@@ -674,14 +674,14 @@ impl VirtualFile {
     /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
     /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
     /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
-    pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    pub async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: Slice<Buf>,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<usize, Error>) {
+    ) -> (Slice<Buf>, Result<usize, Error>) {
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
-            return (Slice::into_inner(buf.slice_full()), Ok(0));
+            return (buf, Ok(0));
         }
         let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
@@ -690,7 +690,7 @@ impl VirtualFile {
             match res {
                 Ok(0) => {
                     return (
-                        Slice::into_inner(buf),
+                        buf,
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -701,10 +701,10 @@ impl VirtualFile {
                     buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(buf), Err(e)),
+                Err(e) => return (buf, Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(nbytes))
+        (buf, Ok(nbytes))
     }
 
     async fn write<B: IoBuf + Send>(
@@ -1096,8 +1096,8 @@ impl OwnedAsyncWriter for VirtualFile {
         buf: B,
         ctx: &RequestContext,
     ) -> std::io::Result<(usize, B::Buf)> {
-        let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
-        res.map(move |v| (v, buf))
+        let (buf, res) = VirtualFile::write_all(self, buf.slice_full(), ctx).await;
+        res.map(move |v| (v, Slice::into_inner(buf)))
     }
 }
 

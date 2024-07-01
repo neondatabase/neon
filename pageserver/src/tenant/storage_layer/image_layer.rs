@@ -341,6 +341,7 @@ impl ImageLayer {
     where
         F: Fn(Summary) -> Summary,
     {
+        use tokio_epoll_uring::BoundedBuf as _;
         let mut file = VirtualFile::open_with_options(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
@@ -362,7 +363,7 @@ impl ImageLayer {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf, ctx).await;
+        let (_buf, res) = file.write_all(buf.slice_full(), ctx).await;
         res?;
         Ok(())
     }
@@ -798,8 +799,9 @@ impl ImageLayerWriterInner {
         img: Bytes,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        use tokio_epoll_uring::BoundedBuf as _;
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
+        let (_img, res) = self.blob_writer.write_blob(img.slice_full(), ctx).await;
         // TODO: re-use the buffer for `img` further upstack
         let off = res?;
 
@@ -818,6 +820,7 @@ impl ImageLayerWriterInner {
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
+        use tokio_epoll_uring::BoundedBuf as _;
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -828,7 +831,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf, ctx).await;
+            let (_slice, res) = file.write_all(buf.slice_full(), ctx).await;
             res?;
         }
 
@@ -848,7 +851,7 @@ impl ImageLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf, ctx).await;
+        let (_slice, res) = file.write_all(buf.slice_full(), ctx).await;
         res?;
 
         let metadata = file

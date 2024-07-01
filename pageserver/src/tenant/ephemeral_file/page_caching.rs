@@ -158,7 +158,7 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
         let iobuf = match self.file.write_all(buf, ctx).await {
             (iobuf, Ok(nwritten)) => {
                 assert_eq!(nwritten, buflen);
-                iobuf
+                iobuf.into_inner()
             }
             (_, Err(e)) => {
                 return Err(std::io::Error::new(
