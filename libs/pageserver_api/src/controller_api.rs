@@ -155,6 +155,10 @@ impl UtilizationScore {
 pub enum NodeAvailability {
     // Normal, happy state
     Active(UtilizationScore),
+    // Node is not available, but we expect it to become available soon. Covers
+    // the time span between a drain operation for the node finishing and the node
+    // finishing the processing of the re-attach response.
+    Unavailable,
     // Offline: Tenants shouldn't try to attach here, but they may assume that their
     // secondary locations on this node still exist.  Newly added nodes are in this
     // state until we successfully contact them.
@@ -164,7 +168,10 @@ pub enum NodeAvailability {
 impl PartialEq for NodeAvailability {
     fn eq(&self, other: &Self) -> bool {
         use NodeAvailability::*;
-        matches!((self, other), (Active(_), Active(_)) | (Offline, Offline))
+        matches!(
+            (self, other),
+            (Active(_), Active(_)) | (Offline, Offline) | (Unavailable, Unavailable)
+        )
     }
 }
 
@@ -176,6 +183,7 @@ impl Eq for NodeAvailability {}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum NodeAvailabilityWrapper {
     Active,
+    Unavailable,
     Offline,
 }
 
@@ -185,6 +193,7 @@ impl From<NodeAvailabilityWrapper> for NodeAvailability {
             // Assume the worst utilisation score to begin with. It will later be updated by
             // the heartbeats.
             NodeAvailabilityWrapper::Active => NodeAvailability::Active(UtilizationScore::worst()),
+            NodeAvailabilityWrapper::Unavailable => NodeAvailability::Unavailable,
             NodeAvailabilityWrapper::Offline => NodeAvailability::Offline,
         }
     }
@@ -194,6 +203,7 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
     fn from(val: NodeAvailability) -> Self {
         match val {
             NodeAvailability::Active(_) => NodeAvailabilityWrapper::Active,
+            NodeAvailability::Unavailable => NodeAvailabilityWrapper::Unavailable,
             NodeAvailability::Offline => NodeAvailabilityWrapper::Offline,
         }
     }

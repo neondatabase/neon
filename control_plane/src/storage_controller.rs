@@ -287,6 +287,8 @@ impl StorageController {
             "--dev",
             "--database-url",
             &database_url,
+            "--max-offline-interval",
+            &humantime::Duration::from(self.config.max_offline).to_string(),
             "--max-unavailable-interval",
             &humantime::Duration::from(self.config.max_unavailable).to_string(),
         ]
