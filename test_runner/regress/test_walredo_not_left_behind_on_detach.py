@@ -37,7 +37,7 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
         expected_exception=PageserverApiException,
         match=f"NotFound: tenant {tenant_id}",
     ):
-        pageserver_http.tenant_detach(tenant_id)
+        pageserver_http.tenant_status(tenant_id)
 
     # create new nenant
     tenant_id, _ = env.neon_cli.create_tenant()

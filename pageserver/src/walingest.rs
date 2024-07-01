@@ -1384,14 +1384,31 @@ impl WalIngest {
             // Note: The multixact members can wrap around, even within one WAL record.
             offset = offset.wrapping_add(n_this_page as u32);
         }
-        if xlrec.mid >= self.checkpoint.nextMulti {
-            self.checkpoint.nextMulti = xlrec.mid + 1;
+        let next_offset = offset;
+        assert!(xlrec.moff.wrapping_add(xlrec.nmembers) == next_offset);
+
+        // Update next-multi-xid and next-offset
+        //
+        // NB: In PostgreSQL, the next-multi-xid stored in the control file is allowed to
+        // go to 0, and it's fixed up by skipping to FirstMultiXactId in functions that
+        // read it, like GetNewMultiXactId(). This is different from how nextXid is
+        // incremented! nextXid skips over < FirstNormalTransactionId when the the value
+        // is stored, so it's never 0 in a checkpoint.
+        //
+        // I don't know why it's done that way, it seems less error-prone to skip over 0
+        // when the value is stored rather than when it's read. But let's do it the same
+        // way here.
+        let next_multi_xid = xlrec.mid.wrapping_add(1);
+
+        if self
+            .checkpoint
+            .update_next_multixid(next_multi_xid, next_offset)
+        {
             self.checkpoint_modified = true;
         }
-        if xlrec.moff + xlrec.nmembers > self.checkpoint.nextMultiOffset {
-            self.checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
-            self.checkpoint_modified = true;
-        }
+
+        // Also update the next-xid with the highest member. According to the comments in
+        // multixact_redo(), this shouldn't be necessary, but let's do the same here.
         let max_mbr_xid = xlrec.members.iter().fold(None, |acc, mbr| {
             if let Some(max_xid) = acc {
                 if mbr.xid.wrapping_sub(max_xid) as i32 > 0 {

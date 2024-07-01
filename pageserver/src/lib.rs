@@ -113,11 +113,7 @@ pub async fn shutdown_pageserver(
 }
 
 /// Per-tenant configuration file.
-/// Full path: `tenants/<tenant_id>/config`.
-pub(crate) const TENANT_CONFIG_NAME: &str = "config";
-
-/// Per-tenant configuration file.
-/// Full path: `tenants/<tenant_id>/config`.
+/// Full path: `tenants/<tenant_id>/config-v1`.
 pub(crate) const TENANT_LOCATION_CONFIG_NAME: &str = "config-v1";
 
 /// Per-tenant copy of their remote heatmap, downloaded into the local

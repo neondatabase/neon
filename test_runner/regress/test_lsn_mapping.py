@@ -12,10 +12,24 @@ from fixtures.utils import query_scalar, wait_until
 from requests.exceptions import ReadTimeout
 
 
-#
-# Test pageserver get_lsn_by_timestamp API
-#
-def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
+def assert_lsn_lease_granted(result, with_lease: bool):
+    """
+    Asserts an LSN lease is granted when `with_lease` flag is turned on.
+    Always asserts no LSN lease is granted when `with_lease` flag is off.
+    """
+    if with_lease:
+        assert result.get("valid_until")
+    else:
+        assert result.get("valid_until") is None
+
+
+@pytest.mark.parametrize("with_lease", [True, False])
+def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
+    """
+    Test pageserver get_lsn_by_timestamp API.
+
+    :param with_lease: Whether to get a lease associated with returned LSN.
+    """
     env = neon_env_builder.init_start()
 
     tenant_id, _ = env.neon_cli.create_tenant(
@@ -67,23 +81,33 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # Check edge cases
         # Timestamp is in the future
         probe_timestamp = tbl[-1][1] + timedelta(hours=1)
-        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
+        result = client.timeline_get_lsn_by_timestamp(
+            tenant_id, timeline_id, probe_timestamp, with_lease=with_lease
+        )
         assert result["kind"] == "future"
+        assert_lsn_lease_granted(result, with_lease)
         # make sure that we return a well advanced lsn here
         assert Lsn(result["lsn"]) > start_lsn
 
         # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
-        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
+        result = client.timeline_get_lsn_by_timestamp(
+            tenant_id, timeline_id, probe_timestamp, with_lease=with_lease
+        )
         assert result["kind"] == "past"
+        assert_lsn_lease_granted(result, with_lease)
+
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) < start_lsn
 
         # Probe a bunch of timestamps in the valid range
         for i in range(1, len(tbl), 100):
             probe_timestamp = tbl[i][1]
-            result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
+            result = client.timeline_get_lsn_by_timestamp(
+                tenant_id, timeline_id, probe_timestamp, with_lease=with_lease
+            )
             assert result["kind"] not in ["past", "nodata"]
+            assert_lsn_lease_granted(result, with_lease)
             lsn = result["lsn"]
             # Call get_lsn_by_timestamp to get the LSN
             # Launch a new read-only node at that LSN, and check that only the rows
@@ -105,8 +129,11 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
         # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
-        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id_child, probe_timestamp)
+        result = client.timeline_get_lsn_by_timestamp(
+            tenant_id, timeline_id_child, probe_timestamp, with_lease=with_lease
+        )
         assert result["kind"] == "past"
+        assert_lsn_lease_granted(result, with_lease)
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) >= last_flush_lsn
 

@@ -115,7 +115,6 @@ syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-trai
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
-toml_edit = { version = "0.19", features = ["serde"] }
 zstd = { version = "0.13" }
 zstd-safe = { version = "7", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }

@@ -281,22 +281,6 @@ impl LocationConf {
     }
 }
 
-impl Default for LocationConf {
-    // TODO: this should be removed once tenant loading can guarantee that we are never
-    // loading from a directory without a configuration.
-    // => tech debt since https://github.com/neondatabase/neon/issues/1555
-    fn default() -> Self {
-        Self {
-            mode: LocationMode::Attached(AttachedLocationConfig {
-                generation: Generation::none(),
-                attach_mode: AttachmentMode::Single,
-            }),
-            tenant_conf: TenantConfOpt::default(),
-            shard: ShardIdentity::unsharded(),
-        }
-    }
-}
-
 /// A tenant's calcuated configuration, which is the result of merging a
 /// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
 ///

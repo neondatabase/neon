@@ -32,7 +32,7 @@ use crate::{
         routes::TimelineStatus,
     },
     safekeeper::Term,
-    timeline::{get_tenant_dir, get_timeline_dir, FullAccessTimeline, Timeline, TimelineError},
+    timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError, WalResidentTimeline},
     wal_storage::{self, open_wal_file, Storage},
     GlobalTimelines, SafeKeeperConf,
 };
@@ -46,7 +46,7 @@ use utils::{
 
 /// Stream tar archive of timeline to tx.
 #[instrument(name = "snapshot", skip_all, fields(ttid = %tli.ttid))]
-pub async fn stream_snapshot(tli: FullAccessTimeline, tx: mpsc::Sender<Result<Bytes>>) {
+pub async fn stream_snapshot(tli: WalResidentTimeline, tx: mpsc::Sender<Result<Bytes>>) {
     if let Err(e) = stream_snapshot_guts(tli, tx.clone()).await {
         // Error type/contents don't matter as they won't can't reach the client
         // (hyper likely doesn't do anything with it), but http stream will be
@@ -66,7 +66,7 @@ pub struct SnapshotContext {
     pub flush_lsn: Lsn,
     pub wal_seg_size: usize,
     // used to remove WAL hold off in Drop.
-    pub tli: FullAccessTimeline,
+    pub tli: WalResidentTimeline,
 }
 
 impl Drop for SnapshotContext {
@@ -80,7 +80,7 @@ impl Drop for SnapshotContext {
 }
 
 pub async fn stream_snapshot_guts(
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     tx: mpsc::Sender<Result<Bytes>>,
 ) -> Result<()> {
     // tokio-tar wants Write implementor, but we have mpsc tx <Result<Bytes>>;
@@ -135,7 +135,7 @@ pub async fn stream_snapshot_guts(
     Ok(())
 }
 
-impl FullAccessTimeline {
+impl WalResidentTimeline {
     /// Start streaming tar archive with timeline:
     /// 1) stream control file under lock;
     /// 2) hold off WAL removal;
@@ -160,6 +160,7 @@ impl FullAccessTimeline {
         ar: &mut tokio_tar::Builder<W>,
     ) -> Result<SnapshotContext> {
         let mut shared_state = self.write_shared_state().await;
+        let wal_seg_size = shared_state.get_wal_seg_size();
 
         let cf_path = self.get_timeline_dir().join(CONTROL_FILE_NAME);
         let mut cf = File::open(cf_path).await?;
@@ -173,19 +174,19 @@ impl FullAccessTimeline {
         // lock and setting `wal_removal_on_hold` later, it guarantees that WAL
         // won't be removed until we're done.
         let from_lsn = min(
-            shared_state.sk.state.remote_consistent_lsn,
-            shared_state.sk.state.backup_lsn,
+            shared_state.sk.state().remote_consistent_lsn,
+            shared_state.sk.state().backup_lsn,
         );
         if from_lsn == Lsn::INVALID {
             // this is possible if snapshot is called before handling first
             // elected message
             bail!("snapshot is called on uninitialized timeline");
         }
-        let from_segno = from_lsn.segment_number(shared_state.get_wal_seg_size());
-        let term = shared_state.sk.get_term();
-        let last_log_term = shared_state.sk.get_last_log_term();
+        let from_segno = from_lsn.segment_number(wal_seg_size);
+        let term = shared_state.sk.state().acceptor_state.term;
+        let last_log_term = shared_state.sk.last_log_term();
         let flush_lsn = shared_state.sk.flush_lsn();
-        let upto_segno = flush_lsn.segment_number(shared_state.get_wal_seg_size());
+        let upto_segno = flush_lsn.segment_number(wal_seg_size);
         // have some limit on max number of segments as a sanity check
         const MAX_ALLOWED_SEGS: u64 = 1000;
         let num_segs = upto_segno - from_segno + 1;
@@ -206,14 +207,18 @@ impl FullAccessTimeline {
         }
         shared_state.wal_removal_on_hold = true;
 
+        // Drop shared_state to release the lock, before calling wal_residence_guard().
+        drop(shared_state);
+
+        let tli_copy = self.wal_residence_guard().await?;
         let bctx = SnapshotContext {
             from_segno,
             upto_segno,
             term,
             last_log_term,
             flush_lsn,
-            wal_seg_size: shared_state.get_wal_seg_size(),
-            tli: self.clone(),
+            wal_seg_size,
+            tli: tli_copy,
         };
 
         Ok(bctx)
@@ -225,8 +230,8 @@ impl FullAccessTimeline {
     /// forget this if snapshotting fails mid the way.
     pub async fn finish_snapshot(&self, bctx: &SnapshotContext) -> Result<()> {
         let shared_state = self.read_shared_state().await;
-        let term = shared_state.sk.get_term();
-        let last_log_term = shared_state.sk.get_last_log_term();
+        let term = shared_state.sk.state().acceptor_state.term;
+        let last_log_term = shared_state.sk.last_log_term();
         // There are some cases to relax this check (e.g. last_log_term might
         // change, but as long as older history is strictly part of new that's
         // fine), but there is no need to do it.

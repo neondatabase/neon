@@ -48,7 +48,16 @@ def test_storage_controller_many_tenants(
 
     # We will intentionally stress reconciler concurrrency, which triggers a warning when lots
     # of shards are hitting the delayed path.
-    env.storage_controller.allowed_errors.append(".*Many shards are waiting to reconcile")
+    env.storage_controller.allowed_errors.extend(
+        [
+            # We will intentionally stress reconciler concurrrency, which triggers a warning when lots
+            # of shards are hitting the delayed path.
+            ".*Many shards are waiting to reconcile",
+            # We will create many timelines concurrently, so they might get slow enough to trip the warning
+            # that timeline creation is holding a lock too long.
+            ".*Shared lock by TimelineCreate.*was held.*",
+        ]
+    )
 
     for ps in env.pageservers:
         # This can happen because when we do a loop over all pageservers and mark them offline/active,

@@ -103,12 +103,8 @@ impl ConnCfg {
 
     /// Reuse password or auth keys from the other config.
     pub fn reuse_password(&mut self, other: Self) {
-        if let Some(password) = other.get_password() {
-            self.password(password);
-        }
-
-        if let Some(keys) = other.get_auth_keys() {
-            self.auth_keys(keys);
+        if let Some(password) = other.get_auth() {
+            self.auth(password);
         }
     }
 
@@ -124,48 +120,64 @@ impl ConnCfg {
 
     /// Apply startup message params to the connection config.
     pub fn set_startup_params(&mut self, params: &StartupMessageParams) {
-        // Only set `user` if it's not present in the config.
-        // Link auth flow takes username from the console's response.
-        if let (None, Some(user)) = (self.get_user(), params.get("user")) {
-            self.user(user);
-        }
-
-        // Only set `dbname` if it's not present in the config.
-        // Link auth flow takes dbname from the console's response.
-        if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
-            self.dbname(dbname);
-        }
-
-        // Don't add `options` if they were only used for specifying a project.
-        // Connection pools don't support `options`, because they affect backend startup.
-        if let Some(options) = filtered_options(params) {
-            self.options(&options);
-        }
-
-        if let Some(app_name) = params.get("application_name") {
-            self.application_name(app_name);
-        }
-
-        // TODO: This is especially ugly...
-        if let Some(replication) = params.get("replication") {
-            use tokio_postgres::config::ReplicationMode;
-            match replication {
-                "true" | "on" | "yes" | "1" => {
-                    self.replication_mode(ReplicationMode::Physical);
+        let mut client_encoding = false;
+        for (k, v) in params.iter() {
+            match k {
+                "user" => {
+                    // Only set `user` if it's not present in the config.
+                    // Link auth flow takes username from the console's response.
+                    if self.get_user().is_none() {
+                        self.user(v);
+                    }
                 }
                 "database" => {
-                    self.replication_mode(ReplicationMode::Logical);
+                    // Only set `dbname` if it's not present in the config.
+                    // Link auth flow takes dbname from the console's response.
+                    if self.get_dbname().is_none() {
+                        self.dbname(v);
+                    }
                 }
-                _other => {}
+                "options" => {
+                    // Don't add `options` if they were only used for specifying a project.
+                    // Connection pools don't support `options`, because they affect backend startup.
+                    if let Some(options) = filtered_options(v) {
+                        self.options(&options);
+                    }
+                }
+
+                // the special ones in tokio-postgres that we don't want being set by the user
+                "dbname" => {}
+                "password" => {}
+                "sslmode" => {}
+                "host" => {}
+                "port" => {}
+                "connect_timeout" => {}
+                "keepalives" => {}
+                "keepalives_idle" => {}
+                "keepalives_interval" => {}
+                "keepalives_retries" => {}
+                "target_session_attrs" => {}
+                "channel_binding" => {}
+                "max_backend_message_size" => {}
+
+                "client_encoding" => {
+                    client_encoding = true;
+                    // only error should be from bad null bytes,
+                    // but we've already checked for those.
+                    _ = self.param("client_encoding", v);
+                }
+
+                _ => {
+                    // only error should be from bad null bytes,
+                    // but we've already checked for those.
+                    _ = self.param(k, v);
+                }
             }
         }
-
-        // TODO: extend the list of the forwarded startup parameters.
-        // Currently, tokio-postgres doesn't allow us to pass
-        // arbitrary parameters, but the ones above are a good start.
-        //
-        // This and the reverse params problem can be better addressed
-        // in a bespoke connection machinery (a new library for that sake).
+        if !client_encoding {
+            // for compatibility since we removed it from tokio-postgres
+            self.param("client_encoding", "UTF8").unwrap();
+        }
     }
 }
 
@@ -338,10 +350,9 @@ impl ConnCfg {
 }
 
 /// Retrieve `options` from a startup message, dropping all proxy-secific flags.
-fn filtered_options(params: &StartupMessageParams) -> Option<String> {
+fn filtered_options(options: &str) -> Option<String> {
     #[allow(unstable_name_collisions)]
-    let options: String = params
-        .options_raw()?
+    let options: String = StartupMessageParams::parse_options_raw(options)
         .filter(|opt| parse_endpoint_param(opt).is_none() && neon_option(opt).is_none())
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
@@ -413,27 +424,23 @@ mod tests {
     #[test]
     fn test_filtered_options() {
         // Empty options is unlikely to be useful anyway.
-        let params = StartupMessageParams::new([("options", "")]);
-        assert_eq!(filtered_options(&params), None);
+        assert_eq!(filtered_options(""), None);
 
         // It's likely that clients will only use options to specify endpoint/project.
-        let params = StartupMessageParams::new([("options", "project=foo")]);
-        assert_eq!(filtered_options(&params), None);
+        let params = "project=foo";
+        assert_eq!(filtered_options(params), None);
 
         // Same, because unescaped whitespaces are no-op.
-        let params = StartupMessageParams::new([("options", " project=foo ")]);
-        assert_eq!(filtered_options(&params).as_deref(), None);
+        let params = " project=foo ";
+        assert_eq!(filtered_options(params), None);
 
-        let params = StartupMessageParams::new([("options", r"\  project=foo \ ")]);
-        assert_eq!(filtered_options(&params).as_deref(), Some(r"\  \ "));
+        let params = r"\  project=foo \ ";
+        assert_eq!(filtered_options(params).as_deref(), Some(r"\  \ "));
 
-        let params = StartupMessageParams::new([("options", "project = foo")]);
-        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+        let params = "project = foo";
+        assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
 
-        let params = StartupMessageParams::new([(
-            "options",
-            "project = foo neon_endpoint_type:read_write   neon_lsn:0/2",
-        )]);
-        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
+        let params = "project = foo neon_endpoint_type:read_write   neon_lsn:0/2";
+        assert_eq!(filtered_options(params).as_deref(), Some("project = foo"));
     }
 }

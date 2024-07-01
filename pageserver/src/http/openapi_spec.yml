@@ -236,6 +236,13 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
+        - name: with_lease
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Whether to grant a lease to the corresponding LSN. Default to false.
+
       responses:
         "200":
           description: OK
@@ -360,16 +367,7 @@ paths:
                 $ref: "#/components/schemas/TenantLocationConfigResponse"
         "409":
           description: |
-            The tenant is already known to Pageserver in some way,
-            and hence this `/attach` call has been rejected.
-
-            Some examples of how this can happen:
-            - tenant was created on this pageserver
-            - tenant attachment was started by an earlier call to `/attach`.
-
-            Callers should poll the tenant status's `attachment_status` field,
-            like for status 202. See the longer description for `POST /attach`
-            for details.
+            The tenant is already being modified, perhaps by a concurrent call to this API
           content:
             application/json:
               schema:
@@ -755,8 +753,6 @@ components:
               For example this can be caused by s3 being unreachable. The retry may be implemented
               with call to detach, though it would be better to not automate it and inspec failed state
               manually before proceeding with a retry.
-
-            See the tenant `/attach` endpoint for more information.
           type: object
           required:
             - slug
@@ -1029,6 +1025,10 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
+        valid_until:
+          type: string
+          format: date-time
+          description: The expiration time of the granted lease.
 
     LsnLease:
       type: object

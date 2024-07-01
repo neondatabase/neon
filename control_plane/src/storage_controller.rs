@@ -5,12 +5,11 @@ use crate::{
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::{
     controller_api::{
-        NodeConfigureRequest, NodeRegisterRequest, TenantCreateResponse, TenantLocateResponse,
-        TenantShardMigrateRequest, TenantShardMigrateResponse,
+        NodeConfigureRequest, NodeRegisterRequest, TenantCreateRequest, TenantCreateResponse,
+        TenantLocateResponse, TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
-        TenantCreateRequest, TenantShardSplitRequest, TenantShardSplitResponse,
-        TimelineCreateRequest, TimelineInfo,
+        TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardStripeSize, TenantShardId},
 };

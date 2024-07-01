@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
 )
-from fixtures.pageserver.http import PageserverApiException, TenantConfig
+from fixtures.pageserver.http import TenantConfig
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import wait_until
 
@@ -82,8 +82,8 @@ def test_null_body(negative_env: NegativeTests):
     tenant_id = negative_env.tenant_id
     ps_http = env.pageserver.http_client()
 
-    res = ps_http.post(
-        f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
+    res = ps_http.put(
+        f"{ps_http.base_url}/v1/tenant/{tenant_id}/location_config",
         data=b"null",
         headers={"Content-Type": "application/json"},
     )
@@ -99,35 +99,16 @@ def test_null_config(negative_env: NegativeTests):
     tenant_id = negative_env.tenant_id
     ps_http = env.pageserver.http_client()
 
-    res = ps_http.post(
-        f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
-        data=b'{"config": null}',
+    res = ps_http.put(
+        f"{ps_http.base_url}/v1/tenant/{tenant_id}/location_config",
+        json={"mode": "AttachedSingle", "generation": 1, "tenant_conf": None},
         headers={"Content-Type": "application/json"},
     )
     assert res.status_code == 400
 
 
-def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
-    """
-    If we send a config with unknown keys, the request should be rejected with status 400.
-    """
-
-    env = negative_env.neon_env
-    tenant_id = negative_env.tenant_id
-
-    config_with_unknown_keys = {
-        "compaction_period": "1h",
-        "this_key_does_not_exist": "some value",
-    }
-
-    with pytest.raises(PageserverApiException) as e:
-        env.pageserver.tenant_attach(tenant_id, config=config_with_unknown_keys)
-    assert e.type == PageserverApiException
-    assert e.value.status_code == 400
-
-
 @pytest.mark.parametrize("content_type", [None, "application/json"])
-def test_no_config(positive_env: NeonEnv, content_type: Optional[str]):
+def test_empty_config(positive_env: NeonEnv, content_type: Optional[str]):
     """
     When the 'config' body attribute is omitted, the request should be accepted
     and the tenant should use the default configuration
@@ -141,11 +122,13 @@ def test_no_config(positive_env: NeonEnv, content_type: Optional[str]):
     ps_http.tenant_detach(tenant_id)
     assert tenant_id not in [TenantId(t["id"]) for t in ps_http.tenant_list()]
 
-    body = {"generation": env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id)}
-
-    ps_http.post(
-        f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
-        json=body,
+    ps_http.put(
+        f"{ps_http.base_url}/v1/tenant/{tenant_id}/location_config",
+        json={
+            "mode": "AttachedSingle",
+            "generation": env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id),
+            "tenant_conf": {},
+        },
         headers=None if content_type else {"Content-Type": "application/json"},
     ).raise_for_status()
 

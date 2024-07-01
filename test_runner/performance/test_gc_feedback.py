@@ -33,7 +33,7 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             "checkpoint_distance": f"{1024 ** 2}",
             "compaction_target_size": f"{1024 ** 2}",
             # set PITR interval to be small, so we can do GC
-            "pitr_interval": "10 s",
+            "pitr_interval": "60 s",
             # "compaction_threshold": "3",
             # "image_creation_threshold": "2",
         }
@@ -98,6 +98,52 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
         "",
         MetricReport.LOWER_IS_BETTER,
     )
+
+    client.timeline_compact(tenant_id, timeline_id, enhanced_gc_bottom_most_compaction=True)
+    tline_detail = client.timeline_detail(tenant_id, timeline_id)
+    logical_size = tline_detail["current_logical_size"]
+    physical_size = tline_detail["current_physical_size"]
+
+    max_num_of_deltas_above_image = 0
+    max_total_num_of_deltas = 0
+    for key_range in client.perf_info(tenant_id, timeline_id):
+        max_total_num_of_deltas = max(max_total_num_of_deltas, key_range["total_num_of_deltas"])
+        max_num_of_deltas_above_image = max(
+            max_num_of_deltas_above_image, key_range["num_of_deltas_above_image"]
+        )
+    zenbenchmark.record(
+        "logical_size_after_bottom_most_compaction",
+        logical_size // MB,
+        "Mb",
+        MetricReport.LOWER_IS_BETTER,
+    )
+    zenbenchmark.record(
+        "physical_size_after_bottom_most_compaction",
+        physical_size // MB,
+        "Mb",
+        MetricReport.LOWER_IS_BETTER,
+    )
+    zenbenchmark.record(
+        "physical/logical ratio after bottom_most_compaction",
+        physical_size / logical_size,
+        "",
+        MetricReport.LOWER_IS_BETTER,
+    )
+    zenbenchmark.record(
+        "max_total_num_of_deltas_after_bottom_most_compaction",
+        max_total_num_of_deltas,
+        "",
+        MetricReport.LOWER_IS_BETTER,
+    )
+    zenbenchmark.record(
+        "max_num_of_deltas_above_image_after_bottom_most_compaction",
+        max_num_of_deltas_above_image,
+        "",
+        MetricReport.LOWER_IS_BETTER,
+    )
+
+    with endpoint.cursor() as cur:
+        cur.execute("SELECT * FROM t")  # ensure data is not corrupted
 
     layer_map_path = env.repo_dir / "layer-map.json"
     log.info(f"Writing layer map to {layer_map_path}")

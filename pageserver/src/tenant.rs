@@ -55,11 +55,9 @@ use self::config::AttachedLocationConfig;
 use self::config::AttachmentMode;
 use self::config::LocationConf;
 use self::config::TenantConf;
-use self::delete::DeleteTenantFlow;
 use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
-use self::mgr::TenantsMap;
 use self::remote_timeline_client::upload::upload_index_part;
 use self::remote_timeline_client::RemoteTimelineClient;
 use self::timeline::uninit::TimelineCreateGuard;
@@ -90,6 +88,7 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
+use crate::walredo;
 use crate::InitializationOrder;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
@@ -137,7 +136,6 @@ pub mod remote_timeline_client;
 pub mod storage_layer;
 
 pub mod config;
-pub mod delete;
 pub mod mgr;
 pub mod secondary;
 pub mod tasks;
@@ -160,8 +158,6 @@ pub const TENANTS_SEGMENT_NAME: &str = "tenants";
 
 /// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
-
-pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 
 /// References to shared objects that are passed into each tenant, such
 /// as the shared remote storage client and process initialization state.
@@ -207,7 +203,6 @@ struct TimelinePreload {
 }
 
 pub(crate) struct TenantPreload {
-    deleting: bool,
     timelines: HashMap<TimelineId, TimelinePreload>,
 }
 
@@ -218,8 +213,6 @@ pub(crate) enum SpawnMode {
     Eager,
     /// Lazy activation in the background, with the option to skip the queue if the need comes up
     Lazy,
-    /// Tenant has been created during the lifetime of this process
-    Create,
 }
 
 ///
@@ -286,8 +279,6 @@ pub struct Tenant {
     /// background warmup.
     pub(crate) activate_now_sem: tokio::sync::Semaphore,
 
-    pub(crate) delete_progress: Arc<tokio::sync::Mutex<DeleteTenantFlow>>,
-
     // Cancellation token fires when we have entered shutdown().  This is a parent of
     // Timelines' cancellation token.
     pub(crate) cancel: CancellationToken,
@@ -331,6 +322,16 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+    pub(crate) async fn shutdown(&self) {
+        match self {
+            Self::Prod(mgr) => mgr.shutdown().await,
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
             Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
@@ -351,7 +352,7 @@ impl WalRedoManager {
         base_img: Option<(Lsn, bytes::Bytes)>,
         records: Vec<(Lsn, crate::walrecord::NeonWalRecord)>,
         pg_version: u32,
-    ) -> anyhow::Result<bytes::Bytes> {
+    ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
             Self::Prod(mgr) => {
                 mgr.request_redo(key, lsn, base_img, records, pg_version)
@@ -654,10 +655,9 @@ impl Tenant {
         attached_conf: AttachedTenantConf,
         shard_identity: ShardIdentity,
         init_order: Option<InitializationOrder>,
-        tenants: &'static std::sync::RwLock<TenantsMap>,
         mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Tenant>> {
+    ) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
             conf,
             tenant_shard_id,
@@ -806,9 +806,6 @@ impl Tenant {
                 };
 
                 let preload = match &mode {
-                    SpawnMode::Create => {
-                        None
-                    },
                     SpawnMode::Eager | SpawnMode::Lazy => {
                         let _preload_timer = TENANT.preload.start_timer();
                         let res = tenant_clone
@@ -828,59 +825,10 @@ impl Tenant {
                 // Remote preload is complete.
                 drop(remote_load_completion);
 
-                let pending_deletion = {
-                    match DeleteTenantFlow::should_resume_deletion(
-                        conf,
-                        preload.as_ref().map(|p| p.deleting).unwrap_or(false),
-                        &tenant_clone,
-                    )
-                    .await
-                    {
-                        Ok(should_resume_deletion) => should_resume_deletion,
-                        Err(err) => {
-                            make_broken(&tenant_clone, anyhow::anyhow!(err), BrokenVerbosity::Error);
-                            return Ok(());
-                        }
-                    }
-                };
-
-                info!("pending_deletion {}", pending_deletion.is_some());
-
-                if let Some(deletion) = pending_deletion {
-                    // as we are no longer loading, signal completion by dropping
-                    // the completion while we resume deletion
-                    drop(_completion);
-                    let background_jobs_can_start =
-                        init_order.as_ref().map(|x| &x.background_jobs_can_start);
-                    if let Some(background) = background_jobs_can_start {
-                        info!("waiting for backgound jobs barrier");
-                        background.clone().wait().await;
-                        info!("ready for backgound jobs barrier");
-                    }
-
-                    let deleted = DeleteTenantFlow::resume_from_attach(
-                        deletion,
-                        &tenant_clone,
-                        preload,
-                        tenants,
-                        &ctx,
-                    )
-                    .await;
-
-                    if let Err(e) = deleted {
-                        make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
-                    }
-
-                    return Ok(());
-                }
-
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
                 let attached = {
-                    let _attach_timer = match mode {
-                        SpawnMode::Create => None,
-                        SpawnMode::Eager | SpawnMode::Lazy => Some(TENANT.attach.start_timer()),
-                    };
-                    tenant_clone.attach(preload, mode, &ctx).await
+                    let _attach_timer = Some(TENANT.attach.start_timer());
+                    tenant_clone.attach(preload, &ctx).await
                 };
 
                 match attached {
@@ -911,7 +859,7 @@ impl Tenant {
             }
             .instrument(tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation)),
         );
-        Ok(tenant)
+        tenant
     }
 
     #[instrument(skip_all)]
@@ -931,21 +879,13 @@ impl Tenant {
         )
         .await?;
 
-        let deleting = other_keys.contains(TENANT_DELETED_MARKER_FILE_NAME);
-        info!(
-            "found {} timelines, deleting={}",
-            remote_timeline_ids.len(),
-            deleting
-        );
+        info!("found {} timelines", remote_timeline_ids.len(),);
 
         for k in other_keys {
-            if k != TENANT_DELETED_MARKER_FILE_NAME {
-                warn!("Unexpected non timeline key {k}");
-            }
+            warn!("Unexpected non timeline key {k}");
         }
 
         Ok(TenantPreload {
-            deleting,
             timelines: Self::load_timeline_metadata(
                 self,
                 remote_timeline_ids,
@@ -964,22 +904,14 @@ impl Tenant {
     async fn attach(
         self: &Arc<Tenant>,
         preload: Option<TenantPreload>,
-        mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
-        let preload = match (preload, mode) {
-            (Some(p), _) => p,
-            (None, SpawnMode::Create) => TenantPreload {
-                deleting: false,
-                timelines: HashMap::new(),
-            },
-            (None, _) => {
-                anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
-            }
+        let Some(preload) = preload else {
+            anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
         };
 
         let mut timelines_to_resume_deletions = vec![];
@@ -1209,30 +1141,6 @@ impl Tenant {
             ctx,
         )
         .await
-    }
-
-    /// Create a placeholder Tenant object for a broken tenant
-    pub fn create_broken_tenant(
-        conf: &'static PageServerConf,
-        tenant_shard_id: TenantShardId,
-        remote_storage: GenericRemoteStorage,
-        reason: String,
-    ) -> Arc<Tenant> {
-        Arc::new(Tenant::new(
-            TenantState::Broken {
-                reason,
-                backtrace: String::new(),
-            },
-            conf,
-            AttachedTenantConf::try_from(LocationConf::default()).unwrap(),
-            // Shard identity isn't meaningful for a broken tenant: it's just a placeholder
-            // to occupy the slot for this TenantShardId.
-            ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
-            None,
-            tenant_shard_id,
-            remote_storage,
-            DeletionQueueClient::broken(),
-        ))
     }
 
     async fn load_timeline_metadata(
@@ -1941,6 +1849,10 @@ impl Tenant {
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), None).await;
 
+        if let Some(walredo_mgr) = self.walredo_mgr.as_ref() {
+            walredo_mgr.shutdown().await;
+        }
+
         // Wait for any in-flight operations to complete
         self.gate.close().await;
 
@@ -2215,6 +2127,7 @@ impl Tenant {
             // Upload an index from the parent: this is partly to provide freshness for the
             // child tenants that will copy it, and partly for general ease-of-debugging: there will
             // always be a parent shard index in the same generation as we wrote the child shard index.
+            tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index");
             timeline
                 .remote_client
                 .schedule_index_upload_for_file_changes()?;
@@ -2222,12 +2135,14 @@ impl Tenant {
 
             // Shut down the timeline's remote client: this means that the indices we write
             // for child shards will not be invalidated by the parent shard deleting layers.
+            tracing::info!(timeline_id=%timeline.timeline_id, "Shutting down remote storage client");
             timeline.remote_client.shutdown().await;
 
             // Download methods can still be used after shutdown, as they don't flow through the remote client's
             // queue.  In principal the RemoteTimelineClient could provide this without downloading it, but this
             // operation is rare, so it's simpler to just download it (and robustly guarantees that the index
             // we use here really is the remotely persistent one).
+            tracing::info!(timeline_id=%timeline.timeline_id, "Downloading index_part from parent");
             let result = timeline.remote_client
                 .download_index_file(&self.cancel)
                 .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))
@@ -2240,6 +2155,7 @@ impl Tenant {
             };
 
             for child_shard in child_shards {
+                tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index_part for child {}", child_shard.to_index());
                 upload_index_part(
                     &self.remote_storage,
                     child_shard,
@@ -2554,6 +2470,10 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
+        debug_assert!(
+            !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
+        );
+
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
@@ -2628,7 +2548,6 @@ impl Tenant {
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
             activate_now_sem: tokio::sync::Semaphore::new(0),
-            delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTenantFlow::default())),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
             timeline_get_throttle: Arc::new(throttle::Throttle::new(
@@ -2645,45 +2564,22 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_shard_id: &TenantShardId,
     ) -> anyhow::Result<LocationConf> {
-        let legacy_config_path = conf.tenant_config_path(tenant_shard_id);
         let config_path = conf.tenant_location_config_path(tenant_shard_id);
 
         if config_path.exists() {
             // New-style config takes precedence
             let deserialized = Self::read_config(&config_path)?;
             Ok(toml_edit::de::from_document::<LocationConf>(deserialized)?)
-        } else if legacy_config_path.exists() {
-            // Upgrade path: found an old-style configuration only
-            let deserialized = Self::read_config(&legacy_config_path)?;
-
-            let mut tenant_conf = TenantConfOpt::default();
-            for (key, item) in deserialized.iter() {
-                match key {
-                    "tenant_config" => {
-                        tenant_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("Failed to parse config from file '{legacy_config_path}' as pageserver config"))?;
-                    }
-                    _ => bail!(
-                        "config file {legacy_config_path} has unrecognized pageserver option '{key}'"
-                    ),
-                }
-            }
-
-            // Legacy configs are implicitly in attached state, and do not support sharding
-            Ok(LocationConf::attached_single(
-                tenant_conf,
-                Generation::none(),
-                &models::ShardParameters::default(),
-            ))
         } else {
-            // FIXME If the config file is not found, assume that we're attaching
-            // a detached tenant and config is passed via attach command.
-            // https://github.com/neondatabase/neon/issues/1555
-            // OR: we're loading after incomplete deletion that managed to remove config.
-            info!(
-                "tenant config not found in {} or {}",
-                config_path, legacy_config_path
-            );
-            Ok(LocationConf::default())
+            // The config should almost always exist for a tenant directory:
+            //  - When attaching a tenant, the config is the first thing we write
+            //  - When detaching a tenant, we atomically move the directory to a tmp location
+            //    before deleting contents.
+            //
+            // The very rare edge case that can result in a missing config is if we crash during attach
+            // between creating directory and writing config.  Callers should handle that as if the
+            // directory didn't exist.
+            anyhow::bail!("tenant config not found in {}", config_path);
         }
     }
 
@@ -2705,47 +2601,17 @@ impl Tenant {
         tenant_shard_id: &TenantShardId,
         location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
-        let legacy_config_path = conf.tenant_config_path(tenant_shard_id);
         let config_path = conf.tenant_location_config_path(tenant_shard_id);
 
-        Self::persist_tenant_config_at(
-            tenant_shard_id,
-            &config_path,
-            &legacy_config_path,
-            location_conf,
-        )
-        .await
+        Self::persist_tenant_config_at(tenant_shard_id, &config_path, location_conf).await
     }
 
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
     pub(super) async fn persist_tenant_config_at(
         tenant_shard_id: &TenantShardId,
         config_path: &Utf8Path,
-        legacy_config_path: &Utf8Path,
         location_conf: &LocationConf,
     ) -> anyhow::Result<()> {
-        if let LocationMode::Attached(attach_conf) = &location_conf.mode {
-            // The modern-style LocationConf config file requires a generation to be set. In case someone
-            // is running a pageserver without the infrastructure to set generations, write out the legacy-style
-            // config file that only contains TenantConf.
-            //
-            // This will eventually be removed in https://github.com/neondatabase/neon/issues/5388
-
-            if attach_conf.generation.is_none() {
-                tracing::info!(
-                    "Running without generations, writing legacy-style tenant config file"
-                );
-                Self::persist_tenant_config_legacy(
-                    tenant_shard_id,
-                    legacy_config_path,
-                    &location_conf.tenant_conf,
-                )
-                .await?;
-
-                return Ok(());
-            }
-        }
-
         debug!("persisting tenantconf to {config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
@@ -2769,37 +2635,6 @@ impl Tenant {
             .await
             .with_context(|| format!("write tenant {tenant_shard_id} config to {config_path}"))?;
 
-        Ok(())
-    }
-
-    #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
-    async fn persist_tenant_config_legacy(
-        tenant_shard_id: &TenantShardId,
-        target_config_path: &Utf8Path,
-        tenant_conf: &TenantConfOpt,
-    ) -> anyhow::Result<()> {
-        debug!("persisting tenantconf to {target_config_path}");
-
-        let mut conf_content = r#"# This file contains a specific per-tenant's config.
-#  It is read in case of pageserver restart.
-
-[tenant_config]
-"#
-        .to_string();
-
-        // Convert the config to a toml file.
-        conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
-
-        let temp_path = path_with_suffix_extension(target_config_path, TEMP_FILE_SUFFIX);
-
-        let tenant_shard_id = *tenant_shard_id;
-        let target_config_path = target_config_path.to_owned();
-        let conf_content = conf_content.into_bytes();
-        VirtualFile::crashsafe_overwrite(target_config_path.clone(), temp_path, conf_content)
-            .await
-            .with_context(|| {
-                format!("write tenant {tenant_shard_id} config to {target_config_path}")
-            })?;
         Ok(())
     }
 
@@ -3020,6 +2855,11 @@ impl Tenant {
 
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
+
+                timeline
+                    .metrics
+                    .valid_lsn_lease_count_gauge
+                    .set(target.leases.len() as u64);
 
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
@@ -3986,7 +3826,7 @@ pub(crate) mod harness {
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())
                 .await?;
-            tenant.attach(Some(preload), SpawnMode::Eager, ctx).await?;
+            tenant.attach(Some(preload), ctx).await?;
 
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
@@ -4014,7 +3854,7 @@ pub(crate) mod harness {
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
-        ) -> anyhow::Result<Bytes> {
+        ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
             if records_neon {
                 // For Neon wal records, we can decode without spawning postgres, so do so.
@@ -4068,6 +3908,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
+    use timeline::GcInfo;
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
@@ -6423,7 +6264,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
+        let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads")?;
         let (tenant, ctx) = harness.load().await;
 
         let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
@@ -6745,49 +6586,48 @@ mod tests {
 
         // img layer at 0x10
         let img_layer = (0..10)
-            .map(|id| (get_key(id), test_img(&format!("value {id}@0x10"))))
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
             .collect_vec();
 
         let delta1 = vec![
-            // TODO: we should test a real delta record here, which requires us to add a variant of NeonWalRecord for testing purpose.
             (
                 get_key(1),
                 Lsn(0x20),
-                Value::Image(test_img("value 1@0x20")),
+                Value::Image(Bytes::from("value 1@0x20")),
             ),
             (
                 get_key(2),
                 Lsn(0x30),
-                Value::Image(test_img("value 2@0x30")),
+                Value::Image(Bytes::from("value 2@0x30")),
             ),
             (
                 get_key(3),
                 Lsn(0x40),
-                Value::Image(test_img("value 3@0x40")),
+                Value::Image(Bytes::from("value 3@0x40")),
             ),
         ];
         let delta2 = vec![
             (
                 get_key(5),
                 Lsn(0x20),
-                Value::Image(test_img("value 5@0x20")),
+                Value::Image(Bytes::from("value 5@0x20")),
             ),
             (
                 get_key(6),
                 Lsn(0x20),
-                Value::Image(test_img("value 6@0x20")),
+                Value::Image(Bytes::from("value 6@0x20")),
             ),
         ];
         let delta3 = vec![
             (
                 get_key(8),
                 Lsn(0x40),
-                Value::Image(test_img("value 8@0x40")),
+                Value::Image(Bytes::from("value 8@0x40")),
             ),
             (
                 get_key(9),
                 Lsn(0x40),
-                Value::Image(test_img("value 9@0x40")),
+                Value::Image(Bytes::from("value 9@0x40")),
             ),
         ];
 
@@ -6809,8 +6649,41 @@ mod tests {
             guard.cutoffs.horizon = Lsn(0x30);
         }
 
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x20"),
+            Bytes::from_static(b"value 2@0x30"),
+            Bytes::from_static(b"value 3@0x40"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x20"),
+            Bytes::from_static(b"value 6@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x40"),
+            Bytes::from_static(b"value 9@0x40"),
+        ];
+
+        for (idx, expected) in expected_result.iter().enumerate() {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+
         let cancel = CancellationToken::new();
         tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+
+        for (idx, expected) in expected_result.iter().enumerate() {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
 
         // Check if the image layer at the GC horizon contains exactly what we want
         let image_at_gc_horizon = tline
@@ -6822,14 +6695,22 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(image_at_gc_horizon.len(), 10);
-        let expected_lsn = [0x10, 0x20, 0x30, 0x10, 0x10, 0x20, 0x20, 0x10, 0x10, 0x10];
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x20"),
+            Bytes::from_static(b"value 2@0x30"),
+            Bytes::from_static(b"value 3@0x10"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x20"),
+            Bytes::from_static(b"value 6@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
         for idx in 0..10 {
             assert_eq!(
                 image_at_gc_horizon[idx],
-                (
-                    get_key(idx as u32),
-                    test_img(&format!("value {idx}@{:#x}", expected_lsn[idx]))
-                )
+                (get_key(idx as u32), expected_result[idx].clone())
             );
         }
 
@@ -6862,7 +6743,7 @@ mod tests {
                 },
                 // The delta layer that is cut in the middle
                 PersistentLayerKey {
-                    key_range: Key::MIN..get_key(9),
+                    key_range: get_key(3)..get_key(4),
                     lsn_range: Lsn(0x30)..Lsn(0x41),
                     is_delta: true
                 },
@@ -6947,6 +6828,9 @@ mod tests {
             tline.get(get_key(2), Lsn(0x50), &ctx).await?,
             Bytes::from_static(b"0x10,0x20,0x30")
         );
+
+        // Need to remove the limit of "Neon WAL redo requires base image".
+
         // assert_eq!(tline.get(get_key(3), Lsn(0x50), &ctx).await?, Bytes::new());
         // assert_eq!(tline.get(get_key(4), Lsn(0x50), &ctx).await?, Bytes::new());
 
@@ -7038,6 +6922,176 @@ mod tests {
         // Assumption: original lease to is still valid for 0/50.
         let _ =
             timeline.make_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_simple_bottom_most_compaction_deltas() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas")?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        //
+        //  | D1 |                       | D3 |
+        // -|    |-- gc horizon -----------------
+        //  |    |                | D2 |
+        // --------- img layer ------------------
+        //
+        // What we should expact from this compaction is:
+        //  | Part of D1 |               | D3 |
+        // --------- img layer with D1+D2 at GC horizon------------------
+
+        // img layer at 0x10
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x28),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x28")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+        ];
+        let delta2 = vec![
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(6),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+        ];
+        let delta3 = vec![
+            (
+                get_key(8),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+            (
+                get_key(9),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![delta1, delta2, delta3], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            *guard = GcInfo {
+                retain_lsns: vec![],
+                cutoffs: GcCutoffs {
+                    pitr: Lsn(0x30),
+                    horizon: Lsn(0x30),
+                },
+                leases: Default::default(),
+            };
+        }
+
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10@0x30"),
+            Bytes::from_static(b"value 3@0x10@0x28@0x30@0x40"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10@0x40"),
+            Bytes::from_static(b"value 9@0x10@0x40"),
+        ];
+
+        let expected_result_at_gc_horizon = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10@0x30"),
+            Bytes::from_static(b"value 3@0x10@0x28@0x30"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
+
+        for idx in 0..10 {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result[idx]
+            );
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result_at_gc_horizon[idx]
+            );
+        }
+
+        let cancel = CancellationToken::new();
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+
+        for idx in 0..10 {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result[idx]
+            );
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result_at_gc_horizon[idx]
+            );
+        }
 
         Ok(())
     }

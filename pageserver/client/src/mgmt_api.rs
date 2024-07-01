@@ -205,15 +205,6 @@ impl Client {
         Ok(())
     }
 
-    pub async fn tenant_create(&self, req: &TenantCreateRequest) -> Result<TenantId> {
-        let uri = format!("{}/v1/tenant", self.mgmt_api_endpoint);
-        self.request(Method::POST, &uri, req)
-            .await?
-            .json()
-            .await
-            .map_err(Error::ReceiveBody)
-    }
-
     /// The tenant deletion API can return 202 if deletion is incomplete, or
     /// 404 if it is complete.  Callers are responsible for checking the status
     /// code and retrying.  Error codes other than 404 will return Err().
