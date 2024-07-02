@@ -1096,10 +1096,10 @@ impl LayerInner {
 
         match rx.await {
             Ok(Ok(res)) => Ok(res),
-            Ok(Err(e)) => match e {
-                remote_storage::DownloadError::Cancelled => Err(DownloadError::DownloadCancelled),
-                _ => Err(DownloadError::DownloadFailed),
-            },
+            Ok(Err(remote_storage::DownloadError::Cancelled)) => {
+                Err(DownloadError::DownloadCancelled)
+            }
+            Ok(Err(_)) => Err(DownloadError::DownloadFailed),
             Err(_gone) => Err(DownloadError::DownloadCancelled),
         }
     }
