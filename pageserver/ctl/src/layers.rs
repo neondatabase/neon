@@ -1,4 +1,7 @@
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -8,7 +11,7 @@ use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::block_io::BlockCursor;
 use pageserver::tenant::disk_btree::DiskBtreeReader;
 use pageserver::tenant::storage_layer::delta_layer::{BlobRef, Summary};
-use pageserver::tenant::storage_layer::{delta_layer, image_layer};
+use pageserver::tenant::storage_layer::{delta_layer, image_layer, LayerName};
 use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::{page_cache, virtual_file};
@@ -20,7 +23,12 @@ use pageserver::{
     },
     virtual_file::VirtualFile,
 };
+use pageserver_api::models::ImageCompressionAlgorithm;
+use remote_storage::{GenericRemoteStorage, ListingMode, RemotePath, RemoteStorageConfig};
 use std::fs;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
 
@@ -54,6 +62,17 @@ pub(crate) enum LayerCmd {
         new_tenant_id: Option<TenantId>,
         #[clap(long)]
         new_timeline_id: Option<TimelineId>,
+    },
+    CompressOne {
+        dest_path: Utf8PathBuf,
+        layer_file_path: Utf8PathBuf,
+    },
+    CompressMany {
+        tmp_dir: Utf8PathBuf,
+        tenant_remote_prefix: String,
+        tenant_remote_config: String,
+        layers_dir: Utf8PathBuf,
+        parallelism: Option<u32>,
     },
 }
 
@@ -239,6 +258,139 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             }
 
             anyhow::bail!("not an image or delta layer: {layer_file_path}");
+        }
+        LayerCmd::CompressOne {
+            dest_path,
+            layer_file_path,
+        } => {
+            pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+            pageserver::page_cache::init(100);
+
+            let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+
+            let stats =
+                ImageLayer::compression_statistics(dest_path, layer_file_path, &ctx).await?;
+            println!(
+                "Statistics: {stats:#?}\n{}",
+                serde_json::to_string(&stats).unwrap()
+            );
+            Ok(())
+        }
+        LayerCmd::CompressMany {
+            tmp_dir,
+            tenant_remote_prefix,
+            tenant_remote_config,
+            layers_dir,
+            parallelism,
+        } => {
+            pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+            pageserver::page_cache::init(100);
+
+            let toml_document = toml_edit::Document::from_str(tenant_remote_config)?;
+            let toml_item = toml_document
+                .get("remote_storage")
+                .expect("need remote_storage");
+            let config = RemoteStorageConfig::from_toml(toml_item)?.expect("incomplete config");
+            let storage = remote_storage::GenericRemoteStorage::from_config(&config)?;
+            let storage = Arc::new(storage);
+
+            let cancel = CancellationToken::new();
+            let path = RemotePath::from_string(tenant_remote_prefix)?;
+            let max_files = NonZeroU32::new(128_000);
+            let files_list = storage
+                .list(Some(&path), ListingMode::NoDelimiter, max_files, &cancel)
+                .await?;
+
+            println!("Listing gave {} keys", files_list.keys.len());
+
+            tokio::fs::create_dir_all(&layers_dir).await?;
+
+            let semaphore = Arc::new(Semaphore::new(parallelism.unwrap_or(1) as usize));
+
+            let mut tasks = JoinSet::new();
+            for (file_idx, file_key) in files_list.keys.iter().enumerate() {
+                let Some(file_name) = file_key.object_name() else {
+                    continue;
+                };
+                match LayerName::from_str(file_name) {
+                    Ok(LayerName::Delta(_)) => continue,
+                    Ok(LayerName::Image(_)) => (),
+                    Err(_e) => {
+                        // Split off the final part. We ensured above that this is not turning a
+                        // generation-less delta layer file name into an image layer file name.
+                        let Some(file_without_generation) = file_name.rsplit_once('-') else {
+                            continue;
+                        };
+                        let Ok(LayerName::Image(_layer_file_name)) =
+                            LayerName::from_str(file_without_generation.0)
+                        else {
+                            // Skipping because it's either not a layer or an image layer
+                            //println!("object {file_name}: not an image layer");
+                            continue;
+                        };
+                    }
+                }
+                let json_file_path = layers_dir.join(format!("{file_name}.json"));
+                if tokio::fs::try_exists(&json_file_path).await? {
+                    //println!("object {file_name}: report already created");
+                    // If we have already created a report for the layer, skip it.
+                    continue;
+                }
+                let local_layer_path = layers_dir.join(file_name);
+                async fn stats(
+                    semaphore: Arc<Semaphore>,
+                    local_layer_path: Utf8PathBuf,
+                    json_file_path: Utf8PathBuf,
+                    tmp_dir: Utf8PathBuf,
+                    storage: Arc<GenericRemoteStorage>,
+                    file_key: RemotePath,
+                ) -> Result<Vec<(Option<ImageCompressionAlgorithm>, u64, u64, u64)>, anyhow::Error>
+                {
+                    let _permit = semaphore.acquire().await?;
+                    let cancel = CancellationToken::new();
+                    let download = storage.download(&file_key, &cancel).await?;
+                    let mut dest_layer_file = tokio::fs::File::create(&local_layer_path).await?;
+                    let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+                    let _size = tokio::io::copy_buf(&mut body, &mut dest_layer_file).await?;
+                    println!("Downloaded file to {local_layer_path}");
+                    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+                    let stats =
+                        ImageLayer::compression_statistics(&tmp_dir, &local_layer_path, &ctx)
+                            .await?;
+
+                    let stats_str = serde_json::to_string(&stats).unwrap();
+                    tokio::fs::write(json_file_path, stats_str).await?;
+
+                    tokio::fs::remove_file(&local_layer_path).await?;
+                    Ok(stats)
+                }
+                let semaphore = semaphore.clone();
+                let file_key = file_key.to_owned();
+                let storage = storage.clone();
+                let tmp_dir = tmp_dir.to_owned();
+                let file_name = file_name.to_owned();
+                let percent = (file_idx * 100) as f64 / files_list.keys.len() as f64;
+                tasks.spawn(async move {
+                    let stats = stats(
+                        semaphore,
+                        local_layer_path.to_owned(),
+                        json_file_path.to_owned(),
+                        tmp_dir,
+                        storage,
+                        file_key,
+                    )
+                    .await;
+                    match stats {
+                        Ok(stats) => {
+                            println!("Statistics for {file_name} ({percent:.1}%): {stats:?}\n")
+                        }
+                        Err(e) => eprintln!("Error for {file_name}: {e:?}"),
+                    };
+                });
+            }
+            while let Some(_res) = tasks.join_next().await {}
+
+            Ok(())
         }
     }
 }
