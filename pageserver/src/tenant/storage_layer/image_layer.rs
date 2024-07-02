@@ -369,6 +369,16 @@ impl ImageLayer {
 }
 
 impl ImageLayerInner {
+    #[cfg(test)]
+    pub(crate) fn key_range(&self) -> &Range<Key> {
+        &self.key_range
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+
     /// Returns nested result following Result<Result<_, OpErr>, Critical>:
     /// - inner has the success or transient failure
     /// - outer has the permanent failure
