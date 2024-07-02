@@ -17,7 +17,12 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch("test_readonly_node", "empty")
     endpoint_main = env.endpoints.create_start("test_readonly_node")
 
-    env.pageserver.allowed_errors.append(".*basebackup .* failed: invalid basebackup lsn.*")
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*basebackup .* failed: invalid basebackup lsn.*",
+            ".*page_service.*error obtaining lsn lease.*.*tried to request a page version that was garbage collected",
+        ]
+    )
 
     main_pg_conn = endpoint_main.connect()
     main_cur = main_pg_conn.cursor()

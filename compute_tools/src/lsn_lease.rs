@@ -1,5 +1,7 @@
 use anyhow::bail;
 use anyhow::Result;
+use pageserver_api::shard::ShardCount;
+use pageserver_api::shard::ShardNumber;
 use postgres::{NoTls, SimpleQueryMessage};
 use std::{
     str::FromStr,
@@ -7,8 +9,11 @@ use std::{
     thread,
     time::{Duration, SystemTime},
 };
+use utils::id::TenantId;
+use utils::id::TimelineId;
 
 use compute_api::spec::ComputeMode;
+use pageserver_api::shard::TenantShardId;
 use tracing::{error, info};
 use utils::lsn::Lsn;
 
@@ -47,16 +52,16 @@ fn postgres_configs_from_state(compute_state: &ComputeState) -> Vec<postgres::Co
 
 fn lsn_lease_loop(compute: Arc<ComputeNode>, lsn: Lsn) {
     loop {
-        let (configs, cmd) = {
+        let (tenant_id, timeline_id, configs) = {
             let state = compute.state.lock().unwrap();
 
             let spec = state.pspec.as_ref().expect("spec must be set");
+
             let configs = postgres_configs_from_state(&state);
-            let cmd = format!("lease lsn {} {} {} ", spec.tenant_id, spec.timeline_id, lsn);
-            (configs, cmd)
+            (spec.tenant_id, spec.timeline_id, configs)
         };
 
-        match lsn_lease_request(&configs, &cmd) {
+        match lsn_lease_request(tenant_id, timeline_id, lsn, &configs) {
             Ok(valid_until) => {
                 let valid_until_duration = Duration::from_millis(valid_until as u64);
 
@@ -85,30 +90,64 @@ fn lsn_lease_loop(compute: Arc<ComputeNode>, lsn: Lsn) {
     }
 }
 
-fn lsn_lease_request(configs: &[postgres::Config], cmd: &str) -> Result<u128> {
-    info!("lsn_lease_request: {}", cmd);
-    let valid_until = configs
-        .iter()
-        .map(|config| {
-            let mut client = config.connect(NoTls)?;
-            let res = client.simple_query(cmd)?;
-            let msg = match res.first() {
-                Some(msg) => msg,
-                None => bail!("empty response"),
-            };
-            let row = match msg {
-                SimpleQueryMessage::Row(row) => row,
-                _ => bail!("error parsing lsn lease response"),
-            };
-            let valid_until_str = match row.get("valid_until") {
-                Some(valid_until) => valid_until,
-                None => bail!("valid_until not found"),
-            };
-            Ok(u128::from_str(valid_until_str)?)
-        })
-        .collect::<Result<Vec<u128>>>()?
-        .into_iter()
-        .min()
-        .unwrap();
+fn lsn_lease_request(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    lsn: Lsn,
+    configs: &[postgres::Config],
+) -> Result<u128> {
+    fn get_valid_until(
+        config: &postgres::Config,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+    ) -> Result<u128> {
+        let mut client = config.connect(NoTls)?;
+        let cmd = format!("lease lsn {} {} {} ", tenant_shard_id, timeline_id, lsn);
+        info!("lsn_lease_request: {}", cmd);
+        let res = client.simple_query(&cmd)?;
+        let msg = match res.first() {
+            Some(msg) => msg,
+            None => bail!("empty response"),
+        };
+        let row = match msg {
+            SimpleQueryMessage::Row(row) => row,
+            _ => bail!("error parsing lsn lease response"),
+        };
+        let valid_until_str = match row.get("valid_until") {
+            Some(valid_until) => valid_until,
+            None => bail!("valid_until not found"),
+        };
+        Ok(u128::from_str(valid_until_str)?)
+    }
+
+    let shard_count = configs.len();
+
+    let valid_until = if shard_count > 1 {
+        configs
+            .iter()
+            .enumerate()
+            .map(|(shard_number, config)| {
+                let tenant_shard_id = TenantShardId {
+                    tenant_id,
+                    shard_count: ShardCount::new(shard_count as u8),
+                    shard_number: ShardNumber(shard_number as u8),
+                };
+                get_valid_until(config, tenant_shard_id, timeline_id, lsn)
+            })
+            .collect::<Result<Vec<u128>>>()?
+            .into_iter()
+            .min()
+            .unwrap()
+    } else {
+        info!("Unsharded!");
+        get_valid_until(
+            &configs[0],
+            TenantShardId::unsharded(tenant_id),
+            timeline_id,
+            lsn,
+        )?
+    };
+
     Ok(valid_until)
 }

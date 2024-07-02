@@ -932,6 +932,7 @@ impl PageServerHandler {
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
         let shard_selector = ShardSelector::Known(tenant_shard_id.to_index());
+
         let timeline = self
             .get_active_tenant_timeline(tenant_shard_id.tenant_id, timeline_id, shard_selector)
             .await?;
