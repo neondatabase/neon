@@ -358,7 +358,7 @@ fn load_tenant_config(
         info!("Found temporary tenant directory, removing: {tenant_dir_path}");
         // No need to use safe_remove_tenant_dir_all because this is already
         // a temporary path
-        std::fs::remove_dir_all(&tenant_dir_path).fatal_err("Deleting temporary tenant dir");
+        std::fs::remove_dir_all(&tenant_dir_path).fatal_err("delete temporary tenant dir");
         return None;
     }
 
@@ -368,7 +368,7 @@ fn load_tenant_config(
         .fatal_err("Checking for empty tenant dir");
     if is_empty {
         info!("removing empty tenant directory {tenant_dir_path:?}");
-        std::fs::remove_dir(&tenant_dir_path).fatal_err("Deleting empty tenant dir");
+        std::fs::remove_dir(&tenant_dir_path).fatal_err("delete empty tenant dir");
         return None;
     }
 
@@ -386,7 +386,7 @@ async fn init_load_tenant_configs(
     let tenants_dir = conf.tenants_path();
 
     let dentries = tokio::task::spawn_blocking(move || -> Vec<Utf8DirEntry> {
-        let context = format!("Reading tenants dir {tenants_dir}");
+        let context = format!("read tenants dir {tenants_dir}");
         let dir_entries = tenants_dir.read_dir_utf8().fatal_err(&context);
 
         dir_entries
@@ -587,7 +587,7 @@ pub async fn init_tenant_mgr(
     // For those shards that have live configurations, construct `Tenant` or `SecondaryTenant` objects and start them running
     for (tenant_shard_id, location_conf, config_write_result) in config_write_results {
         // Writing a config to local disk is foundational to startup up tenants: panic if we can't.
-        config_write_result.fatal_err("writing tenant shard config file");
+        config_write_result.fatal_err("write tenant shard config file");
 
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
         let shard_identity = location_conf.shard;
@@ -953,7 +953,7 @@ impl TenantManager {
             Some(FastPathModified::Attached(tenant)) => {
                 Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
                     .await
-                    .fatal_err("writing tenant shard config");
+                    .fatal_err("write tenant shard config");
 
                 // Transition to AttachedStale means we may well hold a valid generation
                 // still, and have been requested to go stale as part of a migration.  If
@@ -984,7 +984,7 @@ impl TenantManager {
             Some(FastPathModified::Secondary(_secondary_tenant)) => {
                 Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
                     .await
-                    .fatal_err("writing tenant shard config");
+                    .fatal_err("write tenant shard config");
 
                 return Ok(None);
             }
@@ -1069,14 +1069,14 @@ impl TenantManager {
         // Does not need to be fsync'd because local storage is just a cache.
         tokio::fs::create_dir_all(&timelines_path)
             .await
-            .fatal_err("creating timelines/ dir");
+            .fatal_err("create timelines/ dir");
 
         // Before activating either secondary or attached mode, persist the
         // configuration, so that on restart we will re-attach (or re-start
         // secondary) on the tenant.
         Tenant::persist_tenant_config(self.conf, &tenant_shard_id, &new_location_config)
             .await
-            .fatal_err("writing tenant shard config");
+            .fatal_err("write tenant shard config");
 
         let new_slot = match &new_location_config.mode {
             LocationMode::Secondary(secondary_config) => {
