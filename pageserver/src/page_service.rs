@@ -55,7 +55,7 @@ use crate::basebackup::BasebackupError;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
-use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS_COUNT};
+use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
@@ -215,14 +215,9 @@ async fn page_service_conn_main(
     auth_type: AuthType,
     connection_ctx: RequestContext,
 ) -> anyhow::Result<()> {
-    // Immediately increment the gauge, then create a job to decrement it on task exit.
-    // One of the pros of `defer!` is that this will *most probably*
-    // get called, even in presence of panics.
-    let gauge = LIVE_CONNECTIONS_COUNT.with_label_values(&["page_service"]);
-    gauge.inc();
-    scopeguard::defer! {
-        gauge.dec();
-    }
+    let _guard = LIVE_CONNECTIONS
+        .with_label_values(&["page_service"])
+        .guard();
 
     socket
         .set_nodelay(true)
@@ -230,6 +225,7 @@ async fn page_service_conn_main(
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
     tracing::Span::current().record("peer_addr", field::display(peer_addr));
+    info!("accepted connection");
 
     // setup read timeout of 10 minutes. the timeout is rather arbitrary for requirements:
     // - long enough for most valid compute connections
