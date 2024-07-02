@@ -3858,7 +3858,9 @@ class EndpointFactory:
 
         return self
 
-    def new_replica(self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]]):
+    def new_replica(
+        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]] = None
+    ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
         assert branch_name is not None
