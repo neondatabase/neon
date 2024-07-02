@@ -29,6 +29,7 @@ impl EphemeralFile {
         conf: &PageServerConf,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        gate_guard: utils::sync::gate::GateGuard,
         ctx: &RequestContext,
     ) -> Result<EphemeralFile, io::Error> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
@@ -51,10 +52,12 @@ impl EphemeralFile {
         )
         .await?;
 
+        let prewarm = conf.l0_flush.prewarm_on_write();
+
         Ok(EphemeralFile {
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
-            rw: page_caching::RW::new(file, conf.l0_flush.prewarm_on_write()),
+            rw: page_caching::RW::new(file, prewarm, gate_guard),
         })
     }
 
@@ -161,7 +164,11 @@ mod tests {
     async fn test_ephemeral_blobs() -> Result<(), io::Error> {
         let (conf, tenant_id, timeline_id, ctx) = harness("ephemeral_blobs")?;
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &ctx).await?;
+        let gate = utils::sync::gate::Gate::default();
+
+        let entered = gate.enter().unwrap();
+
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, entered, &ctx).await?;
 
         let pos_foo = file.write_blob(b"foo", &ctx).await?;
         assert_eq!(
@@ -214,5 +221,39 @@ mod tests {
         assert_eq!(result, large_data);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn ephemeral_file_holds_gate_open() {
+        const FOREVER: std::time::Duration = std::time::Duration::from_secs(5);
+
+        let (conf, tenant_id, timeline_id, ctx) =
+            harness("ephemeral_file_holds_gate_open").unwrap();
+
+        let gate = utils::sync::gate::Gate::default();
+
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
+            .await
+            .unwrap();
+
+        let mut closing = tokio::task::spawn(async move {
+            gate.close().await;
+        });
+
+        // gate is entered until the ephemeral file is dropped
+        // do not start paused tokio-epoll-uring has a sleep loop
+        tokio::time::pause();
+        tokio::time::timeout(FOREVER, &mut closing)
+            .await
+            .expect_err("closing cannot complete before dropping");
+
+        // this is a requirement of the reset_tenant functionality: we have to be able to restart a
+        // tenant fast, and for that, we need all tenant_dir operations be guarded by entering a gate
+        drop(file);
+
+        tokio::time::timeout(FOREVER, &mut closing)
+            .await
+            .expect("closing completes right away")
+            .expect("closing does not panic");
     }
 }
