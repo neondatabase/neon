@@ -106,8 +106,11 @@ pub enum LsnKind {
     GcCutOff,
     /// Last record LSN
     BranchEnd,
+    /// A LSN lease is granted here.
     LeasePoint,
+    /// A lease starts from here.
     LeaseStart,
+    /// Last record LSN for the lease (should have the same LSN as the previous [`LsnKind::LeaseStart`]).
     LeaseEnd,
 }
 
@@ -326,23 +329,35 @@ pub(super) async fn gather_inputs(
             parent = segments.len() - 1;
 
             if kind == LsnKind::LeasePoint {
+                // Needs `LeaseStart` and `LeaseEnd` as well to model lease as a read-only branch that never writes data
+                // (i.e. it's lsn has not advanced from ancestor_lsn), and therefore the three segments have the same LSN
+                // value. Without the other two segments, the calculation code would not count the leased LSN as a point
+                // to be retained.
+                // Did not use `BranchStart` or `BranchEnd` so we can differentiate branches and leases during debug.
+                //
+                // Alt Design: rewrite the entire calculation code to be independent of timeline id. Both leases and
+                // branch points can be given a synthetic id so we can unite them.
                 let mut lease_parent = parent;
+
+                // Start of a lease.
                 segments.push(SegmentMeta {
                     segment: Segment {
                         parent: Some(lease_parent),
                         lsn: lsn.0,
-                        size: None,
-                        needed: next_gc_cutoff <= lsn,
+                        size: None,                    // Filled in later, if necessary
+                        needed: next_gc_cutoff <= lsn, // only needed if the point is within rentention.
                     },
                     timeline_id: timeline.timeline_id,
                     kind: LsnKind::LeaseStart,
                 });
                 lease_parent += 1;
+
+                // End of the lease.
                 segments.push(SegmentMeta {
                     segment: Segment {
                         parent: Some(lease_parent),
                         lsn: lsn.0,
-                        size: None,
+                        size: None, // Filled in later, if necessary
                         needed: true,
                     },
                     timeline_id: timeline.timeline_id,
