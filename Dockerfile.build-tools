@@ -183,15 +183,18 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
     rustup component add llvm-tools-preview rustfmt clippy && \
-    cargo install --git https://github.com/paritytech/cachepot && \
+    cargo install sccache && \
     cargo install rustfilt && \
     cargo install cargo-hakari && \
     cargo install cargo-deny --locked && \
     cargo install cargo-hack && \
     cargo install cargo-nextest && \
+    cargo install cargo-chef --locked && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
-ENV RUSTC_WRAPPER=cachepot
+ENV RUSTC_WRAPPER=sccache
+# Let sscache to fall back to local filesystem if S3 is misconfigured, not failing the build
+ENV SCCACHE_IGNORE_SERVER_IO_ERROR=1
 
 # Show versions
 RUN whoami \
