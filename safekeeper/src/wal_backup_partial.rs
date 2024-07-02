@@ -18,6 +18,8 @@
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
 
+use std::sync::Arc;
+
 use camino::Utf8PathBuf;
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
@@ -27,20 +29,48 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
-    metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
+    metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
     safekeeper::Term,
-    timeline::FullAccessTimeline,
+    timeline::WalResidentTimeline,
+    timeline_manager::StateSnapshot,
     wal_backup::{self, remote_timeline_path},
     SafeKeeperConf,
 };
 
+#[derive(Clone)]
+pub struct RateLimiter {
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl RateLimiter {
+    pub fn new(permits: usize) -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
+        }
+    }
+
+    async fn acquire_owned(&self) -> tokio::sync::OwnedSemaphorePermit {
+        let _timer = MISC_OPERATION_SECONDS
+            .with_label_values(&["partial_permit_acquire"])
+            .start_timer();
+        self.semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore is closed")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UploadStatus {
-    /// Upload is in progress
+    /// Upload is in progress. This status should be used only for garbage collection,
+    /// don't read data from the remote storage with this status.
     InProgress,
-    /// Upload is finished
+    /// Upload is finished. There is always at most one segment with this status.
+    /// It means that the segment is actual and can be used.
     Uploaded,
-    /// Deletion is in progress
+    /// Deletion is in progress. This status should be used only for garbage collection,
+    /// don't read data from the remote storage with this status.
     Deleting,
 }
 
@@ -50,6 +80,10 @@ pub struct PartialRemoteSegment {
     pub name: String,
     pub commit_lsn: Lsn,
     pub flush_lsn: Lsn,
+    // We should use last_log_term here, otherwise it's possible to have inconsistent data in the
+    // remote storage.
+    //
+    // More info here: https://github.com/neondatabase/neon/pull/8022#discussion_r1654738405
     pub term: Term,
 }
 
@@ -59,6 +93,10 @@ impl PartialRemoteSegment {
             && self.commit_lsn == other.commit_lsn
             && self.flush_lsn == other.flush_lsn
             && self.term == other.term
+    }
+
+    pub(crate) fn remote_path(&self, remote_timeline_path: &RemotePath) -> RemotePath {
+        remote_timeline_path.join(&self.name)
     }
 }
 
@@ -71,7 +109,7 @@ pub struct State {
 
 impl State {
     /// Find an Uploaded segment. There should be only one Uploaded segment at a time.
-    fn uploaded_segment(&self) -> Option<PartialRemoteSegment> {
+    pub(crate) fn uploaded_segment(&self) -> Option<PartialRemoteSegment> {
         self.segments
             .iter()
             .find(|seg| seg.status == UploadStatus::Uploaded)
@@ -81,7 +119,7 @@ impl State {
 
 struct PartialBackup {
     wal_seg_size: usize,
-    tli: FullAccessTimeline,
+    tli: WalResidentTimeline,
     conf: SafeKeeperConf,
     local_prefix: Utf8PathBuf,
     remote_timeline_path: RemotePath,
@@ -128,17 +166,17 @@ impl PartialBackup {
         let sk_info = self.tli.get_safekeeper_info(&self.conf).await;
         let flush_lsn = Lsn(sk_info.flush_lsn);
         let commit_lsn = Lsn(sk_info.commit_lsn);
-        let term = sk_info.term;
+        let last_log_term = sk_info.last_log_term;
         let segno = self.segno(flush_lsn);
 
-        let name = self.remote_segment_name(segno, term, commit_lsn, flush_lsn);
+        let name = self.remote_segment_name(segno, last_log_term, commit_lsn, flush_lsn);
 
         PartialRemoteSegment {
             status: UploadStatus::InProgress,
             name,
             commit_lsn,
             flush_lsn,
-            term,
+            term: last_log_term,
         }
     }
 
@@ -151,7 +189,7 @@ impl PartialBackup {
         let backup_bytes = flush_lsn.segment_offset(self.wal_seg_size);
 
         let local_path = self.local_prefix.join(self.local_segment_name(segno));
-        let remote_path = self.remote_timeline_path.join(&prepared.name);
+        let remote_path = prepared.remote_path(&self.remote_timeline_path);
 
         // Upload first `backup_bytes` bytes of the segment to the remote storage.
         wal_backup::backup_partial_segment(&local_path, &remote_path, backup_bytes).await?;
@@ -161,7 +199,7 @@ impl PartialBackup {
         // If the term changed, we cannot guarantee the validity of the uploaded data.
         // If the term is the same, we know the data is not corrupted.
         let sk_info = self.tli.get_safekeeper_info(&self.conf).await;
-        if sk_info.term != prepared.term {
+        if sk_info.last_log_term != prepared.term {
             anyhow::bail!("term changed during upload");
         }
         assert!(prepared.commit_lsn <= Lsn(sk_info.commit_lsn));
@@ -196,6 +234,9 @@ impl PartialBackup {
     /// Upload the latest version of the partial segment and garbage collect older versions.
     #[instrument(name = "upload", skip_all, fields(name = %prepared.name))]
     async fn do_upload(&mut self, prepared: &PartialRemoteSegment) -> anyhow::Result<()> {
+        let _timer = MISC_OPERATION_SECONDS
+            .with_label_values(&["partial_do_upload"])
+            .start_timer();
         info!("starting upload {:?}", prepared);
 
         let state_0 = self.state.clone();
@@ -270,8 +311,33 @@ impl PartialBackup {
     }
 }
 
+/// Check if everything is uploaded and partial backup task doesn't need to run.
+pub(crate) fn needs_uploading(
+    state: &StateSnapshot,
+    uploaded: &Option<PartialRemoteSegment>,
+) -> bool {
+    match uploaded {
+        Some(uploaded) => {
+            uploaded.status != UploadStatus::Uploaded
+                || uploaded.flush_lsn != state.flush_lsn
+                || uploaded.commit_lsn != state.commit_lsn
+                || uploaded.term != state.last_log_term
+        }
+        None => true,
+    }
+}
+
+/// Main task for partial backup. It waits for the flush_lsn to change and then uploads the
+/// partial segment to the remote storage. It also does garbage collection of old segments.
+///
+/// When there is nothing more to do and the last segment was successfully uploaded, the task
+/// returns PartialRemoteSegment, to signal readiness for offloading the timeline.
 #[instrument(name = "Partial backup", skip_all, fields(ttid = %tli.ttid))]
-pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
+pub async fn main_task(
+    tli: WalResidentTimeline,
+    conf: SafeKeeperConf,
+    limiter: RateLimiter,
+) -> Option<PartialRemoteSegment> {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
 
@@ -285,7 +351,7 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
         Ok(path) => path,
         Err(e) => {
             error!("failed to create remote path: {:?}", e);
-            return;
+            return None;
         }
     };
 
@@ -320,19 +386,13 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
         // wait until we have something to upload
         let uploaded_segment = backup.state.uploaded_segment();
         if let Some(seg) = &uploaded_segment {
-            // if we already uploaded something, wait until we have something new
-            while flush_lsn_rx.borrow().lsn == seg.flush_lsn
+            // check if uploaded segment matches the current state
+            if flush_lsn_rx.borrow().lsn == seg.flush_lsn
                 && *commit_lsn_rx.borrow() == seg.commit_lsn
                 && flush_lsn_rx.borrow().term == seg.term
             {
-                tokio::select! {
-                    _ = backup.tli.cancel.cancelled() => {
-                        info!("timeline canceled");
-                        return;
-                    }
-                    _ = commit_lsn_rx.changed() => {}
-                    _ = flush_lsn_rx.changed() => {}
-                }
+                // we have nothing to do, the last segment is already uploaded
+                return Some(seg.clone());
             }
         }
 
@@ -341,7 +401,7 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
             tokio::select! {
                 _ = backup.tli.cancel.cancelled() => {
                     info!("timeline canceled");
-                    return;
+                    return None;
                 }
                 _ = flush_lsn_rx.changed() => {}
             }
@@ -358,7 +418,7 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
             tokio::select! {
                 _ = backup.tli.cancel.cancelled() => {
                     info!("timeline canceled");
-                    return;
+                    return None;
                 }
                 _ = commit_lsn_rx.changed() => {}
                 _ = flush_lsn_rx.changed() => {
@@ -380,6 +440,9 @@ pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
             // likely segno has changed, let's try again in the next iteration
             continue 'outer;
         }
+
+        // limit concurrent uploads
+        let _upload_permit = limiter.acquire_owned().await;
 
         let prepared = backup.prepare_upload().await;
         if let Some(seg) = &uploaded_segment {

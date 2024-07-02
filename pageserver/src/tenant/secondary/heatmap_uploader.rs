@@ -367,10 +367,9 @@ async fn upload_tenant_heatmap(
     debug_assert_current_span_has_tenant_id();
 
     let generation = tenant.get_generation();
+    debug_assert!(!generation.is_none());
     if generation.is_none() {
-        // We do not expect this: generations were implemented before heatmap uploads.  However,
-        // handle it so that we don't have to make the generation in the heatmap an Option<>
-        // (Generation::none is not serializable)
+        // We do not expect this: None generations should only appear in historic layer metadata, not in running Tenants
         tracing::warn!("Skipping heatmap upload for tenant with generation==None");
         return Ok(UploadHeatmapOutcome::Skipped);
     }

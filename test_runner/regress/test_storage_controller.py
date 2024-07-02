@@ -24,7 +24,6 @@ from fixtures.pageserver.utils import (
     enable_remote_storage_versioning,
     list_prefix,
     remote_storage_delete_key,
-    tenant_delete_wait_completed,
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
@@ -158,7 +157,7 @@ def test_storage_controller_smoke(
 
     # Delete all the tenants
     for tid in tenant_ids:
-        tenant_delete_wait_completed(env.storage_controller.pageserver_api(), tid, 10)
+        env.storage_controller.pageserver_api().tenant_delete(tid)
 
     env.storage_controller.consistency_check()
 
@@ -316,7 +315,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     # Create a tenant directly via pageserver HTTP API, skipping the storage controller
     tenant_id = TenantId.generate()
     generation = 123
-    origin_ps.http_client().tenant_create(tenant_id, generation=generation)
+    origin_ps.tenant_create(tenant_id, generation=generation)
 
     # As if doing a live migration, first configure origin into stale mode
     r = origin_ps.http_client().tenant_location_conf(
@@ -1384,7 +1383,8 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     env.storage_controller.allowed_errors.extend(
         [
-            ".*Lock on.*",
+            ".*Exclusive lock by.*",
+            ".*Shared lock by.*",
             ".*Scheduling is disabled by policy.*",
             f".*Operation TimelineCreate on key {tenant_id} has waited.*",
         ]
@@ -1416,9 +1416,23 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     )
     thread_update_tenant_policy.join()
 
-    env.storage_controller.assert_log_contains("Lock on UpdatePolicy was held for")
-    env.storage_controller.assert_log_contains(
+    env.storage_controller.assert_log_contains("Exclusive lock by UpdatePolicy was held for")
+    _, last_log_cursor = env.storage_controller.assert_log_contains(
         f"Operation TimelineCreate on key {tenant_id} has waited"
+    )
+
+    # Test out shared lock
+    env.storage_controller.configure_failpoints(
+        ("tenant-create-timeline-shared-lock", "return(31000)")
+    )
+
+    timeline_id = TimelineId.generate()
+    # This will hold the shared lock for enough time to cause an warning
+    env.storage_controller.pageserver_api().timeline_create(
+        pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
+    )
+    env.storage_controller.assert_log_contains(
+        "Shared lock by TimelineCreate was held for", offset=last_log_cursor
     )
 
 
@@ -1504,6 +1518,49 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
         workload.validate()
 
 
+def retryable_node_operation(op, ps_id, max_attempts, backoff):
+    while max_attempts > 0:
+        try:
+            op(ps_id)
+            return
+        except StorageControllerApiException as e:
+            max_attempts -= 1
+            log.info(f"Operation failed ({max_attempts} attempts left): {e}")
+
+            if max_attempts == 0:
+                raise e
+
+            time.sleep(backoff)
+
+
+def poll_node_status(env, node_id, desired_scheduling_policy, max_attempts, backoff):
+    log.info(f"Polling {node_id} for {desired_scheduling_policy} scheduling policy")
+    while max_attempts > 0:
+        try:
+            status = env.storage_controller.node_status(node_id)
+            policy = status["scheduling"]
+            if policy == desired_scheduling_policy:
+                return
+            else:
+                max_attempts -= 1
+                log.info(f"Status call returned {policy=} ({max_attempts} attempts left)")
+
+                if max_attempts == 0:
+                    raise AssertionError(
+                        f"Status for {node_id=} did not reach {desired_scheduling_policy=}"
+                    )
+
+                time.sleep(backoff)
+        except StorageControllerApiException as e:
+            max_attempts -= 1
+            log.info(f"Status call failed ({max_attempts} retries left): {e}")
+
+            if max_attempts == 0:
+                raise e
+
+            time.sleep(backoff)
+
+
 def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
     """
     Graceful reststart of storage controller clusters use the drain and
@@ -1527,57 +1584,10 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         )
 
     # Give things a chance to settle.
-    # A call to `reconcile_until_idle` could be used here instead,
-    # however since all attachments are placed on the same node,
-    # we'd have to wait for a long time (2 minutes-ish) for optimizations
-    # to quiesce.
-    # TODO: once the initial attachment selection is fixed, update this
-    # to use `reconcile_until_idle`.
-    time.sleep(2)
+    env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
     nodes = env.storage_controller.node_list()
     assert len(nodes) == 2
-
-    def retryable_node_operation(op, ps_id, max_attempts, backoff):
-        while max_attempts > 0:
-            try:
-                op(ps_id)
-                return
-            except StorageControllerApiException as e:
-                max_attempts -= 1
-                log.info(f"Operation failed ({max_attempts} attempts left): {e}")
-
-                if max_attempts == 0:
-                    raise e
-
-                time.sleep(backoff)
-
-    def poll_node_status(node_id, desired_scheduling_policy, max_attempts, backoff):
-        log.info(f"Polling {node_id} for {desired_scheduling_policy} scheduling policy")
-        while max_attempts > 0:
-            try:
-                status = env.storage_controller.node_status(node_id)
-                policy = status["scheduling"]
-                if policy == desired_scheduling_policy:
-                    return
-                else:
-                    max_attempts -= 1
-                    log.info(f"Status call returned {policy=} ({max_attempts} attempts left)")
-
-                    if max_attempts == 0:
-                        raise AssertionError(
-                            f"Status for {node_id=} did not reach {desired_scheduling_policy=}"
-                        )
-
-                    time.sleep(backoff)
-            except StorageControllerApiException as e:
-                max_attempts -= 1
-                log.info(f"Status call failed ({max_attempts} retries left): {e}")
-
-                if max_attempts == 0:
-                    raise e
-
-                time.sleep(backoff)
 
     def assert_shard_counts_balanced(env: NeonEnv, shard_counts, total_shards):
         # Assert that all nodes have some attached shards
@@ -1594,7 +1604,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         retryable_node_operation(
             lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        poll_node_status(ps.id, "PauseForRestart", max_attempts=6, backoff=5)
+        poll_node_status(env, ps.id, "PauseForRestart", max_attempts=6, backoff=5)
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
@@ -1604,12 +1614,12 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         assert sum(shard_counts.values()) == total_shards
 
         ps.restart()
-        poll_node_status(ps.id, "Active", max_attempts=10, backoff=1)
+        poll_node_status(env, ps.id, "Active", max_attempts=10, backoff=1)
 
         retryable_node_operation(
             lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        poll_node_status(ps.id, "Active", max_attempts=6, backoff=5)
+        poll_node_status(env, ps.id, "Active", max_attempts=6, backoff=5)
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
@@ -1619,3 +1629,43 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
     shard_counts = get_node_shard_counts(env, tenant_ids)
     log.info(f"Shard counts after rolling restart: {shard_counts}")
     assert_shard_counts_balanced(env, shard_counts, total_shards)
+
+
+def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_count = 10
+    shard_count_per_tenant = 8
+    tenant_ids = []
+
+    for _ in range(0, tenant_count):
+        tid = TenantId.generate()
+        tenant_ids.append(tid)
+        env.neon_cli.create_tenant(
+            tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
+        )
+
+    # See sleep comment in the test above.
+    time.sleep(2)
+
+    nodes = env.storage_controller.node_list()
+    assert len(nodes) == 2
+
+    env.storage_controller.configure_failpoints(("sleepy-drain-loop", "return(2000)"))
+
+    ps_id_to_drain = env.pageservers[0].id
+
+    retryable_node_operation(
+        lambda ps_id: env.storage_controller.node_drain(ps_id),
+        ps_id_to_drain,
+        max_attempts=3,
+        backoff=2,
+    )
+
+    poll_node_status(env, ps_id_to_drain, "Draining", max_attempts=6, backoff=2)
+
+    env.storage_controller.cancel_node_drain(ps_id_to_drain)
+
+    poll_node_status(env, ps_id_to_drain, "Active", max_attempts=6, backoff=2)

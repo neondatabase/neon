@@ -53,9 +53,6 @@ pub(crate) enum StorageTimeOperation {
 
     #[strum(serialize = "find gc cutoffs")]
     FindGcCutoffs,
-
-    #[strum(serialize = "create tenant")]
-    CreateTenant,
 }
 
 pub(crate) static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
@@ -479,7 +476,7 @@ static STANDBY_HORIZON: Lazy<IntGaugeVec> = Lazy::new(|| {
 static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_resident_physical_size",
-        "The size of the layer files present in the pageserver's filesystem.",
+        "The size of the layer files present in the pageserver's filesystem, for attached locations.",
         &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
@@ -541,6 +538,15 @@ static AUX_FILE_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
         "pageserver_aux_file_estimated_size",
         "The size of all aux files for a timeline in aux file v2 store.",
         &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static VALID_LSN_LEASE_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_valid_lsn_lease_count",
+        "The number of valid leases after refreshing gc info.",
+        &["tenant_id", "shard_id", "timeline_id"],
     )
     .expect("failed to define a metric")
 });
@@ -1347,17 +1353,23 @@ static COMPUTE_STARTUP_BUCKETS: Lazy<[f64; 28]> = Lazy::new(|| {
     .map(|ms| (ms as f64) / 1000.0)
 });
 
-pub(crate) struct BasebackupQueryTime(HistogramVec);
+pub(crate) struct BasebackupQueryTime {
+    ok: Histogram,
+    error: Histogram,
+}
+
 pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
-    BasebackupQueryTime({
-        register_histogram_vec!(
-            "pageserver_basebackup_query_seconds",
-            "Histogram of basebackup queries durations, by result type",
-            &["result"],
-            COMPUTE_STARTUP_BUCKETS.to_vec(),
-        )
-        .expect("failed to define a metric")
-    })
+    let vec = register_histogram_vec!(
+        "pageserver_basebackup_query_seconds",
+        "Histogram of basebackup queries durations, by result type",
+        &["result"],
+        COMPUTE_STARTUP_BUCKETS.to_vec(),
+    )
+    .expect("failed to define a metric");
+    BasebackupQueryTime {
+        ok: vec.get_metric_with_label_values(&["ok"]).unwrap(),
+        error: vec.get_metric_with_label_values(&["error"]).unwrap(),
+    }
 });
 
 pub(crate) struct BasebackupQueryTimeOngoingRecording<'a, 'c> {
@@ -1412,12 +1424,11 @@ impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
                 elapsed
             }
         };
-        let label_value = if res.is_ok() { "ok" } else { "error" };
-        let metric = self
-            .parent
-            .0
-            .get_metric_with_label_values(&[label_value])
-            .unwrap();
+        let metric = if res.is_ok() {
+            &self.parent.ok
+        } else {
+            &self.parent.error
+        };
         metric.observe(ex_throttled.as_secs_f64());
     }
 }
@@ -1430,6 +1441,46 @@ pub(crate) static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+#[derive(Clone, Copy, enum_map::Enum, IntoStaticStr)]
+pub(crate) enum ComputeCommandKind {
+    PageStreamV2,
+    PageStream,
+    Basebackup,
+    GetLastRecordRlsn,
+    Fullbackup,
+    ImportBasebackup,
+    ImportWal,
+    LeaseLsn,
+    Show,
+}
+
+pub(crate) struct ComputeCommandCounters {
+    map: EnumMap<ComputeCommandKind, IntCounter>,
+}
+
+pub(crate) static COMPUTE_COMMANDS_COUNTERS: Lazy<ComputeCommandCounters> = Lazy::new(|| {
+    let inner = register_int_counter_vec!(
+        "pageserver_compute_commands",
+        "Number of compute -> pageserver commands processed",
+        &["command"]
+    )
+    .expect("failed to define a metric");
+
+    ComputeCommandCounters {
+        map: EnumMap::from_array(std::array::from_fn(|i| {
+            let command = <ComputeCommandKind as enum_map::Enum>::from_usize(i);
+            let command_str: &'static str = command.into();
+            inner.with_label_values(&[command_str])
+        })),
+    }
+});
+
+impl ComputeCommandCounters {
+    pub(crate) fn for_command(&self, command: ComputeCommandKind) -> &IntCounter {
+        &self.map[command]
+    }
+}
 
 // remote storage metrics
 
@@ -1638,6 +1689,15 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
     )
     .expect("failed to define a metric"),
 }
+});
+
+pub(crate) static SECONDARY_RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_secondary_resident_physical_size",
+        "The size of the layer files present in the pageserver's filesystem, for secondary locations.",
+        &["tenant_id", "shard_id"]
+    )
+    .expect("failed to define a metric")
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2050,6 +2110,8 @@ pub(crate) struct TimelineMetrics {
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
+    /// Number of valid LSN leases.
+    pub valid_lsn_lease_count_gauge: UIntGauge,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -2148,6 +2210,10 @@ impl TimelineMetrics {
         let evictions_with_low_residence_duration = evictions_with_low_residence_duration_builder
             .build(&tenant_id, &shard_id, &timeline_id);
 
+        let valid_lsn_lease_count_gauge = VALID_LSN_LEASE_COUNT
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -2170,6 +2236,7 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
+            valid_lsn_lease_count_gauge,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -2219,6 +2286,7 @@ impl TimelineMetrics {
         }
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = VALID_LSN_LEASE_COUNT.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
@@ -2926,4 +2994,6 @@ pub fn preinitialize_metrics() {
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
     Lazy::force(&tenant_throttling::TIMELINE_GET);
+    Lazy::force(&BASEBACKUP_QUERY_TIME);
+    Lazy::force(&COMPUTE_COMMANDS_COUNTERS);
 }

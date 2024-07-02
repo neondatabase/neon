@@ -93,16 +93,12 @@ pub(crate) struct Layer(Arc<LayerInner>);
 
 impl std::fmt::Display for Layer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if matches!(self.0.generation, Generation::Broken) {
-            write!(f, "{}-broken", self.layer_desc().short_id())
-        } else {
-            write!(
-                f,
-                "{}{}",
-                self.layer_desc().short_id(),
-                self.0.generation.get_suffix()
-            )
-        }
+        write!(
+            f,
+            "{}{}",
+            self.layer_desc().short_id(),
+            self.0.generation.get_suffix()
+        )
     }
 }
 
@@ -389,7 +385,6 @@ impl Layer {
     }
 
     /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
-    #[cfg(test)]
     pub(crate) async fn load_key_values(
         &self,
         ctx: &RequestContext,
@@ -1101,19 +1096,10 @@ impl LayerInner {
 
         match rx.await {
             Ok(Ok(res)) => Ok(res),
-            Ok(Err(e)) => {
-                // sleep already happened in the spawned task, if it was not cancelled
-                match e.downcast_ref::<remote_storage::DownloadError>() {
-                    // If the download failed due to its cancellation token,
-                    // propagate the cancellation error upstream.
-                    Some(remote_storage::DownloadError::Cancelled) => {
-                        Err(DownloadError::DownloadCancelled)
-                    }
-                    // FIXME: this is not embedding the error because historically it would had
-                    // been output to compute, however that is no longer the case.
-                    _ => Err(DownloadError::DownloadFailed),
-                }
+            Ok(Err(remote_storage::DownloadError::Cancelled)) => {
+                Err(DownloadError::DownloadCancelled)
             }
+            Ok(Err(_)) => Err(DownloadError::DownloadFailed),
             Err(_gone) => Err(DownloadError::DownloadCancelled),
         }
     }
@@ -1123,7 +1109,7 @@ impl LayerInner {
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<DownloadedLayer>> {
+    ) -> Result<Arc<DownloadedLayer>, remote_storage::DownloadError> {
         let result = timeline
             .remote_client
             .download_layer_file(
@@ -1774,7 +1760,6 @@ impl DownloadedLayer {
         }
     }
 
-    #[cfg(test)]
     async fn load_key_values(
         &self,
         owner: &Arc<LayerInner>,
@@ -1905,7 +1890,7 @@ impl ResidentLayer {
     }
 
     #[cfg(test)]
-    pub(crate) async fn as_delta(
+    pub(crate) async fn get_as_delta(
         &self,
         ctx: &RequestContext,
     ) -> anyhow::Result<&delta_layer::DeltaLayerInner> {
@@ -1913,6 +1898,18 @@ impl ResidentLayer {
         match self.downloaded.get(&self.owner.0, ctx).await? {
             Delta(ref d) => Ok(d),
             Image(_) => Err(anyhow::anyhow!("image layer")),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn get_as_image(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<&image_layer::ImageLayerInner> {
+        use LayerKind::*;
+        match self.downloaded.get(&self.owner.0, ctx).await? {
+            Image(ref d) => Ok(d),
+            Delta(_) => Err(anyhow::anyhow!("delta layer")),
         }
     }
 }

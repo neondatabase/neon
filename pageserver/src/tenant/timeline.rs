@@ -65,7 +65,6 @@ use std::{
     ops::{Deref, Range},
 };
 
-use crate::metrics::GetKind;
 use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -89,6 +88,10 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
+};
+use crate::{
+    l0_flush::{self, L0FlushGlobalState},
+    metrics::GetKind,
 };
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
@@ -208,6 +211,7 @@ pub struct TimelineResources {
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
+    pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
 pub(crate) struct AuxFilesState {
@@ -433,6 +437,8 @@ pub struct Timeline {
     /// in the future, add `extra_test_sparse_keyspace` if necessary.
     #[cfg(test)]
     pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
+
+    pub(crate) l0_flush_global_state: L0FlushGlobalState,
 }
 
 pub struct WalReceiverInfo {
@@ -686,6 +692,7 @@ pub enum GetLogicalSizePriority {
 pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
+    EnhancedGcBottomMostCompaction,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -995,6 +1002,7 @@ impl Timeline {
     }
 
     pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
+    pub(crate) const VEC_GET_LAYERS_VISITED_WARN_THRESH: f64 = 512.0;
 
     /// Look up multiple page versions at a given LSN
     ///
@@ -1096,7 +1104,6 @@ impl Timeline {
     /// scan iterator interface. We could optimize this interface later to avoid some checks in the vectored
     /// get path to maintain and split the probing and to-be-probe keyspace. We also need to ensure that
     /// the scan operation will not cause OOM in the future.
-    #[allow(dead_code)]
     pub(crate) async fn scan(
         &self,
         keyspace: KeySpace,
@@ -1228,7 +1235,7 @@ impl Timeline {
         let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
             .for_get_kind(get_kind)
             .start_timer();
-        self.get_vectored_reconstruct_data(keyspace, lsn, reconstruct_state, ctx)
+        self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
             .await?;
         get_data_timer.stop_and_record();
 
@@ -1258,11 +1265,26 @@ impl Timeline {
         // (this is a requirement, not a bug). Skip updating the metric in these cases
         // to avoid infinite results.
         if !results.is_empty() {
+            let avg = layers_visited as f64 / results.len() as f64;
+            if avg >= Self::VEC_GET_LAYERS_VISITED_WARN_THRESH {
+                use utils::rate_limit::RateLimit;
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    tracing::info!(
+                    tenant_id = %self.tenant_shard_id.tenant_id,
+                    shard_id = %self.tenant_shard_id.shard_slug(),
+                    timeline_id = %self.timeline_id,
+                    "Vectored read for {} visited {} layers on average per key and {} in total. {}/{} pages were returned",
+                    keyspace, avg, layers_visited, results.len(), keyspace.total_raw_size());
+                });
+            }
+
             // Note that this is an approximation. Tracking the exact number of layers visited
             // per key requires virtually unbounded memory usage and is inefficient
             // (i.e. segment tree tracking each range queried from a layer)
-            crate::metrics::VEC_READ_NUM_LAYERS_VISITED
-                .observe(layers_visited as f64 / results.len() as f64);
+            crate::metrics::VEC_READ_NUM_LAYERS_VISITED.observe(avg);
         }
 
         Ok(results)
@@ -2376,6 +2398,8 @@ impl Timeline {
 
                 #[cfg(test)]
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
+
+                l0_flush_global_state: resources.l0_flush_global_state,
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -5481,12 +5505,12 @@ impl Timeline {
         }
         images.sort_unstable_by(|(ka, _), (kb, _)| ka.cmp(kb));
         let min_key = *images.first().map(|(k, _)| k).unwrap();
-        let max_key = images.last().map(|(k, _)| k).unwrap().next();
+        let end_key = images.last().map(|(k, _)| k).unwrap().next();
         let mut image_layer_writer = ImageLayerWriter::new(
             self.conf,
             self.timeline_id,
             self.tenant_shard_id,
-            &(min_key..max_key),
+            &(min_key..end_key),
             lsn,
             ctx,
         )
@@ -5518,7 +5542,7 @@ impl Timeline {
         let last_record_lsn = self.get_last_record_lsn();
         deltas.sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
         let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
-        let max_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
+        let end_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
         let min_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
         let max_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
         assert!(
@@ -5541,7 +5565,7 @@ impl Timeline {
         for (key, lsn, val) in deltas {
             delta_layer_writer.put_value(key, lsn, val, ctx).await?;
         }
-        let delta_layer = delta_layer_writer.finish(max_key, self, ctx).await?;
+        let delta_layer = delta_layer_writer.finish(end_key, self, ctx).await?;
 
         {
             let mut guard = self.layers.write().await;

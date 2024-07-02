@@ -63,10 +63,25 @@ pub struct TimelinePersistentState {
     /// Holds names of partial segments uploaded to remote storage. Used to
     /// clean up old objects without leaving garbage in remote storage.
     pub partial_backup: wal_backup_partial::State,
+    /// Eviction state of the timeline. If it's Offloaded, we should download
+    /// WAL files from remote storage to serve the timeline.
+    pub eviction_state: EvictionState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedPeers(pub Vec<(NodeId, PersistedPeerInfo)>);
+
+/// State of the local WAL files. Used to track current timeline state,
+/// that can be either WAL files are present on disk or last partial segment
+/// is offloaded to remote storage.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum EvictionState {
+    /// WAL files are present on disk.
+    Present,
+    /// Last partial segment is offloaded to remote storage.
+    /// Contains flush_lsn of the last offloaded segment.
+    Offloaded(Lsn),
+}
 
 impl TimelinePersistentState {
     pub fn new(
@@ -98,6 +113,7 @@ impl TimelinePersistentState {
                     .collect(),
             ),
             partial_backup: wal_backup_partial::State::default(),
+            eviction_state: EvictionState::Present,
         }
     }
 
@@ -173,7 +189,12 @@ where
 
     /// Persist given state. c.f. start_change.
     pub async fn finish_change(&mut self, s: &TimelinePersistentState) -> Result<()> {
-        self.pers.persist(s).await?;
+        if s.eq(&*self.pers) {
+            // nothing to do if state didn't change
+        } else {
+            self.pers.persist(s).await?;
+        }
+
         // keep in memory values up to date
         self.inmem.commit_lsn = s.commit_lsn;
         self.inmem.backup_lsn = s.backup_lsn;

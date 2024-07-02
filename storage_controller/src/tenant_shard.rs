@@ -646,6 +646,48 @@ impl TenantShard {
         Ok(())
     }
 
+    /// Reschedule this tenant shard to one of its secondary locations. Returns a scheduling error
+    /// if the swap is not possible and leaves the intent state in its original state.
+    ///
+    /// Arguments:
+    /// `attached_to`: the currently attached location matching the intent state (may be None if the
+    /// shard is not attached)
+    /// `promote_to`: an optional secondary location of this tenant shard. If set to None, we ask
+    /// the scheduler to recommend a node
+    pub(crate) fn reschedule_to_secondary(
+        &mut self,
+        promote_to: Option<NodeId>,
+        scheduler: &mut Scheduler,
+    ) -> Result<(), ScheduleError> {
+        let promote_to = match promote_to {
+            Some(node) => node,
+            None => match scheduler.node_preferred(self.intent.get_secondary()) {
+                Some(node) => node,
+                None => {
+                    return Err(ScheduleError::ImpossibleConstraint);
+                }
+            },
+        };
+
+        assert!(self.intent.get_secondary().contains(&promote_to));
+
+        if let Some(node) = self.intent.get_attached() {
+            let demoted = self.intent.demote_attached(scheduler, *node);
+            if !demoted {
+                return Err(ScheduleError::ImpossibleConstraint);
+            }
+        }
+
+        self.intent.promote_attached(scheduler, promote_to);
+
+        // Increment the sequence number for the edge case where a
+        // reconciler is already running to avoid waiting on the
+        // current reconcile instead of spawning a new one.
+        self.sequence = self.sequence.next();
+
+        Ok(())
+    }
+
     /// Optimize attachments: if a shard has a secondary location that is preferable to
     /// its primary location based on soft constraints, switch that secondary location
     /// to be attached.
@@ -866,12 +908,8 @@ impl TenantShard {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf = attached_location_conf(
-                generation,
-                &self.shard,
-                &self.config,
-                !self.intent.secondary.is_empty(),
-            );
+            let wanted_conf =
+                attached_location_conf(generation, &self.shard, &self.config, &self.policy);
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -1057,6 +1095,7 @@ impl TenantShard {
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
+            placement_policy: self.policy.clone(),
             generation: self.generation,
             intent: reconciler_intent,
             detach,
@@ -1632,14 +1671,10 @@ pub(crate) mod tests {
 
         // We should see equal number of locations on the two nodes.
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 4);
-        // Scheduling does not consider the number of attachments picking the initial
-        // pageserver to attach to (hence the assertion that all primaries are on the
-        // same node)
-        // TODO: Tweak the scheduling to evenly distribute attachments for new shards.
-        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 4);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 2);
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 4);
-        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 0);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 2);
 
         // Add another two nodes: we should see the shards spread out when their optimize
         // methods are called

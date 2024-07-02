@@ -55,7 +55,7 @@ use crate::basebackup::BasebackupError;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
-use crate::metrics::LIVE_CONNECTIONS_COUNT;
+use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS_COUNT};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
@@ -1554,6 +1554,10 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::PageStreamV2)
+                .inc();
+
             self.handle_pagerequests(
                 pgb,
                 tenant_id,
@@ -1578,6 +1582,10 @@ where
                 .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
+
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::PageStream)
+                .inc();
 
             self.handle_pagerequests(
                 pgb,
@@ -1604,6 +1612,10 @@ where
                 .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
+
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::Basebackup)
+                .inc();
 
             let lsn = if let Some(lsn_str) = params.get(2) {
                 Some(
@@ -1662,6 +1674,11 @@ where
                 .record("timeline_id", field::display(timeline_id));
 
             self.check_permission(Some(tenant_id))?;
+
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::GetLastRecordRlsn)
+                .inc();
+
             async {
                 let timeline = self
                     .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
@@ -1723,6 +1740,10 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::Fullbackup)
+                .inc();
+
             // Check that the timeline exists
             self.handle_basebackup_request(
                 pgb,
@@ -1771,6 +1792,10 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::ImportBasebackup)
+                .inc();
+
             match self
                 .handle_import_basebackup(
                     pgb,
@@ -1818,6 +1843,10 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::ImportWal)
+                .inc();
+
             match self
                 .handle_import_wal(pgb, tenant_id, timeline_id, start_lsn, end_lsn, ctx)
                 .await
@@ -1855,6 +1884,10 @@ where
 
             self.check_permission(Some(tenant_shard_id.tenant_id))?;
 
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::LeaseLsn)
+                .inc();
+
             // The caller is responsible for providing correct lsn.
             let lsn = Lsn::from_str(params[2])
                 .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
@@ -1885,6 +1918,10 @@ where
             tracing::Span::current().record("tenant_id", field::display(tenant_id));
 
             self.check_permission(Some(tenant_id))?;
+
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::Show)
+                .inc();
 
             let tenant = self
                 .get_active_tenant_with_timeout(
