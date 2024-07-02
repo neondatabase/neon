@@ -111,7 +111,7 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
 )  # TODO: this value is just "a really high number"; have this per instance type
 @pytest.mark.skipif(
     os.getenv("CI", "false") == "true",
-    reason="This test needs log of resoucres and should on on dedicated HW, not in github action runners as part of CI",
+    reason="This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI",
 )
 def test_pageserver_characterize_throughput_with_n_tenants(
     neon_env_builder: NeonEnvBuilder,
@@ -193,7 +193,7 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 )  # TODO: this value is just "a really high number"; have this per instance type
 @pytest.mark.skipif(
     os.getenv("CI", "false") == "true",
-    reason="This test needs log of resoucres and should on on dedicated HW, not in github action runners as part of CI",
+    reason="This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI",
 )
 def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant(
     neon_env_builder: NeonEnvBuilder,
