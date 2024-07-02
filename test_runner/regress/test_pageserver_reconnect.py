@@ -40,3 +40,25 @@ def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
                 c.execute("select pg_reload_conf()")
 
     thread.join()
+
+
+# Test handling errors during page server reconnect
+def test_pageserver_reconnect_failure(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    env.neon_cli.create_branch("test_pageserver_reconnect")
+    endpoint = env.endpoints.create_start("test_pageserver_reconnect")
+
+    con = endpoint.connect()
+    cur = con.cursor()
+
+    cur.execute("SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'")
+    connstring = cur.fetchall()[0][0]
+    cur.execute(
+        f"alter system set neon.pageserver_connstring='{connstring}?some_invalid_param=xyz'"
+    )
+    cur.execute("select pg_reload_conf()")
+    try:
+        cur.execute("select count(*) from pg_class")
+    except Exception as e:
+        log.info(f"Connection to PS failed: {e}")
+    assert not endpoint.log_contains("ERROR:  cannot wait on socket event without a socket.*")
