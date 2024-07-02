@@ -883,7 +883,7 @@ impl Timeline {
         // page_service.
         debug_assert!(!self.shard_identity.is_key_disposable(&key));
 
-        self.timeline_get_throttle.throttle(ctx, 1).await;
+        self.timeline_get_throttle.throttle(ctx, 1).await; // throttling should prob be sensitive to self cancellation, but really, caller should tokio::select! us
 
         match self.conf.get_impl {
             GetImpl::Legacy => {

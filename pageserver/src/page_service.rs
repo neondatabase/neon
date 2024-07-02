@@ -317,6 +317,9 @@ struct PageServerHandler {
     /// to see is the number of shards divided by the number of pageservers (typically < 2),
     /// or the ratio used when splitting shards (i.e. how many children created from one)
     /// parent shard, where a "large" number might be ~8.
+    ///
+    /// Hmm, we never remove timelines from this map, even not on remove_tenant_from_memory.
+    /// Shouldn't matter though.
     shard_timelines: HashMap<ShardIndex, HandlerTimeline>,
 }
 
@@ -585,7 +588,7 @@ impl PageServerHandler {
             let msg = tokio::select! {
                 biased;
 
-                _ = self.await_connection_cancelled() => {
+                _ = self.await_connection_cancelled() => { // we're sensitive here, and we see prompt sensitivy in the logs
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
                     return Err(QueryError::Shutdown)
@@ -1176,6 +1179,7 @@ impl PageServerHandler {
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = match self.get_cached_timeline_for_page(req) {
+            // on cache hit, we don't check if timeline is active
             Ok(tl) => {
                 set_tracing_field_shard_id(tl);
                 tl
@@ -1210,6 +1214,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
+            // if `timeline` is not active, but not_modified_since is < last_record_lsn, this doesn't wait
             timeline,
             req.request_lsn,
             req.not_modified_since,
@@ -1219,6 +1224,7 @@ impl PageServerHandler {
         .await?;
 
         let page = timeline
+            // but if tl is cancelled, then we'd quickly return from here
             .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), ctx)
             .await?;
 
