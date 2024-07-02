@@ -59,7 +59,7 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
 
     # Any files left behind on disk during failed creation do not prevent
     # a retry from succeeding.  Restart pageserver with no failpoints.
-    neon_simple_env.pageserver.stop()
+    neon_simple_env.pageserver.running = False
     neon_simple_env.pageserver.start()
 
     # The failed creation should not be present in list of tenants, as when we start up we'll see
