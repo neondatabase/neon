@@ -596,14 +596,7 @@ impl PageServerHandler {
 
             let copy_data_bytes = match msg? {
                 Some(FeMessage::CopyData(bytes)) => bytes,
-                Some(FeMessage::Terminate) => {
-                    info!("received Terminate message");
-                    break; // FIXME we want to not wait for new comment when we see this one (and generally, pgb.read_message() should probably return an error when it sees it)
-                }
-                Some(FeMessage::CopyDone) => {
-                    info!("received CopyDone message");
-                    break;
-                }
+                Some(FeMessage::Terminate) => break,
                 Some(m) => {
                     return Err(QueryError::Other(anyhow::anyhow!(
                         "unexpected message: {m:?} during COPY"
@@ -722,9 +715,6 @@ impl PageServerHandler {
                 }
             }
         }
-
-        pgb.write_message_noflush(&BeMessage::CopyDone)?;
-        self.flush_cancellable(pgb, &tenant.cancel).await?;
         Ok(())
     }
 
