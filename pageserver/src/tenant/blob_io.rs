@@ -185,7 +185,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         let remaining = Self::CAPACITY - self.buf.len();
         let src_buf_len = src_buf.bytes_init();
         if src_buf_len == 0 {
-            return_!(src_buf, Ok(()));
+            return (src_buf, Ok(()));
         }
         let mut src_buf = src_buf.slice(0..src_buf_len);
         // First try to copy as much as we can into the buffer

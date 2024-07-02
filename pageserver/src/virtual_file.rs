@@ -691,7 +691,7 @@ impl VirtualFile {
 
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
-            return_!(buf, Ok(0));
+            return (buf, Ok(0));
         }
         let mut buf = buf.slice(0..nbytes);
         while !buf.is_empty() {
