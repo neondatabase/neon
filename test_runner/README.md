@@ -81,7 +81,7 @@ should go.
 Useful parameters and commands:
 
 `--preserve-database-files` to preserve pageserver (layer) and safekeer (segment) timeline files on disk
-after running a test suite. Such files might be large, so removed by default; but might be useful for debugging or creation of svg images with layer file contents.
+after running a test suite. Such files might be large, so removed by default; but might be useful for debugging or creation of svg images with layer file contents. If `NeonEnvBuilder#preserve_database_files` set to `True` for a particular test, the whole `repo` directory will be attached to Allure report (thus uploaded to S3) as `everything.tar.zst` for this test.
 
 Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
 `./scripts/pytest -s --log-cli-level=INFO ...`
