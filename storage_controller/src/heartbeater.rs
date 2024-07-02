@@ -22,6 +22,7 @@ struct HeartbeaterTask {
 
     state: HashMap<NodeId, PageserverState>,
 
+    max_offline_interval: Duration,
     max_unavailable_interval: Duration,
     jwt_token: Option<String>,
 }
@@ -31,7 +32,9 @@ pub(crate) enum PageserverState {
     Available {
         last_seen_at: Instant,
         utilization: PageserverUtilization,
-        new: bool,
+    },
+    Unavailable {
+        last_seen_at: Instant,
     },
     Offline,
 }
@@ -57,12 +60,18 @@ pub(crate) struct Heartbeater {
 impl Heartbeater {
     pub(crate) fn new(
         jwt_token: Option<String>,
+        max_offline_interval: Duration,
         max_unavailable_interval: Duration,
         cancel: CancellationToken,
     ) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<HeartbeatRequest>();
-        let mut heartbeater =
-            HeartbeaterTask::new(receiver, jwt_token, max_unavailable_interval, cancel);
+        let mut heartbeater = HeartbeaterTask::new(
+            receiver,
+            jwt_token,
+            max_offline_interval,
+            max_unavailable_interval,
+            cancel,
+        );
         tokio::task::spawn(async move { heartbeater.run().await });
 
         Self { sender }
@@ -88,6 +97,7 @@ impl HeartbeaterTask {
     fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<HeartbeatRequest>,
         jwt_token: Option<String>,
+        max_offline_interval: Duration,
         max_unavailable_interval: Duration,
         cancel: CancellationToken,
     ) -> Self {
@@ -95,6 +105,7 @@ impl HeartbeaterTask {
             receiver,
             cancel,
             state: HashMap::new(),
+            max_offline_interval,
             max_unavailable_interval,
             jwt_token,
         }
@@ -128,7 +139,6 @@ impl HeartbeaterTask {
             heartbeat_futs.push({
                 let jwt_token = self.jwt_token.clone();
                 let cancel = self.cancel.clone();
-                let new_node = !self.state.contains_key(node_id);
 
                 // Clone the node and mark it as available such that the request
                 // goes through to the pageserver even when the node is marked offline.
@@ -161,7 +171,10 @@ impl HeartbeaterTask {
                         PageserverState::Available {
                             last_seen_at: Instant::now(),
                             utilization,
-                            new: new_node,
+                        }
+                    } else if matches!(node.get_availability(), NodeAvailability::Unavailable) {
+                        PageserverState::Unavailable {
+                            last_seen_at: Instant::now(),
                         }
                     } else {
                         PageserverState::Offline
@@ -187,53 +200,86 @@ impl HeartbeaterTask {
                 }
             }
         }
+
+        let mut unavailable = 0;
+        let mut offline = 0;
+        for state in new_state.values() {
+            match state {
+                PageserverState::Unavailable { .. } => {
+                    unavailable += 1;
+                }
+                PageserverState::Offline { .. } => offline += 1,
+                PageserverState::Available { .. } => {}
+            }
+        }
+
         tracing::info!(
-            "Heartbeat round complete for {} nodes, {} offline",
+            "Heartbeat round complete for {} nodes, {} unavailable, {} offline",
             new_state.len(),
-            new_state
-                .values()
-                .filter(|s| match s {
-                    PageserverState::Available { .. } => {
-                        false
-                    }
-                    PageserverState::Offline => true,
-                })
-                .count()
+            unavailable,
+            offline
         );
 
         let mut deltas = Vec::new();
         let now = Instant::now();
-        for (node_id, ps_state) in new_state {
+        for (node_id, ps_state) in new_state.iter_mut() {
             use std::collections::hash_map::Entry::*;
-            let entry = self.state.entry(node_id);
+            let entry = self.state.entry(*node_id);
 
             let mut needs_update = false;
             match entry {
                 Occupied(ref occ) => match (occ.get(), &ps_state) {
                     (PageserverState::Offline, PageserverState::Offline) => {}
                     (PageserverState::Available { last_seen_at, .. }, PageserverState::Offline) => {
-                        if now - *last_seen_at >= self.max_unavailable_interval {
-                            deltas.push((node_id, ps_state.clone()));
+                        if now - *last_seen_at >= self.max_offline_interval {
+                            deltas.push((*node_id, ps_state.clone()));
                             needs_update = true;
                         }
                     }
+                    (
+                        PageserverState::Unavailable { .. },
+                        PageserverState::Unavailable { last_seen_at },
+                    ) => {
+                        if now - *last_seen_at >= self.max_unavailable_interval {
+                            *ps_state = PageserverState::Offline;
+                            deltas.push((*node_id, ps_state.clone()));
+                            needs_update = true;
+                        }
+                    }
+                    // TODO: remove once stabilised
+                    // (PageserverState::Available { .. }, PageserverState::Unavailable { .. }) => {
+                    //     deltas.push((*node_id, ps_state.clone()));
+                    //     needs_update = true;
+                    // },
+                    // (PageserverState::Unavailable { .. }, PageserverState::Available { .. }) => {
+                    //     deltas.push((*node_id, ps_state.clone()));
+                    //     needs_update = true;
+                    // },
+                    // (PageserverState::Offline, PageserverState::Unavailable { .. }) => {
+                    //     deltas.push((*node_id, ps_state.clone()));
+                    //     needs_update = true;
+                    // }
+                    // (PageserverState::Unavailable { .. }, PageserverState::Offline { .. }) => {
+                    //     deltas.push((*node_id, ps_state.clone()));
+                    //     needs_update = true;
+                    // }
                     _ => {
-                        deltas.push((node_id, ps_state.clone()));
+                        deltas.push((*node_id, ps_state.clone()));
                         needs_update = true;
                     }
                 },
                 Vacant(_) => {
                     // This is a new node. Don't generate a delta for it.
-                    deltas.push((node_id, ps_state.clone()));
+                    deltas.push((*node_id, ps_state.clone()));
                 }
             }
 
             match entry {
                 Occupied(mut occ) if needs_update => {
-                    (*occ.get_mut()) = ps_state;
+                    (*occ.get_mut()) = ps_state.clone();
                 }
                 Vacant(vac) => {
-                    vac.insert(ps_state);
+                    vac.insert(ps_state.clone());
                 }
                 _ => {}
             }

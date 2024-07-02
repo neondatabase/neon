@@ -35,7 +35,8 @@ def test_storage_controller_many_tenants(
         # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
         # TODO: tune this down as restarts get faster (https://github.com/neondatabase/neon/pull/7553), to
         # guard against regressions in restart time.
-        "max_unavailable": "300s"
+        "max_offline": "30s",
+        "max_unavailable": "300s",
     }
     neon_env_builder.control_plane_compute_hook_api = (
         compute_reconfigure_listener.control_plane_compute_hook_api
