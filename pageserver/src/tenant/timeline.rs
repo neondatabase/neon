@@ -1913,6 +1913,10 @@ impl Timeline {
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         self.remote_client.stop();
+
+        // Allow any remaining in-memory layers to do cleanup.
+        self.layers.write().await.drop_inmemory_layers();
+
         // As documented in remote_client.stop()'s doc comment, it's our responsibility
         // to shut down the upload queue tasks.
         // TODO: fix that, task management should be encapsulated inside remote_client.
