@@ -347,7 +347,7 @@ async fn init_load_generations(
 /// Given a directory discovered in the pageserver's tenants/ directory, attempt
 /// to load a tenant config from it.
 ///
-/// If we cleaned up something expected (like an empty dir or a temp dir), return Ok(None).
+/// If we cleaned up something expected (like an empty dir or a temp dir), return None.
 fn load_tenant_config(
     conf: &'static PageServerConf,
     tenant_shard_id: TenantShardId,
