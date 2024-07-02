@@ -225,7 +225,6 @@ async fn page_service_conn_main(
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
     tracing::Span::current().record("peer_addr", field::display(peer_addr));
-    info!("accepted connection");
 
     // setup read timeout of 10 minutes. the timeout is rather arbitrary for requirements:
     // - long enough for most valid compute connections
