@@ -410,12 +410,12 @@ mod tests {
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let (_, res) = if COMPRESSION {
-                        wtr.write_blob_maybe_compressed(
-                            blob.clone(),
-                            &ctx,
-                            Some(ImageCompressionAlgorithm::Zstd { level: Some(1) }),
-                        )
-                        .await
+                    wtr.write_blob_maybe_compressed(
+                        blob.clone(),
+                        &ctx,
+                        Some(ImageCompressionAlgorithm::Zstd { level: Some(1) }),
+                    )
+                    .await
                 } else {
                     wtr.write_blob(blob.clone(), &ctx).await
                 };

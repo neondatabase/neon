@@ -196,11 +196,25 @@ pub struct FileBlockReader<'a> {
 
     /// Unique ID of this file, used as key in the page cache.
     file_id: page_cache::FileId,
+
+    compressed_reads: bool,
 }
 
 impl<'a> FileBlockReader<'a> {
     pub fn new(file: &'a VirtualFile, file_id: FileId) -> Self {
-        FileBlockReader { file_id, file }
+        Self::new_with_compression(file, file_id, false)
+    }
+
+    pub fn new_with_compression(
+        file: &'a VirtualFile,
+        file_id: FileId,
+        compressed_reads: bool,
+    ) -> Self {
+        FileBlockReader {
+            file_id,
+            file,
+            compressed_reads,
+        }
     }
 
     /// Read a page from the underlying file into given buffer.
@@ -247,7 +261,10 @@ impl<'a> FileBlockReader<'a> {
 
 impl BlockReader for FileBlockReader<'_> {
     fn block_cursor(&self) -> BlockCursor<'_> {
-        BlockCursor::new(BlockReaderRef::FileBlockReader(self))
+        BlockCursor::new_with_compression(
+            BlockReaderRef::FileBlockReader(self),
+            self.compressed_reads,
+        )
     }
 }
 
