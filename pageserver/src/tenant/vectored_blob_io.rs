@@ -91,7 +91,7 @@ impl VectoredReadBuilder {
         start_offset: u64,
         end_offset: u64,
         meta: BlobMeta,
-        max_read_size: Option<usize>,
+        max_read_size: usize,
     ) -> Self {
         let mut blobs_at = VecMap::default();
         blobs_at
@@ -102,7 +102,7 @@ impl VectoredReadBuilder {
             start: start_offset,
             end: end_offset,
             blobs_at,
-            max_read_size,
+            max_read_size: Some(max_read_size),
         }
     }
 
@@ -164,7 +164,7 @@ pub struct VectoredReadPlanner {
     // Arguments for previous blob passed into [`VectoredReadPlanner::handle`]
     prev: Option<(Key, Lsn, u64, BlobFlag)>,
 
-    max_read_size: Option<usize>,
+    max_read_size: usize,
 }
 
 impl VectoredReadPlanner {
@@ -172,20 +172,7 @@ impl VectoredReadPlanner {
         Self {
             blobs: BTreeMap::new(),
             prev: None,
-            max_read_size: Some(max_read_size),
-        }
-    }
-
-    /// This function should *only* be used if the caller has a way to control the limit. e.g., in [`StreamingVectoredReadPlanner`],
-    /// it uses the vectored read planner to avoid duplicated logic on handling blob start/end, while expecting the vectored
-    /// read planner to give a single read to a continuous range of bytes in the image layer. Therefore, it does not need the
-    /// code path to split reads into chunks of `max_read_size`, and controls the read size itself.
-    #[cfg(test)]
-    pub(crate) fn new_caller_controlled_max_limit() -> Self {
-        Self {
-            blobs: BTreeMap::new(),
-            prev: None,
-            max_read_size: None,
+            max_read_size,
         }
     }
 
@@ -380,13 +367,13 @@ impl<'a> VectoredBlobReader<'a> {
 /// max_cnt constraints. Underlying it uses [`VectoredReadPlanner`].
 #[cfg(test)]
 pub struct StreamingVectoredReadPlanner {
-    planner: VectoredReadPlanner,
+    read_builder: Option<VectoredReadBuilder>,
+    // Arguments for previous blob passed into [`StreamingVectoredReadPlanner::handle`]
+    prev: Option<(Key, Lsn, u64)>,
     /// Max read size per batch
     max_read_size: u64,
     /// Max item count per batch
     max_cnt: usize,
-    /// The first offset of this batch
-    this_batch_first_offset: Option<u64>,
     /// Size of the current batch
     cnt: usize,
 }
@@ -397,62 +384,76 @@ impl StreamingVectoredReadPlanner {
         assert!(max_cnt > 0);
         assert!(max_read_size > 0);
         Self {
+            read_builder: None,
+            prev: None,
             // We want to have exactly one read syscall (plus several others for index lookup) for each `next_batch` call.
             // Therefore, we enforce `self.max_read_size` by ourselves instead of using the VectoredReadPlanner's capability,
             // to avoid splitting into two I/Os.
-            planner: VectoredReadPlanner::new_caller_controlled_max_limit(),
             max_cnt,
             max_read_size,
-            this_batch_first_offset: None,
             cnt: 0,
         }
     }
 
-    fn emit(&mut self, this_batch_first_offset: u64) -> VectoredRead {
-        let planner = std::mem::replace(
-            &mut self.planner,
-            VectoredReadPlanner::new_caller_controlled_max_limit(),
-        );
-        self.this_batch_first_offset = Some(this_batch_first_offset);
-        self.cnt = 1;
-        let mut batch = planner.finish();
-        assert_eq!(batch.len(), 1, "should have exactly one read batch");
-        batch.pop().unwrap()
+    pub fn handle(&mut self, key: Key, lsn: Lsn, offset: u64) -> Option<VectoredRead> {
+        // Implementation note: internally lag behind by one blob such that
+        // we have a start and end offset when initialising [`VectoredRead`]
+        let (prev_key, prev_lsn, prev_offset) = match self.prev {
+            None => {
+                self.prev = Some((key, lsn, offset));
+                return None;
+            }
+            Some(prev) => prev,
+        };
+
+        let res = self.add_blob(prev_key, prev_lsn, prev_offset, offset);
+
+        self.prev = Some((key, lsn, offset));
+
+        res
     }
 
-    pub fn handle(
+    pub fn handle_range_end(&mut self, offset: u64) -> Option<VectoredRead> {
+        let res = if let Some((prev_key, prev_lsn, prev_offset)) = self.prev {
+            self.add_blob(prev_key, prev_lsn, prev_offset, offset)
+        } else {
+            None
+        };
+
+        self.prev = None;
+
+        res
+    }
+
+    fn add_blob(
         &mut self,
         key: Key,
         lsn: Lsn,
-        offset: u64,
-        flag: BlobFlag,
+        start_offset: u64,
+        end_offset: u64,
     ) -> Option<VectoredRead> {
-        if let Some(begin_offset) = self.this_batch_first_offset {
-            // Each batch will have at least one item b/c `self.this_batch_first_offset` is set
-            // after one item gets processed
-            if offset - begin_offset > self.max_read_size {
-                self.planner.handle_range_end(offset); // End the current batch with the offset
-                let batch = self.emit(offset); // Produce a batch
-                self.planner.handle(key, lsn, offset, flag); // Add this key to the next batch
-                return Some(batch);
+        let extended = match &mut self.read_builder {
+            Some(read_builder) => {
+                read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn })
             }
-        } else {
-            self.this_batch_first_offset = Some(offset)
-        }
-        if self.cnt >= self.max_cnt {
-            self.planner.handle_range_end(offset); // End the current batch with the offset
-            let batch = self.emit(offset); // Produce a batch
-            self.planner.handle(key, lsn, offset, flag); // Add this key to the next batch
-            return Some(batch);
-        }
-        self.planner.handle(key, lsn, offset, flag); // Add this key to the current batch
-        self.cnt += 1;
-        None
-    }
+            None => VectoredReadExtended::No,
+        };
+        if extended == VectoredReadExtended::No {
+            let next_read_builder = VectoredReadBuilder::new(
+                start_offset,
+                end_offset,
+                BlobMeta { key, lsn },
+                self.max_read_size as usize,
+            );
 
-    pub fn handle_range_end(&mut self, offset: u64) -> VectoredRead {
-        self.planner.handle_range_end(offset);
-        self.emit(offset)
+            let prev_read_builder = self.read_builder.replace(next_read_builder);
+
+            // `current_read_builder` is None in the first iteration of the outer loop
+            if let Some(read_builder) = prev_read_builder {
+                return Some(read_builder.build());
+            }
+        }
+        None
     }
 }
 
