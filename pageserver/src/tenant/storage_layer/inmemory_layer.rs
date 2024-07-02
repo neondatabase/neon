@@ -6,13 +6,14 @@
 //!
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
+use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
-use crate::tenant::block_io::BlockReader;
+use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::{PageReconstructError, Timeline};
-use crate::{page_cache, walrecord};
+use crate::{l0_flush, page_cache, walrecord};
 use anyhow::{anyhow, ensure, Result};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
@@ -410,6 +411,7 @@ impl InMemoryLayer {
                 continue;
             }
 
+            // TODO: this uses the page cache => https://github.com/neondatabase/neon/issues/8183
             let buf = reader.read_blob(block_read.block_offset, &ctx).await;
             if let Err(e) = buf {
                 reconstruct_state
@@ -620,6 +622,13 @@ impl InMemoryLayer {
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().await;
 
+        let l0_flush_global_state = timeline.l0_flush_global_state.inner().clone();
+        use l0_flush::Inner;
+        let _concurrency_permit = match &*l0_flush_global_state {
+            Inner::PageCached => None,
+            Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
+        };
+
         let end_lsn = *self.end_lsn.get().unwrap();
 
         let key_count = if let Some(key_range) = key_range {
@@ -645,28 +654,77 @@ impl InMemoryLayer {
         )
         .await?;
 
-        let mut buf = Vec::new();
+        match &*l0_flush_global_state {
+            l0_flush::Inner::PageCached => {
+                let ctx = RequestContextBuilder::extend(ctx)
+                    .page_content_kind(PageContentKind::InMemoryLayer)
+                    .build();
 
-        let cursor = inner.file.block_cursor();
+                let mut buf = Vec::new();
 
-        let ctx = RequestContextBuilder::extend(ctx)
-            .page_content_kind(PageContentKind::InMemoryLayer)
-            .build();
-        for (key, vec_map) in inner.index.iter() {
-            // Write all page versions
-            for (lsn, pos) in vec_map.as_slice() {
-                cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
-                let will_init = Value::des(&buf)?.will_init();
-                let res;
-                (buf, res) = delta_layer_writer
-                    .put_value_bytes(*key, *lsn, buf, will_init, &ctx)
-                    .await;
-                res?;
+                let cursor = inner.file.block_cursor();
+
+                for (key, vec_map) in inner.index.iter() {
+                    // Write all page versions
+                    for (lsn, pos) in vec_map.as_slice() {
+                        cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
+                        let will_init = Value::des(&buf)?.will_init();
+                        let res;
+                        (buf, res) = delta_layer_writer
+                            .put_value_bytes(*key, *lsn, buf, will_init, &ctx)
+                            .await;
+                        res?;
+                    }
+                }
+            }
+            l0_flush::Inner::Direct { .. } => {
+                let file_contents: Vec<u8> = inner.file.load_to_vec(ctx).await?;
+                assert_eq!(
+                    file_contents.len() % PAGE_SZ,
+                    0,
+                    "needed by BlockReaderRef::Slice"
+                );
+                assert_eq!(file_contents.len(), {
+                    let written = usize::try_from(inner.file.len()).unwrap();
+                    if written % PAGE_SZ == 0 {
+                        written
+                    } else {
+                        written.checked_add(PAGE_SZ - (written % PAGE_SZ)).unwrap()
+                    }
+                });
+
+                let cursor = BlockCursor::new(BlockReaderRef::Slice(&file_contents));
+
+                let mut buf = Vec::new();
+
+                for (key, vec_map) in inner.index.iter() {
+                    // Write all page versions
+                    for (lsn, pos) in vec_map.as_slice() {
+                        // TODO: once we have blob lengths in the in-memory index, we can
+                        // 1. get rid of the blob_io / BlockReaderRef::Slice business and
+                        // 2. load the file contents into a Bytes and
+                        // 3. the use `Bytes::slice` to get the `buf` that is our blob
+                        // 4. pass that `buf` into `put_value_bytes`
+                        // => https://github.com/neondatabase/neon/issues/8183
+                        cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
+                        let will_init = Value::des(&buf)?.will_init();
+                        let res;
+                        (buf, res) = delta_layer_writer
+                            .put_value_bytes(*key, *lsn, buf, will_init, ctx)
+                            .await;
+                        res?;
+                    }
+                }
+
+                // Hold the permit until the IO is done; if we didn't, one could drop this future,
+                // thereby releasing the permit, but the Vec<u8> remains allocated until the IO completes.
+                // => we'd have more concurrenct Vec<u8> than allowed as per the semaphore.
+                drop(_concurrency_permit);
             }
         }
 
         // MAX is used here because we identify L0 layers by full key range
-        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, &ctx).await?;
+        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, ctx).await?;
         Ok(Some(delta_layer))
     }
 }
