@@ -39,7 +39,6 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::backoff;
-use utils::bin_ser::DeserializeError;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::failpoint_support;
@@ -532,15 +531,8 @@ impl From<PageReconstructError> for GcError {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum LoadConfigError {
-    #[error("Config deserialization error: '{0}'")]
-    Deserialize(#[from] DeserializeError),
-
     #[error("TOML deserialization error: '{0}'")]
     DeserializeToml(#[from] toml_edit::de::Error),
-
-    // FIXME
-    #[error("TOML deserialization error: '{0}'")]
-    DeserializeToml2(#[from] toml_edit::TomlError),
 
     #[error("Config not found at {0}")]
     NotFound(Utf8PathBuf),
@@ -2608,9 +2600,7 @@ impl Tenant {
             }
         })?;
 
-        let toml_doc = config.parse::<toml_edit::Document>()?;
-
-        Ok(toml_edit::de::from_document::<LocationConf>(toml_doc)?)
+        Ok(toml_edit::de::from_str::<LocationConf>(&config)?)
     }
 
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
