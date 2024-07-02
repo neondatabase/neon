@@ -1816,9 +1816,15 @@ impl Tenant {
         // If we're still attaching, fire the cancellation token early to drop out: this
         // will prevent us flushing, but ensures timely shutdown if some I/O during attach
         // is very slow.
-        if matches!(self.current_state(), TenantState::Attaching) {
+        let shutdown_mode = if matches!(self.current_state(), TenantState::Attaching) {
             self.cancel.cancel();
-        }
+
+            // Having fired our cancellation token, do not try and flush timelines: their cancellation tokens
+            // are children of ours, so their flush loops will have shut down already
+            timeline::ShutdownMode::Hard
+        } else {
+            shutdown_mode
+        };
 
         match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
