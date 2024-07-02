@@ -30,11 +30,11 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::tenant::timeline::GetVectoredImpl;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
+use crate::{l0_flush::L0FlushConfig, tenant::timeline::GetVectoredImpl};
 use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
@@ -296,6 +296,8 @@ pub struct PageServerConf {
     ///
     /// Setting this to zero disables limits on total ephemeral layer size.
     pub ephemeral_bytes_per_memory_kb: usize,
+
+    pub l0_flush: L0FlushConfig,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -403,6 +405,8 @@ struct PageServerConfigBuilder {
     image_compression: BuilderValue<Option<ImageCompressionAlgorithm>>,
 
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
+
+    l0_flush: BuilderValue<L0FlushConfig>,
 }
 
 impl PageServerConfigBuilder {
@@ -492,6 +496,7 @@ impl PageServerConfigBuilder {
             image_compression: Set(DEFAULT_IMAGE_COMPRESSION),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
+            l0_flush: Set(L0FlushConfig::default()),
         }
     }
 }
@@ -683,6 +688,10 @@ impl PageServerConfigBuilder {
         self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
     }
 
+    pub fn l0_flush(&mut self, value: L0FlushConfig) {
+        self.l0_flush = BuilderValue::Set(value);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
@@ -741,6 +750,7 @@ impl PageServerConfigBuilder {
                 validate_vectored_get,
                 image_compression,
                 ephemeral_bytes_per_memory_kb,
+                l0_flush,
             }
             CUSTOM LOGIC
             {
@@ -1023,6 +1033,9 @@ impl PageServerConf {
                 "ephemeral_bytes_per_memory_kb" => {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
                 }
+                "l0_flush" => {
+                    builder.l0_flush(utils::toml_edit_ext::deserialize_item(item).context("l0_flush")?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -1107,6 +1120,7 @@ impl PageServerConf {
             image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+            l0_flush: L0FlushConfig::default(),
         }
     }
 }
@@ -1347,6 +1361,7 @@ background_task_maximum_delay = '334 s'
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                l0_flush: L0FlushConfig::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1421,6 +1436,7 @@ background_task_maximum_delay = '334 s'
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                l0_flush: L0FlushConfig::default(),
             },
             "Should be able to parse all basic config values correctly"
         );
