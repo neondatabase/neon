@@ -169,12 +169,12 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         src_buf: Slice<Buf>,
         ctx: &RequestContext,
     ) -> (Slice<Buf>, Result<(), Error>) {
-        let begin_end = (src_buf.begin(), src_buf.end());
+        let orig_bounds = src_buf.bounds();
 
-        macro_rules! return_ {
+        macro_rules! return_orig_bounds {
             ($buf:expr, $val:expr) => {{
                 let buf = $buf.into_inner();
-                return (buf.slice(begin_end.0..begin_end.1), $val);
+                return (buf.slice(orig_bounds), $val);
             }};
         }
 
@@ -196,7 +196,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         // Then, if the buffer is full, flush it out
         if self.buf.len() == Self::CAPACITY {
             if let Err(e) = self.flush_buffer(ctx).await {
-                return_!(src_buf, Err(e));
+                return_orig_bounds!(src_buf, Err(e));
             }
         }
         // Finally, write the tail of src_buf:
@@ -213,14 +213,14 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             } else {
                 let (src_buf, res) = self.write_all_unbuffered(src_buf, ctx).await;
                 if let Err(e) = res {
-                    return_!(src_buf, Err(e));
+                    return_orig_bounds!(src_buf, Err(e));
                 }
                 src_buf
             }
         } else {
             src_buf
         };
-        return_!(src_buf, Ok(()));
+        return_orig_bounds!(src_buf, Ok(()));
     }
 
     /// Write a blob of data. Returns the offset that it was written to,

@@ -680,12 +680,12 @@ impl VirtualFile {
         buf: Slice<Buf>,
         ctx: &RequestContext,
     ) -> (Slice<Buf>, Result<usize, Error>) {
-        let begin_end = (buf.begin(), buf.end());
+        let begin_end = buf.bounds();
 
-        macro_rules! return_ {
+        macro_rules! return_orig_bounds {
             ($buf:expr, $val:expr) => {{
                 let buf = $buf.into_inner();
-                return (buf.slice(begin_end.0..begin_end.1), $val);
+                return (buf.slice(begin_end), $val);
             }};
         }
 
@@ -699,7 +699,7 @@ impl VirtualFile {
             (buf, res) = self.write(buf, ctx).await;
             match res {
                 Ok(0) => {
-                    return_!(
+                    return_orig_bounds!(
                         buf,
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
@@ -711,11 +711,11 @@ impl VirtualFile {
                     buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return_!(buf, Err(e)),
+                Err(e) => return_orig_bounds!(buf, Err(e)),
             }
         }
 
-        return_!(buf, Ok(nbytes));
+        return_orig_bounds!(buf, Ok(nbytes));
     }
 
     async fn write<B: IoBuf + Send>(
