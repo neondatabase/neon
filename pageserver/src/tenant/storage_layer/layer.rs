@@ -1096,19 +1096,10 @@ impl LayerInner {
 
         match rx.await {
             Ok(Ok(res)) => Ok(res),
-            Ok(Err(e)) => {
-                // sleep already happened in the spawned task, if it was not cancelled
-                match e.downcast_ref::<remote_storage::DownloadError>() {
-                    // If the download failed due to its cancellation token,
-                    // propagate the cancellation error upstream.
-                    Some(remote_storage::DownloadError::Cancelled) => {
-                        Err(DownloadError::DownloadCancelled)
-                    }
-                    // FIXME: this is not embedding the error because historically it would had
-                    // been output to compute, however that is no longer the case.
-                    _ => Err(DownloadError::DownloadFailed),
-                }
+            Ok(Err(remote_storage::DownloadError::Cancelled)) => {
+                Err(DownloadError::DownloadCancelled)
             }
+            Ok(Err(_)) => Err(DownloadError::DownloadFailed),
             Err(_gone) => Err(DownloadError::DownloadCancelled),
         }
     }
@@ -1118,7 +1109,7 @@ impl LayerInner {
         timeline: Arc<Timeline>,
         permit: heavier_once_cell::InitPermit,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<DownloadedLayer>> {
+    ) -> Result<Arc<DownloadedLayer>, remote_storage::DownloadError> {
         let result = timeline
             .remote_client
             .download_layer_file(
