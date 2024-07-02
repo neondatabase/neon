@@ -1211,6 +1211,10 @@ class NeonEnv:
                     )
                 )
 
+        # Wait for nodes to register with storage controller, then restart it: this is a workaround
+        # for the way the compat tests don't carry the controller database in their snapshots, so
+        # the storage controller initially started with no nodes & therefore no place to schedule tenants.
+
         for f in futs:
             f.result()
 
@@ -2241,6 +2245,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "POST",
             f"{self.env.storage_controller_api}/control/v1/node",
             json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def node_delete(self, node_id):
+        log.info(f"node_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
 

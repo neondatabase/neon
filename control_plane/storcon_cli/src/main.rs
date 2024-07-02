@@ -56,6 +56,10 @@ enum Command {
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicy>,
     },
+    NodeDelete {
+        #[arg(long)]
+        node_id: NodeId,
+    },
     /// Modify a tenant's policies in the storage controller
     TenantPolicy {
         #[arg(long)]
@@ -357,13 +361,16 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Delete status: {}", status);
         }
         Command::Nodes {} => {
-            let resp = storcon_client
+            let mut resp = storcon_client
                 .dispatch::<(), Vec<NodeDescribeResponse>>(
                     Method::GET,
                     "control/v1/node".to_string(),
                     None,
                 )
                 .await?;
+
+            resp.sort_by(|a, b| a.listen_http_addr.cmp(&b.listen_http_addr));
+
             let mut table = comfy_table::Table::new();
             table.set_header(["Id", "Hostname", "Scheduling", "Availability"]);
             for node in resp {
@@ -395,13 +402,16 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Command::Tenants {} => {
-            let resp = storcon_client
+            let mut resp = storcon_client
                 .dispatch::<(), Vec<TenantDescribeResponse>>(
                     Method::GET,
                     "control/v1/tenant".to_string(),
                     None,
                 )
                 .await?;
+
+            resp.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
+
             let mut table = comfy_table::Table::new();
             table.set_header([
                 "TenantId",
@@ -648,6 +658,11 @@ async fn main() -> anyhow::Result<()> {
             }
             storcon_client
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
+                .await?;
+        }
+        Command::NodeDelete { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
                 .await?;
         }
         Command::TenantSetTimeBasedEviction {
