@@ -78,8 +78,9 @@ impl Drop for GateGuard {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum GateError {
+    #[error("gate is closed")]
     GateClosed,
 }
 
