@@ -655,7 +655,10 @@ fn tenant_spawn(
     // to avoid impacting prod runtime performance.
     assert!(!crate::is_temporary(tenant_path));
     debug_assert!(tenant_path.is_dir());
-    debug_assert!(conf.tenant_location_config_path(&tenant_shard_id).exists());
+    debug_assert!(conf
+        .tenant_location_config_path(&tenant_shard_id)
+        .try_exists()
+        .unwrap());
 
     Tenant::spawn(
         conf,
