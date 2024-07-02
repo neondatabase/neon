@@ -288,7 +288,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 io_buf.put_u8(len as u8);
                 (
                     self.write_all(io_buf, ctx).await,
-                    srcbuf.slice(..).into_inner(),
+                    srcbuf.slice_full().into_inner(),
                 )
             } else {
                 // Write a 4-byte length header
@@ -301,7 +301,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                                 format!("blob too large ({len} bytes)"),
                             )),
                         ),
-                        srcbuf.slice(..).into_inner(),
+                        srcbuf.slice_full().into_inner(),
                     );
                 }
                 let (high_bit_mask, len_written, srcbuf) = match algorithm {
@@ -314,7 +314,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         } else {
                             async_compression::tokio::write::ZstdEncoder::new(Vec::new())
                         };
-                        let slice = srcbuf.slice(..);
+                        let slice = srcbuf.slice_full();
                         encoder.write_all(&slice[..]).await.unwrap();
                         encoder.shutdown().await.unwrap();
                         let compressed = encoder.into_inner();
@@ -326,7 +326,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                             (BYTE_UNCOMPRESSED, len, slice.into_inner())
                         }
                     }
-                    None => (BYTE_UNCOMPRESSED, len, srcbuf.slice(..).into_inner()),
+                    None => (BYTE_UNCOMPRESSED, len, srcbuf.slice_full().into_inner()),
                 };
                 let mut len_buf = (len_written as u32).to_be_bytes();
                 assert_eq!(len_buf[0] & 0xf0, 0);
