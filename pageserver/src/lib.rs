@@ -11,6 +11,7 @@ pub mod deletion_queue;
 pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
+pub mod l0_flush;
 pub use pageserver_api::keyspace;
 pub mod aux_file;
 pub mod metrics;
