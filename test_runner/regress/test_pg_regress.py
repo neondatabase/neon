@@ -45,7 +45,16 @@ def test_pg_regress(
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
-    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # Scaled down thresholds so that we are exercising the pageserver beyond just writing
+            # ephemeral/L0 layers, and because debug-mode code is slow to read from full sized ephemeral layer files.
+            "pitr_interval": "60s",
+            "checkpoint_distance": f"{8 * 1024 * 1024}",
+            "compaction_target_size": f"{8 * 1024 * 1024}",
+        },
+        initial_tenant_shard_count=shard_count,
+    )
 
     # Connect to postgres and create a database called "regression".
     endpoint = env.endpoints.create_start("main")
