@@ -3266,10 +3266,18 @@ impl Timeline {
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
         let gate_guard = self.gate.enter().context("enter gate for inmem layer")?;
+
+        let last_record_lsn = self.get_last_record_lsn();
+        ensure!(
+            lsn > last_record_lsn,
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
+            lsn,
+            last_record_lsn,
+        );
+
         let layer = guard
             .get_layer_for_write(
                 lsn,
-                self.get_last_record_lsn(),
                 self.conf,
                 self.timeline_id,
                 self.tenant_shard_id,

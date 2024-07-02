@@ -73,7 +73,6 @@ impl LayerManager {
     pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
-        last_record_lsn: Lsn,
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
@@ -81,13 +80,6 @@ impl LayerManager {
         ctx: &RequestContext,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
-
-        ensure!(
-            lsn > last_record_lsn,
-            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
-            lsn,
-            last_record_lsn,
-        );
 
         // Do we have a layer open for writing already?
         let layer = if let Some(open_layer) = &self.layer_map.open_layer {
