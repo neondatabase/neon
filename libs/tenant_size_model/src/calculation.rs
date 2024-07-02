@@ -34,10 +34,10 @@ struct SegmentSize {
 }
 
 struct SizeAlternatives {
-    // cheapest alternative if parent is available.
+    /// cheapest alternative if parent is available.
     incremental: SegmentSize,
 
-    // cheapest alternative if parent node is not available
+    /// cheapest alternative if parent node is not available
     non_incremental: Option<SegmentSize>,
 }
 

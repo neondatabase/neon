@@ -87,6 +87,9 @@ impl SegmentMeta {
             LsnKind::BranchPoint => true,
             LsnKind::GcCutOff => true,
             LsnKind::BranchEnd => false,
+            LsnKind::LeasePoint => true,
+            LsnKind::LeaseStart => false,
+            LsnKind::LeaseEnd => false,
         }
     }
 }
@@ -103,6 +106,9 @@ pub enum LsnKind {
     GcCutOff,
     /// Last record LSN
     BranchEnd,
+    LeasePoint,
+    LeaseStart,
+    LeaseEnd,
 }
 
 /// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
@@ -248,6 +254,15 @@ pub(super) async fn gather_inputs(
             .map(|lsn| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
 
+        lsns.extend(
+            gc_info
+                .leases
+                .keys()
+                .filter(|&&lsn| lsn > ancestor_lsn)
+                .copied()
+                .map(|lsn| (lsn, LsnKind::LeasePoint)),
+        );
+
         drop(gc_info);
 
         // Add branch points we collected earlier, just in case there were any that were
@@ -296,6 +311,7 @@ pub(super) async fn gather_inputs(
             if kind == LsnKind::BranchPoint {
                 branchpoint_segments.insert((timeline_id, lsn), segments.len());
             }
+
             segments.push(SegmentMeta {
                 segment: Segment {
                     parent: Some(parent),
@@ -306,7 +322,33 @@ pub(super) async fn gather_inputs(
                 timeline_id: timeline.timeline_id,
                 kind,
             });
-            parent += 1;
+
+            parent = segments.len() - 1;
+
+            if kind == LsnKind::LeasePoint {
+                let mut lease_parent = parent;
+                segments.push(SegmentMeta {
+                    segment: Segment {
+                        parent: Some(lease_parent),
+                        lsn: lsn.0,
+                        size: None,
+                        needed: next_gc_cutoff <= lsn,
+                    },
+                    timeline_id: timeline.timeline_id,
+                    kind: LsnKind::LeaseStart,
+                });
+                lease_parent += 1;
+                segments.push(SegmentMeta {
+                    segment: Segment {
+                        parent: Some(lease_parent),
+                        lsn: lsn.0,
+                        size: None,
+                        needed: true,
+                    },
+                    timeline_id: timeline.timeline_id,
+                    kind: LsnKind::LeaseEnd,
+                });
+            }
         }
 
         // Current end of the timeline

@@ -6,13 +6,13 @@ const SVG_WIDTH: f32 = 500.0;
 struct SvgDraw<'a> {
     storage: &'a StorageModel,
     branches: &'a [String],
-    seg_to_branch: &'a [usize],
+    seg_to_branch: &'a [(usize, bool)],
     sizes: &'a [SegmentSizeResult],
 
     // layout
     xscale: f32,
     min_lsn: u64,
-    seg_coordinates: Vec<(f32, f32)>,
+    seg_coordinates: Vec<(f32, f32, bool)>,
 }
 
 fn draw_legend(result: &mut String) -> anyhow::Result<()> {
@@ -42,13 +42,18 @@ fn draw_legend(result: &mut String) -> anyhow::Result<()> {
         "<line x1=\"5\" y1=\"70\" x2=\"15\" y2=\"70\" stroke-width=\"1\" stroke=\"gray\" />"
     )?;
     writeln!(result, "<text x=\"20\" y=\"75\">WAL not retained</text>")?;
+    writeln!(
+        result,
+        "<line x1=\"10\" y1=\"85\" x2=\"10\" y2=\"95\" stroke-width=\"3\" stroke=\"blue\" />"
+    )?;
+    writeln!(result, "<text x=\"20\" y=\"95\">LSN lease</text>")?;
     Ok(())
 }
 
 pub fn draw_svg(
     storage: &StorageModel,
     branches: &[String],
-    seg_to_branch: &[usize],
+    seg_to_branch: &[(usize, bool)],
     sizes: &SizeResult,
 ) -> anyhow::Result<String> {
     let mut draw = SvgDraw {
@@ -100,7 +105,7 @@ impl<'a> SvgDraw<'a> {
 
         // Layout the timelines on Y dimension.
         // TODO
-        let mut y = 100.0;
+        let mut y = 120.0;
         let mut branch_y_coordinates = Vec::new();
         for _branch in self.branches {
             branch_y_coordinates.push(y);
@@ -109,10 +114,10 @@ impl<'a> SvgDraw<'a> {
 
         // Calculate coordinates for each point
         let seg_coordinates = std::iter::zip(segments, self.seg_to_branch)
-            .map(|(seg, branch_id)| {
+            .map(|(seg, (branch_id, is_lease_point))| {
                 let x = (seg.lsn - min_lsn) as f32 / xscale;
                 let y = branch_y_coordinates[*branch_id];
-                (x, y)
+                (x, y, *is_lease_point)
             })
             .collect();
 
@@ -140,8 +145,8 @@ impl<'a> SvgDraw<'a> {
             SegmentMethod::Skipped => "stroke-width=\"1\" stroke=\"gray\"",
         };
         if let Some(parent_id) = seg.parent {
-            let (x1, y1) = self.seg_coordinates[parent_id];
-            let (x2, y2) = self.seg_coordinates[seg_id];
+            let (x1, y1, _) = self.seg_coordinates[parent_id];
+            let (x2, y2, _) = self.seg_coordinates[seg_id];
 
             writeln!(
                 result,
@@ -154,7 +159,7 @@ impl<'a> SvgDraw<'a> {
             writeln!(result, "</line>")?;
         } else {
             // draw a little dash to mark the starting point of this branch
-            let (x, y) = self.seg_coordinates[seg_id];
+            let (x, y, _) = self.seg_coordinates[seg_id];
             let (x1, y1) = (x, y - 5.0);
             let (x2, y2) = (x, y + 5.0);
 
@@ -174,7 +179,22 @@ impl<'a> SvgDraw<'a> {
         let seg = &self.storage.segments[seg_id];
 
         // draw a snapshot point if it's needed
-        let (coord_x, coord_y) = self.seg_coordinates[seg_id];
+        let (coord_x, coord_y, is_lease_point) = self.seg_coordinates[seg_id];
+
+        if is_lease_point {
+            let (x1, y1) = (coord_x, coord_y - 10.0);
+            let (x2, y2) = (coord_x, coord_y + 10.0);
+
+            let style = "stroke-width=\"3\" stroke=\"blue\"";
+
+            writeln!(
+                result,
+                "<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\" {style}>",
+            )?;
+            writeln!(result, "  <title>leased lsn at {}</title>", seg.lsn)?;
+            writeln!(result, "</line>")?;
+        }
+
         if self.sizes[seg_id].method == SegmentMethod::SnapshotHere {
             writeln!(
                 result,
