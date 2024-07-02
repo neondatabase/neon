@@ -1,5 +1,6 @@
 use std::pin::Pin;
 
+use anyhow::Context;
 use futures::SinkExt;
 use pageserver_api::{
     models::{
@@ -65,10 +66,11 @@ impl Client {
         let Client {
             cancel_on_client_drop,
             conn_task,
-            client: _,
+            client,
         } = self;
         Ok(PagestreamClient {
             copy_both: Box::pin(copy_both),
+            client,
             conn_task,
             cancel_on_client_drop,
         })
@@ -93,11 +95,28 @@ impl Client {
         }
         Ok(self.client.copy_out(&args.join(" ")).await?)
     }
+
+    pub async fn shutdown(self) -> anyhow::Result<()> {
+        let Self {
+            client,
+            cancel_on_client_drop,
+            conn_task,
+        } = self;
+
+        drop(client); // this sends Terminate message(?)
+        conn_task
+            .await
+            .context("wait for network communications to finish cleanly")?;
+        drop(cancel_on_client_drop);
+        Ok(())
+    }
 }
 
 /// Create using [`Client::pagestream`].
 pub struct PagestreamClient {
     copy_both: Pin<Box<tokio_postgres::CopyBothDuplex<bytes::Bytes>>>,
+    /// Must not use this until copy_both has been shut down.
+    client: tokio_postgres::Client,
     cancel_on_client_drop: Option<tokio_util::sync::DropGuard>,
     conn_task: JoinHandle<()>,
 }
@@ -108,10 +127,11 @@ pub struct RelTagBlockNo {
 }
 
 impl PagestreamClient {
-    pub async fn shutdown(self) {
+    pub async fn shutdown(self) -> anyhow::Result<Client> {
         let Self {
-            copy_both,
-            cancel_on_client_drop: cancel_conn_task,
+            mut copy_both,
+            client,
+            cancel_on_client_drop,
             conn_task,
         } = self;
         // The `copy_both` contains internal channel sender, the receiver of which is polled by `conn_task`.
@@ -131,9 +151,13 @@ impl PagestreamClient {
         //
         // NB: page_service doesn't have a use case to exit the `pagestream` mode currently.
         // => https://github.com/neondatabase/neon/issues/6390
-        let _ = cancel_conn_task.unwrap();
-        conn_task.await.unwrap();
-        drop(copy_both);
+
+        let _: () = copy_both.close().await.unwrap();
+        Ok(Client {
+            client,
+            cancel_on_client_drop,
+            conn_task,
+        })
     }
 
     pub async fn getpage(
