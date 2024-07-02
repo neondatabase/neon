@@ -3657,12 +3657,14 @@ impl Timeline {
         &self.shard_identity
     }
 
+    /// Returns a non-frozen open in-memory layer for ingestion.
     ///
-    /// Get a handle to the latest layer for appending.
-    ///
+    /// Takes a witness of timeline writer state lock being held, because it makes no sense to call
+    /// this function without holding the mutex.
     async fn get_layer_for_write(
         &self,
         lsn: Lsn,
+        _guard: &tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
@@ -5735,7 +5737,10 @@ impl<'a> TimelineWriter<'a> {
     }
 
     async fn open_layer(&mut self, at: Lsn, ctx: &RequestContext) -> anyhow::Result<()> {
-        let layer = self.tl.get_layer_for_write(at, ctx).await?;
+        let layer = self
+            .tl
+            .get_layer_for_write(at, &self.write_guard, ctx)
+            .await?;
         let initial_size = layer.size().await?;
 
         let last_freeze_at = self.last_freeze_at.load();
