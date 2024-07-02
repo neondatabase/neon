@@ -149,16 +149,24 @@ impl<'a> BlockReaderRef<'a> {
 /// ```
 ///
 pub struct BlockCursor<'a> {
+    pub(super) read_compressed: bool,
     reader: BlockReaderRef<'a>,
 }
 
 impl<'a> BlockCursor<'a> {
     pub(crate) fn new(reader: BlockReaderRef<'a>) -> Self {
-        BlockCursor { reader }
+        Self::new_with_compression(reader, false)
+    }
+    pub(crate) fn new_with_compression(reader: BlockReaderRef<'a>, read_compressed: bool) -> Self {
+        BlockCursor {
+            read_compressed,
+            reader,
+        }
     }
     // Needed by cli
     pub fn new_fileblockreader(reader: &'a FileBlockReader) -> Self {
         BlockCursor {
+            read_compressed: false,
             reader: BlockReaderRef::FileBlockReader(reader),
         }
     }
