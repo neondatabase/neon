@@ -5,7 +5,7 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{models::ImageCompressionAlgorithm, shard::TenantShardId};
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use serde;
 use serde::de::IntoDeserializer;
@@ -30,11 +30,11 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::tenant::timeline::GetVectoredImpl;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
+use crate::{l0_flush::L0FlushConfig, tenant::timeline::GetVectoredImpl};
 use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
@@ -50,6 +50,7 @@ pub mod defaults {
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_PG_LISTEN_PORT,
     };
+    use pageserver_api::models::ImageCompressionAlgorithm;
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
@@ -89,6 +90,8 @@ pub mod defaults {
     pub const DEFAULT_GET_IMPL: &str = "legacy";
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
+
+    pub const DEFAULT_IMAGE_COMPRESSION: Option<ImageCompressionAlgorithm> = None;
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
@@ -159,7 +162,7 @@ pub mod defaults {
 
 #ephemeral_bytes_per_memory_kb = {DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB}
 
-[remote_storage]
+#[remote_storage]
 
 "#
     );
@@ -285,12 +288,16 @@ pub struct PageServerConf {
 
     pub validate_vectored_get: bool,
 
+    pub image_compression: Option<ImageCompressionAlgorithm>,
+
     /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
     /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
     /// of ephemeral data.
     ///
     /// Setting this to zero disables limits on total ephemeral layer size.
     pub ephemeral_bytes_per_memory_kb: usize,
+
+    pub l0_flush: L0FlushConfig,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -395,7 +402,11 @@ struct PageServerConfigBuilder {
 
     validate_vectored_get: BuilderValue<bool>,
 
+    image_compression: BuilderValue<Option<ImageCompressionAlgorithm>>,
+
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
+
+    l0_flush: BuilderValue<L0FlushConfig>,
 }
 
 impl PageServerConfigBuilder {
@@ -482,8 +493,10 @@ impl PageServerConfigBuilder {
             max_vectored_read_bytes: Set(MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
+            image_compression: Set(DEFAULT_IMAGE_COMPRESSION),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
+            l0_flush: Set(L0FlushConfig::default()),
         }
     }
 }
@@ -667,8 +680,16 @@ impl PageServerConfigBuilder {
         self.validate_vectored_get = BuilderValue::Set(value);
     }
 
+    pub fn get_image_compression(&mut self, value: Option<ImageCompressionAlgorithm>) {
+        self.image_compression = BuilderValue::Set(value);
+    }
+
     pub fn get_ephemeral_bytes_per_memory_kb(&mut self, value: usize) {
         self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
+    }
+
+    pub fn l0_flush(&mut self, value: L0FlushConfig) {
+        self.l0_flush = BuilderValue::Set(value);
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
@@ -727,7 +748,9 @@ impl PageServerConfigBuilder {
                 get_impl,
                 max_vectored_read_bytes,
                 validate_vectored_get,
+                image_compression,
                 ephemeral_bytes_per_memory_kb,
+                l0_flush,
             }
             CUSTOM LOGIC
             {
@@ -918,7 +941,7 @@ impl PageServerConf {
                 "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
                 "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
-                    builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
+                    builder.remote_storage_config(Some(RemoteStorageConfig::from_toml(item).context("remote_storage")?))
                 }
                 "tenant_config" => {
                     t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
@@ -946,7 +969,7 @@ impl PageServerConf {
                     builder.metric_collection_endpoint(Some(endpoint));
                 },
                 "metric_collection_bucket" => {
-                    builder.metric_collection_bucket(RemoteStorageConfig::from_toml(item)?)
+                    builder.metric_collection_bucket(Some(RemoteStorageConfig::from_toml(item)?))
                 }
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
@@ -1004,8 +1027,14 @@ impl PageServerConf {
                 "validate_vectored_get" => {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
                 }
+                "image_compression" => {
+                    builder.get_image_compression(Some(parse_toml_from_str("image_compression", item)?))
+                }
                 "ephemeral_bytes_per_memory_kb" => {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
+                }
+                "l0_flush" => {
+                    builder.l0_flush(utils::toml_edit_ext::deserialize_item(item).context("l0_flush")?)
                 }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
@@ -1088,8 +1117,10 @@ impl PageServerConf {
                 NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                     .expect("Invalid default constant"),
             ),
+            image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+            l0_flush: L0FlushConfig::default(),
         }
     }
 }
@@ -1328,7 +1359,9 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                l0_flush: L0FlushConfig::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1401,7 +1434,9 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                l0_flush: L0FlushConfig::default(),
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -1679,6 +1714,19 @@ threshold = "20m"
             }
             other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
+    }
+
+    #[test]
+    fn empty_remote_storage_is_error() {
+        let tempdir = tempdir().unwrap();
+        let (workdir, _) = prepare_fs(&tempdir).unwrap();
+        let input = r#"
+remote_storage = {}
+        "#;
+        let doc = toml_edit::Document::from_str(input).unwrap();
+        let err = PageServerConf::parse_and_validate(&doc, &workdir)
+            .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
+        assert!(format!("{err}").contains("remote_storage"), "{err}");
     }
 
     fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {

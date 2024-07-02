@@ -73,6 +73,7 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
+use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::TENANT;
 use crate::metrics::{
     remove_tenant_metrics, BROKEN_TENANTS_SET, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
@@ -166,6 +167,7 @@ pub struct TenantSharedResources {
     pub broker_client: storage_broker::BrokerClientChannel,
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
+    pub l0_flush_global_state: L0FlushGlobalState,
 }
 
 /// A [`Tenant`] is really an _attached_ tenant.  The configuration
@@ -294,6 +296,8 @@ pub struct Tenant {
 
     /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
     ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
+
+    l0_flush_global_state: L0FlushGlobalState,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -529,6 +533,15 @@ impl From<PageReconstructError> for GcError {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum LoadConfigError {
+    #[error("TOML deserialization error: '{0}'")]
+    DeserializeToml(#[from] toml_edit::de::Error),
+
+    #[error("Config not found at {0}")]
+    NotFound(Utf8PathBuf),
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     ///
@@ -667,6 +680,7 @@ impl Tenant {
             broker_client,
             remote_storage,
             deletion_queue_client,
+            l0_flush_global_state,
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -681,6 +695,7 @@ impl Tenant {
             tenant_shard_id,
             remote_storage.clone(),
             deletion_queue_client,
+            l0_flush_global_state,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -980,6 +995,7 @@ impl Tenant {
                 TimelineResources {
                     remote_client,
                     timeline_get_throttle: self.timeline_get_throttle.clone(),
+                    l0_flush_global_state: self.l0_flush_global_state.clone(),
                 },
                 ctx,
             )
@@ -2469,6 +2485,7 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
+        l0_flush_global_state: L0FlushGlobalState,
     ) -> Tenant {
         debug_assert!(
             !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
@@ -2556,6 +2573,7 @@ impl Tenant {
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
+            l0_flush_global_state,
         }
     }
 
@@ -2563,36 +2581,35 @@ impl Tenant {
     pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
         tenant_shard_id: &TenantShardId,
-    ) -> anyhow::Result<LocationConf> {
+    ) -> Result<LocationConf, LoadConfigError> {
         let config_path = conf.tenant_location_config_path(tenant_shard_id);
 
-        if config_path.exists() {
-            // New-style config takes precedence
-            let deserialized = Self::read_config(&config_path)?;
-            Ok(toml_edit::de::from_document::<LocationConf>(deserialized)?)
-        } else {
-            // The config should almost always exist for a tenant directory:
-            //  - When attaching a tenant, the config is the first thing we write
-            //  - When detaching a tenant, we atomically move the directory to a tmp location
-            //    before deleting contents.
-            //
-            // The very rare edge case that can result in a missing config is if we crash during attach
-            // between creating directory and writing config.  Callers should handle that as if the
-            // directory didn't exist.
-            anyhow::bail!("tenant config not found in {}", config_path);
-        }
-    }
-
-    fn read_config(path: &Utf8Path) -> anyhow::Result<toml_edit::Document> {
-        info!("loading tenant configuration from {path}");
+        info!("loading tenant configuration from {config_path}");
 
         // load and parse file
-        let config = fs::read_to_string(path)
-            .with_context(|| format!("Failed to load config from path '{path}'"))?;
+        let config = fs::read_to_string(&config_path).map_err(|e| {
+            match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    // The config should almost always exist for a tenant directory:
+                    //  - When attaching a tenant, the config is the first thing we write
+                    //  - When detaching a tenant, we atomically move the directory to a tmp location
+                    //    before deleting contents.
+                    //
+                    // The very rare edge case that can result in a missing config is if we crash during attach
+                    // between creating directory and writing config.  Callers should handle that as if the
+                    // directory didn't exist.
 
-        config
-            .parse::<toml_edit::Document>()
-            .with_context(|| format!("Failed to parse config from file '{path}' as toml file"))
+                    LoadConfigError::NotFound(config_path)
+                }
+                _ => {
+                    // No IO errors except NotFound are acceptable here: other kinds of error indicate local storage or permissions issues
+                    // that we cannot cleanly recover
+                    crate::virtual_file::on_fatal_io_error(&e, "Reading tenant config file")
+                }
+            }
+        })?;
+
+        Ok(toml_edit::de::from_str::<LocationConf>(&config)?)
     }
 
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
@@ -2600,7 +2617,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_shard_id: &TenantShardId,
         location_conf: &LocationConf,
-    ) -> anyhow::Result<()> {
+    ) -> std::io::Result<()> {
         let config_path = conf.tenant_location_config_path(tenant_shard_id);
 
         Self::persist_tenant_config_at(tenant_shard_id, &config_path, location_conf).await
@@ -2611,7 +2628,7 @@ impl Tenant {
         tenant_shard_id: &TenantShardId,
         config_path: &Utf8Path,
         location_conf: &LocationConf,
-    ) -> anyhow::Result<()> {
+    ) -> std::io::Result<()> {
         debug!("persisting tenantconf to {config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
@@ -2620,22 +2637,20 @@ impl Tenant {
         .to_string();
 
         fail::fail_point!("tenant-config-before-write", |_| {
-            anyhow::bail!("tenant-config-before-write");
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "tenant-config-before-write",
+            ))
         });
 
         // Convert the config to a toml file.
-        conf_content += &toml_edit::ser::to_string_pretty(&location_conf)?;
+        conf_content +=
+            &toml_edit::ser::to_string_pretty(&location_conf).expect("Config serialization failed");
 
         let temp_path = path_with_suffix_extension(config_path, TEMP_FILE_SUFFIX);
 
-        let tenant_shard_id = *tenant_shard_id;
-        let config_path = config_path.to_owned();
         let conf_content = conf_content.into_bytes();
-        VirtualFile::crashsafe_overwrite(config_path.clone(), temp_path, conf_content)
-            .await
-            .with_context(|| format!("write tenant {tenant_shard_id} config to {config_path}"))?;
-
-        Ok(())
+        VirtualFile::crashsafe_overwrite(config_path.to_owned(), temp_path, conf_content).await
     }
 
     //
@@ -3296,6 +3311,7 @@ impl Tenant {
         TimelineResources {
             remote_client,
             timeline_get_throttle: self.timeline_get_throttle.clone(),
+            l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
     }
 
@@ -3632,6 +3648,7 @@ pub(crate) mod harness {
     use utils::logging;
 
     use crate::deletion_queue::mock::MockDeletionQueue;
+    use crate::l0_flush::L0FlushConfig;
     use crate::walredo::apply_neon;
     use crate::{repository::Key, walrecord::NeonWalRecord};
 
@@ -3821,6 +3838,8 @@ pub(crate) mod harness {
                 self.tenant_shard_id,
                 self.remote_storage.clone(),
                 self.deletion_queue.new_client(),
+                // TODO: ideally we should run all unit tests with both configs
+                L0FlushGlobalState::new(L0FlushConfig::default()),
             ));
 
             let preload = tenant

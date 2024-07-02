@@ -8,6 +8,7 @@ use crate::virtual_file::VirtualFile;
 
 use once_cell::sync::Lazy;
 use std::io::{self, ErrorKind};
+use std::ops::{Deref, Range};
 use tokio_epoll_uring::BoundedBuf;
 use tracing::*;
 
@@ -19,14 +20,23 @@ pub struct RW {
     rw: super::zero_padded_read_write::RW<PreWarmingWriter>,
 }
 
+/// When we flush a block to the underlying [`crate::virtual_file::VirtualFile`],
+/// should we pre-warm the [`crate::page_cache`] with the contents?
+#[derive(Clone, Copy)]
+pub enum PrewarmOnWrite {
+    Yes,
+    No,
+}
+
 impl RW {
-    pub fn new(file: VirtualFile) -> Self {
+    pub fn new(file: VirtualFile, prewarm_on_write: PrewarmOnWrite) -> Self {
         let page_cache_file_id = page_cache::next_file_id();
         Self {
             page_cache_file_id,
             rw: super::zero_padded_read_write::RW::new(PreWarmingWriter::new(
                 page_cache_file_id,
                 file,
+                prewarm_on_write,
             )),
         }
     }
@@ -47,6 +57,43 @@ impl RW {
 
     pub(crate) fn bytes_written(&self) -> u64 {
         self.rw.bytes_written()
+    }
+
+    /// Load all blocks that can be read via [`Self::read_blk`] into a contiguous memory buffer.
+    ///
+    /// This includes the blocks that aren't yet flushed to disk by the internal buffered writer.
+    /// The last block is zero-padded to [`PAGE_SZ`], so, the returned buffer is always a multiple of [`PAGE_SZ`].
+    pub(super) async fn load_to_vec(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
+        // round up to the next PAGE_SZ multiple, required by blob_io
+        let size = {
+            let s = usize::try_from(self.bytes_written()).unwrap();
+            if s % PAGE_SZ == 0 {
+                s
+            } else {
+                s.checked_add(PAGE_SZ - (s % PAGE_SZ)).unwrap()
+            }
+        };
+        let vec = Vec::with_capacity(size);
+
+        // read from disk what we've already flushed
+        let writer = self.rw.as_writer();
+        let flushed_range = writer.written_range();
+        let mut vec = writer
+            .file
+            .read_exact_at(
+                vec.slice(0..(flushed_range.end - flushed_range.start)),
+                u64::try_from(flushed_range.start).unwrap(),
+                ctx,
+            )
+            .await?
+            .into_inner();
+
+        // copy from in-memory buffer what we haven't flushed yet but would return when accessed via read_blk
+        let buffered = self.rw.get_tail_zero_padded();
+        vec.extend_from_slice(buffered);
+        assert_eq!(vec.len(), size);
+        assert_eq!(vec.len() % PAGE_SZ, 0);
+        Ok(vec)
     }
 
     pub(crate) async fn read_blk(
@@ -116,18 +163,39 @@ impl Drop for RW {
 }
 
 struct PreWarmingWriter {
+    prewarm_on_write: PrewarmOnWrite,
     nwritten_blocks: u32,
     page_cache_file_id: page_cache::FileId,
     file: VirtualFile,
 }
 
 impl PreWarmingWriter {
-    fn new(page_cache_file_id: page_cache::FileId, file: VirtualFile) -> Self {
+    fn new(
+        page_cache_file_id: page_cache::FileId,
+        file: VirtualFile,
+        prewarm_on_write: PrewarmOnWrite,
+    ) -> Self {
         Self {
+            prewarm_on_write,
             nwritten_blocks: 0,
             page_cache_file_id,
             file,
         }
+    }
+
+    /// Return the byte range within `file` that has been written though `write_all`.
+    ///
+    /// The returned range would be invalidated by another `write_all`. To prevent that, we capture `&_`.
+    fn written_range(&self) -> (impl Deref<Target = Range<usize>> + '_) {
+        let nwritten_blocks = usize::try_from(self.nwritten_blocks).unwrap();
+        struct Wrapper(Range<usize>);
+        impl Deref for Wrapper {
+            type Target = Range<usize>;
+            fn deref(&self) -> &Range<usize> {
+                &self.0
+            }
+        }
+        Wrapper(0..nwritten_blocks * PAGE_SZ)
     }
 }
 
@@ -178,45 +246,51 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
             assert_eq!(&check_bounds_stuff_works, &*buf);
         }
 
-        // Pre-warm page cache with the contents.
-        // At least in isolated bulk ingest benchmarks (test_bulk_insert.py), the pre-warming
-        // benefits the code that writes InMemoryLayer=>L0 layers.
         let nblocks = buflen / PAGE_SZ;
         let nblocks32 = u32::try_from(nblocks).unwrap();
-        let cache = page_cache::get();
-        static CTX: Lazy<RequestContext> = Lazy::new(|| {
-            RequestContext::new(
-                crate::task_mgr::TaskKind::EphemeralFilePreWarmPageCache,
-                crate::context::DownloadBehavior::Error,
-            )
-        });
-        for blknum_in_buffer in 0..nblocks {
-            let blk_in_buffer = &buf[blknum_in_buffer * PAGE_SZ..(blknum_in_buffer + 1) * PAGE_SZ];
-            let blknum = self
-                .nwritten_blocks
-                .checked_add(blknum_in_buffer as u32)
-                .unwrap();
-            match cache
-                .read_immutable_buf(self.page_cache_file_id, blknum, &CTX)
-                .await
-            {
-                Err(e) => {
-                    error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
-                    // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
-                }
-                Ok(v) => match v {
-                    page_cache::ReadBufResult::Found(_guard) => {
-                        // This function takes &mut self, so, it shouldn't be possible to reach this point.
-                        unreachable!("we just wrote block {blknum} to the VirtualFile, which is owned by Self, \
+
+        if matches!(self.prewarm_on_write, PrewarmOnWrite::Yes) {
+            // Pre-warm page cache with the contents.
+            // At least in isolated bulk ingest benchmarks (test_bulk_insert.py), the pre-warming
+            // benefits the code that writes InMemoryLayer=>L0 layers.
+
+            let cache = page_cache::get();
+            static CTX: Lazy<RequestContext> = Lazy::new(|| {
+                RequestContext::new(
+                    crate::task_mgr::TaskKind::EphemeralFilePreWarmPageCache,
+                    crate::context::DownloadBehavior::Error,
+                )
+            });
+            for blknum_in_buffer in 0..nblocks {
+                let blk_in_buffer =
+                    &buf[blknum_in_buffer * PAGE_SZ..(blknum_in_buffer + 1) * PAGE_SZ];
+                let blknum = self
+                    .nwritten_blocks
+                    .checked_add(blknum_in_buffer as u32)
+                    .unwrap();
+                match cache
+                    .read_immutable_buf(self.page_cache_file_id, blknum, &CTX)
+                    .await
+                {
+                    Err(e) => {
+                        error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
+                        // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
+                    }
+                    Ok(v) => match v {
+                        page_cache::ReadBufResult::Found(_guard) => {
+                            // This function takes &mut self, so, it shouldn't be possible to reach this point.
+                            unreachable!("we just wrote block {blknum} to the VirtualFile, which is owned by Self, \
                                       and this function takes &mut self, so, no concurrent read_blk is possible");
-                    }
-                    page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                        write_guard.copy_from_slice(blk_in_buffer);
-                        let _ = write_guard.mark_valid();
-                    }
-                },
+                        }
+                        page_cache::ReadBufResult::NotFound(mut write_guard) => {
+                            write_guard.copy_from_slice(blk_in_buffer);
+                            let _ = write_guard.mark_valid();
+                        }
+                    },
+                }
             }
         }
+
         self.nwritten_blocks = self.nwritten_blocks.checked_add(nblocks32).unwrap();
         Ok((buflen, buf.into_inner()))
     }
