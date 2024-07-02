@@ -2,6 +2,7 @@ import threading
 import time
 from contextlib import closing
 
+import psycopg2.errors
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, PgBin
 
@@ -60,6 +61,6 @@ def test_pageserver_reconnect_failure(neon_simple_env: NeonEnv):
     cur.execute("select pg_reload_conf()")
     try:
         cur.execute("select count(*) from pg_class")
-    except Exception as e:
-        log.info(f"Connection to PS failed: {e}")
+    except psycopg2.errors.QueryCanceled:
+        log.info("Connection to PS failed")
     assert not endpoint.log_contains("ERROR:  cannot wait on socket event without a socket.*")
