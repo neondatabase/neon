@@ -41,7 +41,7 @@ RETURNS bytea
 AS 'MODULE_PATHNAME', 'get_raw_page_at_lsn_ex'
 LANGUAGE C PARALLEL UNSAFE;
 
-CREATE FUNCTION neon_xlogflush(lsn pg_lsn)
+CREATE FUNCTION neon_xlogflush(lsn pg_lsn DEFAULT NULL)
 RETURNS VOID
 AS 'MODULE_PATHNAME', 'neon_xlogflush'
 LANGUAGE C PARALLEL UNSAFE;

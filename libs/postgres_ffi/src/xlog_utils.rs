@@ -356,6 +356,28 @@ impl CheckPoint {
         }
         false
     }
+
+    /// Advance next multi-XID/offset to those given in arguments.
+    ///
+    /// It's important that this handles wraparound correctly. This should match the
+    /// MultiXactAdvanceNextMXact() logic in PostgreSQL's xlog_redo() function.
+    ///
+    /// Returns 'true' if the Checkpoint was updated.
+    pub fn update_next_multixid(&mut self, multi_xid: u32, multi_offset: u32) -> bool {
+        let mut modified = false;
+
+        if multi_xid.wrapping_sub(self.nextMulti) as i32 > 0 {
+            self.nextMulti = multi_xid;
+            modified = true;
+        }
+
+        if multi_offset.wrapping_sub(self.nextMultiOffset) as i32 > 0 {
+            self.nextMultiOffset = multi_offset;
+            modified = true;
+        }
+
+        modified
+    }
 }
 
 /// Generate new, empty WAL segment, with correct block headers at the first
