@@ -51,6 +51,7 @@ def test_pageserver_reconnect_failure(neon_simple_env: NeonEnv):
     con = endpoint.connect()
     cur = con.cursor()
 
+    cur.execute("set statement_timeout='2s'")
     cur.execute("SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'")
     connstring = cur.fetchall()[0][0]
     cur.execute(
