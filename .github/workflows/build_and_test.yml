@@ -133,6 +133,11 @@ jobs:
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
+    env:
+      SCCACHE_BUCKET: neon-github-dev
+      SCCACHE_REGION: eu-central-1
+      SCCACHE_S3_KEY_PREFIX: sccache
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -193,6 +198,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo deny check --hide-inclusion-graph
 
+      - run: sccache --show-stats
+
   build-neon:
     needs: [ check-permissions, tag, build-build-tools-image ]
     runs-on: [ self-hosted, gen3, large ]
@@ -214,6 +221,9 @@ jobs:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
       BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
+      SCCACHE_BUCKET: neon-github-dev
+      SCCACHE_REGION: eu-central-1
+      SCCACHE_S3_KEY_PREFIX: sccache
 
     steps:
       - name: Fix git ownership
@@ -339,6 +349,8 @@ jobs:
           export PQ_LIB_DIR
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
+      - run: sccache --show-stats
+
       # Do install *before* running rust tests because they might recompile the
       # binaries with different features/flags.
       - name: Install rust binaries
@@ -411,6 +423,8 @@ jobs:
           export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
           export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
           ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
+
+      - run: sccache --show-stats
 
       - name: Install postgres binaries
         run: cp -a pg_install /tmp/neon/pg_install
@@ -765,6 +779,9 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            RUSTC_WRAPPER=sccache
+            AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_DEV }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_KEY_DEV }}
           provenance: false
           push: true
           pull: true
@@ -857,6 +874,9 @@ jobs:
             PG_VERSION=${{ matrix.version }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            RUSTC_WRAPPER=sccache
+            AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_DEV }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_KEY_DEV }}
           provenance: false
           push: true
           pull: true
@@ -897,6 +917,9 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            RUSTC_WRAPPER=sccache
+            AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_DEV }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_KEY_DEV }}
           provenance: false
           push: true
           pull: true

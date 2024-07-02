@@ -868,10 +868,22 @@ FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
 ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
+ARG RUSTC_WRAPPER
+ARG SCCACHE_BUCKET=neon-github-dev
+ARG SCCACHE_REGION=eu-central-1
+ARG SCCACHE_S3_KEY_PREFIX=sccache
+ARG AWS_ACCESS_KEY_ID
+ARG AWS_SECRET_ACCESS_KEY
+
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN cd compute_tools && mold -run cargo build --locked --profile release-line-debug-size-lto
+RUN set -e \
+    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build  \
+      --bin compute_ctl  \
+      --locked \
+      --profile release-line-debug-size-lto \
+    && sccache --show-stats
 
 #########################################################################################
 #
