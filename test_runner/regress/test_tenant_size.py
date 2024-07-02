@@ -719,7 +719,10 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
     They should have the same effect.
     """
 
-    conf = {"pitr_interval": "0s"} if zero_gc else {"pitr_interval": "3600s"}
+    conf = {
+      "pitr_interval": "0s" if zero_gc else "3600s",
+      "gc_period": "0s",
+    }
 
     env = neon_env_builder.init_start(initial_tenant_conf=conf)
     lease_res = insert_and_acquire_lease(
