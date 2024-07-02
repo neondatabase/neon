@@ -1883,6 +1883,7 @@ impl Timeline {
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         self.remote_client.stop();
+
         // As documented in remote_client.stop()'s doc comment, it's our responsibility
         // to shut down the upload queue tasks.
         // TODO: fix that, task management should be encapsulated inside remote_client.
@@ -1896,6 +1897,15 @@ impl Timeline {
         // TODO: work toward making this a no-op. See this funciton's doc comment for more context.
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
+
+        {
+            // Allow any remaining in-memory layers to do cleanup.
+            let mut write_guard = self.write_lock.lock().await;
+            self.layers
+                .write()
+                .await
+                .drop_inmemory_layers(&mut write_guard);
+        }
 
         // Finally wait until any gate-holders are complete.
         //
@@ -3663,22 +3673,34 @@ impl Timeline {
         &self.shard_identity
     }
 
+    /// Returns a non-frozen open in-memory layer for ingestion.
     ///
-    /// Get a handle to the latest layer for appending.
-    ///
+    /// Takes a witness of timeline writer state lock being held, because it makes no sense to call
+    /// this function without holding the mutex.
     async fn get_layer_for_write(
         &self,
         lsn: Lsn,
+        _guard: &tokio::sync::MutexGuard<'_, Option<TimelineWriterState>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
+        let gate_guard = self.gate.enter().context("enter gate for inmem layer")?;
+
+        let last_record_lsn = self.get_last_record_lsn();
+        ensure!(
+            lsn > last_record_lsn,
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
+            lsn,
+            last_record_lsn,
+        );
+
         let layer = guard
             .get_layer_for_write(
                 lsn,
-                self.get_last_record_lsn(),
                 self.conf,
                 self.timeline_id,
                 self.tenant_shard_id,
+                gate_guard,
                 ctx,
             )
             .await?;
@@ -5623,7 +5645,7 @@ type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 /// Tracking writes ingestion does to a particular in-memory layer.
 ///
 /// Cleared upon freezing a layer.
-struct TimelineWriterState {
+pub(crate) struct TimelineWriterState {
     open_layer: Arc<InMemoryLayer>,
     current_size: u64,
     // Previous Lsn which passed through
@@ -5731,7 +5753,10 @@ impl<'a> TimelineWriter<'a> {
     }
 
     async fn open_layer(&mut self, at: Lsn, ctx: &RequestContext) -> anyhow::Result<()> {
-        let layer = self.tl.get_layer_for_write(at, ctx).await?;
+        let layer = self
+            .tl
+            .get_layer_for_write(at, &self.write_guard, ctx)
+            .await?;
         let initial_size = layer.size().await?;
 
         let last_freeze_at = self.last_freeze_at.load();

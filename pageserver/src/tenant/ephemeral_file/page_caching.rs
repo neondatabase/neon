@@ -17,10 +17,12 @@ use super::zero_padded_read_write;
 pub struct RW {
     page_cache_file_id: page_cache::FileId,
     rw: super::zero_padded_read_write::RW<PreWarmingWriter>,
+    /// Gate guard is held on as long as we need to do operations in the path (delete on drop).
+    _gate_guard: utils::sync::gate::GateGuard,
 }
 
 impl RW {
-    pub fn new(file: VirtualFile) -> Self {
+    pub fn new(file: VirtualFile, _gate_guard: utils::sync::gate::GateGuard) -> Self {
         let page_cache_file_id = page_cache::next_file_id();
         Self {
             page_cache_file_id,
@@ -28,6 +30,7 @@ impl RW {
                 page_cache_file_id,
                 file,
             )),
+            _gate_guard,
         }
     }
 
@@ -98,6 +101,7 @@ impl Drop for RW {
         // We leave them there, [`crate::page_cache::PageCache::find_victim`] will evict them when needed.
 
         // unlink the file
+        // we are clear to do this, because we have entered a gate
         let res = std::fs::remove_file(&self.rw.as_writer().file.path);
         if let Err(e) = res {
             if e.kind() != std::io::ErrorKind::NotFound {

@@ -69,20 +69,13 @@ impl LayerManager {
     pub(crate) async fn get_layer_for_write(
         &mut self,
         lsn: Lsn,
-        last_record_lsn: Lsn,
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
+        gate_guard: utils::sync::gate::GateGuard,
         ctx: &RequestContext,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
-
-        ensure!(
-            lsn > last_record_lsn,
-            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
-            lsn,
-            last_record_lsn,
-        );
 
         // Do we have a layer open for writing already?
         let layer = if let Some(open_layer) = &self.layer_map.open_layer {
@@ -109,8 +102,15 @@ impl LayerManager {
                 lsn
             );
 
-            let new_layer =
-                InMemoryLayer::create(conf, timeline_id, tenant_shard_id, start_lsn, ctx).await?;
+            let new_layer = InMemoryLayer::create(
+                conf,
+                timeline_id,
+                tenant_shard_id,
+                start_lsn,
+                gate_guard,
+                ctx,
+            )
+            .await?;
             let layer = Arc::new(new_layer);
 
             self.layer_map.open_layer = Some(layer.clone());
@@ -206,6 +206,19 @@ impl LayerManager {
             metrics.record_new_file_metrics(l.layer_desc().file_size);
             updates.flush();
         }
+    }
+
+    /// LayerManager shutdown. The in-memory layers do cleanup on drop, so we must drop them in
+    /// order to allow shutdown to complete.
+    ///
+    /// If there was a want to flush in-memory layers, it must have happened earlier.
+    pub(crate) fn drop_inmemory_layers(&mut self, writer_state: &mut Option<TimelineWriterState>) {
+        let open = self.layer_map.open_layer.take();
+        let frozen = self.layer_map.frozen_layers.len();
+        self.layer_map.frozen_layers.clear();
+        assert_eq!(open.is_some(), writer_state.is_some());
+        writer_state.take();
+        tracing::info!(open = open.is_some(), frozen, "dropped inmemory layers");
     }
 
     /// Called when compaction is completed.
