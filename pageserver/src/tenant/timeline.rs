@@ -1662,6 +1662,7 @@ impl Timeline {
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         self.remote_client.stop();
+
         // As documented in remote_client.stop()'s doc comment, it's our responsibility
         // to shut down the upload queue tasks.
         // TODO: fix that, task management should be encapsulated inside remote_client.
@@ -1675,6 +1676,15 @@ impl Timeline {
         // TODO: work toward making this a no-op. See this funciton's doc comment for more context.
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
+
+        {
+            // Allow any remaining in-memory layers to do cleanup.
+            let mut write_guard = self.write_lock.lock().await;
+            self.layers
+                .write()
+                .await
+                .drop_inmemory_layers(&mut write_guard);
+        }
 
         // Finally wait until any gate-holders are complete.
         //
@@ -5424,7 +5434,7 @@ impl Timeline {
 /// Tracking writes ingestion does to a particular in-memory layer.
 ///
 /// Cleared upon freezing a layer.
-struct TimelineWriterState {
+pub(crate) struct TimelineWriterState {
     open_layer: Arc<InMemoryLayer>,
     current_size: u64,
     // Previous Lsn which passed through

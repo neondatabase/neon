@@ -212,6 +212,19 @@ impl LayerManager {
         }
     }
 
+    /// LayerManager shutdown. The in-memory layers do cleanup on drop, so we must drop them in
+    /// order to allow shutdown to complete.
+    ///
+    /// If there was a want to flush in-memory layers, it must have happened earlier.
+    pub(crate) fn drop_inmemory_layers(&mut self, writer_state: &mut Option<TimelineWriterState>) {
+        let open = self.layer_map.open_layer.take();
+        let frozen = self.layer_map.frozen_layers.len();
+        self.layer_map.frozen_layers.clear();
+        assert_eq!(open.is_some(), writer_state.is_some());
+        writer_state.take();
+        tracing::info!(open = open.is_some(), frozen, "dropped inmemory layers");
+    }
+
     /// Called when compaction is completed.
     pub(crate) fn finish_compact_l0(
         &mut self,
