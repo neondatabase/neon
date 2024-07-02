@@ -996,7 +996,7 @@ impl Timeline {
     }
 
     pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
-    pub(crate) const VEC_GET_LAYERS_VISITED_WARN_THRESH: f64 = 800.0;
+    pub(crate) const VEC_GET_LAYERS_VISITED_WARN_THRESH: f64 = 512.0;
 
     /// Look up multiple page versions at a given LSN
     ///
