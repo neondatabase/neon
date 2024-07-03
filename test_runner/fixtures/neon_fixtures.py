@@ -2883,6 +2883,13 @@ class PgBin:
         env.update(env_add)
         return env
 
+    def _log_env(self, env: dict[str, str]) -> None:
+        env_s = {}
+        for k, v in env.items():
+            if k.startswith("PG") and k != "PGPASSWORD":
+                env_s[k] = v
+        log.debug(f"Environment: {env_s}")
+
     def run(
         self,
         command: List[str],
@@ -2905,6 +2912,7 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
+        self._log_env(env)
         subprocess.run(command, env=env, cwd=cwd, check=True)
 
     def run_capture(
@@ -2925,6 +2933,7 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
+        self._log_env(env)
         base_path, _, _ = subprocess_capture(
             self.log_dir,
             command,
