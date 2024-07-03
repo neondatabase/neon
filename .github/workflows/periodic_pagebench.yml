@@ -43,11 +43,6 @@ jobs:
       AWS_DEFAULT_REGION : "eu-central-1"
       AWS_INSTANCE_ID : "i-02a59a3bf86bc7e74"
     steps:
-    - name: Setup environment
-      run: |
-        apt-get update
-        apt-get install -y curl unzip gzip jq 
-
     - name: Show my own (github runner) external IP address - usefull for IP allowlisting
       run: curl https://ifconfig.me
 
