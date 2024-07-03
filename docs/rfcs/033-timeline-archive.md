@@ -154,6 +154,12 @@ The contents of the manifest's offload list will also be stored as an attribute 
 set of timelines may be found by the union of `Tenant::timelines` (non-offloaded timelines) and `Tenant::offloaded`
 (offloaded timelines).
 
+For split-brain protection, the manifest object will be written with a generation suffix, in the same way as
+index_part objects are (see [generation numbers RFC](025-generation-numbers.md)).  This will add some complexity, but
+give us total safety against two pageservers with the same tenant attached fighting over the object.  Existing code
+for finding the latest generation and for cleaning up old generations (in the scrubber) will be generalized to cover
+the manifest file.
+
 ### API & Timeline state
 
 Timelines will store a lifecycle state (enum of Active or Archived) in their IndexPart.  This will
@@ -418,16 +424,6 @@ This has downsides:
   is created, rather than having a usage-dependency storage price.
 - Complexity: enabling the page service to call up into the Tenant to activate a timeline
   would be awkward, compared with an external entry point.
-
-
-### Generation suffix on `archive.json`
-
-We could reduce the onus on external callers to avoid doing weird overlapping calls to
-the timeline config API by putting a generation into `archive.json` so that different
-pageservers can safely write it at the same time.
-
-To do so would be relatively complex: we'd have to reproduce the logic that we use for
-loading timeline indices, and the logic in the storage scrubber for cleaning up old ones.
 
 ### Make offloaded a state of Timeline
 
