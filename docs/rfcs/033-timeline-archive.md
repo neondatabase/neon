@@ -143,7 +143,7 @@ The manifest object will have a format like this:
 ```
 
 The information about a timeline in its offload state is intentionally minimal: just enough to decide:
-- Whether it requires storage optimization by rewriting as a set of image layers: we may infer this
+- Whether it requires [archive optimization](#archive-branch-optimization) by rewriting as a set of image layers: we may infer this
   by checking if now > last_record_lsn_time - pitr_interval, and pitr_lsn < last_record_lsn.
 - Whether a parent branch should include this offloaded branch in its GC inputs to avoid removing
   layers that the archived branch depends on
@@ -177,6 +177,12 @@ index, but not any data: it should be about as fast as a couple of small S3 requ
 The API will be available with identical path via the storage controller: calling this on a sharded tenant
 will simply map the API call to all the shards.
 
+Archived timelines may never have descendent timelines which are active.  This will be enforced at the API level,
+such that activating a timeline requires that all its ancestors are active, and archiving a timeline requires
+that all its descendents are archived.  It is the callers responsibility to walk the hierarchy of timelines
+in the proper order if they would like to archive whole trees of branches.
+
+
 ### Tenant attach changes
 
 Currently, during Tenant::spawn we list all the timelines in the S3 bucket, and then for each timeline
@@ -205,7 +211,18 @@ to call it, because otherwise populating local contents for a timeline can take 
 for SQL queries to coincidentally hit all the layers, and during that time query latency remains quite
 volatile.
 
-### Background offload
+### Background work
+
+Archived branches are not subject to normal compaction.  Instead, when the compaction loop encounters
+an archived branch, it will consider rewriting the branch to just image layers if the branch has no history
+([archive branch optimization](#archive-branch-optimization)), or offloading the timeline from local disk
+if its state permits that.
+
+Additionally, the tenant compaction task will walk the state of already offloaded timelines to consider
+optimizing their storage, e.g. if a timeline had some history when offloaded, but since then its PITR
+has elapsed and it can now be rewritten to image layers.
+
+#### Archive branch offload
 
 Recall that when we archive a timeline via the HTTP API, this only sets a state: it doesn't do
 any actual work.
@@ -215,7 +232,11 @@ loop, because it is spiritually aligned: offloading data for archived branches i
 
 The condition for offload is simple:
  - a `Timeline` object exists with state `Archived`
- - the timeline does not have any non-offloaded children
+ - the timeline does not have any non-offloaded children.
+ 
+ Regarding the condition that children must be offloaded, this will always be eventually true, because
+ we enforce at the API level that children of archived timelines must themselves be archived, and all
+ archived timelines will eventually be offloaded.
 
 Offloading a timeline is simple:
 - Read the timeline's attributes that we will store in its offloaded state (especially its logical size)
@@ -223,7 +244,7 @@ Offloading a timeline is simple:
 - Erase all the timeline's content from local storage (`remove_dir_all` on its path)
 - Write the tenant manifest to S3 to prevent this timeline being loaded on next start.
 
-### Background storage optimization
+#### Archive branch optimization
 
 When we offloaded a branch, it might have had some history that prevented rewriting it to a single
 point in time set of image layers.  For example, a branch might have several days of writes and a 7
@@ -235,8 +256,8 @@ Once the PITR has expired, we have an opportunity to reduce the physical footpri
 - Updating the branch's offload metadata to indicate that this branch no longer depends on its ancestor
   for data, i.e. the ancestor is free to GC layers files at+below the branch point
 
-Storage optimization should be done _before_ background offloads during compaction, because there may
-be timelines which are ready to be offloaded but also would benefit from storage optimization before
+Archive branch optimization should be done _before_ background offloads during compaction, because there may
+be timelines which are ready to be offloaded but also would benefit from the optimization step before
 being offloaded.  For example, a branch which has already fallen out of PITR window and has no history
 of its own may be immediately re-written as a series of image layers before being offloaded.
 
