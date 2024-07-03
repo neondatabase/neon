@@ -115,7 +115,8 @@ def test_storage_controller_many_tenants(
     # A small sleep on each call into the notify hook, to simulate the latency of doing a database write
     compute_reconfigure_listener.register_on_notify(lambda body: time.sleep(0.01))
 
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_configs()
+    neon_env_builder.start()
 
     # We will intentionally stress reconciler concurrrency, which triggers a warning when lots
     # of shards are hitting the delayed path.
@@ -129,9 +130,6 @@ def test_storage_controller_many_tenants(
             ".*Shared lock by TimelineCreate.*was held.*",
         ]
     )
-
-    # TODO: default tenant does not have a secondary location
-    env.storage_controller.allowed_errors.append(".*Scheduling error when draining pageserver.*")
 
     for ps in env.pageservers:
         # This can happen because when we do a loop over all pageservers and mark them offline/active,
