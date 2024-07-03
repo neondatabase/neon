@@ -751,14 +751,16 @@ jobs:
         run: |
           mkdir -p .docker-custom
           echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v2
+      - uses: docker/setup-buildx-action@v3
+        with:
+          cache-binary: false
 
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -829,11 +831,12 @@ jobs:
         run: |
           mkdir -p .docker-custom
           echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v2
+      - uses: docker/setup-buildx-action@v3
         with:
+          cache-binary: false
           # Disable parallelism for docker buildkit.
           # As we already build everything with `make -j$(nproc)`, running it in additional level of parallelisam blows up the Runner.
-          config-inline: |
+          buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 1
 
@@ -849,7 +852,7 @@ jobs:
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
       - name: Build compute-node image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -868,7 +871,7 @@ jobs:
 
       - name: Build neon extensions test image
         if: matrix.version == 'v16'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -889,7 +892,7 @@ jobs:
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
         if: matrix.version == 'v16'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           target: compute-tools-image
           context: .
