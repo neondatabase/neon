@@ -18,6 +18,12 @@ from performance.pageserver.util import (
     setup_pageserver_with_tenants,
 )
 
+# The following tests use pagebench "getpage at latest LSN" to characterize the throughput of the pageserver.
+# originally there was a single test named `test_pageserver_max_throughput_getpage_at_latest_lsn``
+# so you still see some references to this name in the code.
+# To avoid recreating the snapshots for each test, we continue to use the name `max_throughput_latest_lsn`
+# for some files and metrics.
+
 
 # For reference, the space usage of the snapshots:
 # sudo du -hs /instance_store/neon/test_output/shared-snapshots/*
@@ -38,7 +44,7 @@ def test_pageserver_characterize_throughput_with_n_tenants(
     pgbench_scale: int,
     duration: int,
 ):
-    setup_and_run_benchmark_max_throughput_latest_lsn(
+    setup_and_run_pagebench_benchmark(
         neon_env_builder, zenbenchmark, pg_bin, n_tenants, pgbench_scale, duration, 1
     )
 
@@ -67,12 +73,12 @@ def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_man
     duration: int,
     n_clients: int,
 ):
-    setup_and_run_benchmark_max_throughput_latest_lsn(
+    setup_and_run_pagebench_benchmark(
         neon_env_builder, zenbenchmark, pg_bin, n_tenants, pgbench_scale, duration, n_clients
     )
 
 
-def setup_and_run_benchmark_max_throughput_latest_lsn(
+def setup_and_run_pagebench_benchmark(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
@@ -136,7 +142,7 @@ def setup_and_run_benchmark_max_throughput_latest_lsn(
         r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
     )
 
-    run_benchmark_max_throughput_latest_lsn(env, pg_bin, record, duration, n_clients)
+    run_pagebench_benchmark(env, pg_bin, record, duration, n_clients)
 
 
 def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
@@ -197,8 +203,8 @@ def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
     return (template_tenant, template_timeline, config)
 
 
-def run_benchmark_max_throughput_latest_lsn(
-    env: NeonEnv, pg_bin: PgBin, record, duration_secs: int, n_clients: int = 1
+def run_pagebench_benchmark(
+    env: NeonEnv, pg_bin: PgBin, record, duration_secs: int, n_clients: int
 ):
     """
     Benchmark `env.pageserver` for max throughput @ latest LSN and record results in `zenbenchmark`.
