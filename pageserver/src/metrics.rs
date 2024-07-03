@@ -8,7 +8,7 @@ use metrics::{
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
-use strum::{EnumCount, IntoEnumIterator, VariantNames};
+use strum::{EnumCount, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
 use tracing::warn;
 use utils::id::TimelineId;
@@ -1076,21 +1076,12 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-#[derive(Debug)]
-struct GlobalAndPerTimelineHistogram {
-    global: Histogram,
-    per_tenant_timeline: Histogram,
-}
-
-impl GlobalAndPerTimelineHistogram {
-    fn observe(&self, value: f64) {
-        self.global.observe(value);
-        self.per_tenant_timeline.observe(value);
-    }
-}
-
 struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
-    h: &'a GlobalAndPerTimelineHistogram,
+    global_metric: &'a Histogram,
+
+    // Optional because not all op types are tracked per-timeline
+    timeline_metric: Option<&'a Histogram>,
+
     ctx: &'c RequestContext,
     start: std::time::Instant,
     op: SmgrQueryType,
@@ -1121,7 +1112,10 @@ impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
                 elapsed
             }
         };
-        self.h.observe(ex_throttled.as_secs_f64());
+        self.global_metric.observe(ex_throttled.as_secs_f64());
+        if let Some(timeline_metric) = self.timeline_metric {
+            timeline_metric.observe(ex_throttled.as_secs_f64());
+        }
     }
 }
 
@@ -1146,7 +1140,8 @@ pub enum SmgrQueryType {
 
 #[derive(Debug)]
 pub(crate) struct SmgrQueryTimePerTimeline {
-    metrics: [GlobalAndPerTimelineHistogram; SmgrQueryType::COUNT],
+    global_metrics: [Histogram; SmgrQueryType::COUNT],
+    per_timeline_getpage: Histogram,
 }
 
 static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
@@ -1224,27 +1219,32 @@ impl SmgrQueryTimePerTimeline {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_slug = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
-        let metrics = std::array::from_fn(|i| {
+        let global_metrics = std::array::from_fn(|i| {
             let op = SmgrQueryType::from_repr(i).unwrap();
-            let global = SMGR_QUERY_TIME_GLOBAL
+            SMGR_QUERY_TIME_GLOBAL
                 .get_metric_with_label_values(&[op.into()])
-                .unwrap();
-            let per_tenant_timeline = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
-                .get_metric_with_label_values(&[op.into(), &tenant_id, &shard_slug, &timeline_id])
-                .unwrap();
-            GlobalAndPerTimelineHistogram {
-                global,
-                per_tenant_timeline,
-            }
+                .unwrap()
         });
-        Self { metrics }
+
+        let per_timeline_getpage = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
+            .get_metric_with_label_values(&[
+                SmgrQueryType::GetPageAtLsn.into(),
+                &tenant_id,
+                &shard_slug,
+                &timeline_id,
+            ])
+            .unwrap();
+        Self {
+            global_metrics,
+            per_timeline_getpage,
+        }
     }
     pub(crate) fn start_timer<'c: 'a, 'a>(
         &'a self,
         op: SmgrQueryType,
         ctx: &'c RequestContext,
-    ) -> impl Drop + '_ {
-        let metric = &self.metrics[op as usize];
+    ) -> Option<impl Drop + '_> {
+        let global_metric = &self.global_metrics[op as usize];
         let start = Instant::now();
         match ctx.micros_spent_throttled.open() {
             Ok(()) => (),
@@ -1263,12 +1263,20 @@ impl SmgrQueryTimePerTimeline {
                 });
             }
         }
-        GlobalAndPerTimelineHistogramTimer {
-            h: metric,
+
+        let timeline_metric = if matches!(op, SmgrQueryType::GetPageAtLsn) {
+            Some(&self.per_timeline_getpage)
+        } else {
+            None
+        };
+
+        Some(GlobalAndPerTimelineHistogramTimer {
+            global_metric,
+            timeline_metric,
             ctx,
             start,
             op,
-        }
+        })
     }
 }
 
@@ -1315,17 +1323,9 @@ mod smgr_query_time_tests {
             let get_counts = || {
                 let global: u64 = ops
                     .iter()
-                    .map(|op| metrics.metrics[*op as usize].global.get_sample_count())
+                    .map(|op| metrics.global_metrics[*op as usize].get_sample_count())
                     .sum();
-                let per_tenant_timeline: u64 = ops
-                    .iter()
-                    .map(|op| {
-                        metrics.metrics[*op as usize]
-                            .per_tenant_timeline
-                            .get_sample_count()
-                    })
-                    .sum();
-                (global, per_tenant_timeline)
+                (global, metrics.per_timeline_getpage.get_sample_count())
             };
 
             let (pre_global, pre_per_tenant_timeline) = get_counts();
@@ -1336,7 +1336,12 @@ mod smgr_query_time_tests {
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();
-            assert_eq!(post_per_tenant_timeline, 1);
+            if matches!(op, super::SmgrQueryType::GetPageAtLsn) {
+                // getpage ops are tracked per-timeline, others aren't
+                assert_eq!(post_per_tenant_timeline, 1);
+            } else {
+                assert_eq!(post_per_tenant_timeline, 0);
+            }
             assert!(post_global > pre_global);
         }
     }
@@ -2317,14 +2322,12 @@ impl TimelineMetrics {
             let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
         }
 
-        for op in SmgrQueryType::iter() {
-            let _ = SMGR_QUERY_TIME_PER_TENANT_TIMELINE.remove_label_values(&[
-                op.into(),
-                tenant_id,
-                shard_id,
-                timeline_id,
-            ]);
-        }
+        let _ = SMGR_QUERY_TIME_PER_TENANT_TIMELINE.remove_label_values(&[
+            SmgrQueryType::GetPageAtLsn.into(),
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
     }
 }
 
