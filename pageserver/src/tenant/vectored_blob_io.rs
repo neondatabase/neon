@@ -106,6 +106,21 @@ impl VectoredReadBuilder {
         }
     }
 
+    #[cfg(test)]
+    fn new_with_controlled_limit(start_offset: u64, end_offset: u64, meta: BlobMeta) -> Self {
+        let mut blobs_at = VecMap::default();
+        blobs_at
+            .append(start_offset, meta)
+            .expect("First insertion always succeeds");
+
+        Self {
+            start: start_offset,
+            end: end_offset,
+            blobs_at,
+            max_read_size: None,
+        }
+    }
+
     /// Attempt to extend the current read with a new blob if the start
     /// offset matches with the current end of the vectored read
     /// and the resuting size is below the max read size
@@ -370,7 +385,8 @@ pub struct StreamingVectoredReadPlanner {
     read_builder: Option<VectoredReadBuilder>,
     // Arguments for previous blob passed into [`StreamingVectoredReadPlanner::handle`]
     prev: Option<(Key, Lsn, u64)>,
-    /// Max read size per batch
+    /// Max read size per batch. This is not a strict limit. If there are [0, 100) and [100, 200), while the `max_read_size` is 150,
+    /// we will produce a single batch instead of split them.
     max_read_size: u64,
     /// Max item count per batch
     max_cnt: usize,
@@ -386,9 +402,6 @@ impl StreamingVectoredReadPlanner {
         Self {
             read_builder: None,
             prev: None,
-            // We want to have exactly one read syscall (plus several others for index lookup) for each `next_batch` call.
-            // Therefore, we enforce `self.max_read_size` by ourselves instead of using the VectoredReadPlanner's capability,
-            // to avoid splitting into two I/Os.
             max_cnt,
             max_read_size,
             cnt: 0,
@@ -406,7 +419,7 @@ impl StreamingVectoredReadPlanner {
             Some(prev) => prev,
         };
 
-        let res = self.add_blob(prev_key, prev_lsn, prev_offset, offset);
+        let res = self.add_blob(prev_key, prev_lsn, prev_offset, offset, false);
 
         self.prev = Some((key, lsn, offset));
 
@@ -415,7 +428,7 @@ impl StreamingVectoredReadPlanner {
 
     pub fn handle_range_end(&mut self, offset: u64) -> Option<VectoredRead> {
         let res = if let Some((prev_key, prev_lsn, prev_offset)) = self.prev {
-            self.add_blob(prev_key, prev_lsn, prev_offset, offset)
+            self.add_blob(prev_key, prev_lsn, prev_offset, offset, true)
         } else {
             None
         };
@@ -431,24 +444,30 @@ impl StreamingVectoredReadPlanner {
         lsn: Lsn,
         start_offset: u64,
         end_offset: u64,
+        is_last_batch: bool,
     ) -> Option<VectoredRead> {
-        let extended = match &mut self.read_builder {
+        match &mut self.read_builder {
             Some(read_builder) => {
-                read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn })
+                read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn });
             }
-            None => VectoredReadExtended::No,
-        };
-        if extended == VectoredReadExtended::No {
-            let next_read_builder = VectoredReadBuilder::new(
-                start_offset,
-                end_offset,
-                BlobMeta { key, lsn },
-                self.max_read_size as usize,
-            );
+            None => {
+                self.read_builder = Some(VectoredReadBuilder::new_with_controlled_limit(
+                    start_offset,
+                    end_offset,
+                    BlobMeta { key, lsn },
+                ));
+            }
+        }
+        let read_builder = self.read_builder.as_mut().unwrap();
+        self.cnt += 1;
+        if is_last_batch
+            || read_builder.size() >= self.max_read_size as usize
+            || self.cnt >= self.max_cnt
+        {
+            let prev_read_builder = self.read_builder.take();
+            self.cnt = 0;
 
-            let prev_read_builder = self.read_builder.replace(next_read_builder);
-
-            // `current_read_builder` is None in the first iteration of the outer loop
+            // `current_read_builder` is None in the first iteration
             if let Some(read_builder) = prev_read_builder {
                 return Some(read_builder.build());
             }
@@ -510,7 +529,10 @@ mod tests {
         planner.handle_range_end(652 * 1024);
 
         let reads = planner.finish();
+
         assert_eq!(reads.len(), 6);
+
+        // TODO: should we produce 5 reads instead? Currently, the last read has the same start=end=652*1024, a zero-sized read.
 
         for (idx, read) in reads.iter().enumerate() {
             validate_read(read, ranges[idx]);
@@ -547,6 +569,129 @@ mod tests {
 
         for (idx, read) in reads.iter().enumerate() {
             validate_read(read, ranges[idx]);
+        }
+    }
+
+    #[test]
+    fn streaming_planner_max_read_size_test() {
+        let max_read_size = 128 * 1024;
+        let key = Key::MIN;
+        let lsn = Lsn(0);
+
+        let blob_descriptions = vec![
+            (key, lsn, 0, BlobFlag::None),
+            (key, lsn, 32 * 1024, BlobFlag::None),
+            (key, lsn, 96 * 1024, BlobFlag::None),
+            (key, lsn, 128 * 1024, BlobFlag::None),
+            (key, lsn, 198 * 1024, BlobFlag::None),
+            (key, lsn, 268 * 1024, BlobFlag::None),
+            (key, lsn, 396 * 1024, BlobFlag::None),
+            (key, lsn, 652 * 1024, BlobFlag::None),
+        ];
+
+        let ranges = [
+            &blob_descriptions[0..3],
+            &blob_descriptions[3..5],
+            &blob_descriptions[5..6],
+            &blob_descriptions[6..7],
+            &blob_descriptions[7..],
+        ];
+
+        let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1000);
+        let mut reads = Vec::new();
+        for (key, lsn, offset, _) in blob_descriptions.clone() {
+            reads.extend(planner.handle(key, lsn, offset));
+        }
+        reads.extend(planner.handle_range_end(652 * 1024));
+
+        assert_eq!(reads.len(), ranges.len());
+
+        for (idx, read) in reads.iter().enumerate() {
+            validate_read(read, ranges[idx]);
+        }
+    }
+
+    #[test]
+    fn streaming_planner_max_cnt_test() {
+        let max_read_size = 1024 * 1024;
+        let key = Key::MIN;
+        let lsn = Lsn(0);
+
+        let blob_descriptions = vec![
+            (key, lsn, 0, BlobFlag::None),
+            (key, lsn, 32 * 1024, BlobFlag::None),
+            (key, lsn, 96 * 1024, BlobFlag::None),
+            (key, lsn, 128 * 1024, BlobFlag::None),
+            (key, lsn, 198 * 1024, BlobFlag::None),
+            (key, lsn, 268 * 1024, BlobFlag::None),
+            (key, lsn, 396 * 1024, BlobFlag::None),
+            (key, lsn, 652 * 1024, BlobFlag::None),
+        ];
+
+        let ranges = [
+            &blob_descriptions[0..2],
+            &blob_descriptions[2..4],
+            &blob_descriptions[4..6],
+            &blob_descriptions[6..],
+        ];
+
+        let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 2);
+        let mut reads = Vec::new();
+        for (key, lsn, offset, _) in blob_descriptions.clone() {
+            reads.extend(planner.handle(key, lsn, offset));
+        }
+        reads.extend(planner.handle_range_end(652 * 1024));
+
+        assert_eq!(reads.len(), ranges.len());
+
+        for (idx, read) in reads.iter().enumerate() {
+            validate_read(read, ranges[idx]);
+        }
+    }
+
+    #[test]
+    fn streaming_planner_edge_test() {
+        let max_read_size = 1024 * 1024;
+        let key = Key::MIN;
+        let lsn = Lsn(0);
+        {
+            let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1);
+            let mut reads = Vec::new();
+            reads.extend(planner.handle_range_end(652 * 1024));
+            assert!(reads.is_empty());
+        }
+        {
+            let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1);
+            let mut reads = Vec::new();
+            reads.extend(planner.handle(key, lsn, 0));
+            reads.extend(planner.handle_range_end(652 * 1024));
+            assert_eq!(reads.len(), 1);
+            validate_read(&reads[0], &[(key, lsn, 0, BlobFlag::None)]);
+        }
+        {
+            let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 1);
+            let mut reads = Vec::new();
+            reads.extend(planner.handle(key, lsn, 0));
+            reads.extend(planner.handle(key, lsn, 128 * 1024));
+            reads.extend(planner.handle_range_end(652 * 1024));
+            assert_eq!(reads.len(), 2);
+            validate_read(&reads[0], &[(key, lsn, 0, BlobFlag::None)]);
+            validate_read(&reads[1], &[(key, lsn, 128 * 1024, BlobFlag::None)]);
+        }
+        {
+            let mut planner = StreamingVectoredReadPlanner::new(max_read_size, 2);
+            let mut reads = Vec::new();
+            reads.extend(planner.handle(key, lsn, 0));
+            reads.extend(planner.handle(key, lsn, 128 * 1024));
+            reads.extend(planner.handle_range_end(652 * 1024));
+            assert_eq!(reads.len(), 1);
+            validate_read(
+                &reads[0],
+                &[
+                    (key, lsn, 0, BlobFlag::None),
+                    (key, lsn, 128 * 1024, BlobFlag::None),
+                ],
+            );
         }
     }
 }
