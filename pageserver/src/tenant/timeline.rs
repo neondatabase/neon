@@ -365,6 +365,7 @@ pub struct Timeline {
     repartition_threshold: u64,
 
     last_image_layer_creation_check_at: AtomicLsn,
+    last_image_layer_creation_check_instant: std::sync::Mutex<Option<Instant>>,
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
@@ -2384,6 +2385,7 @@ impl Timeline {
                 )),
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
+                last_image_layer_creation_check_instant: Mutex::new(None),
 
                 last_received_wal: Mutex::new(None),
                 rel_size_cache: RwLock::new(RelSizeCache {
@@ -4494,14 +4496,30 @@ impl Timeline {
             let min_distance = self.get_image_layer_creation_check_threshold() as u64
                 * self.get_checkpoint_distance();
 
-            // Skip the expensive delta layer counting if this timeline has not ingested sufficient
-            // WAL since the last check.
-            distance.0 >= min_distance
-        };
+            let distance_based_decision = distance.0 >= min_distance;
 
-        if check_for_image_layers {
-            self.last_image_layer_creation_check_at.store(lsn);
-        }
+            let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
+            let time_based_decision = match *last_check_instant {
+                Some(last_check) => {
+                    let elapsed = last_check.elapsed();
+                    elapsed > self.get_checkpoint_timeout()
+                }
+                None => true,
+            };
+
+            // Do the expensive delta layer counting only if this timeline has ingested sufficient
+            // WAL since the last check or a checkpoint timeout interval has elapsed since the last
+            // check.
+            let decision = distance_based_decision || time_based_decision;
+
+
+            if decision {
+                self.last_image_layer_creation_check_at.store(lsn);
+                *last_check_instant = Some(Instant::now());
+            }
+
+            decision
+        };
 
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
