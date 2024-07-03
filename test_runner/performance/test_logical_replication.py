@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import time
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import AuxFileStore, NeonEnv, PgBin, logical_replication_sync
+from fixtures.neon_fixtures import AuxFileStore, logical_replication_sync
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv, PgBin
 
 
 @pytest.mark.parametrize("pageserver_aux_file_policy", [AuxFileStore.V2])
