@@ -10,6 +10,7 @@ from fixtures.neon_fixtures import (
     Endpoint,
     NeonEnv,
     NeonEnvBuilder,
+    flush_ep_to_pageserver,
     wait_for_last_flush_lsn,
     wait_for_wal_insert_lsn,
 )
@@ -785,10 +786,10 @@ def insert_with_action(
                 "CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
             )
 
-            # Avoid flakiness when calculating logical size.
-            cur.execute("CHECKPOINT")
-
         last_flush_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
+
+        # Avoid flakiness when calculating logical size.
+        flush_ep_to_pageserver(env, ep, tenant, timeline)
 
         size_after_action_and_insert = client.tenant_size(tenant)
         log.info(f"{size_after_action_and_insert=}")

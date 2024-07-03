@@ -745,7 +745,8 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/2210CD0",
       "pitr_cutoff": "0/2210CD0",
       "next_gc_cutoff": "0/2210CD0",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     },
     {
       "timeline_id": "454626700469f0a9914949b9d018e876",
@@ -755,7 +756,8 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/1817770",
       "pitr_cutoff": "0/1817770",
       "next_gc_cutoff": "0/1817770",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     },
     {
       "timeline_id": "cb5e3cbe60a4afc00d01880e1a37047f",
@@ -765,7 +767,8 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/18B3D98",
       "pitr_cutoff": "0/18B3D98",
       "next_gc_cutoff": "0/18B3D98",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     }
   ]
 }
@@ -820,7 +823,8 @@ fn verify_size_for_one_branch() {
       "horizon_cutoff": "47/240A5860",
       "pitr_cutoff": "47/240A5860",
       "next_gc_cutoff": "47/240A5860",
-      "retention_param_cutoff": "0/0"
+      "retention_param_cutoff": "0/0",
+      "lease_points": []
     }
   ]
 }"#;
