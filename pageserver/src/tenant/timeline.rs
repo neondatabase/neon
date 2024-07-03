@@ -4498,11 +4498,12 @@ impl Timeline {
 
             let distance_based_decision = distance.0 >= min_distance;
 
-            let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
+            let mut last_check_instant =
+                self.last_image_layer_creation_check_instant.lock().unwrap();
             let time_based_decision = match *last_check_instant {
                 Some(last_check) => {
                     let elapsed = last_check.elapsed();
-                    elapsed > self.get_checkpoint_timeout()
+                    elapsed >= self.get_checkpoint_timeout()
                 }
                 None => true,
             };
@@ -4511,7 +4512,6 @@ impl Timeline {
             // WAL since the last check or a checkpoint timeout interval has elapsed since the last
             // check.
             let decision = distance_based_decision || time_based_decision;
-
 
             if decision {
                 self.last_image_layer_creation_check_at.store(lsn);
