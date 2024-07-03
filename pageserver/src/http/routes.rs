@@ -43,7 +43,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
-use tenant_size_model::{SizeResult, StorageModel};
+use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
@@ -68,7 +68,6 @@ use crate::tenant::remote_timeline_client::download_index_part;
 use crate::tenant::remote_timeline_client::list_remote_tenant_shards;
 use crate::tenant::remote_timeline_client::list_remote_timelines;
 use crate::tenant::secondary::SecondaryController;
-use crate::tenant::size::LsnKind;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
@@ -1193,13 +1192,13 @@ fn synthetic_size_html_response(
         timeline_map.insert(ti.timeline_id, index);
         timeline_ids.push(ti.timeline_id.to_string());
     }
-    let seg_to_branch: Vec<(usize, bool)> = inputs
+    let seg_to_branch: Vec<(usize, SvgBranchKind)> = inputs
         .segments
         .iter()
         .map(|seg| {
             (
                 *timeline_map.get(&seg.timeline_id).unwrap(),
-                seg.kind == LsnKind::LeasePoint,
+                seg.kind.into(),
             )
         })
         .collect();

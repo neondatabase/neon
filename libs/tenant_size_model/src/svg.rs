@@ -3,16 +3,23 @@ use std::fmt::Write;
 
 const SVG_WIDTH: f32 = 500.0;
 
+/// Different branch kind for SVG drawing.
+#[derive(PartialEq)]
+pub enum SvgBranchKind {
+    Timeline,
+    Lease,
+}
+
 struct SvgDraw<'a> {
     storage: &'a StorageModel,
     branches: &'a [String],
-    seg_to_branch: &'a [(usize, bool)],
+    seg_to_branch: &'a [(usize, SvgBranchKind)],
     sizes: &'a [SegmentSizeResult],
 
     // layout
     xscale: f32,
     min_lsn: u64,
-    seg_coordinates: Vec<(f32, f32, bool)>,
+    seg_coordinates: Vec<(f32, f32)>,
 }
 
 fn draw_legend(result: &mut String) -> anyhow::Result<()> {
@@ -53,7 +60,7 @@ fn draw_legend(result: &mut String) -> anyhow::Result<()> {
 pub fn draw_svg(
     storage: &StorageModel,
     branches: &[String],
-    seg_to_branch: &[(usize, bool)],
+    seg_to_branch: &[(usize, SvgBranchKind)],
     sizes: &SizeResult,
 ) -> anyhow::Result<String> {
     let mut draw = SvgDraw {
@@ -114,10 +121,10 @@ impl<'a> SvgDraw<'a> {
 
         // Calculate coordinates for each point
         let seg_coordinates = std::iter::zip(segments, self.seg_to_branch)
-            .map(|(seg, (branch_id, is_lease_point))| {
+            .map(|(seg, (branch_id, _))| {
                 let x = (seg.lsn - min_lsn) as f32 / xscale;
                 let y = branch_y_coordinates[*branch_id];
-                (x, y, *is_lease_point)
+                (x, y)
             })
             .collect();
 
@@ -145,8 +152,8 @@ impl<'a> SvgDraw<'a> {
             SegmentMethod::Skipped => "stroke-width=\"1\" stroke=\"gray\"",
         };
         if let Some(parent_id) = seg.parent {
-            let (x1, y1, _) = self.seg_coordinates[parent_id];
-            let (x2, y2, _) = self.seg_coordinates[seg_id];
+            let (x1, y1) = self.seg_coordinates[parent_id];
+            let (x2, y2) = self.seg_coordinates[seg_id];
 
             writeln!(
                 result,
@@ -159,7 +166,7 @@ impl<'a> SvgDraw<'a> {
             writeln!(result, "</line>")?;
         } else {
             // draw a little dash to mark the starting point of this branch
-            let (x, y, _) = self.seg_coordinates[seg_id];
+            let (x, y) = self.seg_coordinates[seg_id];
             let (x1, y1) = (x, y - 5.0);
             let (x2, y2) = (x, y + 5.0);
 
@@ -179,9 +186,10 @@ impl<'a> SvgDraw<'a> {
         let seg = &self.storage.segments[seg_id];
 
         // draw a snapshot point if it's needed
-        let (coord_x, coord_y, is_lease_point) = self.seg_coordinates[seg_id];
+        let (coord_x, coord_y) = self.seg_coordinates[seg_id];
 
-        if is_lease_point {
+        let (_, kind) = &self.seg_to_branch[seg_id];
+        if kind == &SvgBranchKind::Lease {
             let (x1, y1) = (coord_x, coord_y - 10.0);
             let (x2, y2) = (coord_x, coord_y + 10.0);
 
