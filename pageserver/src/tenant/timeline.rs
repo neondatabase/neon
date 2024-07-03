@@ -463,6 +463,9 @@ pub(crate) struct GcInfo {
 
     /// Leases granted to particular LSNs.
     pub(crate) leases: BTreeMap<Lsn, LsnLease>,
+
+    /// Whether our branch point is within our ancestor's PITR interval (for cost estimation)
+    pub(crate) within_ancestor_pitr: bool,
 }
 
 impl GcInfo {
@@ -849,6 +852,18 @@ impl Timeline {
         self.ancestor_timeline
             .as_ref()
             .map(|ancestor| ancestor.timeline_id)
+    }
+
+    /// Get the bytes written since the PITR cutoff on this branch, and
+    /// whether this branch's ancestor_lsn is within its parent's PITR.
+    pub(crate) fn get_pitr_history_stats(&self) -> (u64, bool) {
+        let gc_info = self.gc_info.read().unwrap();
+        let history = self
+            .get_last_record_lsn()
+            .checked_sub(gc_info.cutoffs.pitr)
+            .unwrap_or(Lsn(0))
+            .0;
+        (history, gc_info.within_ancestor_pitr)
     }
 
     /// Lock and get timeline's GC cutoff

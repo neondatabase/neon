@@ -661,6 +661,16 @@ pub struct TimelineInfo {
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
 
+    /// How many bytes of WAL are within this branch's pitr_interval.  If the pitr_interval goes
+    /// beyond the branch's branch point, we only count up to the branch point.
+    pub pitr_history_size: u64,
+
+    /// Whether this branch's branch point is within its ancestor's PITR interval (i.e. any
+    /// ancestor data used by this branch would have been retained anyway).  If this is false, then
+    /// this branch may be imposing a cost on the ancestor by causing it to retain layers that it would
+    /// otherwise be able to GC.
+    pub within_ancestor_pitr: bool,
+
     pub timeline_dir_layer_file_size_sum: Option<u64>,
 
     pub wal_source_connstr: Option<String>,
