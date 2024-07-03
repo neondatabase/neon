@@ -121,13 +121,13 @@ of:
 There are two storage format changes:
 1. `index_part.json` gets a new attribute `state` that describes whether the timeline is to
    be considered active or archived.
-2. A new tenant-level _offload manifest_ object `offload-v1.json` describes which timelines a tenant does not need to load
-   at startup.
+2. A new tenant-level _manifest_ object `tenant_manifest-v1.json` describes which timelines a tenant does not need to load
+   at startup (and is available for storing other small, rarely changing tenant-wide attributes in future)
 
-The offload file will have a format like this:
+The manifest object will have a format like this:
 ```
 {
-  "timelines": [
+  "offload_timelines": [
     {
       "timeline_id": ...
       "last_record_lsn": ...
@@ -150,7 +150,7 @@ The information about a timeline in its offload state is intentionally minimal: 
 - Whether requests to delete this `timeline_id` should be accepted (i.e. presence of the timeline_id)
 - How much archived space to report in consumption metrics
 
-The contents of the offload manifest will also be stored as an attribute of `Tenant`, such that the total
+The contents of the manifest's offload list will also be stored as an attribute of `Tenant`, such that the total
 set of timelines may be found by the union of `Tenant::timelines` (non-offloaded timelines) and `Tenant::offloaded`
 (offloaded timelines).
 
@@ -221,7 +221,7 @@ Offloading a timeline is simple:
 - Read the timeline's attributes that we will store in its offloaded state (especially its logical size)
 - Call `shutdown()` on the timeline and remove it from the `Tenant` (as if we were about to delete it)
 - Erase all the timeline's content from local storage (`remove_dir_all` on its path)
-- Write the offload manifest to prevent this timeline being loaded on next start.
+- Write the tenant manifest to S3 to prevent this timeline being loaded on next start.
 
 ### Background storage optimization
 
@@ -250,7 +250,7 @@ variant of `MetricsKey`: receivers are then free to bill on this metric as they 
 
 ## FAQ/Alternatives
 
-### Store all timelines in a JSON manifest
+### Store all timelines in the tenant manifest
 
 Rather than special-casing offloaded timelines in the offload manifest, we could store a total
 manifest of all timelines, eliminating the need for the pageserver to list timelines in S3 on
@@ -261,7 +261,6 @@ generate much more I/O to this manifest for tenants that had many branches _and_
 create/delete cycles for short lived branches.  Restricting the manifest to offloaded timelines
 means that we only have to cope with the rate at which long-lived timelines are archived, rather
 than the rate at which sort lived timelines are created & destroyed.
-
 
 ### Automatically archiving/activating timelines without external API calls
 
