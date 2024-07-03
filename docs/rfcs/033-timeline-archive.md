@@ -197,7 +197,7 @@ to delete an offloaded timeline.
 
 This API will be similar to the existing `download_remote_layers` API, but smarter:
 - It will not download _all_ remote layers, just the visible set (i.e. layers needed for a read)
-- It will download layers until reaching `wait_ms`, then return a struct describing progress
+- It will download layers in the visible set until reaching `wait_ms`, then return a struct describing progress
   of downloads, so that the caller can poll.
 
 The caller does not have to wait for the warm up API, or call it at all.  But it is strongly advised
@@ -246,6 +246,21 @@ Archived and offloaded timelines will be excluded from the synthetic size calcul
 
 Archived and offloaded timelines' logical size will be reported under the existing `timeline_logical_size`
 variant of `MetricsKey`: receivers are then free to bill on this metric as they please.
+
+### Secondary locations
+
+Archived timelines (including offloaded timelines) will be excluded from heatmaps, and thereby
+when a timeline is archived, after the next cycle of heatmap upload & secondary download, its contents
+will be dropped from secondary locations.
+
+### Sharding
+
+Archiving or activating a timeline will be done symmetrically across all shards in a tenant, in
+the same way that timeline creation and deletion is done.  There are no special rules about ordering:
+the storage controller may dispatch concurrent calls to all shards when archiving or activating a timeline.
+
+Since consumption metrics are only transmitted from shard zero, the state of archival on this shard
+will be authoritative for consumption metrics.
 
 
 ## FAQ/Alternatives
