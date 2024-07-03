@@ -211,11 +211,17 @@ impl GlobalTimelines {
                 let tli = Arc::new(timeline);
 
                 // TODO: prevent concurrent timeline creation/loading
-                TIMELINES_STATE
-                    .lock()
-                    .unwrap()
-                    .timelines
-                    .insert(ttid, tli.clone());
+                {
+                    let mut state = TIMELINES_STATE.lock().unwrap();
+
+                    // We may be have been asked to load a timeline that was previously deleted (e.g. from `pull_timeline.rs`).  We trust
+                    // that the human doing this manual intervention knows what they are doing, and remove its tombstone.
+                    if state.tombstones.remove(&ttid).is_some() {
+                        warn!("Un-deleted timeline {ttid}");
+                    }
+
+                    state.timelines.insert(ttid, tli.clone());
+                }
 
                 tli.bootstrap(&conf, broker_active_set, partial_backup_rate_limiter);
 
