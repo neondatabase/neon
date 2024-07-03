@@ -51,6 +51,8 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
+        tracing::info!("Compacting with flags {flags:?}");
+
         if flags.contains(CompactFlags::EnhancedGcBottomMostCompaction) {
             return self.compact_with_gc(cancel, ctx).await;
         }

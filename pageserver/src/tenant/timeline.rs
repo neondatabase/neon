@@ -688,7 +688,7 @@ pub enum GetLogicalSizePriority {
     Background,
 }
 
-#[derive(enumset::EnumSetType)]
+#[derive(enumset::EnumSetType, Debug)]
 pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
@@ -4480,7 +4480,10 @@ impl Timeline {
             self.last_image_layer_creation_check_at.store(lsn);
         }
 
+        tracing::info!("Compacting image layers at lsn {lsn} with creation mode {mode:?} check_for_image_layers={check_for_image_layers}");
+
         for partition in partitioning.parts.iter() {
+            tracing::info!("Looking at partition {partition}");
             let img_range = start..partition.ranges.last().unwrap().end;
             let compact_metadata = partition.overlaps(&Key::metadata_key_range());
             if compact_metadata {
@@ -4503,7 +4506,9 @@ impl Timeline {
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
-                if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
+                let time_for_new_image_layer = self.time_for_new_image_layer(partition, lsn).await;
+                if !check_for_image_layers || time_for_new_image_layer {
+                    tracing::info!("Skipping image layer creation check_for_image_layers={check_for_image_layers} time_for_new_image_layer={time_for_new_image_layer}");
                     start = img_range.end;
                     continue;
                 }
