@@ -725,12 +725,13 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=conf)
-    lease_res = insert_and_acquire_lease(
+
+    ro_branch_res = insert_and_create_ro_branch(
         env, env.initial_tenant, env.initial_timeline, test_output_dir
     )
 
     tenant, timeline = env.neon_cli.create_tenant(conf=conf)
-    ro_branch_res = insert_and_create_ro_branch(env, tenant, timeline, test_output_dir)
+    lease_res = insert_and_acquire_lease(env, tenant, timeline, test_output_dir)
 
     for lhs, rhs in zip(lease_res, ro_branch_res):
         assert_size_approx_equal(lhs, rhs)
