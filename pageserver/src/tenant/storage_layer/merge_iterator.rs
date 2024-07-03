@@ -51,9 +51,30 @@ enum IteratorWrapper<'a> {
         layer: LayerRef<'a>,
     },
     Loaded {
-        peeked: Option<(Key, Lsn, Value)>, // None == end
-        iter: LayerIterRef<'a>,
+        iter: PeekableLayerIterRef<'a>,
     },
+}
+
+struct PeekableLayerIterRef<'a> {
+    iter: LayerIterRef<'a>,
+    peeked: Option<(Key, Lsn, Value)>, // None == end
+}
+
+impl<'a> PeekableLayerIterRef<'a> {
+    async fn create(mut iter: LayerIterRef<'a>) -> anyhow::Result<Self> {
+        let peeked = iter.next().await?;
+        Ok(Self { iter, peeked })
+    }
+
+    fn peek(&self) -> &Option<(Key, Lsn, Value)> {
+        &self.peeked
+    }
+
+    async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+        let result = self.peeked.take();
+        self.peeked = self.iter.next().await?;
+        Ok(result)
+    }
 }
 
 impl<'a> std::cmp::PartialEq for IteratorWrapper<'a> {
@@ -116,11 +137,7 @@ impl<'a> IteratorWrapper<'a> {
 
     fn peek_next_key_lsn(&self) -> Option<(&Key, Lsn)> {
         match self {
-            Self::Loaded {
-                peeked: Some((key, lsn, _)),
-                ..
-            } => Some((key, *lsn)),
-            Self::Loaded { peeked: None, .. } => None,
+            Self::Loaded { iter } => iter.peek().as_ref().map(|(key, lsn, _)| (key, *lsn)),
             Self::NotLoaded {
                 first_key_lower_bound: (key, lsn),
                 ..
@@ -145,13 +162,13 @@ impl<'a> IteratorWrapper<'a> {
         else {
             unreachable!()
         };
-        let mut iter = layer.iter(ctx);
-        let peeked = iter.next().await?;
-        if let Some((k1, l1, _)) = &peeked {
+        let iter = layer.iter(ctx);
+        let iter = PeekableLayerIterRef::create(iter).await?;
+        if let Some((k1, l1, _)) = iter.peek() {
             let (k2, l2) = first_key_lower_bound;
             debug_assert!((k1, l1) >= (k2, l2));
         }
-        *self = Self::Loaded { peeked, iter };
+        *self = Self::Loaded { iter };
         Ok(())
     }
 
@@ -165,12 +182,10 @@ impl<'a> IteratorWrapper<'a> {
     /// The public interfaces to use are [`crate::tenant::storage_layer::delta_layer::DeltaLayerIterator`] and
     /// [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`].
     async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
-        let Self::Loaded { peeked, iter } = self else {
+        let Self::Loaded { iter } = self else {
             panic!("must load the iterator before using")
         };
-        let result = peeked.take();
-        *peeked = iter.next().await?;
-        Ok(result)
+        iter.next().await
     }
 }
 
