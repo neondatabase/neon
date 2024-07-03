@@ -1447,7 +1447,6 @@ pub(crate) enum ComputeCommandKind {
     PageStreamV2,
     PageStream,
     Basebackup,
-    GetLastRecordRlsn,
     Fullbackup,
     ImportBasebackup,
     ImportWal,
