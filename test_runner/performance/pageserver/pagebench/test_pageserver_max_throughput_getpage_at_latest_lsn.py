@@ -20,95 +20,12 @@ from performance.pageserver.util import (
 
 
 # For reference, the space usage of the snapshots:
-# admin@ip-172-31-13-23:[~/neon-main]: sudo du -hs /instance_store/test_output/shared-snapshots
-# 137G    /instance_store/test_output/shared-snapshots
-# admin@ip-172-31-13-23:[~/neon-main]: sudo du -hs /instance_store/test_output/shared-snapshots/*
-# 1.8G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-1-13
-# 1.1G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-1-6
-# 8.5G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-10-13
-# 5.1G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-10-6
-# 76G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-13
-# 46G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-6
-@pytest.mark.parametrize("duration", [30])
-@pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(s) for s in [100, 200]])
-@pytest.mark.parametrize("n_tenants", [1, 10])
-@pytest.mark.timeout(
-    10000
-)  # TODO: this value is just "a really high number"; have this per instance type
-def test_pageserver_max_throughput_getpage_at_latest_lsn(
-    neon_env_builder: NeonEnvBuilder,
-    zenbenchmark: NeonBenchmarker,
-    pg_bin: PgBin,
-    n_tenants: int,
-    pgbench_scale: int,
-    duration: int,
-):
-    def record(metric, **kwargs):
-        zenbenchmark.record(
-            metric_name=f"pageserver_max_throughput_getpage_at_latest_lsn.{metric}", **kwargs
-        )
-
-    params: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
-
-    # params from fixtures
-    params.update(
-        {
-            "n_tenants": (n_tenants, {"unit": ""}),
-            "pgbench_scale": (pgbench_scale, {"unit": ""}),
-            "duration": (duration, {"unit": "s"}),
-        }
-    )
-
-    # configure cache sizes like in prod
-    page_cache_size = 16384
-    max_file_descriptors = 500000
-    neon_env_builder.pageserver_config_override = (
-        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
-    )
-    params.update(
-        {
-            "pageserver_config_override.page_cache_size": (
-                page_cache_size * 8192,
-                {"unit": "byte"},
-            ),
-            "pageserver_config_override.max_file_descriptors": (max_file_descriptors, {"unit": ""}),
-        }
-    )
-
-    for param, (value, kwargs) in params.items():
-        record(param, metric_value=value, report=MetricReport.TEST_PARAM, **kwargs)
-
-    def setup_wrapper(env: NeonEnv):
-        return setup_tenant_template(env, pg_bin, pgbench_scale)
-
-    env = setup_pageserver_with_tenants(
-        neon_env_builder,
-        f"max_throughput_latest_lsn-{n_tenants}-{pgbench_scale}",
-        n_tenants,
-        setup_wrapper,
-        # https://github.com/neondatabase/neon/issues/8070
-        timeout_in_seconds=60,
-    )
-
-    env.pageserver.allowed_errors.append(
-        # https://github.com/neondatabase/neon/issues/6925
-        # https://github.com/neondatabase/neon/issues/6390
-        # https://github.com/neondatabase/neon/issues/6724
-        r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
-    )
-
-    run_benchmark_max_throughput_latest_lsn(env, pg_bin, record, duration)
-
-
-# For reference, the space usage of the snapshots:
 # sudo du -hs /instance_store/neon/test_output/shared-snapshots/*
 # 416G	/instance_store/neon/test_output/shared-snapshots/max_throughput_latest_lsn-500-13
 @pytest.mark.parametrize("duration", [60 * 60])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
 @pytest.mark.parametrize("n_tenants", [500])
-@pytest.mark.timeout(
-    10000
-)  # TODO: this value is just "a really high number"; have this per instance type
+@pytest.mark.timeout(10000)
 @pytest.mark.skipif(
     os.getenv("CI", "false") == "true",
     reason="This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI",
@@ -121,61 +38,9 @@ def test_pageserver_characterize_throughput_with_n_tenants(
     pgbench_scale: int,
     duration: int,
 ):
-    def record(metric, **kwargs):
-        zenbenchmark.record(
-            metric_name=f"pageserver_max_throughput_getpage_at_latest_lsn.{metric}", **kwargs
-        )
-
-    params: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
-
-    # params from fixtures
-    params.update(
-        {
-            "n_tenants": (n_tenants, {"unit": ""}),
-            "pgbench_scale": (pgbench_scale, {"unit": ""}),
-            "duration": (duration, {"unit": "s"}),
-        }
+    setup_and_run_benchmark_max_throughput_latest_lsn(
+        neon_env_builder, zenbenchmark, pg_bin, n_tenants, pgbench_scale, duration, 1
     )
-
-    # configure cache sizes like in prod
-    page_cache_size = 16384
-    max_file_descriptors = 500000
-    neon_env_builder.pageserver_config_override = (
-        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
-    )
-    params.update(
-        {
-            "pageserver_config_override.page_cache_size": (
-                page_cache_size * 8192,
-                {"unit": "byte"},
-            ),
-            "pageserver_config_override.max_file_descriptors": (max_file_descriptors, {"unit": ""}),
-        }
-    )
-
-    for param, (value, kwargs) in params.items():
-        record(param, metric_value=value, report=MetricReport.TEST_PARAM, **kwargs)
-
-    def setup_wrapper(env: NeonEnv):
-        return setup_tenant_template(env, pg_bin, pgbench_scale)
-
-    env = setup_pageserver_with_tenants(
-        neon_env_builder,
-        f"max_throughput_latest_lsn-{n_tenants}-{pgbench_scale}",
-        n_tenants,
-        setup_wrapper,
-        # https://github.com/neondatabase/neon/issues/8070
-        timeout_in_seconds=60,
-    )
-
-    env.pageserver.allowed_errors.append(
-        # https://github.com/neondatabase/neon/issues/6925
-        # https://github.com/neondatabase/neon/issues/6390
-        # https://github.com/neondatabase/neon/issues/6724
-        r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
-    )
-
-    run_benchmark_max_throughput_latest_lsn(env, pg_bin, record, duration)
 
 
 # For reference, the space usage of the snapshots:
@@ -188,14 +53,26 @@ def test_pageserver_characterize_throughput_with_n_tenants(
 # which by default uses 64 connections
 @pytest.mark.parametrize("n_clients", [1, 64])
 @pytest.mark.parametrize("n_tenants", [1])
-@pytest.mark.timeout(
-    10000
-)  # TODO: this value is just "a really high number"; have this per instance type
+@pytest.mark.timeout(2400)
 @pytest.mark.skipif(
     os.getenv("CI", "false") == "true",
     reason="This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI",
 )
 def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant(
+    neon_env_builder: NeonEnvBuilder,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    n_tenants: int,
+    pgbench_scale: int,
+    duration: int,
+    n_clients: int,
+):
+    setup_and_run_benchmark_max_throughput_latest_lsn(
+        neon_env_builder, zenbenchmark, pg_bin, n_tenants, pgbench_scale, duration, n_clients
+    )
+
+
+def setup_and_run_benchmark_max_throughput_latest_lsn(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
