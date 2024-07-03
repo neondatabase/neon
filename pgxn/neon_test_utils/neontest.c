@@ -77,6 +77,8 @@ _PG_init(void)
 
 /*
  * test_consume_oids(int4), for rapidly consuming OIDs, to test wraparound.
+ * Unlike test_consume_xids which is passed number of xids to be consumed,
+ * this function is given the target Oid.
  */
 Datum
 test_consume_oids(PG_FUNCTION_ARGS)
@@ -88,6 +90,9 @@ test_consume_oids(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+/*
+ * test_consume_xids(int4), for rapidly consuming XIDs, to test wraparound.
+ */
 Datum
 test_consume_xids(PG_FUNCTION_ARGS)
 {
