@@ -273,38 +273,34 @@ impl super::Api for Api {
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key = user_info.endpoint_cache_key();
 
+        macro_rules! check_cache {
+            () => {
+                if let Some(cached) = self.caches.node_info.get(&key) {
+                    let (cached, info) = cached.take_value();
+                    let info = info.map_err(|c| {
+                        info!(key = &*key, "found cached wake_compute error");
+                        WakeComputeError::ApiError(ApiError::Console(*c))
+                    })?;
+
+                    debug!(key = &*key, "found cached compute node info");
+                    ctx.set_project(info.aux.clone());
+                    return Ok(cached.map(|()| info));
+                }
+            };
+        }
+
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(&key) {
-            let (cached, info) = cached.take_value();
-            let info = info.map_err(|c| {
-                debug!(key = &*key, "found cached wake_compute error");
-                WakeComputeError::ApiError(ApiError::Console(*c))
-            })?;
-
-            debug!(key = &*key, "found cached compute node info");
-            ctx.set_project(info.aux.clone());
-            return Ok(cached.map(|()| info));
-        }
+        check_cache!();
 
         let permit = self.locks.get_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
-            if let Some(cached) = self.caches.node_info.get(&key) {
-                let (cached, info) = cached.take_value();
-                let info = info.map_err(|c| {
-                    info!(key = &*key, "found cached wake_compute error");
-                    WakeComputeError::ApiError(ApiError::Console(*c))
-                })?;
-
-                info!(key = &*key, "found cached compute node info");
-                ctx.set_project(info.aux.clone());
-                return Ok(cached.map(|()| info));
-            }
+            check_cache!();
         }
 
         // check rate limit
@@ -317,20 +313,15 @@ impl super::Api for Api {
 
         let node = permit.release_result(self.do_wake_compute(ctx, user_info).await);
         match node {
-            Ok(mut node) => {
+            Ok(node) => {
                 ctx.set_project(node.aux.clone());
-                let cold_start_info = node.aux.cold_start_info;
-                debug!("woken up a compute node");
+                debug!(key = &*key, "created a cache entry for woken compute node");
 
-                // store the cached node as 'warm'
-                node.aux.cold_start_info = ColdStartInfo::WarmCached;
-                let (_, cached) = self
-                    .caches
-                    .node_info
-                    .insert_unit(key.clone(), Ok(node.clone()));
-                node.aux.cold_start_info = cold_start_info;
+                let mut stored_node = node.clone();
+                // store the cached node as 'warm_cached'
+                stored_node.aux.cold_start_info = ColdStartInfo::WarmCached;
 
-                debug!(key = &*key, "created a cache entry for compute node info");
+                let (_, cached) = self.caches.node_info.insert_unit(key, Ok(stored_node));
 
                 Ok(cached.map(|()| node))
             }
