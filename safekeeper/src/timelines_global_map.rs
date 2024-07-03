@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::*;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
@@ -473,6 +473,18 @@ impl GlobalTimelines {
         // }
 
         Ok(deleted)
+    }
+
+    pub fn housekeeping(tombstone_ttl: &Duration) {
+        let mut state = TIMELINES_STATE.lock().unwrap();
+
+        // We keep tombstones long enough to have a good chance of preventing rogue computes from re-creating deleted
+        // timelines.  If a compute kept running for longer than this TTL (or across a safekeeper restart) then they
+        // may recreate a deleted timeline.
+        let now = Instant::now();
+        state
+            .tombstones
+            .retain(|_, v| now.duration_since(*v) < *tombstone_ttl);
     }
 }
 
