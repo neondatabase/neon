@@ -2890,14 +2890,14 @@ class PgBin:
                 env_s[k] = v
         log.debug(f"Environment: {env_s}")
 
-    def run(
+    def run_nonblocking(
         self,
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[Union[str, Path]] = None,
-    ):
+    ) -> subprocess.Popen[Any]:
         """
-        Run one of the postgres binaries.
+        Run one of the postgres binaries, not waiting for it to finish
 
         The command should be in list form, e.g. ['pgbench', '-p', '55432']
 
@@ -2908,12 +2908,34 @@ class PgBin:
 
         If you want stdout/stderr captured to files, use `run_capture` instead.
         """
-
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
         self._log_env(env)
-        subprocess.run(command, env=env, cwd=cwd, check=True)
+        return subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE, text=True)
+
+    def run(
+        self,
+        command: List[str],
+        env: Optional[Env] = None,
+        cwd: Optional[Union[str, Path]] = None,
+    ) -> None:
+        """
+        Run one of the postgres binaries, waiting for it to finish
+
+        The command should be in list form, e.g. ['pgbench', '-p', '55432']
+
+        All the necessary environment variables will be set.
+
+        If the first argument (the command name) doesn't include a path (no '/'
+        characters present), then it will be edited to include the correct path.
+
+        If you want stdout/stderr captured to files, use `run_capture` instead.
+        """
+        proc = self.run_nonblocking(command, env, cwd)
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
     def run_capture(
         self,
