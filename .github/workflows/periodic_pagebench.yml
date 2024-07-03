@@ -21,33 +21,33 @@ defaults:
   run:
     shell: bash -euo pipefail {0}
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   trigger_bench_on_ec2_machine_in_eu_central_1:
     runs-on: [ self-hosted, gen3, small ]
     container:
-        image: ubuntu:latest
-        options: --init
+      image: neondatabase/build-tools:pinned
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init
     timeout-minutes: 360  # Set the timeout to 6 hours
     env:
-        API_KEY: ${{ secrets.PERIODIC_PAGEBENCH_EC2_RUNNER_API_KEY }}
-        RUN_ID: ${{ github.run_id }}
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_EC2_US_TEST_RUNNER_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY : ${{ secrets.AWS_EC2_US_TEST_RUNNER_ACCESS_KEY_SECRET }}
-        AWS_DEFAULT_REGION : "eu-central-1"
-        AWS_INSTANCE_ID : "i-02a59a3bf86bc7e74"
+      API_KEY: ${{ secrets.PERIODIC_PAGEBENCH_EC2_RUNNER_API_KEY }}
+      RUN_ID: ${{ github.run_id }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_EC2_US_TEST_RUNNER_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY : ${{ secrets.AWS_EC2_US_TEST_RUNNER_ACCESS_KEY_SECRET }}
+      AWS_DEFAULT_REGION : "eu-central-1"
+      AWS_INSTANCE_ID : "i-02a59a3bf86bc7e74"
     steps:
     - name: Setup environment
       run: |
         apt-get update
         apt-get install -y curl unzip gzip jq 
-    - name: Install AWS CLI
-      run: |
-        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-        unzip awscliv2.zip
-        ./aws/install
-    - name: Check AWS CLI version
-      run: |
-        aws --version
+
     - name: Show my own (github runner) external IP address - usefull for IP allowlisting
       run: curl https://ifconfig.me
 
