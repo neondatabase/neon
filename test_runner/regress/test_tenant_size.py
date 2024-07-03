@@ -1,5 +1,6 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
 from pathlib import Path
 from typing import List, Tuple
 
@@ -726,21 +727,32 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
 
     env = neon_env_builder.init_start(initial_tenant_conf=conf)
 
-    ro_branch_res = insert_and_create_ro_branch(
-        env, env.initial_tenant, env.initial_timeline, test_output_dir
+    ro_branch_res = insert_with_action(
+        env, env.initial_tenant, env.initial_timeline, test_output_dir, action="branch"
     )
 
     tenant, timeline = env.neon_cli.create_tenant(conf=conf)
-    lease_res = insert_and_acquire_lease(env, tenant, timeline, test_output_dir)
+    lease_res = insert_with_action(env, tenant, timeline, test_output_dir, action="lease")
 
-    for lhs, rhs in zip(lease_res, ro_branch_res):
-        assert_size_approx_equal(lhs, rhs)
+    assert_size_approx_equal(lease_res, ro_branch_res)
 
 
-def insert_and_acquire_lease(
-    env: NeonEnv, tenant: TenantId, timeline: TimelineId, test_output_dir: Path
-) -> list[int]:
-    sizes = []
+def insert_with_action(
+    env: NeonEnv,
+    tenant: TenantId,
+    timeline: TimelineId,
+    test_output_dir: Path,
+    action: str,
+) -> int:
+    """
+    Inserts some data on the timeline, perform an action, and insert more data on the same timeline.
+    Returns the size at the end of the insertion.
+
+    Valid actions:
+     - "lease": Acquires a lease.
+     - "branch": Creates a child branch but never writes to it.
+    """
+
     client = env.pageserver.http_client()
     with env.endpoints.create_start("main", tenant_id=tenant) as ep:
         initial_size = client.tenant_size(tenant)
@@ -751,8 +763,17 @@ def insert_and_acquire_lease(
                 "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
             )
         last_flush_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
-        res = client.timeline_lsn_lease(tenant, timeline, last_flush_lsn)
-        log.info(f"result from lsn_lease api: {res}")
+
+        if action == "lease":
+            res = client.timeline_lsn_lease(tenant, timeline, last_flush_lsn)
+            log.info(f"result from lsn_lease api: {res}")
+        elif action == "branch":
+            ro_branch = env.neon_cli.create_branch(
+                "ro_branch", tenant_id=tenant, ancestor_start_lsn=last_flush_lsn
+            )
+            log.info(f"{ro_branch=} created")
+        else:
+            raise AssertionError("Invalid action type, only `lease` and `branch`are accepted")
 
         with ep.cursor() as cur:
             cur.execute(
@@ -765,59 +786,15 @@ def insert_and_acquire_lease(
                 "CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
             )
 
+            # Avoid flakiness when calculating logical size.
             cur.execute("CHECKPOINT")
 
         last_flush_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
 
-        size_after_lease_and_insert = client.tenant_size(tenant)
-        sizes.append(size_after_lease_and_insert)
-        log.info(f"size_after_lease_and_insert: {size_after_lease_and_insert}")
+        size_after_action_and_insert = client.tenant_size(tenant)
+        log.info(f"{size_after_action_and_insert=}")
 
-        size_debug_file = open(test_output_dir / "size_debug_lease.html", "w")
+        size_debug_file = open(test_output_dir / f"size_debug_{action}.html", "w")
         size_debug = client.tenant_size_debug(tenant)
         size_debug_file.write(size_debug)
-        return sizes
-
-
-def insert_and_create_ro_branch(
-    env: NeonEnv, tenant: TenantId, timeline: TimelineId, test_output_dir: Path
-) -> list[int]:
-    sizes = []
-    client = env.pageserver.http_client()
-    with env.endpoints.create_start("main", tenant_id=tenant) as ep:
-        initial_size = client.tenant_size(tenant)
-        log.info(f"initial size: {initial_size}")
-
-        with ep.cursor() as cur:
-            cur.execute(
-                "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
-            )
-        ancestor_start_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
-        ro_branch = env.neon_cli.create_branch(
-            "ro_branch", tenant_id=tenant, ancestor_start_lsn=ancestor_start_lsn
-        )
-        log.info(f"{ro_branch=}")
-
-        with ep.cursor() as cur:
-            cur.execute(
-                "CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
-            )
-            cur.execute(
-                "CREATE TABLE t2 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
-            )
-            cur.execute(
-                "CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
-            )
-
-            cur.execute("CHECKPOINT")
-
-        wait_for_last_flush_lsn(env, ep, tenant, timeline)
-
-        size_after_branching = client.tenant_size(tenant)
-        sizes.append(size_after_branching)
-        log.info(f"size_after_branching: {size_after_branching}")
-
-        size_debug_file = open(test_output_dir / "size_debug_ro_branch.html", "w")
-        size_debug = client.tenant_size_debug(tenant)
-        size_debug_file.write(size_debug)
-        return sizes
+        return size_after_action_and_insert
