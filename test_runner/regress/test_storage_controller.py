@@ -60,11 +60,6 @@ def test_storage_controller_smoke(
     neon_env_builder.num_pageservers = 3
     env = neon_env_builder.init_configs()
 
-    for pageserver in env.pageservers:
-        # This test detaches tenants during migration, which can race with deletion queue operations,
-        # during detach we only do an advisory flush, we don't wait for it.
-        pageserver.allowed_errors.extend([".*Dropped remote consistent LSN updates.*"])
-
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.try_start()
     env.storage_controller.start()
@@ -483,9 +478,6 @@ def test_storage_controller_compute_hook(
 
     # Start running
     env = neon_env_builder.init_start()
-
-    # We will to an unclean migration, which will result in deletion queue warnings
-    env.pageservers[0].allowed_errors.append(".*Dropped remote consistent LSN updates for tenant.*")
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
@@ -1054,13 +1046,6 @@ def test_storage_controller_heartbeats(
     online_node_ids = set(range(1, len(env.pageservers) + 1)) - offline_node_ids
 
     for node_id in offline_node_ids:
-        env.get_pageserver(node_id).allowed_errors.append(
-            # In the case of the failpoint failure, the impacted pageserver
-            # still believes it has the tenant attached since location
-            # config calls into it will fail due to being marked offline.
-            ".*Dropped remote consistent LSN updates.*",
-        )
-
         if len(offline_node_ids) > 1:
             env.get_pageserver(node_id).allowed_errors.append(
                 ".*Scheduling error when marking pageserver.*offline.*",
