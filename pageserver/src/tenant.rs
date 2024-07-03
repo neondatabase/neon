@@ -6576,7 +6576,11 @@ mod tests {
             key
         }
 
-        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        // We create
+        // - one bottom-most image layer,
+        // - a delta layer D1 crossing the GC horizon with data below and above the horizon,
+        // - a delta layer D2 crossing the GC horizon with data only below the horizon,
+        // - a delta layer D3 above the horizon.
         //
         //                             | D3 |
         //  | D1 |
@@ -6950,15 +6954,21 @@ mod tests {
             key
         }
 
-        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
-        //                                | D3 |
+        // We create
+        // - one bottom-most image layer,
+        // - a delta layer D1 crossing the GC horizon with data below and above the horizon,
+        // - a delta layer D2 crossing the GC horizon with data only below the horizon,
+        // - a delta layer D3 above the horizon.
+        //
+        //                             | D3 |
         //  | D1 |
         // -|    |-- gc horizon -----------------
         //  |    |                | D2 |
         // --------- img layer ------------------
         //
         // What we should expact from this compaction is:
-        //  | Part of D1 |               | D3 |
+        //                             | D3 |
+        //  | Part of D1 |
         // --------- img layer with D1+D2 at GC horizon------------------
 
         // img layer at 0x10
