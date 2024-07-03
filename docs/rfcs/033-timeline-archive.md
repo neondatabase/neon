@@ -244,7 +244,7 @@ Offloading a timeline is simple:
 - Erase all the timeline's content from local storage (`remove_dir_all` on its path)
 - Write the tenant manifest to S3 to prevent this timeline being loaded on next start.
 
-#### Archive branch optimization
+#### Archive branch optimization (flattening)
 
 When we offloaded a branch, it might have had some history that prevented rewriting it to a single
 point in time set of image layers.  For example, a branch might have several days of writes and a 7
@@ -255,6 +255,10 @@ Once the PITR has expired, we have an opportunity to reduce the physical footpri
   a point in time compared with delta layers
 - Updating the branch's offload metadata to indicate that this branch no longer depends on its ancestor
   for data, i.e. the ancestor is free to GC layers files at+below the branch point
+
+Fully compacting an archived branch into image layers at a single LSN may be thought of as *flattening* the
+branch, such that it is now a one-dimensional keyspace rather than a two-dimensional key/lsn space. It becomes
+a true snapshot at that LSN.
 
 Archive branch optimization should be done _before_ background offloads during compaction, because there may
 be timelines which are ready to be offloaded but also would benefit from the optimization step before
@@ -282,6 +286,108 @@ the storage controller may dispatch concurrent calls to all shards when archivin
 
 Since consumption metrics are only transmitted from shard zero, the state of archival on this shard
 will be authoritative for consumption metrics.
+
+## Optimizations
+
+### Delaying storage optimization if retaining parent layers is cheaper
+
+Optimizing archived branches to image layers and thereby enabling parent branch GC to progress
+is a safe default: archived branches cannot over-fill a pageserver's local disk, and once they
+are offloaded to S3 they're totally safe, inert things.
+
+However, in some cases it can be advantageous to retain extra history on their parent branch rather
+than flattening the archived branch.  For example, if a 1TB parent branch is rather slow-changing (1GB
+of data per day), and archive branches are being created nightly, then writing out full 1TB image layers
+for each nightly branch is inefficient compared with just keeping more history on the main branch.
+
+Getting this right requires consideration of:
+- Compaction: if keeping more history on the main branch is going to prompt the main branch's compaction to
+  write out extra image layers, then it might make more sense to just write out the image layers on
+  the archived branch.
+- Metadata bloat: keeping extra history on a parent branch doesn't just cost GB of storage, it makes
+  the layer map (and index_part) bigger.  There are practical limits beyond which writing an indefinitely
+  large layer map can cause problems elsewhere.
+
+This optimization can probably be implemented quite cheaply with some basic heuristics like:
+- don't bother doing optimization on an archive branch if the LSN distance between
+  its branch point and the end of the PITR window is <5% of the logical size of the archive branch.
+- ...but, Don't keep more history on the main branch than double the PITR
+
+### Creating a timeline in archived state (a snapshot)
+
+Sometimes, one might want to create a branch with no history, which will not be written to
+before it is archived.  This is a snapshot, although we do not require a special snapshot API,
+since a snapshot can be represented as a timeline with no history.
+
+This can be accomplished by simply creating a timeline and then immediately archiving it, but
+that is somewhat wasteful: this timeline it will spin up various tasks and open a connection to the storage
+broker to try and ingest WAL, before being shutdown in the subsequent archival call.  To explicitly
+support this common special case, we may add a parameter to the timeline creation API which
+creates a timeline directly into the archived state.
+
+Such a timeline creation will do exactly two I/Os at creation time:
+- write the index_part object to record the timeline's existence
+- when the timeline is offloaded in the next iteration of the compaction loop (~20s later),
+  write the tenant manifest.
+
+Later, when the timeline falls off the end of the PITR interval, the usual offload logic will wake
+up the 'snapshot' branch and write out image layers.
+
+## Future Work
+
+### Enabling `fullbackup` dumps from archive branches
+
+It would be useful to be able to export an archive branch to another system, or for use in a local
+postgres database.
+
+This could be implemented as a general capability for all branches, in which case it would "just work"
+for archive branches by activating them.  However, downloading all the layers in a branch just to generate
+a fullbackup is a bit inefficient: we could implement a special case for flattened archived branches
+which streams image layers from S3 and outputs the fullbackup stream without writing the layers out to disk.
+
+Implementing `fullbackup` is a bit more complicated than this because of sharding, but solving that problem
+is unrelated to the topic of archived branches (it probably involves having each shard write out a fullbackup 
+stream to S3 in an intermediate format and, then having one node stitch them together).
+
+### Tagging layers from archived branches
+
+When we know a layer is an image layer written for an archived branch that has fallen off the PITR window,
+we may add tags to the S3 objects to enable writing lifecycle policies that transition such layers to even
+cheaper storage.
+
+This could be done for all archived layers, or it could be driven by the archival API, to give the pageserver
+external hints on which branches are likely to be reactivated, and which branches are good candidates for
+tagging for low performance storage.
+
+Tagging+lifecycles is just one mechanism: one might also directly use S3 storage classes.  Other clouds' object
+stores have similar mechanisms.
+
+### Storing sequences of archive branches as deltas
+
+When archived branches are used as scheduled snapshots, we could store them even more efficiently
+by encoding them as deltas relative to each other (i.e. for nightly snapshots, when we do the
+storage optimization for Tuesday's snapshot, we would read Monday's snapshot and store only the modified
+pages). This is the kind of encoding that many backup storage systems use.
+
+The utility of this depends a lot on the churn rate of the data, and the cost of doing the delta encoding
+vs. just writing out a simple stream of the entire database.  For smaller databases, writing out a full
+copy is pretty trivial (e.g. writing a compressed copy of a 10GiB database to S3 can take under 10 seconds,
+so the complexity tradeoff of diff-encoding it is dubious).
+
+One does not necessarily have to read-back the previous snapshot in order to encoded the next one: if the
+pageserver knows about the schedule, it can intentionally retain extra history on the main branch so that
+we can say: "A branch exists from Monday night.  I have Monday night's data still active in the main branch,
+so now I can read at the Monday LSN and the Tuesday LSN, calculate the delta, and store it as Tuesday's
+delta snapshot".
+
+Clearly this all requires careful housekeeping to retain the relationship between branches that depend on
+each other: perhaps this would be done by making the archive branches have child/parent relationships with
+each other, or perhaps we would permit them to remain children of their original parent, but additionally
+have a relationship with the snapshot they're encoded relative to.
+
+Activating a branch that is diff-encoded may require activating several earlier branches too, so figuring
+out how frequently to write a full copy is important.  This is essentially a zoomed-out version of what
+we do with delta layers and image layers within a timeline, except each "layer" is a whole timeline.
 
 
 ## FAQ/Alternatives
