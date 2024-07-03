@@ -64,11 +64,13 @@ jobs:
         echo "EC2_MACHINE_URL_US=https://${public_ip}:8443" >> $GITHUB_ENV
 
     - name: Determine commit hash
+      env:
+        INPUT_COMMIT_HASH: ${{ github.event.inputs.commit_hash }}
       run: |
-        if [ -z "${{ github.event.inputs.commit_hash }}" ]; then
+        if [ -z "$INPUT_COMMIT_HASH" ]; then
           echo "COMMIT_HASH=$(curl -s https://api.github.com/repos/neondatabase/neon/commits/main | jq -r '.sha')" >> $GITHUB_ENV
         else
-          echo "COMMIT_HASH=${{ github.event.inputs.commit_hash }}" >> $GITHUB_ENV
+          echo "COMMIT_HASH=$INPUT_COMMIT_HASH" >> $GITHUB_ENV
         fi
 
     - name: Start Bench with run_id   
