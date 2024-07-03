@@ -103,6 +103,12 @@ stateDiagram
   Active(cold) --> Active(warm)
 ```
 
+Note that the transition from Archived to Active(warm) is expected to be fairly rare: the most common lifecycles
+of branches will be:
+- Very frequent: Short lived branches: Active -> Deleted
+- Frequent: Long-lived branches: Active -> Archived -> Offloaded -> Deleted
+- Rare: Branches used to restore old state: Active ->Archived -> Offloaded -> Active
+
 These states are _not_ all stored as a single physical state on the timeline, but rather represent the combination
 of:
 - the timeline's lifecycle state: active or archived, stored in the timeline's index
