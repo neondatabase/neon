@@ -765,6 +765,8 @@ def insert_and_acquire_lease(
                 "CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
             )
 
+            cur.execute("CHECKPOINT")
+
         last_flush_lsn = wait_for_last_flush_lsn(env, ep, tenant, timeline)
 
         size_after_lease_and_insert = client.tenant_size(tenant)
@@ -806,6 +808,9 @@ def insert_and_create_ro_branch(
             cur.execute(
                 "CREATE TABLE t3 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
             )
+
+            cur.execute("CHECKPOINT")
+
         wait_for_last_flush_lsn(env, ep, tenant, timeline)
 
         size_after_branching = client.tenant_size(tenant)
