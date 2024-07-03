@@ -152,10 +152,12 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
 
     client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
 
+    size_limit_mb = 30
+
     endpoint_main = env.endpoints.create(
         "test_timeline_size_quota_on_startup",
         # Set small limit for the test
-        config_lines=["neon.max_cluster_size=30MB"],
+        config_lines=[f"neon.max_cluster_size={size_limit_mb}MB"],
     )
     endpoint_main.start()
 
@@ -165,17 +167,39 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
 
             # Insert many rows. This query must fail because of space limit
             try:
-                for _i in range(5000):
-                    cur.execute(
-                        """
-                        INSERT INTO foo
-                            SELECT 'long string to consume some space' || g
-                            FROM generate_series(1, 100) g
-                    """
-                    )
 
-                # If we get here, the timeline size limit failed
-                log.error("Query unexpectedly succeeded")
+                def write_rows(count):
+                    for _i in range(count):
+                        cur.execute(
+                            """
+                            INSERT INTO foo
+                                SELECT 'long string to consume some space' || g
+                                FROM generate_series(1, 100) g
+                        """
+                        )
+
+                # Write some data that exceeds limit, then let the pageserver ingest it to guarantee that some feedback has made it to
+                # the safekeeper, then try to write some more.  We expect either the initial writes or the ones after
+                # the wait_for_last_flush_lsn to generate an exception.
+                #
+                # Without the wait_for_last_flush_lsn, the size limit sometimes isn't enforced (see https://github.com/neondatabase/neon/issues/6562)
+                write_rows(2500)
+                wait_for_last_flush_lsn(env, endpoint_main, env.initial_tenant, new_timeline_id)
+                logical_size = env.pageserver.http_client().timeline_detail(
+                    env.initial_tenant, new_timeline_id
+                )["current_logical_size"]
+                assert logical_size > size_limit_mb * 1024 * 1024
+                write_rows(2500)
+
+                # If we get here, the timeline size limit failed.  Find out from the pageserver how large it
+                # thinks the timeline is.
+                wait_for_last_flush_lsn(env, endpoint_main, env.initial_tenant, new_timeline_id)
+                logical_size = env.pageserver.http_client().timeline_detail(
+                    env.initial_tenant, new_timeline_id
+                )["current_logical_size"]
+                log.error(
+                    f"Query unexpectedly succeeded, pageserver logical size is {logical_size}"
+                )
                 raise AssertionError()
 
             except psycopg2.errors.DiskFull as err:
