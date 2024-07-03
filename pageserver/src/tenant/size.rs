@@ -345,7 +345,7 @@ pub(super) async fn gather_inputs(
                         parent: Some(lease_parent),
                         lsn: lsn.0,
                         size: None,                    // Filled in later, if necessary
-                        needed: next_gc_cutoff <= lsn, // only needed if the point is within rentention.
+                        needed: lsn > next_gc_cutoff, // only needed if the point is within rentention.
                     },
                     timeline_id: timeline.timeline_id,
                     kind: LsnKind::LeaseStart,
@@ -358,7 +358,7 @@ pub(super) async fn gather_inputs(
                         parent: Some(lease_parent),
                         lsn: lsn.0,
                         size: None, // Filled in later, if necessary
-                        needed: true,
+                        needed: true, // everything at the lease LSN must be readable => is needed
                     },
                     timeline_id: timeline.timeline_id,
                     kind: LsnKind::LeaseEnd,
