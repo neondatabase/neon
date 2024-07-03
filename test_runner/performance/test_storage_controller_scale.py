@@ -151,7 +151,7 @@ def test_storage_controller_many_tenants(
     shard_count = 2
     stripe_size = 1024
 
-    total_shards = tenant_count * shard_count + 1
+    total_shards = tenant_count * shard_count
 
     tenants = set(TenantId.generate() for _i in range(0, tenant_count))
 
