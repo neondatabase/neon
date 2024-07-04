@@ -91,7 +91,8 @@ pub mod defaults {
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
-    pub const DEFAULT_IMAGE_COMPRESSION: Option<ImageCompressionAlgorithm> = None;
+    pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
+        ImageCompressionAlgorithm::DisabledNoDecompress;
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
@@ -288,7 +289,7 @@ pub struct PageServerConf {
 
     pub validate_vectored_get: bool,
 
-    pub image_compression: Option<ImageCompressionAlgorithm>,
+    pub image_compression: ImageCompressionAlgorithm,
 
     /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
     /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
@@ -402,7 +403,7 @@ struct PageServerConfigBuilder {
 
     validate_vectored_get: BuilderValue<bool>,
 
-    image_compression: BuilderValue<Option<ImageCompressionAlgorithm>>,
+    image_compression: BuilderValue<ImageCompressionAlgorithm>,
 
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
 
@@ -680,7 +681,7 @@ impl PageServerConfigBuilder {
         self.validate_vectored_get = BuilderValue::Set(value);
     }
 
-    pub fn get_image_compression(&mut self, value: Option<ImageCompressionAlgorithm>) {
+    pub fn get_image_compression(&mut self, value: ImageCompressionAlgorithm) {
         self.image_compression = BuilderValue::Set(value);
     }
 
@@ -1028,7 +1029,7 @@ impl PageServerConf {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
                 }
                 "image_compression" => {
-                    builder.get_image_compression(Some(parse_toml_from_str("image_compression", item)?))
+                    builder.get_image_compression(parse_toml_from_str("image_compression", item)?)
                 }
                 "ephemeral_bytes_per_memory_kb" => {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
