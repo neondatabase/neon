@@ -45,8 +45,7 @@ jobs:
     steps:
     # we don't need the neon source code because we run everything remotely
     # however we still need the local github actions to run the allure step below
-    - name: Checkout
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
     - name: Show my own (github runner) external IP address - usefull for IP allowlisting
       run: curl https://ifconfig.me
