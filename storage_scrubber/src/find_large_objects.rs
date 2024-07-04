@@ -60,7 +60,7 @@ pub async fn find_large_objects(
         tenant_ctr += 1;
         if tenant_ctr % 10 == 0 {
             tracing::info!(
-                "Scanned {tenant_ctr} shards, {object_ctr} objects. current {tenant_shard_id}."
+                "Scanned {tenant_ctr} shards. objects={object_ctr}, found={}, current={tenant_shard_id}.", objects.len()
             );
         }
     }
