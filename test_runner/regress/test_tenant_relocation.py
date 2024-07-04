@@ -203,8 +203,6 @@ def test_tenant_relocation(
         [
             # Needed for detach polling on the original pageserver
             f".*NotFound: tenant {tenant_id}.*",
-            # We will dual-attach in this test, so stale generations are expected
-            ".*Dropped remote consistent LSN updates.*",
         ]
     )
 
