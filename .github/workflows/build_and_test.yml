@@ -1368,3 +1368,31 @@ jobs:
     with:
       from-tag: ${{ needs.build-build-tools-image.outputs.image-tag }}
     secrets: inherit
+
+  # This job simplifies setting branch protection rules (in GitHub UI)
+  # by allowing to set only this job instead of listing many others.
+  # It also makes it easier to rename or parametrise jobs (using matrix)
+  # which requires changes in branch protection rules
+  #
+  # Note, that we can't add external check (like `neon-cloud-e2e`) we still need to use GitHub UI for that.
+  #
+  # https://github.com/neondatabase/neon/settings/branch_protection_rules
+  conclusion:
+    if: always()
+    # Format `needs` differently to make the list more readable.
+    # Usually we do `needs: [...]`
+    needs:
+      - check-codestyle-python
+      - check-codestyle-rust
+      - regress-tests
+      - test-images
+    runs-on: ubuntu-22.04
+    steps:
+      # The list of possible results:
+      # https://docs.github.com/en/actions/learn-github-actions/contexts#needs-context
+      - name: Fail the job if any of the dependencies do not succeed
+        run: exit 1
+        if: |
+          contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
+          || contains(needs.*.result, 'skipped')
