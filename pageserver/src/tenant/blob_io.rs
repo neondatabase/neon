@@ -422,7 +422,7 @@ mod tests {
                     wtr.write_blob_maybe_compressed(
                         blob.clone(),
                         &ctx,
-                        Some(ImageCompressionAlgorithm::Zstd { level: Some(1) }),
+                        ImageCompressionAlgorithm::Zstd { level: Some(1) },
                     )
                     .await
                 } else {
