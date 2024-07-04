@@ -43,6 +43,14 @@ jobs:
       AWS_DEFAULT_REGION : "eu-central-1"
       AWS_INSTANCE_ID : "i-02a59a3bf86bc7e74"
     steps:
+    # we don't need the neon source code because we run everything remotely
+    # however we still need the local github actions to run the allure step below
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: false
+        fetch-depth: 1
+
     - name: Show my own (github runner) external IP address - usefull for IP allowlisting
       run: curl https://ifconfig.me
 
