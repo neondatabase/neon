@@ -95,7 +95,6 @@ static int	lfc_desc = 0;
 static LWLockId lfc_lock;
 static int	lfc_max_size;
 static int	lfc_size_limit;
-static int  wss_max_duration;
 static char *lfc_path;
 static FileCacheControl *lfc_ctl;
 static shmem_startup_hook_type prev_shmem_startup_hook;
@@ -377,19 +376,6 @@ lfc_init(void)
 							   NULL,
 							   NULL,
 							   NULL);
-
-	DefineCustomIntVariable("neon.wss_max_duration",
-							"Maximal duration for estimating working set size",
-							NULL,
-							&wss_max_duration,
-							3600,	/* one hour */
-							0,
-							INT_MAX,
-							PGC_SIGHUP,
-							GUC_UNIT_S,
-							NULL,
-							NULL,
-							NULL);
 
 	if (lfc_max_size == 0)
 		return;
@@ -1002,7 +988,7 @@ approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 	if (lfc_size_limit != 0)
 	{
 		int32 dc;
-		time_t duration = PG_ARGISNULL(0) ? wss_max_duration : PG_GETARG_UINT32(0);
+		time_t duration = PG_ARGISNULL(0) ? INT_MAX : PG_GETARG_UINT32(0);
 		LWLockAcquire(lfc_lock, LW_SHARED);
 		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration);
 		LWLockRelease(lfc_lock);
@@ -1021,7 +1007,7 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 		int32 dc;
 		bool reset = PG_GETARG_BOOL(0);
 		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
-		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, wss_max_duration);
+		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, INT_MAX);
 		if (reset)
 			memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
 		LWLockRelease(lfc_lock);
