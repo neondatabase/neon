@@ -393,11 +393,12 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
-        round_trip_test_compressed::<BUFFERED, false>(blobs).await
+        round_trip_test_compressed::<BUFFERED>(blobs, false).await
     }
 
-    async fn round_trip_test_compressed<const BUFFERED: bool, const COMPRESSION: bool>(
+    async fn round_trip_test_compressed<const BUFFERED: bool>(
         blobs: &[Vec<u8>],
+        compression: bool,
     ) -> Result<(), Error> {
         let temp_dir = camino_tempfile::tempdir()?;
         let pathbuf = temp_dir.path().join("file");
@@ -409,7 +410,7 @@ mod tests {
             let file = VirtualFile::create(pathbuf.as_path(), &ctx).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
-                let (_, res) = if COMPRESSION {
+                let (_, res) = if compression {
                     wtr.write_blob_maybe_compressed(
                         blob.clone(),
                         &ctx,
@@ -432,7 +433,7 @@ mod tests {
 
         let file = VirtualFile::open(pathbuf.as_path(), &ctx).await?;
         let rdr = BlockReaderRef::VirtualFile(&file);
-        let rdr = BlockCursor::new_with_compression(rdr, COMPRESSION);
+        let rdr = BlockCursor::new_with_compression(rdr, compression);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
             let blob_read = rdr.read_blob(*offset, &ctx).await?;
             assert_eq!(
@@ -466,8 +467,8 @@ mod tests {
         ];
         round_trip_test::<false>(blobs).await?;
         round_trip_test::<true>(blobs).await?;
-        round_trip_test_compressed::<false, true>(blobs).await?;
-        round_trip_test_compressed::<true, true>(blobs).await?;
+        round_trip_test_compressed::<false>(blobs, true).await?;
+        round_trip_test_compressed::<true>(blobs, true).await?;
         Ok(())
     }
 
@@ -483,8 +484,8 @@ mod tests {
         ];
         round_trip_test::<false>(blobs).await?;
         round_trip_test::<true>(blobs).await?;
-        round_trip_test_compressed::<false, true>(blobs).await?;
-        round_trip_test_compressed::<true, true>(blobs).await?;
+        round_trip_test_compressed::<false>(blobs, true).await?;
+        round_trip_test_compressed::<true>(blobs, true).await?;
         Ok(())
     }
 
