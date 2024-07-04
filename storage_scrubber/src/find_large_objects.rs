@@ -1,9 +1,9 @@
 use futures::StreamExt;
-use pageserver::tenant::storage_layer::{DeltaLayerName, ImageLayerName};
+use pageserver::tenant::storage_layer::LayerName;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    init_remote, list_objects_with_retries, metadata_stream::stream_tenants, BucketConfig, NodeKind,
+    checks::parse_layer_object_name, init_remote, list_objects_with_retries, metadata_stream::stream_tenants, BucketConfig, NodeKind
 };
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -16,12 +16,14 @@ enum LargeObjectKind {
 impl LargeObjectKind {
     fn from_key(key: &str) -> Self {
         let fname = key.split('/').last().unwrap();
-        let is_delta = DeltaLayerName::parse_str(fname).is_some();
-        let is_image = ImageLayerName::parse_str(fname).is_some();
-        match (is_delta, is_image) {
-            (true, false) => LargeObjectKind::DeltaLayer,
-            (false, true) => LargeObjectKind::ImageLayer,
-            (false, false) | (true, true) => LargeObjectKind::Other,
+
+        let Ok((layer_name, _generation)) = parse_layer_object_name(fname) else {
+            return LargeObjectKind::Other;
+        };
+
+        match layer_name {
+            LayerName::Image(_) => LargeObjectKind::ImageLayer,
+            LayerName::Delta(_) => LargeObjectKind::DeltaLayer,
         }
     }
 }
