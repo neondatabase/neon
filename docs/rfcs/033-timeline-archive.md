@@ -212,6 +212,11 @@ This API will be similar to the existing `download_remote_layers` API, but smart
 - It will download layers in the visible set until reaching `wait_ms`, then return a struct describing progress
   of downloads, so that the caller can poll.
 
+The _visible set_ mentioned above will be calculated by the pageserver in the background, by taking the set
+of readable LSNs (i.e. branch points and heads of branches), and walking the layer map to work out which layers
+can possibly be read from these LSNs.  This concept of layer visibility is more generally useful for cache
+eviction and heatmaps, as well as in this specific case of warming up a timeline.
+
 The caller does not have to wait for the warm up API, or call it at all.  But it is strongly advised
 to call it, because otherwise populating local contents for a timeline can take a long time when waiting
 for SQL queries to coincidentally hit all the layers, and during that time query latency remains quite
@@ -292,6 +297,49 @@ the storage controller may dispatch concurrent calls to all shards when archivin
 
 Since consumption metrics are only transmitted from shard zero, the state of archival on this shard
 will be authoritative for consumption metrics.
+
+## Error cases
+
+### Errors in sharded tenants
+
+If one shard in a tenant fails an operation but others succeed, the tenant may end up in a mixed
+state, where a timeline is archived on some shards but not on others.  
+
+We will not bother implementing a rollback mechanism for this: errors in archiving/activating a timeline
+are either transient (e.g. S3 unavailable, shutting down), or the fault of the caller (NotFound, BadRequest).
+In the transient case callers are expected to retry until success, or to make appropriate API calls to clear
+up their mistake.  We rely on this good behavior of callers to eventually get timelines into a consistent
+state across all shards.  If callers do leave a timeline in an inconsistent state across shards, this doesn't
+break anything, it's just "weird".
+
+This is similar to the status quo for timeline creation and deletion: callers are expected to retry
+these operations until they succeed.
+
+### Archiving/activating
+
+Archiving/activating a timeline can fail in a limited number of ways:
+1. I/O error storing/reading the timeline's updated index
+    - These errors are always retryable: a fundamental design assumption of the pageserver is that remote
+      storage errors are always transient. 
+2. NotFound if the timeline doesn't exist
+    - Callers of the API are expected to avoid calling deletion and archival APIs concurrently.
+    - The storage controller has runtime locking to prevent races such as deleting a timeline while
+      archiving it.
+3. BadRequest if the rules around ancestors/descendents of archived timelines would be violated
+    - Callers are expected to do their own checks to avoid hitting this case.  If they make
+      a mistake and encounter this error, they should give up.
+
+### Offloading
+
+Offloading can only fail if remote storage is unavailable, which would prevent us from writing the
+tenant manifest.  In such error cases, we give up in the expectation that offloading will be tried 
+again at the next iteration of the compaction loop.
+
+### Archive branch optimization
+
+Optimization is a special form of compaction, so can encounter all the same errors as regular compaction
+can: it should return Result<(), CompactionError>, and as with compaction it will be retried on
+the next iteration of the compaction loop.
 
 ## Optimizations
 
