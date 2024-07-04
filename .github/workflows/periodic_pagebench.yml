@@ -43,6 +43,10 @@ jobs:
       AWS_DEFAULT_REGION : "eu-central-1"
       AWS_INSTANCE_ID : "i-02a59a3bf86bc7e74"
     steps:
+    # we don't need the neon source code because we run everything remotely
+    # however we still need the local github actions to run the allure step below
+    - uses: actions/checkout@v4
+
     - name: Show my own (github runner) external IP address - usefull for IP allowlisting
       run: curl https://ifconfig.me
 
@@ -116,6 +120,9 @@ jobs:
         cat "test_log_${GITHUB_RUN_ID}"
 
     - name: Create Allure report
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
