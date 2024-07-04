@@ -273,7 +273,12 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
-        self.write_blob_maybe_compressed(srcbuf, ctx, None).await
+        self.write_blob_maybe_compressed(
+            srcbuf,
+            ctx,
+            ImageCompressionAlgorithm::DisabledNoDecompress,
+        )
+        .await
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
@@ -282,7 +287,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         &mut self,
         srcbuf: B,
         ctx: &RequestContext,
-        algorithm: Option<ImageCompressionAlgorithm>,
+        algorithm: ImageCompressionAlgorithm,
     ) -> (B::Buf, Result<u64, Error>) {
         let offset = self.offset;
 
@@ -314,7 +319,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     );
                 }
                 let (high_bit_mask, len_written, srcbuf) = match algorithm {
-                    Some(ImageCompressionAlgorithm::Zstd { level }) => {
+                    ImageCompressionAlgorithm::Zstd { level } => {
                         let mut encoder = if let Some(level) = level {
                             async_compression::tokio::write::ZstdEncoder::with_quality(
                                 Vec::new(),
@@ -335,7 +340,10 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                             (BYTE_UNCOMPRESSED, len, slice.into_inner())
                         }
                     }
-                    None => (BYTE_UNCOMPRESSED, len, srcbuf.slice_full().into_inner()),
+                    ImageCompressionAlgorithm::Disabled
+                    | ImageCompressionAlgorithm::DisabledNoDecompress => {
+                        (BYTE_UNCOMPRESSED, len, srcbuf.slice_full().into_inner())
+                    }
                 };
                 let mut len_buf = (len_written as u32).to_be_bytes();
                 assert_eq!(len_buf[0] & 0xf0, 0);
