@@ -2,7 +2,7 @@
 pub mod mock;
 pub mod neon;
 
-use super::messages::MetricsAuxInfo;
+use super::messages::{ConsoleError, MetricsAuxInfo};
 use crate::{
     auth::{
         backend::{ComputeCredentialKeys, ComputeUserInfo},
@@ -317,8 +317,8 @@ impl NodeInfo {
     }
 }
 
-pub type NodeInfoCache = TimedLru<EndpointCacheKey, NodeInfo>;
-pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
+pub type NodeInfoCache = TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ConsoleError>>>;
+pub type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
 pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
