@@ -1288,12 +1288,10 @@ impl Timeline {
                 let mut rate_limit = LOGGED.lock().unwrap();
                 rate_limit.call(|| {
                     tracing::info!(
-                    tenant_id = %self.tenant_shard_id.tenant_id,
-                    shard_id = %self.tenant_shard_id.shard_slug(),
-                    timeline_id = %self.timeline_id,
-                    lsn = %lsn,
-                    "Vectored read for {} visited {} layers on average per key and {} in total. {}/{} pages were returned",
-                    keyspace, avg, layers_visited, results.len(), keyspace.total_raw_size());
+                      shard_id = %self.tenant_shard_id.shard_slug(),
+                      lsn = %lsn,
+                      "Vectored read for {} visited {} layers on average per key and {} in total. {}/{} pages were returned",
+                      keyspace, avg, layers_visited, results.len(), keyspace.total_raw_size());
                 });
             }
 
