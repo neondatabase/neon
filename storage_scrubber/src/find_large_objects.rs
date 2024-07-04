@@ -92,9 +92,6 @@ pub async fn find_large_objects(
                 "Scanned {tenant_ctr} shards. objects={object_ctr}, found={}, current={tenant_shard_id}.", objects.len()
             );
         }
-        if tenant_ctr == 100 {
-            break;
-        }
     }
     Ok(LargeObjectListing { objects })
 }
