@@ -76,6 +76,8 @@ enum Command {
     FindLargeObjects {
         #[arg(long = "min-size")]
         min_size: u64,
+        #[arg(short, long, default_value_t = false)]
+        ignore_deltas: bool,
     },
 }
 
@@ -205,8 +207,8 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&summary).unwrap());
             Ok(())
         }
-        Command::FindLargeObjects { min_size } => {
-            let summary = find_large_objects::find_large_objects(bucket_config, min_size).await?;
+        Command::FindLargeObjects { min_size, ignore_deltas } => {
+            let summary = find_large_objects::find_large_objects(bucket_config, min_size, ignore_deltas).await?;
             println!("{}", serde_json::to_string(&summary).unwrap());
             Ok(())
         }

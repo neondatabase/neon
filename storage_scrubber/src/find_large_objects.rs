@@ -6,7 +6,7 @@ use crate::{
     init_remote, list_objects_with_retries, metadata_stream::stream_tenants, BucketConfig, NodeKind,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 enum LargeObjectKind {
     DeltaLayer,
     ImageLayer,
@@ -41,6 +41,7 @@ pub struct LargeObjectListing {
 pub async fn find_large_objects(
     bucket_config: BucketConfig,
     min_size: u64,
+    ignore_deltas: bool,
 ) -> anyhow::Result<LargeObjectListing> {
     let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver)?;
     let mut tenants = std::pin::pin!(stream_tenants(&s3_client, &target));
@@ -69,6 +70,9 @@ pub async fn find_large_objects(
                     .map(|k| k.to_owned())
                     .unwrap_or_else(|| "<unknown key>".to_owned());
                 let kind = LargeObjectKind::from_key(&key);
+                if ignore_deltas && kind == LargeObjectKind::DeltaLayer {
+                    continue;
+                }
                 objects.push(LargeObject {
                     key,
                     size: obj.size.unwrap() as u64,
