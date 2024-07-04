@@ -2,6 +2,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 pub mod checks;
 pub mod cloud_admin_api;
+pub mod find_large_objects;
 pub mod garbage;
 pub mod metadata_stream;
 pub mod pageserver_physical_gc;

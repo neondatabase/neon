@@ -1,6 +1,7 @@
 use anyhow::bail;
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
+use storage_scrubber::find_large_objects;
 use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use storage_scrubber::pageserver_physical_gc::GcMode;
 use storage_scrubber::scan_pageserver_metadata::scan_metadata;
@@ -72,6 +73,12 @@ enum Command {
         #[arg(short, long, default_value_t = GcMode::IndicesOnly)]
         mode: GcMode,
     },
+    FindLargeObjects {
+        #[arg(long = "min-size")]
+        min_size: u64,
+        #[arg(short, long, default_value_t = false)]
+        ignore_deltas: bool,
+    },
 }
 
 #[tokio::main]
@@ -86,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         Command::PurgeGarbage { .. } => "purge-garbage",
         Command::TenantSnapshot { .. } => "tenant-snapshot",
         Command::PageserverPhysicalGc { .. } => "pageserver-physical-gc",
+        Command::FindLargeObjects { .. } => "find-large-objects",
     };
     let _guard = init_logging(&format!(
         "{}_{}_{}_{}.log",
@@ -196,6 +204,16 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let summary =
                 pageserver_physical_gc(bucket_config, tenant_ids, min_age.into(), mode).await?;
+            println!("{}", serde_json::to_string(&summary).unwrap());
+            Ok(())
+        }
+        Command::FindLargeObjects {
+            min_size,
+            ignore_deltas,
+        } => {
+            let summary =
+                find_large_objects::find_large_objects(bucket_config, min_size, ignore_deltas)
+                    .await?;
             println!("{}", serde_json::to_string(&summary).unwrap());
             Ok(())
         }
