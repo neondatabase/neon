@@ -4466,6 +4466,58 @@ impl Timeline {
         }
     }
 
+    /// Predicate function which indicates whether we should check if new image layers
+    /// are required. Since checking if new image layers are required is expensive in
+    /// terms of CPU, we only do it in the following cases:
+    /// 1. If the timeline has ingested sufficient WAL to justify the cost
+    /// 2. If enough time has passed since the last check
+    /// 2.1. For large tenants, we wish to perform the check more often since they
+    /// suffer from the lack of image layers
+    /// 2.2. For small tenants (that can mostly fit in RAM), we use a much longer interval
+    fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
+        const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
+
+        let last_checks_at = self.last_image_layer_creation_check_at.load();
+        let distance = lsn
+            .checked_sub(last_checks_at)
+            .expect("Attempt to compact with LSN going backwards");
+        let min_distance =
+            self.get_image_layer_creation_check_threshold() as u64 * self.get_checkpoint_distance();
+
+        let distance_based_decision = distance.0 >= min_distance;
+
+        let mut time_based_decision = false;
+        let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
+        if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
+            let check_required_after = if Into::<u64>::into(&logical_size) >= LARGE_TENANT_THRESHOLD
+            {
+                self.get_checkpoint_timeout()
+            } else {
+                Duration::from_secs(3600 * 48)
+            };
+
+            time_based_decision = match *last_check_instant {
+                Some(last_check) => {
+                    let elapsed = last_check.elapsed();
+                    elapsed >= check_required_after
+                }
+                None => true,
+            };
+        }
+
+        // Do the expensive delta layer counting only if this timeline has ingested sufficient
+        // WAL since the last check or a checkpoint timeout interval has elapsed since the last
+        // check.
+        let decision = distance_based_decision || time_based_decision;
+
+        if decision {
+            self.last_image_layer_creation_check_at.store(lsn);
+            *last_check_instant = Some(Instant::now());
+        }
+
+        decision
+    }
+
     #[tracing::instrument(skip_all, fields(%lsn, %mode))]
     async fn create_image_layers(
         self: &Arc<Timeline>,
@@ -4488,38 +4540,7 @@ impl Timeline {
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
         let mut start = Key::MIN;
 
-        let check_for_image_layers = {
-            let last_checks_at = self.last_image_layer_creation_check_at.load();
-            let distance = lsn
-                .checked_sub(last_checks_at)
-                .expect("Attempt to compact with LSN going backwards");
-            let min_distance = self.get_image_layer_creation_check_threshold() as u64
-                * self.get_checkpoint_distance();
-
-            let distance_based_decision = distance.0 >= min_distance;
-
-            let mut last_check_instant =
-                self.last_image_layer_creation_check_instant.lock().unwrap();
-            let time_based_decision = match *last_check_instant {
-                Some(last_check) => {
-                    let elapsed = last_check.elapsed();
-                    elapsed >= self.get_checkpoint_timeout()
-                }
-                None => true,
-            };
-
-            // Do the expensive delta layer counting only if this timeline has ingested sufficient
-            // WAL since the last check or a checkpoint timeout interval has elapsed since the last
-            // check.
-            let decision = distance_based_decision || time_based_decision;
-
-            if decision {
-                self.last_image_layer_creation_check_at.store(lsn);
-                *last_check_instant = Some(Instant::now());
-            }
-
-            decision
-        };
+        let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
 
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
