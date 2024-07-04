@@ -1,4 +1,4 @@
-FROM openjdk:21
+FROM openjdk:22
 WORKDIR /source
 
 COPY . .
