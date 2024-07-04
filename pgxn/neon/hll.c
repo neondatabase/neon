@@ -156,7 +156,8 @@ estimateSHLL(HyperLogLogState *cState, time_t duration)
 	double		sum = 0.0;
 	size_t		i;
 	uint8       R[HLL_N_REGISTERS];
-	TimestampTz since = GetCurrentTimestamp() - duration * USECS_PER_SEC;
+	/* 0 indicates uninitialized timestamp, so if we need to cover the whole range than starts with 1 */
+	TimestampTz since = duration == (time_t)-1 ? 1 : GetCurrentTimestamp() - duration * USECS_PER_SEC;
 
 	for (i = 0; i < HLL_N_REGISTERS; i++)
 	{
