@@ -16,7 +16,10 @@ use crate::{
     context::RequestMonitoring,
     error::{ErrorKind, ReportableError, UserFacingError},
     intern::EndpointIdInt,
-    proxy::{connect_compute::ConnectMechanism, retry::ShouldRetry},
+    proxy::{
+        connect_compute::ConnectMechanism,
+        retry::{CouldRetry, ShouldRetryWakeCompute},
+    },
     rate_limiter::EndpointRateLimiter,
     Host,
 };
@@ -179,7 +182,7 @@ impl UserFacingError for HttpConnError {
     }
 }
 
-impl ShouldRetry for HttpConnError {
+impl CouldRetry for HttpConnError {
     fn could_retry(&self) -> bool {
         match self {
             HttpConnError::ConnectionError(e) => e.could_retry(),
@@ -190,9 +193,11 @@ impl ShouldRetry for HttpConnError {
             HttpConnError::TooManyConnectionAttempts(_) => false,
         }
     }
-    fn should_retry_database_address(&self) -> bool {
+}
+impl ShouldRetryWakeCompute for HttpConnError {
+    fn should_retry_wake_compute(&self) -> bool {
         match self {
-            HttpConnError::ConnectionError(e) => e.should_retry_database_address(),
+            HttpConnError::ConnectionError(e) => e.should_retry_wake_compute(),
             // we never checked cache validity
             HttpConnError::TooManyConnectionAttempts(_) => false,
             _ => true,
@@ -230,6 +235,10 @@ impl ConnectMechanism for TokioMechanism {
             .password(&*self.conn_info.password)
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
+
+        config
+            .param("client_encoding", "UTF8")
+            .expect("client encoding UTF8 is always valid");
 
         let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
         let res = config.connect(tokio_postgres::NoTls).await;

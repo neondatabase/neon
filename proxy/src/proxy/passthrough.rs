@@ -10,13 +10,15 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 use utils::measured_stream::MeasuredStream;
 
+use super::copy_bidirectional::ErrorSource;
+
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
 pub async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
-) -> anyhow::Result<()> {
+) -> Result<(), ErrorSource> {
     let usage = USAGE_METRICS.register(Ids {
         endpoint_id: aux.endpoint_id,
         branch_id: aux.branch_id,
@@ -66,9 +68,11 @@ pub struct ProxyPassthrough<P, S> {
 }
 
 impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
-    pub async fn proxy_pass(self) -> anyhow::Result<()> {
+    pub async fn proxy_pass(self) -> Result<(), ErrorSource> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
-        self.compute.cancel_closure.try_cancel_query().await?;
+        if let Err(err) = self.compute.cancel_closure.try_cancel_query().await {
+            tracing::error!(?err, "could not cancel the query in the database");
+        }
         res
     }
 }

@@ -5,6 +5,7 @@
 use crate::safekeeper::ServerInfo;
 use crate::timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError};
 use crate::timelines_set::TimelinesSet;
+use crate::wal_backup_partial::RateLimiter;
 use crate::SafeKeeperConf;
 use anyhow::{bail, Context, Result};
 use camino::Utf8PathBuf;
@@ -23,6 +24,7 @@ struct GlobalTimelinesState {
     conf: Option<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
     load_lock: Arc<tokio::sync::Mutex<TimelineLoadLock>>,
+    partial_backup_rate_limiter: RateLimiter,
 }
 
 // Used to prevent concurrent timeline loading.
@@ -37,8 +39,12 @@ impl GlobalTimelinesState {
     }
 
     /// Get dependencies for a timeline constructor.
-    fn get_dependencies(&self) -> (SafeKeeperConf, Arc<TimelinesSet>) {
-        (self.get_conf().clone(), self.broker_active_set.clone())
+    fn get_dependencies(&self) -> (SafeKeeperConf, Arc<TimelinesSet>, RateLimiter) {
+        (
+            self.get_conf().clone(),
+            self.broker_active_set.clone(),
+            self.partial_backup_rate_limiter.clone(),
+        )
     }
 
     /// Insert timeline into the map. Returns error if timeline with the same id already exists.
@@ -66,6 +72,7 @@ static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
         conf: None,
         broker_active_set: Arc::new(TimelinesSet::default()),
         load_lock: Arc::new(tokio::sync::Mutex::new(TimelineLoadLock)),
+        partial_backup_rate_limiter: RateLimiter::new(1),
     })
 });
 
@@ -79,6 +86,7 @@ impl GlobalTimelines {
         // lock, so use explicit block
         let tenants_dir = {
             let mut state = TIMELINES_STATE.lock().unwrap();
+            state.partial_backup_rate_limiter = RateLimiter::new(conf.partial_backup_concurrency);
             state.conf = Some(conf);
 
             // Iterate through all directories and load tenants for all directories
@@ -122,7 +130,7 @@ impl GlobalTimelines {
     /// this function is called during init when nothing else is running, so
     /// this is fine.
     async fn load_tenant_timelines(tenant_id: TenantId) -> Result<()> {
-        let (conf, broker_active_set) = {
+        let (conf, broker_active_set, partial_backup_rate_limiter) = {
             let state = TIMELINES_STATE.lock().unwrap();
             state.get_dependencies()
         };
@@ -145,7 +153,11 @@ impl GlobalTimelines {
                                     .unwrap()
                                     .timelines
                                     .insert(ttid, tli.clone());
-                                tli.bootstrap(&conf, broker_active_set.clone());
+                                tli.bootstrap(
+                                    &conf,
+                                    broker_active_set.clone(),
+                                    partial_backup_rate_limiter.clone(),
+                                );
                             }
                             // If we can't load a timeline, it's most likely because of a corrupted
                             // directory. We will log an error and won't allow to delete/recreate
@@ -178,7 +190,8 @@ impl GlobalTimelines {
         _guard: &tokio::sync::MutexGuard<'a, TimelineLoadLock>,
         ttid: TenantTimelineId,
     ) -> Result<Arc<Timeline>> {
-        let (conf, broker_active_set) = TIMELINES_STATE.lock().unwrap().get_dependencies();
+        let (conf, broker_active_set, partial_backup_rate_limiter) =
+            TIMELINES_STATE.lock().unwrap().get_dependencies();
 
         match Timeline::load_timeline(&conf, ttid) {
             Ok(timeline) => {
@@ -191,7 +204,7 @@ impl GlobalTimelines {
                     .timelines
                     .insert(ttid, tli.clone());
 
-                tli.bootstrap(&conf, broker_active_set);
+                tli.bootstrap(&conf, broker_active_set, partial_backup_rate_limiter);
 
                 Ok(tli)
             }
@@ -222,7 +235,7 @@ impl GlobalTimelines {
         commit_lsn: Lsn,
         local_start_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
-        let (conf, broker_active_set) = {
+        let (conf, broker_active_set, partial_backup_rate_limiter) = {
             let state = TIMELINES_STATE.lock().unwrap();
             if let Ok(timeline) = state.get(&ttid) {
                 // Timeline already exists, return it.
@@ -257,7 +270,12 @@ impl GlobalTimelines {
             // Bootstrap is transactional, so if it fails, the timeline will be deleted,
             // and the state on disk should remain unchanged.
             if let Err(e) = timeline
-                .init_new(&mut shared_state, &conf, broker_active_set)
+                .init_new(
+                    &mut shared_state,
+                    &conf,
+                    broker_active_set,
+                    partial_backup_rate_limiter,
+                )
                 .await
             {
                 // Note: the most likely reason for init failure is that the timeline

@@ -581,7 +581,7 @@ class NeonEnvBuilder:
             timeline_id=env.initial_timeline,
             shard_count=initial_tenant_shard_count,
             shard_stripe_size=initial_tenant_shard_stripe_size,
-            aux_file_v2=self.pageserver_aux_file_policy,
+            aux_file_policy=self.pageserver_aux_file_policy,
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
@@ -1604,7 +1604,7 @@ class NeonCli(AbstractNeonCli):
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
         set_default: bool = False,
-        aux_file_v2: Optional[AuxFileStore] = None,
+        aux_file_policy: Optional[AuxFileStore] = None,
     ) -> Tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1629,13 +1629,11 @@ class NeonCli(AbstractNeonCli):
                 )
             )
 
-        if aux_file_v2 is AuxFileStore.V2:
+        if aux_file_policy is AuxFileStore.V2:
             args.extend(["-c", "switch_aux_file_policy:v2"])
-
-        if aux_file_v2 is AuxFileStore.V1:
+        elif aux_file_policy is AuxFileStore.V1:
             args.extend(["-c", "switch_aux_file_policy:v1"])
-
-        if aux_file_v2 is AuxFileStore.CrossValidation:
+        elif aux_file_policy is AuxFileStore.CrossValidation:
             args.extend(["-c", "switch_aux_file_policy:cross-validation"])
 
         if set_default:
@@ -1935,6 +1933,7 @@ class NeonCli(AbstractNeonCli):
         endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
         pageserver_id: Optional[int] = None,
+        safekeepers: Optional[List[int]] = None,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = ["endpoint", "reconfigure", endpoint_id]
@@ -1942,6 +1941,8 @@ class NeonCli(AbstractNeonCli):
             args.extend(["--tenant-id", str(tenant_id)])
         if pageserver_id is not None:
             args.extend(["--pageserver-id", str(pageserver_id)])
+        if safekeepers is not None:
+            args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         return self.raw_cli(args, check_return_code=check_return_code)
 
     def endpoint_stop(
@@ -2684,7 +2685,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         self,
         tenant_id: TenantId,
         config: None | Dict[str, Any] = None,
-        config_null: bool = False,
         generation: Optional[int] = None,
         override_storage_controller_generation: bool = False,
     ):
@@ -2702,7 +2702,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         return client.tenant_attach(
             tenant_id,
             config,
-            config_null,
             generation=generation,
         )
 
@@ -2742,7 +2741,19 @@ class NeonPageserver(PgProtocol, LogUtils):
         if generation is None:
             generation = self.env.storage_controller.attach_hook_issue(tenant_id, self.id)
         client = self.http_client(auth_token=auth_token)
-        return client.tenant_create(tenant_id, conf, generation=generation)
+
+        conf = conf or {}
+
+        client.tenant_location_conf(
+            tenant_id,
+            {
+                "mode": "AttachedSingle",
+                "generation": generation,
+                "tenant_conf": conf,
+                "secondary_conf": None,
+            },
+        )
+        return tenant_id
 
     def list_layers(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
@@ -3077,9 +3088,16 @@ class PSQL:
         host: str = "127.0.0.1",
         port: int = 5432,
     ):
-        assert shutil.which(path)
+        search_path = None
+        if (d := os.getenv("POSTGRES_DISTRIB_DIR")) is not None and (
+            v := os.getenv("DEFAULT_PG_VERSION")
+        ) is not None:
+            search_path = Path(d) / f"v{v}" / "bin"
 
-        self.path = path
+        full_path = shutil.which(path, path=search_path)
+        assert full_path is not None
+
+        self.path = full_path
         self.database_url = f"postgres://{host}:{port}/main?options=project%3Dgeneric-project-name"
 
     async def run(self, query: Optional[str] = None) -> asyncio.subprocess.Process:
@@ -3473,7 +3491,6 @@ class Endpoint(PgProtocol, LogUtils):
     ):
         super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
         self.env = env
-        self.running = False
         self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
@@ -3481,6 +3498,7 @@ class Endpoint(PgProtocol, LogUtils):
         self.pg_port = pg_port
         self.http_port = http_port
         self.check_stop_result = check_stop_result
+        # passed to endpoint create and endpoint reconfigure
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
@@ -3541,7 +3559,6 @@ class Endpoint(PgProtocol, LogUtils):
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
 
-        config_lines = ["neon.primary_is_running=on"] + config_lines
         self.config(config_lines)
 
         return self
@@ -3550,6 +3567,7 @@ class Endpoint(PgProtocol, LogUtils):
         self,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
+        safekeepers: Optional[List[int]] = None,
         allow_multiple: bool = False,
     ) -> "Endpoint":
         """
@@ -3558,6 +3576,11 @@ class Endpoint(PgProtocol, LogUtils):
         """
 
         assert self.endpoint_id is not None
+
+        # If `safekeepers` is not None, they are remember them as active and use
+        # in the following commands.
+        if safekeepers is not None:
+            self.active_safekeepers = safekeepers
 
         log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
@@ -3622,9 +3645,17 @@ class Endpoint(PgProtocol, LogUtils):
     def is_running(self):
         return self._running._value > 0
 
-    def reconfigure(self, pageserver_id: Optional[int] = None):
+    def reconfigure(
+        self, pageserver_id: Optional[int] = None, safekeepers: Optional[List[int]] = None
+    ):
         assert self.endpoint_id is not None
-        self.env.neon_cli.endpoint_reconfigure(self.endpoint_id, self.tenant_id, pageserver_id)
+        # If `safekeepers` is not None, they are remember them as active and use
+        # in the following commands.
+        if safekeepers is not None:
+            self.active_safekeepers = safekeepers
+        self.env.neon_cli.endpoint_reconfigure(
+            self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
+        )
 
     def respec(self, **kwargs):
         """Update the endpoint.json file used by control_plane."""
@@ -3825,7 +3856,9 @@ class EndpointFactory:
 
         return self
 
-    def new_replica(self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]]):
+    def new_replica(
+        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]] = None
+    ):
         branch_name = origin.branch_name
         assert origin in self.endpoints
         assert branch_name is not None
@@ -3912,6 +3945,8 @@ class Safekeeper(LogUtils):
 
     def assert_no_errors(self):
         assert not self.log_contains("manager task finished prematurely")
+        assert not self.log_contains("error while acquiring WalResidentTimeline guard")
+        assert not self.log_contains("timeout while acquiring WalResidentTimeline guard")
 
     def append_logical_message(
         self, tenant_id: TenantId, timeline_id: TimelineId, request: Dict[str, Any]
@@ -4653,6 +4688,70 @@ def fork_at_current_lsn(
     """
     current_lsn = endpoint.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
+
+
+def import_timeline_from_vanilla_postgres(
+    test_output_dir: Path,
+    env: NeonEnv,
+    pg_bin: PgBin,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    branch_name: str,
+    vanilla_pg_connstr: str,
+):
+    """
+    Create a new timeline, by importing an existing PostgreSQL cluster.
+
+    This works by taking a physical backup of the running PostgreSQL cluster, and importing that.
+    """
+
+    # Take backup of the existing PostgreSQL server with pg_basebackup
+    basebackup_dir = os.path.join(test_output_dir, "basebackup")
+    base_tar = os.path.join(basebackup_dir, "base.tar")
+    wal_tar = os.path.join(basebackup_dir, "pg_wal.tar")
+    os.mkdir(basebackup_dir)
+    pg_bin.run(
+        [
+            "pg_basebackup",
+            "-F",
+            "tar",
+            "-d",
+            vanilla_pg_connstr,
+            "-D",
+            basebackup_dir,
+        ]
+    )
+
+    # Extract start_lsn and end_lsn form the backup manifest file
+    with open(os.path.join(basebackup_dir, "backup_manifest")) as f:
+        manifest = json.load(f)
+        start_lsn = manifest["WAL-Ranges"][0]["Start-LSN"]
+        end_lsn = manifest["WAL-Ranges"][0]["End-LSN"]
+
+    # Import the backup tarballs into the pageserver
+    env.neon_cli.raw_cli(
+        [
+            "timeline",
+            "import",
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+            "--branch-name",
+            branch_name,
+            "--base-lsn",
+            start_lsn,
+            "--base-tarfile",
+            base_tar,
+            "--end-lsn",
+            end_lsn,
+            "--wal-tarfile",
+            wal_tar,
+            "--pg-version",
+            env.pg_version,
+        ]
+    )
+    wait_for_last_record_lsn(env.pageserver.http_client(), tenant_id, timeline_id, Lsn(end_lsn))
 
 
 def last_flush_lsn_upload(

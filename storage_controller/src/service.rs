@@ -32,10 +32,10 @@ use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        ShardSchedulingPolicy, TenantCreateResponse, TenantCreateResponseShard,
-        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
-        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
-        UtilizationScore,
+        ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
+        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+        TenantShardMigrateResponse, UtilizationScore,
     },
     models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
@@ -46,10 +46,9 @@ use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
-        PageserverUtilization, ShardParameters, TenantConfig, TenantCreateRequest,
-        TenantLocationConfigRequest, TenantLocationConfigResponse, TenantShardLocation,
-        TenantShardSplitRequest, TenantShardSplitResponse, TenantTimeTravelRequest,
-        TimelineCreateRequest, TimelineInfo,
+        PageserverUtilization, ShardParameters, TenantConfig, TenantLocationConfigRequest,
+        TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
+        TenantShardSplitResponse, TenantTimeTravelRequest, TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
     upcall_api::{
@@ -1231,6 +1230,13 @@ impl Service {
         &self,
         attach_req: AttachHookRequest,
     ) -> anyhow::Result<AttachHookResponse> {
+        let _tenant_lock = trace_exclusive_lock(
+            &self.tenant_op_locks,
+            attach_req.tenant_shard_id.tenant_id,
+            TenantOperations::ShardSplit,
+        )
+        .await;
+
         // This is a test hook.  To enable using it on tenants that were created directly with
         // the pageserver API (not via this service), we will auto-create any missing tenant
         // shards with default state.
@@ -1384,7 +1390,7 @@ impl Service {
                             tenant_shard.generation.unwrap(),
                             &tenant_shard.shard,
                             &tenant_shard.config,
-                            false,
+                            &PlacementPolicy::Attached(0),
                         )),
                     },
                 )]);
@@ -3315,7 +3321,7 @@ impl Service {
                                 generation,
                                 &child_shard,
                                 &config,
-                                matches!(policy, PlacementPolicy::Attached(n) if n > 0),
+                                &policy,
                             )),
                         },
                     );
@@ -5557,9 +5563,12 @@ impl Service {
                 break;
             }
 
-            let mut can_take = attached - expected_attached;
+            let can_take = attached - expected_attached;
+            let needed = fill_requirement - plan.len();
+            let mut take = std::cmp::min(can_take, needed);
+
             let mut remove_node = false;
-            while can_take > 0 {
+            while take > 0 {
                 match tids_by_node.get_mut(&node_id) {
                     Some(tids) => match tids.pop() {
                         Some(tid) => {
@@ -5571,7 +5580,7 @@ impl Service {
                             if *promoted < max_promote_for_tenant {
                                 plan.push(tid);
                                 *promoted += 1;
-                                can_take -= 1;
+                                take -= 1;
                             }
                         }
                         None => {
