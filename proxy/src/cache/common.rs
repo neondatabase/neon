@@ -53,6 +53,13 @@ impl<C: Cache, V> Cached<C, V> {
         )
     }
 
+    pub fn map<U>(self, f: impl FnOnce(V) -> U) -> Cached<C, U> {
+        Cached {
+            token: self.token,
+            value: f(self.value),
+        }
+    }
+
     /// Drop this entry from a cache if it's still there.
     pub fn invalidate(self) -> V {
         if let Some((cache, info)) = &self.token {
