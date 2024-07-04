@@ -540,8 +540,8 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
         },
         allow_self_signed_compute: false,
     };
-    let (_, node) = cache.insert("key".into(), node);
-    node
+    let (_, node2) = cache.insert_unit("key".into(), Ok(node.clone()));
+    node2.map(|()| node)
 }
 
 fn helper_create_connect_info(
