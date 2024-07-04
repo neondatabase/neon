@@ -47,9 +47,6 @@ jobs:
     # however we still need the local github actions to run the allure step below
     - name: Checkout
       uses: actions/checkout@v4
-      with:
-        submodules: false
-        fetch-depth: 1
 
     - name: Show my own (github runner) external IP address - usefull for IP allowlisting
       run: curl https://ifconfig.me
