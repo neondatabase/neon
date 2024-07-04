@@ -1,5 +1,13 @@
 FROM debian:bullseye-slim
 
+# Use ARG as a build-time environment variable here to allow.
+# It's not supposed to be set outside.
+# Alternatively it can be obtained using the following command
+# ```
+# . /etc/os-release && echo "${VERSION_CODENAME}"
+# ```
+ARG DEBIAN_VERSION_CODENAME=bullseye
+
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
 SHELL ["/bin/bash", "-c"]
@@ -66,11 +74,23 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
 # LLVM
 ENV LLVM_VERSION=18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
-    && echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && echo "deb http://apt.llvm.org/${DEBIAN_VERSION_CODENAME}/ llvm-toolchain-${DEBIAN_VERSION_CODENAME}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
     && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Install docker
+RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+    && apt update \
+    && apt install -y docker-ce docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Configure sudo & docker
+RUN usermod -aG sudo nonroot && \
+    echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
+    usermod -aG docker nonroot
 
 # AWS CLI
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip" \
