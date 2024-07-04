@@ -207,8 +207,13 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&summary).unwrap());
             Ok(())
         }
-        Command::FindLargeObjects { min_size, ignore_deltas } => {
-            let summary = find_large_objects::find_large_objects(bucket_config, min_size, ignore_deltas).await?;
+        Command::FindLargeObjects {
+            min_size,
+            ignore_deltas,
+        } => {
+            let summary =
+                find_large_objects::find_large_objects(bucket_config, min_size, ignore_deltas)
+                    .await?;
             println!("{}", serde_json::to_string(&summary).unwrap());
             Ok(())
         }

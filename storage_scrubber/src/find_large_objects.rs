@@ -3,7 +3,8 @@ use pageserver::tenant::storage_layer::LayerName;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    checks::parse_layer_object_name, init_remote, list_objects_with_retries, metadata_stream::stream_tenants, BucketConfig, NodeKind
+    checks::parse_layer_object_name, init_remote, list_objects_with_retries,
+    metadata_stream::stream_tenants, BucketConfig, NodeKind,
 };
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -67,10 +68,7 @@ pub async fn find_large_objects(
                     false
                 }
             }) {
-                let key = obj
-                    .key()
-                    .map(|k| k.to_owned())
-                    .unwrap_or_else(|| "<unknown key>".to_owned());
+                let key = obj.key().expect("couldn't get key").to_owned();
                 let kind = LargeObjectKind::from_key(&key);
                 if ignore_deltas && kind == LargeObjectKind::DeltaLayer {
                     continue;
