@@ -132,14 +132,6 @@ def test_storage_controller_many_tenants(
     )
 
     for ps in env.pageservers:
-        # This can happen because when we do a loop over all pageservers and mark them offline/active,
-        # reconcilers might get cancelled, and the next reconcile can follow a not-so-elegant path of
-        # bumping generation before other attachments are detached.
-        #
-        # We could clean this up by making reconcilers respect the .observed of their predecessor, if
-        # we spawn with a wait for the predecessor.
-        ps.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
-
         # Storage controller is allowed to drop pageserver requests when the cancellation token
         # for a Reconciler fires.
         ps.allowed_errors.append(".*request was dropped before completing.*")
