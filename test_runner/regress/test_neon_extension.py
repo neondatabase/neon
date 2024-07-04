@@ -24,7 +24,7 @@ def test_neon_extension(neon_env_builder: NeonEnvBuilder):
             # IMPORTANT:
             # If the version has changed, the test should be updated.
             # Ensure that the default version is also updated in the neon.control file
-            assert cur.fetchone() == ("1.4",)
+            assert cur.fetchone() == ("1.3",)
             cur.execute("SELECT * from neon.NEON_STAT_FILE_CACHE")
             res = cur.fetchall()
             log.info(res)
