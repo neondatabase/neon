@@ -1284,13 +1284,14 @@ impl Timeline {
             if avg >= Self::VEC_GET_LAYERS_VISITED_WARN_THRESH {
                 use utils::rate_limit::RateLimit;
                 static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
                 let mut rate_limit = LOGGED.lock().unwrap();
                 rate_limit.call(|| {
                     tracing::info!(
                     tenant_id = %self.tenant_shard_id.tenant_id,
                     shard_id = %self.tenant_shard_id.shard_slug(),
                     timeline_id = %self.timeline_id,
+                    lsn = %lsn,
                     "Vectored read for {} visited {} layers on average per key and {} in total. {}/{} pages were returned",
                     keyspace, avg, layers_visited, results.len(), keyspace.total_raw_size());
                 });
