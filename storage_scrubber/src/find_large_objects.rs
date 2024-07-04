@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use pageserver::tenant::storage_layer::{DeltaLayerName, ImageLayerName};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -6,9 +7,30 @@ use crate::{
 };
 
 #[derive(Serialize, Deserialize)]
+enum LargeObjectKind {
+    DeltaLayer,
+    ImageLayer,
+    Other,
+}
+
+impl LargeObjectKind {
+    fn from_key(key: &str) -> Self {
+        let fname = key.split('/').last().unwrap();
+        let is_delta = DeltaLayerName::parse_str(fname).is_some();
+        let is_image = ImageLayerName::parse_str(fname).is_some();
+        match (is_delta, is_image) {
+            (true, false) => LargeObjectKind::DeltaLayer,
+            (false, true) => LargeObjectKind::ImageLayer,
+            (false, false) | (true, true) => LargeObjectKind::Other,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct LargeObject {
     pub key: String,
     pub size: u64,
+    kind: LargeObjectKind,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -42,12 +64,15 @@ pub async fn find_large_objects(
                     false
                 }
             }) {
+                let key = obj
+                    .key()
+                    .map(|k| k.to_owned())
+                    .unwrap_or_else(|| "<unknown key>".to_owned());
+                let kind = LargeObjectKind::from_key(&key);
                 objects.push(LargeObject {
-                    key: obj
-                        .key()
-                        .map(|k| k.to_owned())
-                        .unwrap_or_else(|| "<unknown key>".to_owned()),
+                    key,
                     size: obj.size.unwrap() as u64,
+                    kind,
                 })
             }
             object_ctr += fetch_response.contents().len() as u64;
@@ -63,9 +88,9 @@ pub async fn find_large_objects(
                 "Scanned {tenant_ctr} shards. objects={object_ctr}, found={}, current={tenant_shard_id}.", objects.len()
             );
         }
+        if tenant_ctr == 100 {
+            break;
+        }
     }
-    //let objects = Vec::new();
-
-    // TODO
     Ok(LargeObjectListing { objects })
 }
