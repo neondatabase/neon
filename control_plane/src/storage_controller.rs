@@ -353,8 +353,10 @@ impl StorageController {
             "--dev",
             "--database-url",
             &database_url,
-            "--max-unavailable-interval",
-            &humantime::Duration::from(self.config.max_unavailable).to_string(),
+            "--max-offline-interval",
+            &humantime::Duration::from(self.config.max_offline).to_string(),
+            "--max-warming-up-interval",
+            &humantime::Duration::from(self.config.max_warming_up).to_string(),
         ]
         .into_iter()
         .map(|s| s.to_string())
