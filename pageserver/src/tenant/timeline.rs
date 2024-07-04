@@ -14,6 +14,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use camino::Utf8Path;
+use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
@@ -1590,7 +1591,13 @@ impl Timeline {
                     let existing_lease = occupied.get_mut();
                     if valid_until > existing_lease.valid_until {
                         existing_lease.valid_until = valid_until;
+                        let dt: DateTime<Utc> = valid_until.into();
+                        info!("lease extended to {}", dt);
+                    } else {
+                        let dt: DateTime<Utc> = existing_lease.valid_until.into();
+                        info!("existing lease covers greater length, valid until {}", dt);
                     }
+
                     existing_lease.clone()
                 } else {
                     // Reject already GC-ed LSN (lsn < latest_gc_cutoff)
@@ -1599,6 +1606,8 @@ impl Timeline {
                         bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
                     }
 
+                    let dt: DateTime<Utc> = valid_until.into();
+                    info!("lease created, valid until {}", dt);
                     entry.or_insert(LsnLease { valid_until }).clone()
                 }
             };
