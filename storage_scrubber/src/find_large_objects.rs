@@ -25,6 +25,8 @@ pub async fn find_large_objects(
     let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver)?;
     let mut tenants = std::pin::pin!(stream_tenants(&s3_client, &target));
     let mut objects = Vec::new();
+    let mut tenant_ctr = 0u64;
+    let mut object_ctr = 0u64;
     while let Some(tenant_shard_id) = tenants.next().await {
         let tenant_shard_id = tenant_shard_id?;
         let mut timelines =
@@ -51,15 +53,18 @@ pub async fn find_large_objects(
                             .unwrap_or_else(|| "<unknown key>".to_owned()),
                         size: obj.size.unwrap() as u64,
                     })
-                    // TODO
                 }
+                object_ctr += fetch_response.contents().len() as u64;
                 match fetch_response.next_continuation_token {
                     Some(new_token) => continuation_token = Some(new_token),
                     None => break,
                 }
             }
         }
-        //objects.push();
+        tenant_ctr += 1;
+        if tenant_ctr % 10 == 0 {
+            tracing::info!("Scanned {tenant_ctr} tenants, {object_ctr} objects. current {tenant_shard_id}.");
+        }
     }
     //let objects = Vec::new();
 
