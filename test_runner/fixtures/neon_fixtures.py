@@ -2548,6 +2548,18 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         log.info("storage controller passed consistency check")
 
+    def node_registered(self, node_id: int) -> bool:
+        """
+        Returns true if the storage controller can confirm
+        it knows of pageserver with 'node_id'
+        """
+        try:
+            self.node_status(node_id)
+        except StorageControllerApiException:
+            return False
+
+        return True
+
     def poll_node_status(
         self,
         node_id: int,
@@ -2565,7 +2577,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         while max_attempts > 0:
             try:
-                status = self.env.storage_controller.node_status(node_id)
+                status = self.node_status(node_id)
                 policy = status["scheduling"]
                 availability = status["availability"]
                 if (desired_scheduling_policy is None or policy == desired_scheduling_policy) and (
@@ -2725,7 +2737,9 @@ class NeonPageserver(PgProtocol, LogUtils):
         )
         self.running = True
 
-        if self.env.storage_controller.running:
+        if self.env.storage_controller.running and self.env.storage_controller.node_registered(
+            self.id
+        ):
             self.env.storage_controller.poll_node_status(
                 self.id, PageserverAvailability.ACTIVE, None, max_attempts=20, backoff=1
             )
