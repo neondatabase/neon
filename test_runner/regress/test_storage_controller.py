@@ -12,6 +12,8 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    PageserverAvailability,
+    PageserverSchedullingPolicy,
     PgBin,
     StorageControllerApiException,
     TokenScope,
@@ -996,6 +998,11 @@ def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
 def test_storage_controller_heartbeats(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, failure: Failure
 ):
+    neon_env_builder.storage_controller_config = {
+        "max_offline": "10s",
+        "max_warming_up": "20s",
+    }
+
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
@@ -1546,7 +1553,13 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        env.storage_controller.poll_node_status(ps.id, "PauseForRestart", max_attempts=6, backoff=5)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedullingPolicy.PAUSE_FOR_RESTART,
+            max_attempts=6,
+            backoff=5,
+        )
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
@@ -1556,12 +1569,24 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         assert sum(shard_counts.values()) == total_shards
 
         ps.restart()
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=10, backoff=1)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedullingPolicy.ACTIVE,
+            max_attempts=10,
+            backoff=1,
+        )
 
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=6, backoff=5)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedullingPolicy.ACTIVE,
+            max_attempts=6,
+            backoff=5,
+        )
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
@@ -1606,11 +1631,23 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
         backoff=2,
     )
 
-    env.storage_controller.poll_node_status(ps_id_to_drain, "Draining", max_attempts=6, backoff=2)
+    env.storage_controller.poll_node_status(
+        ps_id_to_drain,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedullingPolicy.DRAINING,
+        max_attempts=6,
+        backoff=2,
+    )
 
     env.storage_controller.cancel_node_drain(ps_id_to_drain)
 
-    env.storage_controller.poll_node_status(ps_id_to_drain, "Active", max_attempts=6, backoff=2)
+    env.storage_controller.poll_node_status(
+        ps_id_to_drain,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedullingPolicy.ACTIVE,
+        max_attempts=6,
+        backoff=2,
+    )
 
 
 @pytest.mark.parametrize("while_offline", [True, False])

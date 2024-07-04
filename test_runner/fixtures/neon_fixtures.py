@@ -2148,6 +2148,23 @@ class StorageControllerApiException(Exception):
         self.status_code = status_code
 
 
+# See libs/pageserver_api/src/controller_api.rs
+# for the rust definitions of the enums below
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class PageserverAvailability(str, Enum):
+    ACTIVE = "Active"
+    UNAVAILABLE = "Unavailable"
+    OFFLINE = "Offline"
+
+
+class PageserverSchedullingPolicy(str, Enum):
+    ACTIVE = "Active"
+    DRAINING = "Draining"
+    FILLING = "Filling"
+    PAUSE = "Pause"
+    PAUSE_FOR_RESTART = "PauseForRestart"
+
+
 class NeonStorageController(MetricsGetter, LogUtils):
     def __init__(self, env: NeonEnv, auth_enabled: bool):
         self.env = env
@@ -2532,25 +2549,38 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info("storage controller passed consistency check")
 
     def poll_node_status(
-        self, node_id: int, desired_scheduling_policy: str, max_attempts: int, backoff: int
+        self,
+        node_id: int,
+        desired_availability: Optional[PageserverAvailability],
+        desired_scheduling_policy: Optional[PageserverSchedullingPolicy],
+        max_attempts: int,
+        backoff: int,
     ):
         """
-        Poll the node status until it reaches 'desired_scheduling_policy' or 'max_attempts' have been exhausted
+        Poll the node status until it reaches 'desired_scheduling_policy' and 'desired_availability'
+        or 'max_attempts' have been exhausted
         """
-        log.info(f"Polling {node_id} for {desired_scheduling_policy} scheduling policy")
+        log.info(
+            f"Polling {node_id} for {desired_scheduling_policy} scheduling policy and {desired_availability} availability"
+        )
         while max_attempts > 0:
             try:
-                status = self.node_status(node_id)
+                status = self.env.storage_controller.node_status(node_id)
                 policy = status["scheduling"]
-                if policy == desired_scheduling_policy:
+                availability = status["availability"]
+                if (desired_scheduling_policy is None or policy == desired_scheduling_policy) and (
+                    desired_availability is None or availability == desired_availability
+                ):
                     return
                 else:
                     max_attempts -= 1
-                    log.info(f"Status call returned {policy=} ({max_attempts} attempts left)")
+                    log.info(
+                        f"Status call returned {policy=} {availability=} ({max_attempts} attempts left)"
+                    )
 
                     if max_attempts == 0:
                         raise AssertionError(
-                            f"Status for {node_id=} did not reach {desired_scheduling_policy=}"
+                            f"Status for {node_id=} did not reach {desired_scheduling_policy=} {desired_availability=}"
                         )
 
                     time.sleep(backoff)
@@ -2694,6 +2724,12 @@ class NeonPageserver(PgProtocol, LogUtils):
             self.id, extra_env_vars=extra_env_vars, timeout_in_seconds=timeout_in_seconds
         )
         self.running = True
+
+        if self.env.storage_controller.running:
+            self.env.storage_controller.poll_node_status(
+                self.id, PageserverAvailability.ACTIVE, None, max_attempts=20, backoff=1
+            )
+
         return self
 
     def stop(self, immediate: bool = False) -> "NeonPageserver":

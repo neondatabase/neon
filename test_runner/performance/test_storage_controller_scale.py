@@ -8,7 +8,12 @@ import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PageserverAvailability,
+    PageserverSchedullingPolicy,
+)
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
 
@@ -106,7 +111,8 @@ def test_storage_controller_many_tenants(
         # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
         # TODO: tune this down as restarts get faster (https://github.com/neondatabase/neon/pull/7553), to
         # guard against regressions in restart time.
-        "max_unavailable": "300s"
+        "max_offline": "30s",
+        "max_warming_up": "300s",
     }
     neon_env_builder.control_plane_compute_hook_api = (
         compute_reconfigure_listener.control_plane_compute_hook_api
@@ -274,7 +280,11 @@ def test_storage_controller_many_tenants(
         )
 
         env.storage_controller.poll_node_status(
-            ps.id, "PauseForRestart", max_attempts=24, backoff=5
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedullingPolicy.PAUSE_FOR_RESTART,
+            max_attempts=24,
+            backoff=5,
         )
 
         shard_counts = get_consistent_node_shard_counts(env, total_shards)
@@ -285,12 +295,24 @@ def test_storage_controller_many_tenants(
         assert sum(shard_counts.values()) == total_shards
 
         ps.restart()
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=24, backoff=1)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedullingPolicy.ACTIVE,
+            max_attempts=24,
+            backoff=1,
+        )
 
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=24, backoff=5)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedullingPolicy.ACTIVE,
+            max_attempts=24,
+            backoff=5,
+        )
 
         shard_counts = get_consistent_node_shard_counts(env, total_shards)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
