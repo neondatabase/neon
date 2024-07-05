@@ -15,7 +15,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::Client;
 
@@ -293,7 +293,7 @@ async fn list_objects_with_retries(
     s3_target: &S3Target,
     continuation_token: Option<String>,
 ) -> anyhow::Result<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output> {
-    for _ in 0..MAX_RETRIES {
+    for trial in 0..MAX_RETRIES {
         match s3_client
             .list_objects_v2()
             .bucket(&s3_target.bucket_name)
@@ -305,6 +305,10 @@ async fn list_objects_with_retries(
         {
             Ok(response) => return Ok(response),
             Err(e) => {
+                if trial == MAX_RETRIES - 1 {
+                    return Err(e)
+                        .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                }
                 error!(
                     "list_objects_v2 query failed: {e}, bucket_name={}, prefix={}, delimiter={}",
                     s3_target.bucket_name, s3_target.prefix_in_bucket, s3_target.delimiter
@@ -313,8 +317,7 @@ async fn list_objects_with_retries(
             }
         }
     }
-
-    anyhow::bail!("Failed to list objects {MAX_RETRIES} times")
+    Err(anyhow!("unreachable unless MAX_RETRIES==0"))
 }
 
 async fn download_object_with_retries(
