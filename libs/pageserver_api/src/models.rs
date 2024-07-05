@@ -1675,4 +1675,14 @@ mod tests {
             AuxFilePolicy::CrossValidation
         );
     }
+
+    #[test]
+    fn test_image_compression_algorithm_parsing() {
+        use ImageCompressionAlgorithm::*;
+        assert_eq!(ImageCompressionAlgorithm::from_str("disabled").unwrap(), Disabled);
+        assert_eq!(ImageCompressionAlgorithm::from_str("disabled-no-decompress").unwrap(), DisabledNoDecompress);
+        assert_eq!(ImageCompressionAlgorithm::from_str("zstd").unwrap(), Zstd { level: None });
+        assert_eq!(ImageCompressionAlgorithm::from_str("zstd(18)").unwrap(), Zstd { level: Some(18) });
+        assert_eq!(ImageCompressionAlgorithm::from_str("zstd(-3)").unwrap(), Zstd { level: Some(-3) });
+    }
 }
