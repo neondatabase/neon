@@ -486,9 +486,9 @@ def assert_size_approx_equal(size_a, size_b):
     """
 
     # Determined empirically from examples of equality failures: they differ
-    # by page multiples of 8272, and usually by 1-3 pages.  Tolerate 4 to avoid
+    # by page multiples of 8272, and usually by 1-4 pages.  Tolerate 5 to avoid
     # failing on outliers from that observed range.
-    threshold = 4 * 8272
+    threshold = 5 * 8272
 
     assert size_a == pytest.approx(size_b, abs=threshold)
 
