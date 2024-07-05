@@ -6,7 +6,6 @@ use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use once_cell::sync::Lazy;
 use pageserver_api::key::Key;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
@@ -375,15 +374,6 @@ impl PageServerHandler {
             .await;
     }
 
-    /// Checking variant of [`Self::await_connection_cancelled`].
-    fn is_connection_cancelled(&self) -> bool {
-        task_mgr::is_shutdown_requested()
-            || self
-                .shard_timelines
-                .values()
-                .any(|ht| ht.timeline.cancel.is_cancelled() || ht.timeline.is_stopping())
-    }
-
     /// This function always respects cancellation of any timeline in `[Self::shard_timelines]`.  Pass in
     /// a cancellation token at the next scope up (such as a tenant cancellation token) to ensure we respect
     /// cancellation if there aren't any timelines in the cache.
@@ -411,6 +401,9 @@ impl PageServerHandler {
         )
     }
 
+    /// Coding discipline within this function: all interaction with the `pgb` connection
+    /// needs to be sensitive to page_service shutdown, currently signalled via [`task_mgr::shutdown_token`].
+    /// This is so that we can shutdown page_service quickly.
     #[instrument(skip_all)]
     async fn handle_pagerequests<IO>(
         &mut self,
@@ -425,21 +418,26 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
+        let cancel = task_mgr::shutdown_token();
+
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
-        static NO_CANCEL: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
-        self.flush_cancellable(pgb, &NO_CANCEL).await?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(QueryError::Shutdown)
+            }
+            res = pgb.flush() => {
+                res?;
+            }
+        }
 
         loop {
             let msg = tokio::select! {
                 biased;
-
-                _ = self.await_connection_cancelled() => {
-                    // We were requested to shut down.
-                    info!("shutdown request received in page handler");
+                _ = cancel.cancelled() => {
                     return Err(QueryError::Shutdown)
                 }
-
                 msg = pgb.read_message() => { msg }
             };
 
@@ -529,7 +527,7 @@ impl PageServerHandler {
                     span.in_scope(|| info!("handler requested reconnect: {reason}"));
                     return Err(QueryError::Reconnect);
                 }
-                Err(e) if self.is_connection_cancelled() => {
+                Err(e) if cancel.is_cancelled() => {
                     // This branch accomodates code within request handlers that returns an anyhow::Error instead of a clean
                     // shutdown error, this may be buried inside a PageReconstructError::Other for example.
                     //
@@ -555,7 +553,17 @@ impl PageServerHandler {
                     });
 
                     pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
-                    self.flush_cancellable(pgb, &NO_CANCEL).await?;
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            // We were requested to shut down.
+                            info!("shutdown request received in page handler");
+                            return Err(QueryError::Shutdown)
+                        }
+                        res = pgb.flush() => {
+                            res?;
+                        }
+                    }
                 }
             }
         }
