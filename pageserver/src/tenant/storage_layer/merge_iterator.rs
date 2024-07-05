@@ -42,9 +42,11 @@ impl LayerIterRef<'_> {
     }
 }
 
+/// This type plays several roles at once
+/// 1. Unified iterator for image and delta layers.
+/// 2. `Ord` for use in [`MergeIterator::heap`] (for the k-merge).
+/// 3. Lazy creation of the real delta/image iterator.
 enum IteratorWrapper<'a> {
-    /// The potential next key of the iterator. If the layer is not loaded yet, it will be the start key encoded in the layer file.
-    /// Otherwise, it is the next key of the real iterator.
     NotLoaded {
         ctx: &'a RequestContext,
         first_key_lower_bound: (Key, Lsn),
