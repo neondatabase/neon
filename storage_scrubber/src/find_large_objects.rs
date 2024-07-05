@@ -105,8 +105,6 @@ pub async fn find_large_objects(
     });
     let mut objects_stream = std::pin::pin!(objects_stream.try_buffer_unordered(concurrency));
 
-    //let mut objects_stream = objects_stream.flatten();
-
     let mut objects = Vec::new();
     while let Some(res) = objects_stream.next().await {
         let (tenant_shard_id, objects_slice) = res?;
