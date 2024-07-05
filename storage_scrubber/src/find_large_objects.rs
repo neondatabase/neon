@@ -55,12 +55,10 @@ pub async fn find_large_objects(
     let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver)?;
     let tenants = std::pin::pin!(stream_tenants(&s3_client, &target));
 
-    let tenant_ctr = Arc::new(AtomicU64::new(0));
     let object_ctr = Arc::new(AtomicU64::new(0));
 
     let objects_stream = tenants.map_ok(|tenant_shard_id| {
         let mut tenant_root = target.tenant_root(&tenant_shard_id);
-        let tenant_ctr = tenant_ctr.clone();
         let object_ctr = object_ctr.clone();
         let s3_client = s3_client.clone();
         async move {
@@ -98,34 +96,32 @@ pub async fn find_large_objects(
                 }
             }
 
-            tenant_ctr.fetch_add(1, Ordering::Relaxed);
-
             Ok((tenant_shard_id, objects))
         }
     });
     let mut objects_stream = std::pin::pin!(objects_stream.try_buffer_unordered(concurrency));
 
     let mut objects = Vec::new();
+
+    let tenant_ctr = 0u64;
     while let Some(res) = objects_stream.next().await {
         let (tenant_shard_id, objects_slice) = res?;
         objects.extend_from_slice(&objects_slice);
 
-        let tenants_count = tenant_ctr.load(Ordering::Relaxed);
-
-        if tenants_count % 100 == 0 {
+        if tenant_ctr % 100 == 0 {
             let objects_count = object_ctr.load(Ordering::Relaxed);
 
             tracing::info!(
-                "Scanned {tenants_count} shards. objects={objects_count}, found={}, current={tenant_shard_id}.",
+                "Scanned {tenant_ctr} shards. objects={objects_count}, found={}, current={tenant_shard_id}.",
                 objects.len()
             );
         }
     }
 
-    let tenants_count = tenant_ctr.load(Ordering::Relaxed);
+    let bucket_name = target.bucket_name();
     let objects_count = object_ctr.load(Ordering::Relaxed);
     tracing::info!(
-        "Scan finished. Scanned {tenants_count} shards. objects={objects_count}, found={}.",
+        "Scan of {bucket_name} finished. Scanned {tenant_ctr} shards. objects={objects_count}, found={}.",
         objects.len()
     );
     Ok(LargeObjectListing { objects })
