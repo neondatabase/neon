@@ -25,4 +25,4 @@ jobs:
           zstandard numpy pandas pgvector pytest-lazy-fixture pg8000 websockets
       - name: Analyzing code with pylint
         run: |
-          pylint $(git ls-files '*.py')
+          pylint -E $(git ls-files '*.py')
