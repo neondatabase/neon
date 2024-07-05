@@ -109,8 +109,6 @@ class NeonCompare(PgCompare):
 
         # Create tenant
         tenant_conf: Dict[str, str] = {}
-        if False:  # TODO add pytest setting for this
-            tenant_conf["trace_read_requests"] = "true"
         self.tenant, _ = self.env.neon_cli.create_tenant(conf=tenant_conf)
 
         # Create timeline

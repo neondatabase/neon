@@ -23,7 +23,6 @@ pub mod span;
 pub(crate) mod statvfs;
 pub mod task_mgr;
 pub mod tenant;
-pub mod trace;
 pub mod utilization;
 pub mod virtual_file;
 pub mod walingest;

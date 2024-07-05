@@ -8,6 +8,7 @@ use bytes::Bytes;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
+use once_cell::sync::Lazy;
 use pageserver_api::key::Key;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
@@ -40,7 +41,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::id::ConnectionId;
 use utils::sync::gate::GateGuard;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -72,7 +72,6 @@ use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Tenant;
 use crate::tenant::Timeline;
-use crate::trace::Tracer;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -556,25 +555,10 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        let tenant = self
-            .get_active_tenant_with_timeout(tenant_id, ShardSelector::First, ACTIVE_TENANT_TIMEOUT)
-            .await?;
-
-        // Make request tracer if needed
-        let mut tracer = if tenant.get_trace_read_requests() {
-            let connection_id = ConnectionId::generate();
-            let path =
-                tenant
-                    .conf
-                    .trace_path(&tenant.tenant_shard_id(), &timeline_id, &connection_id);
-            Some(Tracer::new(path))
-        } else {
-            None
-        };
-
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
-        self.flush_cancellable(pgb, &tenant.cancel).await?;
+        static NO_CANCEL: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
+        self.flush_cancellable(pgb, &NO_CANCEL).await?;
 
         loop {
             let msg = tokio::select! {
@@ -602,11 +586,6 @@ impl PageServerHandler {
 
             trace!("query: {copy_data_bytes:?}");
             fail::fail_point!("ps::handle-pagerequest-message");
-
-            // Trace request if needed
-            if let Some(t) = tracer.as_mut() {
-                t.trace(&copy_data_bytes)
-            }
 
             let neon_fe_msg =
                 PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
@@ -706,7 +685,7 @@ impl PageServerHandler {
                     });
 
                     pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
-                    self.flush_cancellable(pgb, &tenant.cancel).await?;
+                    self.flush_cancellable(pgb, &NO_CANCEL).await?;
                 }
             }
         }

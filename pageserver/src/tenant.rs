@@ -2341,13 +2341,6 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
-    pub fn get_trace_read_requests(&self) -> bool {
-        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
-        tenant_conf
-            .trace_read_requests
-            .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
-    }
-
     pub fn get_min_resident_size_override(&self) -> Option<u64> {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf
@@ -3718,7 +3711,6 @@ pub(crate) mod harness {
                 walreceiver_connect_timeout: Some(tenant_conf.walreceiver_connect_timeout),
                 lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
                 max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
-                trace_read_requests: Some(tenant_conf.trace_read_requests),
                 eviction_policy: Some(tenant_conf.eviction_policy),
                 min_resident_size_override: tenant_conf.min_resident_size_override,
                 evictions_low_residence_duration_metric_threshold: Some(

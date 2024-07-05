@@ -873,8 +873,6 @@ components:
           type: string
         max_lsn_wal_lag:
           type: integer
-        trace_read_requests:
-          type: boolean
         heatmap_period:
           type: string
     TenantConfigResponse:
