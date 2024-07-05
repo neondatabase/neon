@@ -57,7 +57,7 @@ than the physical size of a compressed image layer representing the data at the 
 - We will not implement a total offload of archived timelines from safekeepers: their control file (small) will
   remain on local disk, although existing eviction mechanisms will remove any segments from local disk.
 - We will not expose any prometheus metrics for archived timelines, or make them visible in any
-  detailed HTTP APIs.
+  detailed HTTP APIs other than the specific API for listing archived timelines.
 - A parent branch may not be archived unless all its children are.
 
 ## Impacted Components
@@ -188,6 +188,17 @@ such that activating a timeline requires that all its ancestors are active, and 
 that all its descendents are archived.  It is the callers responsibility to walk the hierarchy of timelines
 in the proper order if they would like to archive whole trees of branches.
 
+Because archive timelines will be excluded from the usual timeline listing APIs, a new API specifically
+for archived timelines will be added: this is for use in support/debug:
+
+```
+GET /v1/tenants/{tenant_id}/archived_timelines
+
+{
+  ...same per-timeline content as the tenant manifest...
+}
+
+```
 
 ### Tenant attach changes
 
