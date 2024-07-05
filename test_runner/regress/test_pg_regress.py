@@ -12,6 +12,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     check_restored_datadir_content,
+    tenant_get_shards,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import s3_storage
@@ -105,6 +106,13 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
     ignored_files = unlogged_relation_files
 
     check_restored_datadir_content(test_output_dir, env, endpoint, ignored_files=ignored_files)
+
+    # Ensure that compaction works, on a timeline containing all the diversity that postgres regression tests create.
+    # There should have been compactions mid-test as well, this final check is in addition those.
+    for shard, pageserver in tenant_get_shards(env, env.initial_tenant):
+        pageserver.http_client().timeline_checkpoint(
+            shard, env.initial_timeline, force_repartition=True, force_image_layer_creation=True
+        )
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
