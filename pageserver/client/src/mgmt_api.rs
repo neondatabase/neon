@@ -22,6 +22,9 @@ pub struct Client {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("send request: {0}")]
+    SendRequest(reqwest::Error),
+
     #[error("receive body: {0}")]
     ReceiveBody(reqwest::Error),
 
@@ -640,7 +643,9 @@ impl Client {
             .body(basebackup_tarball)
             .send()
             .await
-            .map_err(Error::ReceiveBody)?
+            .map_err(Error::SendRequest)?
+            .error_from_body()
+            .await?
             .json()
             .await
             .map_err(Error::ReceiveBody)
@@ -662,7 +667,9 @@ impl Client {
             .body(wal_tarball)
             .send()
             .await
-            .map_err(Error::ReceiveBody)?
+            .map_err(Error::SendRequest)?
+            .error_from_body()
+            .await?
             .json()
             .await
             .map_err(Error::ReceiveBody)

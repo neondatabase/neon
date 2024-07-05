@@ -2889,7 +2889,7 @@ pub fn make_router(
             |r| api_handler(r, put_tenant_timeline_import_basebackup),
         )
         .put(
-            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/import_wal",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/import_wal",
             |r| api_handler(r, put_tenant_timeline_import_wal),
         )
         .any(handler_404))
