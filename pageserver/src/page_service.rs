@@ -527,17 +527,6 @@ impl PageServerHandler {
                     span.in_scope(|| info!("handler requested reconnect: {reason}"));
                     return Err(QueryError::Reconnect);
                 }
-                Err(e) if cancel.is_cancelled() => {
-                    // This branch accomodates code within request handlers that returns an anyhow::Error instead of a clean
-                    // shutdown error, this may be buried inside a PageReconstructError::Other for example.
-                    //
-                    // Requests may fail as soon as we are Stopping, even if the Timeline's cancellation token wasn't fired yet,
-                    // because wait_lsn etc will drop out
-                    // is_stopping(): [`Timeline::flush_and_shutdown`] has entered
-                    // is_canceled(): [`Timeline::shutdown`]` has entered
-                    span.in_scope(|| info!("dropped error response during shutdown: {e:#}"));
-                    return Err(QueryError::Shutdown);
-                }
                 r => {
                     let response_msg = r.unwrap_or_else(|e| {
                         // print the all details to the log with {:#}, but for the client the
