@@ -78,7 +78,7 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
     )
 }
 
-#[async_trait::async_trait]
+#[allow(async_fn_in_trait)]
 pub trait Handler<IO> {
     /// Handle single query.
     /// postgres_backend will issue ReadyForQuery after calling this (this
