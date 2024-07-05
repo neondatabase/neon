@@ -429,7 +429,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/SyntheticSizeResponse"
             text/html:
-              description: SVG representation of the tenant and it's timelines.
+              schema:
+                type: string
+              examples:
+                html:
+                  summary: SVG representation of the tenant and it's timelines.
         "401":
           description: Unauthorized Error
           content:
