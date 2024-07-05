@@ -228,6 +228,11 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LsnLeaseRequest {
+    pub lsn: Lsn,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TenantShardSplitRequest {
     pub new_shard_count: u8,
@@ -445,9 +450,22 @@ pub enum CompactionAlgorithm {
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum ImageCompressionAlgorithm {
+    /// Disabled for writes, and never decompress during reading.
+    /// Never set this after you've enabled compression once!
+    DisabledNoDecompress,
+    // Disabled for writes, support decompressing during read path
+    Disabled,
     /// Zstandard compression. Level 0 means and None mean the same (default level). Levels can be negative as well.
     /// For details, see the [manual](http://facebook.github.io/zstd/zstd_manual.html).
-    Zstd { level: Option<i8> },
+    Zstd {
+        level: Option<i8>,
+    },
+}
+
+impl ImageCompressionAlgorithm {
+    pub fn allow_decompression(&self) -> bool {
+        !matches!(self, ImageCompressionAlgorithm::DisabledNoDecompress)
+    }
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]

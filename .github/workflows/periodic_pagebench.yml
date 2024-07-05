@@ -43,6 +43,10 @@ jobs:
       AWS_DEFAULT_REGION : "eu-central-1"
       AWS_INSTANCE_ID : "i-02a59a3bf86bc7e74"
     steps:
+    # we don't need the neon source code because we run everything remotely
+    # however we still need the local github actions to run the allure step below
+    - uses: actions/checkout@v4
+
     - name: Show my own (github runner) external IP address - usefull for IP allowlisting
       run: curl https://ifconfig.me
 
@@ -90,10 +94,12 @@ jobs:
           set +x
           status=$(echo $response | jq -r '.status')
           echo "Test status: $status"
-          if [[ "$status" == "failure" || "$status" == "success" || "$status" == "null" ]]; then
+          if [[ "$status" == "failure" ]]; then
+            echo "Test failed"
+            exit 1 # Fail the job step if status is failure
+          elif [[ "$status" == "success" || "$status" == "null" ]]; then
             break
-          fi
-          if [[ "$status" == "too_many_runs" ]]; then
+          elif [[ "$status" == "too_many_runs" ]]; then
             echo "Too many runs already running"
             echo "too_many_runs=true" >> "$GITHUB_OUTPUT"
             exit 1
@@ -103,6 +109,7 @@ jobs:
         done
 
     - name: Retrieve Test Logs
+      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
       run: |
         curl -k -X 'GET' \
         "${EC2_MACHINE_URL_US}/test_log/${GITHUB_RUN_ID}" \
@@ -111,11 +118,15 @@ jobs:
         --output "test_log_${GITHUB_RUN_ID}.gz"
     
     - name: Unzip Test Log and Print it into this job's log
+      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
       run: |
         gzip -d "test_log_${GITHUB_RUN_ID}.gz"
         cat "test_log_${GITHUB_RUN_ID}"
 
     - name: Create Allure report
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 

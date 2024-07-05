@@ -14,6 +14,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use camino::Utf8Path;
+use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
@@ -364,6 +365,7 @@ pub struct Timeline {
     repartition_threshold: u64,
 
     last_image_layer_creation_check_at: AtomicLsn,
+    last_image_layer_creation_check_instant: std::sync::Mutex<Option<Instant>>,
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
@@ -1590,7 +1592,13 @@ impl Timeline {
                     let existing_lease = occupied.get_mut();
                     if valid_until > existing_lease.valid_until {
                         existing_lease.valid_until = valid_until;
+                        let dt: DateTime<Utc> = valid_until.into();
+                        info!("lease extended to {}", dt);
+                    } else {
+                        let dt: DateTime<Utc> = existing_lease.valid_until.into();
+                        info!("existing lease covers greater length, valid until {}", dt);
                     }
+
                     existing_lease.clone()
                 } else {
                     // Reject already GC-ed LSN (lsn < latest_gc_cutoff)
@@ -1599,6 +1607,8 @@ impl Timeline {
                         bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
                     }
 
+                    let dt: DateTime<Utc> = valid_until.into();
+                    info!("lease created, valid until {}", dt);
                     entry.or_insert(LsnLease { valid_until }).clone()
                 }
             };
@@ -2375,6 +2385,7 @@ impl Timeline {
                 )),
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
+                last_image_layer_creation_check_instant: Mutex::new(None),
 
                 last_received_wal: Mutex::new(None),
                 rel_size_cache: RwLock::new(RelSizeCache {
@@ -4455,6 +4466,58 @@ impl Timeline {
         }
     }
 
+    /// Predicate function which indicates whether we should check if new image layers
+    /// are required. Since checking if new image layers are required is expensive in
+    /// terms of CPU, we only do it in the following cases:
+    /// 1. If the timeline has ingested sufficient WAL to justify the cost
+    /// 2. If enough time has passed since the last check
+    /// 2.1. For large tenants, we wish to perform the check more often since they
+    /// suffer from the lack of image layers
+    /// 2.2. For small tenants (that can mostly fit in RAM), we use a much longer interval
+    fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
+        const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
+
+        let last_checks_at = self.last_image_layer_creation_check_at.load();
+        let distance = lsn
+            .checked_sub(last_checks_at)
+            .expect("Attempt to compact with LSN going backwards");
+        let min_distance =
+            self.get_image_layer_creation_check_threshold() as u64 * self.get_checkpoint_distance();
+
+        let distance_based_decision = distance.0 >= min_distance;
+
+        let mut time_based_decision = false;
+        let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
+        if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
+            let check_required_after = if Into::<u64>::into(&logical_size) >= LARGE_TENANT_THRESHOLD
+            {
+                self.get_checkpoint_timeout()
+            } else {
+                Duration::from_secs(3600 * 48)
+            };
+
+            time_based_decision = match *last_check_instant {
+                Some(last_check) => {
+                    let elapsed = last_check.elapsed();
+                    elapsed >= check_required_after
+                }
+                None => true,
+            };
+        }
+
+        // Do the expensive delta layer counting only if this timeline has ingested sufficient
+        // WAL since the last check or a checkpoint timeout interval has elapsed since the last
+        // check.
+        let decision = distance_based_decision || time_based_decision;
+
+        if decision {
+            self.last_image_layer_creation_check_at.store(lsn);
+            *last_check_instant = Some(Instant::now());
+        }
+
+        decision
+    }
+
     #[tracing::instrument(skip_all, fields(%lsn, %mode))]
     async fn create_image_layers(
         self: &Arc<Timeline>,
@@ -4477,22 +4540,7 @@ impl Timeline {
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
         let mut start = Key::MIN;
 
-        let check_for_image_layers = {
-            let last_checks_at = self.last_image_layer_creation_check_at.load();
-            let distance = lsn
-                .checked_sub(last_checks_at)
-                .expect("Attempt to compact with LSN going backwards");
-            let min_distance = self.get_image_layer_creation_check_threshold() as u64
-                * self.get_checkpoint_distance();
-
-            // Skip the expensive delta layer counting if this timeline has not ingested sufficient
-            // WAL since the last check.
-            distance.0 >= min_distance
-        };
-
-        if check_for_image_layers {
-            self.last_image_layer_creation_check_at.store(lsn);
-        }
+        let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
 
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
