@@ -4,7 +4,13 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**.md'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**.md'
 
 defaults:
   run:
