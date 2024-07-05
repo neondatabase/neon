@@ -445,6 +445,19 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .map(|res| ("WAL service main".to_owned(), res));
     tasks_handles.push(Box::pin(wal_service_handle));
 
+    let timeline_housekeeping_handle = current_thread_rt
+        .as_ref()
+        .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
+        .spawn(async move {
+            const TOMBSTONE_TTL: Duration = Duration::from_secs(3600 * 24);
+            loop {
+                tokio::time::sleep(TOMBSTONE_TTL).await;
+                GlobalTimelines::housekeeping(&TOMBSTONE_TTL);
+            }
+        })
+        .map(|res| ("Timeline map housekeeping".to_owned(), res));
+    tasks_handles.push(Box::pin(timeline_housekeeping_handle));
+
     if let Some(pg_listener_tenant_only) = pg_listener_tenant_only {
         let conf_ = conf.clone();
         let wal_service_handle = current_thread_rt
