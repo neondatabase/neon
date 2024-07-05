@@ -1,0 +1,110 @@
+name: Check neon with extra platform builds
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - '.github/workflows/build-macos.yml'
+      - 'pgxn/**'
+      - 'vendor/**'
+      - 'Makefile'
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_BACKTRACE: 1
+  COPT: '-Werror'
+
+jobs:
+  check-permissions:
+    if: >-
+      ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci')
+      || contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')
+      || contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
+
+  neon-build-macos:
+    needs: [ check-permissions ]
+    timeout-minutes: 30
+    runs-on: macos-14
+
+    env:
+      # Use release build only, to have less debug info around
+      # Hence keeping target/ (and general cache size) smaller
+      BUILD_TYPE: release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install macOS postgres dependencies
+        run: brew install flex bison openssl protobuf icu4c pkg-config
+
+      - id: cache-pg-14
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v14
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ hashFiles('Makefile', 'vendor/postgres-v14/**/*') }}
+
+      - id: cache-pg-15
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v15
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ hashFiles('Makefile', 'vendor/postgres-v15/**/*') }}
+
+      - id: cache-pg-16
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v16
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ hashFiles('Makefile', 'vendor/postgres-v16/**/*') }}
+
+      - name: Set extra env for macOS
+        run: |
+          echo 'LDFLAGS=-L/usr/local/opt/openssl@3/lib' >> $GITHUB_ENV
+          echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
+
+      - name: Cache cargo deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            !~/.cargo/registry/src
+            ~/.cargo/git
+            target
+          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+
+      - name: Build postgres v14
+        if: steps.cache-pg-14.outputs.cache-hit != 'true'
+        run: make postgres-v14 -j$(sysctl -n hw.ncpu)
+
+      - name: Build postgres v15
+        if: steps.cache-pg-15.outputs.cache-hit != 'true'
+        run: make postgres-v15 -j$(sysctl -n hw.ncpu)
+
+      - name: Build postgres v16
+        if: steps.cache-pg-16.outputs.cache-hit != 'true'
+        run: make postgres-v16 -j$(sysctl -n hw.ncpu)
+
+      - name: Build neon extensions
+        run: make neon-pg-ext -j$(sysctl -n hw.ncpu)
+
+      - name: Build walproposer-lib
+        run: make walproposer-lib -j$(sysctl -n hw.ncpu)
+
+      - name: Run cargo build
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release
+
+      - name: Check that no warnings are produced
+        run: ./run_clippy.sh
