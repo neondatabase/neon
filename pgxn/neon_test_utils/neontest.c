@@ -42,7 +42,8 @@ PG_FUNCTION_INFO_V1(clear_buffer_cache);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
 PG_FUNCTION_INFO_V1(neon_xlogflush);
-PG_FUNCTION_INFO_V1(boom);
+PG_FUNCTION_INFO_V1(trigger_panic);
+PG_FUNCTION_INFO_V1(trigger_segfault);
 
 /*
  * Linkage to functions in neon module.
@@ -492,10 +493,20 @@ neon_xlogflush(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Function to trigger panic.
+ */
+Datum
+trigger_panic(PG_FUNCTION_ARGS)
+{
+    elog(PANIC, "neon_test_utils: panic");
+    PG_RETURN_VOID();
+}
+
+/*
  * Function to trigger a segfault.
  */
 Datum
-boom(PG_FUNCTION_ARGS)
+trigger_segfault(PG_FUNCTION_ARGS)
 {
     int *ptr = NULL;
     *ptr = 42;
