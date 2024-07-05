@@ -102,7 +102,7 @@ jobs:
           elif [[ "$status" == "too_many_runs" ]]; then
             echo "Too many runs already running"
             echo "too_many_runs=true" >> "$GITHUB_OUTPUT"
-          exit 1
+            exit 1
           fi
 
           sleep 60 # Poll every 60 seconds
