@@ -178,8 +178,7 @@ impl std::fmt::Debug for ImageLayerInner {
 
 impl ImageLayerInner {
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let block_reader =
-            FileBlockReader::new(&self.file, self.file_id);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
@@ -267,10 +266,9 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded =
-            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
-                .await
-                .and_then(|res| res)?;
+        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
+            .await
+            .and_then(|res| res)?;
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
@@ -693,8 +691,7 @@ impl ImageLayerInner {
 
     #[cfg(test)]
     pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
-        let block_reader =
-            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
         ImageLayerIterator {
