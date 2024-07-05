@@ -35,7 +35,7 @@ than the physical size of a compressed image layer representing the data at the 
 - API calls to modify the archived state are atomic and durable
 - An archived timeline should eventually (once out of PITR window) use an efficient compressed
   representation, and avoid retaining arbitrarily large data in its parent branch.
-- Remote storage operations during tenant start may be O(N) with the number of _active_ branches,
+- Remote object GETs during tenant start may be O(N) with the number of _active_ branches,
   but must not scale with the number of _archived_ branches.
 - Background I/O for archived branches should only be done a limited number of times to evolve them
   to a long-term-efficient state (e.g. rewriting to image layers).  There should be no ongoing "housekeeping"
@@ -136,7 +136,12 @@ The manifest object will have a format like this:
       "last_gc_lsn": ...  # equal to last_record_lsn if this branch has no history (i.e. a snapshot)
       "logical_size": ...  # The size at last_record_lsn
       "physical_size" ...
-      "depends_on": <timeline_id>  # If this branch depends on layers in its parent, identify it here
+      "parent": Option<{
+        "timeline_id"...
+        "lsn"... # Branch point LSN on the parent
+        "requires_data": bool # True if this branch depends on layers in its parent, identify it here
+
+      }>
     }
   ]
 }
@@ -147,7 +152,9 @@ The information about a timeline in its offload state is intentionally minimal: 
   by checking if now > last_record_lsn_time - pitr_interval, and pitr_lsn < last_record_lsn.
 - Whether a parent branch should include this offloaded branch in its GC inputs to avoid removing
   layers that the archived branch depends on
-- Whether requests to delete this `timeline_id` should be accepted (i.e. presence of the timeline_id)
+- Whether requests to delete this `timeline_id` should be executed (i.e. if a deletion request
+  is received for a timeline_id that isn't in the site of live `Timelines` or in the manifest, then
+  we don't need to go to S3 for the deletion.
 - How much archived space to report in consumption metrics
 
 The contents of the manifest's offload list will also be stored as an attribute of `Tenant`, such that the total
@@ -203,8 +210,10 @@ GET /v1/tenants/{tenant_id}/archived_timelines
 ### Tenant attach changes
 
 Currently, during Tenant::spawn we list all the timelines in the S3 bucket, and then for each timeline
-we load their index_part.json.  To avoid this operation scaling linearly with the number of archived
-timelines, we must have a single object that tells us which timelines do not need to be loaded.
+we load their index_part.json.  To avoid the number of GETs scaling linearly with the number of archived
+timelines, we must have a single object that tells us which timelines do not need to be loaded.  The
+number of ListObjects requests while listing timelines will still scale O(N), but this is less problematic
+because each request covers 1000 timelines.
 
 This is **not** literally the same as the set of timelines who have state=archived.  Rather, it is
 the set of timelines which have been offloaded in the background after their state was set to archived.
@@ -282,6 +291,9 @@ Fully compacting an archived branch into image layers at a single LSN may be tho
 branch, such that it is now a one-dimensional keyspace rather than a two-dimensional key/lsn space. It becomes
 a true snapshot at that LSN.
 
+It is not always more efficient to flatten a branch than to keep some extra history on the parent: this
+is described in more detail in [optimizations](#delaying-storage-optimization-if-retaining-parent-layers-is-cheaper)
+
 Archive branch optimization should be done _before_ background offloads during compaction, because there may
 be timelines which are ready to be offloaded but also would benefit from the optimization step before
 being offloaded.  For example, a branch which has already fallen out of PITR window and has no history
@@ -289,7 +301,7 @@ of its own may be immediately re-written as a series of image layers before bein
 
 ### Consumption metrics
 
-Archived and offloaded timelines will be excluded from the synthetic size calculation.
+Archived timelines and offloaded timelines will be excluded from the synthetic size calculation.
 
 Archived and offloaded timelines' logical size will be reported under the existing `timeline_logical_size`
 variant of `MetricsKey`: receivers are then free to bill on this metric as they please.
