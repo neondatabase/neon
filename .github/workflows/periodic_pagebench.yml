@@ -94,19 +94,22 @@ jobs:
           set +x
           status=$(echo $response | jq -r '.status')
           echo "Test status: $status"
-          if [[ "$status" == "failure" || "$status" == "success" || "$status" == "null" ]]; then
+          if [[ "$status" == "failure" ]]; then
+            echo "Test failed"
+            exit 1 # Fail the job step if status is failure
+          elif [[ "$status" == "success" || "$status" == "null" ]]; then
             break
-          fi
-          if [[ "$status" == "too_many_runs" ]]; then
+          elif [[ "$status" == "too_many_runs" ]]; then
             echo "Too many runs already running"
             echo "too_many_runs=true" >> "$GITHUB_OUTPUT"
-            exit 1
+          exit 1
           fi
 
           sleep 60 # Poll every 60 seconds
         done
 
     - name: Retrieve Test Logs
+      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
       run: |
         curl -k -X 'GET' \
         "${EC2_MACHINE_URL_US}/test_log/${GITHUB_RUN_ID}" \
@@ -115,6 +118,7 @@ jobs:
         --output "test_log_${GITHUB_RUN_ID}.gz"
     
     - name: Unzip Test Log and Print it into this job's log
+      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
       run: |
         gzip -d "test_log_${GITHUB_RUN_ID}.gz"
         cat "test_log_${GITHUB_RUN_ID}"
