@@ -196,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
             concurrency,
         } => {
             let downloader =
-                SnapshotDownloader::new(bucket_config, tenant_id, output_path, concurrency)?;
+                SnapshotDownloader::new(bucket_config, tenant_id, output_path, concurrency).await?;
             downloader.download().await
         }
         Command::PageserverPhysicalGc {

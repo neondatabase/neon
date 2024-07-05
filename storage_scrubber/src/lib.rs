@@ -16,16 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use aws_config::environment::EnvironmentVariableCredentialsProvider;
-use aws_config::imds::credentials::ImdsCredentialsProvider;
-use aws_config::meta::credentials::CredentialsProviderChain;
-use aws_config::profile::ProfileFileCredentialsProvider;
-use aws_config::retry::RetryConfig;
-use aws_config::sso::SsoCredentialsProvider;
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::{AsyncSleep, Region, SharedAsyncSleep};
-use aws_sdk_s3::{Client, Config};
-use aws_smithy_async::rt::sleep::TokioSleep;
+use aws_sdk_s3::config::Region;
+use aws_sdk_s3::Client;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
@@ -262,65 +254,21 @@ pub fn init_logging(file_name: &str) -> WorkerGuard {
     guard
 }
 
-pub fn init_s3_client(bucket_region: Region) -> Client {
-    let credentials_provider = {
-        // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-        let chain = CredentialsProviderChain::first_try(
-            "env",
-            EnvironmentVariableCredentialsProvider::new(),
-        )
-        // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
-        .or_else(
-            "profile-sso",
-            ProfileFileCredentialsProvider::builder().build(),
-        );
-
-        // Use SSO if we were given an account ID
-        match std::env::var("SSO_ACCOUNT_ID").ok() {
-            Some(sso_account) => chain.or_else(
-                "sso",
-                SsoCredentialsProvider::builder()
-                    .account_id(sso_account)
-                    .role_name("PowerUserAccess")
-                    .start_url("https://neondb.awsapps.com/start")
-                    .region(bucket_region.clone())
-                    .build(),
-            ),
-            None => chain,
-        }
-        .or_else(
-            // Finally try IMDS
-            "imds",
-            ImdsCredentialsProvider::builder().build(),
-        )
-    };
-
-    let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
-
-    let mut builder = Config::builder()
-        .behavior_version(
-            #[allow(deprecated)] /* TODO: https://github.com/neondatabase/neon/issues/7665 */
-            BehaviorVersion::v2023_11_09(),
-        )
+pub async fn init_s3_client(bucket_region: Region) -> Client {
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(bucket_region)
-        .retry_config(RetryConfig::adaptive().with_max_attempts(3))
-        .sleep_impl(SharedAsyncSleep::from(sleep_impl))
-        .credentials_provider(credentials_provider);
-
-    if let Ok(endpoint) = env::var("AWS_ENDPOINT_URL") {
-        builder = builder.endpoint_url(endpoint)
-    }
-
-    Client::from_conf(builder.build())
+        .load()
+        .await;
+    Client::new(&config)
 }
 
-fn init_remote(
+async fn init_remote(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
 ) -> anyhow::Result<(Arc<Client>, RootTarget)> {
     let bucket_region = Region::new(bucket_config.region);
     let delimiter = "/".to_string();
-    let s3_client = Arc::new(init_s3_client(bucket_region));
+    let s3_client = Arc::new(init_s3_client(bucket_region).await);
 
     let s3_root = match node_kind {
         NodeKind::Pageserver => RootTarget::Pageserver(S3Target {
