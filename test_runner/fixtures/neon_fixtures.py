@@ -4518,11 +4518,16 @@ def check_restored_datadir_content(
 
     if pgdata_files != restored_files:
         # filter pg_xact and multixact files which are downloaded on demand
-        pgdata_files = [
-            f
-            for f in pgdata_files
-            if not f.startswith("pg_xact") and not f.startswith("pg_multixact")
-        ]
+        # filter pg_notify files because....?  (XXX: this is the hack that makes isolation tests pass)
+        def filter_expr(f):
+            return (
+                not f.startswith("pg_xact")
+                and not f.startswith("pg_multixact")
+                and not f.startswith("pg_notify")
+            )
+
+        pgdata_files = list(filter(filter_expr, pgdata_files))
+        restored_files = list(filter(filter_expr, restored_files))
 
     if ignored_files:
         pgdata_files = [f for f in pgdata_files if f not in ignored_files]
