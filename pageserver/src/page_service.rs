@@ -401,6 +401,12 @@ impl PageServerHandler {
         )
     }
 
+    /// Pagestream sub-protocol handler.
+    ///
+    /// It is a simple request-response protocol inside a COPYBOTH session.
+    ///
+    /// # Coding Discipline
+    ///
     /// Coding discipline within this function: all interaction with the `pgb` connection
     /// needs to be sensitive to page_service shutdown, currently signalled via [`task_mgr::shutdown_token`].
     /// This is so that we can shutdown page_service quickly.
@@ -433,6 +439,7 @@ impl PageServerHandler {
         }
 
         loop {
+            // read request bytes (it's exactly 1 PagestreamFeMessage per CopyData)
             let msg = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -440,7 +447,6 @@ impl PageServerHandler {
                 }
                 msg = pgb.read_message() => { msg }
             };
-
             let copy_data_bytes = match msg? {
                 Some(FeMessage::CopyData(bytes)) => bytes,
                 Some(FeMessage::Terminate) => break,
@@ -455,13 +461,12 @@ impl PageServerHandler {
             trace!("query: {copy_data_bytes:?}");
             fail::fail_point!("ps::handle-pagerequest-message");
 
+            // parse request
             let neon_fe_msg =
                 PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
 
-            // TODO: We could create a new per-request context here, with unique ID.
-            // Currently we use the same per-timeline context for all requests
-
-            let (response, span) = match neon_fe_msg {
+            // invoke handler function
+            let (handler_result, span) = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     fail::fail_point!("ps::handle-pagerequest-message::exists");
                     let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
@@ -515,20 +520,26 @@ impl PageServerHandler {
                 }
             };
 
-            match response {
-                Err(PageStreamError::Shutdown) => {
-                    // If we fail to fulfil a request during shutdown, which may be _because_ of
-                    // shutdown, then do not send the error to the client.  Instead just drop the
-                    // connection.
-                    span.in_scope(|| info!("dropping connection due to shutdown"));
-                    return Err(QueryError::Shutdown);
-                }
-                Err(PageStreamError::Reconnect(reason)) => {
-                    span.in_scope(|| info!("handler requested reconnect: {reason}"));
-                    return Err(QueryError::Reconnect);
-                }
-                r => {
-                    let response_msg = r.unwrap_or_else(|e| {
+            // Map handler result to protocol behavior.
+            // Some handler errors cause exit from pagestream protocol.
+            // Other handler errors are sent back as an error message and we stay in pagestream protocol.
+            let response_msg = match handler_result {
+                Err(e) => match &e {
+                    PageStreamError::Shutdown => {
+                        // If we fail to fulfil a request during shutdown, which may be _because_ of
+                        // shutdown, then do not send the error to the client.  Instead just drop the
+                        // connection.
+                        span.in_scope(|| info!("dropping connection due to shutdown"));
+                        return Err(QueryError::Shutdown);
+                    }
+                    PageStreamError::Reconnect(reason) => {
+                        span.in_scope(|| info!("handler requested reconnect: {reason}"));
+                        return Err(QueryError::Reconnect);
+                    }
+                    PageStreamError::Read(_)
+                    | PageStreamError::LsnTimeout(_)
+                    | PageStreamError::NotFound(_)
+                    | PageStreamError::BadRequest(_) => {
                         // print the all details to the log with {:#}, but for the client the
                         // error message is enough.  Do not log if shutting down, as the anyhow::Error
                         // here includes cancellation which is not an error.
@@ -539,20 +550,22 @@ impl PageServerHandler {
                         PagestreamBeMessage::Error(PagestreamErrorResponse {
                             message: e.to_string(),
                         })
-                    });
-
-                    pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            // We were requested to shut down.
-                            info!("shutdown request received in page handler");
-                            return Err(QueryError::Shutdown)
-                        }
-                        res = pgb.flush() => {
-                            res?;
-                        }
                     }
+                },
+                Ok(response_msg) => response_msg,
+            };
+
+            // marshal & transmit response message
+            pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // We were requested to shut down.
+                    info!("shutdown request received in page handler");
+                    return Err(QueryError::Shutdown)
+                }
+                res = pgb.flush() => {
+                    res?;
                 }
             }
         }
