@@ -22,7 +22,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pylint psycopg2 pytest toml aiohttp backoff requests allure-pytest \
           pytest-httpserver prometheus_client asyncpg jwt httpx psutil boto3 mypy_boto3_s3 \
-          zstandard numpy pandas pgvector pytest_lazyfixture
+          zstandard numpy pandas pgvector pytest-lazy-fixture
       - name: Analyzing code with pylint
         run: |
           pylint $(git ls-files '*.py')
