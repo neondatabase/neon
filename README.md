@@ -1,12 +1,11 @@
 [![Neon](https://github.com/neondatabase/neon/assets/11527560/f15a17f0-836e-40c5-b35d-030606a6b660)](https://neon.tech)
 
-
-
 # Neon
 
 Neon is a serverless open-source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes the PostgreSQL storage layer by redistributing data across a cluster of nodes.
 
 ## Quick start
+
 Try the [Neon Free Tier](https://neon.tech/github) to create a serverless Postgres instance. Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or use the online [SQL Editor](https://neon.tech/docs/get-started-with-neon/query-with-neon-sql-editor/). See [Connect from any application](https://neon.tech/docs/connect/connect-from-any-app/) for connection instructions.
 
 Alternatively, compile and run the project [locally](#running-local-installation).
@@ -16,6 +15,7 @@ Alternatively, compile and run the project [locally](#running-local-installation
 A Neon installation consists of compute nodes and the Neon storage engine. Compute nodes are stateless PostgreSQL nodes backed by the Neon storage engine.
 
 The Neon storage engine consists of two major components:
+
 - Pageserver: Scalable storage backend for the compute nodes.
 - Safekeepers: The safekeepers form a redundant WAL service that received WAL from the compute node, and stores it durably until it has been processed by the pageserver and uploaded to cloud storage.
 
@@ -23,24 +23,29 @@ See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more informati
 
 ## Running local installation
 
-
 #### Installing dependencies on Linux
+
 1. Install build dependencies and other applicable packages
 
-* On Ubuntu or Debian, this set of packages should be sufficient to build the code:
+- On Ubuntu or Debian, this set of packages should be sufficient to build the code:
+
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler \
 libcurl4-openssl-dev openssl python3-poetry lsof libicu-dev
 ```
-* On Fedora, these packages are needed:
+
+- On Fedora, these packages are needed:
+
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
   libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
   protobuf-devel libcurl-devel openssl poetry lsof libicu-devel libpq-devel python3-devel \
   libffi-devel
 ```
-* On Arch based systems, these packages are needed:
+
+- On Arch based systems, these packages are needed:
+
 ```bash
 pacman -S base-devel readline zlib libseccomp openssl clang \
 postgresql-libs cmake postgresql protobuf curl lsof
@@ -49,13 +54,16 @@ postgresql-libs cmake postgresql protobuf curl lsof
 Building Neon requires 3.15+ version of `protoc` (protobuf-compiler). If your distribution provides an older version, you can install a newer version from [here](https://github.com/protocolbuffers/protobuf/releases).
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
+
 ```
 # recommended approach from https://www.rust-lang.org/tools/install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 #### Installing dependencies on macOS (12.3.1)
+
 1. Install XCode and dependencies
+
 ```
 xcode-select --install
 brew install protobuf openssl flex bison icu4c pkg-config
@@ -65,12 +73,14 @@ echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
+
 ```
 # recommended approach from https://www.rust-lang.org/tools/install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 3. Install PostgreSQL Client
+
 ```
 # from https://stackoverflow.com/questions/44654216/correct-way-to-install-psql-without-full-postgres-on-macos
 brew install libpq
@@ -91,6 +101,7 @@ Newer rustc versions most probably will work fine, yet older ones might not be s
 #### Building on Linux
 
 1. Build neon and patched postgres
+
 ```
 # Note: The path to the neon sources can not contain a space.
 
@@ -108,6 +119,7 @@ make -j`nproc` -s
 #### Building on OSX
 
 1. Build neon and patched postgres
+
 ```
 # Note: The path to the neon sources can not contain a space.
 
@@ -123,14 +135,16 @@ make -j`sysctl -n hw.logicalcpu` -s
 ```
 
 #### Dependency installation notes
+
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `pg_install/bin` and `pg_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
 Python (3.9 or higher), and install the python3 packages using `./scripts/pysync` (requires [poetry>=1.3](https://python-poetry.org/)) in the project directory.
 
-
 #### Running neon database
+
 1. Start pageserver and postgres on top of it (should be called from repo root):
+
 ```sh
 # Create repository in .neon with proper paths to binaries and data
 # Later that would be responsibility of a package install script
@@ -167,6 +181,7 @@ Starting postgres at 'postgresql://cloud_admin@127.0.0.1:55432/postgres'
 ```
 
 2. Now, it is possible to connect to postgres and run some queries:
+
 ```text
 > psql -p 55432 -h 127.0.0.1 -U cloud_admin postgres
 postgres=# CREATE TABLE t(key int primary key, value text);
@@ -181,6 +196,7 @@ postgres=# select * from t;
 ```
 
 3. And create branches and run postgres on them:
+
 ```sh
 # create branch named migration_check
 > cargo neon timeline branch --branch-name migration_check
@@ -228,6 +244,7 @@ postgres=# select * from t;
 
 4. If you want to run tests afterwards (see below), you must stop all the running pageserver, safekeeper, and postgres instances
    you have just started. You can terminate them all with one command:
+
 ```sh
 > cargo neon stop
 ```
@@ -270,7 +287,7 @@ DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest
 You may find yourself in need of flamegraphs for software in this repository.
 You can use [`flamegraph-rs`](https://github.com/flamegraph-rs/flamegraph) or the original [`flamegraph.pl`](https://github.com/brendangregg/FlameGraph). Your choice!
 
->[!IMPORTANT]
+> [!IMPORTANT]
 > If you're using `lld` or `mold`, you need the `--no-rosegment` linker argument.
 > It's a [general thing with Rust / lld / mold](https://crbug.com/919499#c16), not specific to this repository.
 > See [this PR for further instructions](https://github.com/neondatabase/neon/pull/6764).
@@ -300,7 +317,7 @@ Other resources:
 ### Postgres-specific terms
 
 Due to Neon's very close relation with PostgreSQL internals, numerous specific terms are used.
-The same applies to certain spelling: i.e. we use MB to denote 1024 * 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
+The same applies to certain spelling: i.e. we use MB to denote 1024 \* 1024 bytes, while MiB would be technically more correct, it's inconsistent with what PostgreSQL code and its documentation use.
 
 To get more familiar with this aspect, refer to:
 
@@ -313,3 +330,5 @@ To get more familiar with this aspect, refer to:
 - Read [CONTRIBUTING.md](/CONTRIBUTING.md) to learn about project code style and practices.
 - To get familiar with a source tree layout, use [sourcetree.md](/docs/sourcetree.md).
 - To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html
+
+## Adding a change in markdown to see CI/CD gets triggered.
