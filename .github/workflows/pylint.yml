@@ -21,7 +21,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           echo pip install pylint psycopg2 pytest toml aiohttp backoff requests allure
-          pip install pylint psycopg2 pytest toml aiohttp backoff requests allure
+          pip install pylint psycopg2 pytest toml aiohttp backoff requests allure-pytest
       - name: Analyzing code with pylint
         run: |
           pylint $(git ls-files '*.py')
