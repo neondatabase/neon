@@ -17,6 +17,16 @@ pub struct KeySpace {
     pub ranges: Vec<Range<Key>>,
 }
 
+impl std::fmt::Display for KeySpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[")?;
+        for range in &self.ranges {
+            write!(f, "{}..{},", range.start, range.end)?;
+        }
+        write!(f, "]")
+    }
+}
+
 /// A wrapper type for sparse keyspaces.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SparseKeySpace(pub KeySpace);

@@ -190,7 +190,7 @@ where
                 }
             } else {
                 // If we failed validation, then do not apply any of the projected updates
-                warn!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}", tenant_lsn_state.generation);
+                info!("Dropped remote consistent LSN updates for tenant {tenant_id} in stale generation {:?}", tenant_lsn_state.generation);
                 metrics::DELETION_QUEUE.dropped_lsn_updates.inc();
             }
         }
@@ -225,7 +225,7 @@ where
                     && (tenant.generation == *validated_generation);
 
                 if !this_list_valid {
-                    warn!("Dropping stale deletions for tenant {tenant_id} in generation {:?}, objects may be leaked", tenant.generation);
+                    info!("Dropping stale deletions for tenant {tenant_id} in generation {:?}, objects may be leaked", tenant.generation);
                     metrics::DELETION_QUEUE.keys_dropped.inc_by(tenant.len() as u64);
                     mutated = true;
                 } else {

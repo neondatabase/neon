@@ -355,13 +355,6 @@ def test_remote_storage_upload_queue_retries(
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
 
-    # We are about to forcibly drop local dirs.  Storage controller will increment generation in re-attach before
-    # we later increment when actually attaching it again, leading to skipping a generation and potentially getting
-    # these warnings if there was a durable but un-executed deletion list at time of restart.
-    env.pageserver.allowed_errors.extend(
-        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
-    )
-
     dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)

@@ -83,9 +83,6 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     for ps in env.pageservers:
         ps.allowed_errors.extend(
             [
-                # We will make no effort to avoid stale attachments
-                ".*Dropped remote consistent LSN updates.*",
-                ".*Dropping stale deletions.*",
                 # page_service_conn_main{peer_addr=[::1]:41176}: query handler for 'pagestream 3b19aec5038c796f64b430b30a555121 d07776761d44050b8aab511df1657d83' failed: Tenant 3b19aec5038c796f64b430b30a555121 not found
                 ".*query handler.*Tenant.*not found.*",
                 # page_service_conn_main{peer_addr=[::1]:45552}: query handler for 'pagestream 414ede7ad50f775a8e7d9ba0e43b9efc a43884be16f44b3626482b6981b2c745' failed: Tenant 414ede7ad50f775a8e7d9ba0e43b9efc is not active

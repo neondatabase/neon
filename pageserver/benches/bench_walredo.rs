@@ -48,6 +48,7 @@
 //! medium/128        time:   [8.8311 ms 8.9849 ms 9.1263 ms]
 //! ```
 
+use anyhow::Context;
 use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};
 use pageserver::{config::PageServerConf, walrecord::NeonWalRecord, walredo::PostgresRedoManager};
@@ -188,6 +189,7 @@ impl Request {
         manager
             .request_redo(*key, *lsn, base_img.clone(), records.clone(), *pg_version)
             .await
+            .context("request_redo")
     }
 
     fn pg_record(will_init: bool, bytes: &'static [u8]) -> NeonWalRecord {

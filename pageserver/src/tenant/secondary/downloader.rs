@@ -46,6 +46,7 @@ use crate::tenant::{
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
 use futures::Future;
+use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{DownloadError, Etag, GenericRemoteStorage};
@@ -131,14 +132,64 @@ impl OnDiskState {
             .or_else(fs_ext::ignore_not_found)
             .fatal_err("Deleting secondary layer")
     }
+
+    pub(crate) fn file_size(&self) -> u64 {
+        self.metadata.file_size
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct SecondaryDetailTimeline {
-    pub(super) on_disk_layers: HashMap<LayerName, OnDiskState>,
+    on_disk_layers: HashMap<LayerName, OnDiskState>,
 
     /// We remember when layers were evicted, to prevent re-downloading them.
     pub(super) evicted_at: HashMap<LayerName, SystemTime>,
+}
+
+impl SecondaryDetailTimeline {
+    pub(super) fn remove_layer(
+        &mut self,
+        name: &LayerName,
+        resident_metric: &UIntGauge,
+    ) -> Option<OnDiskState> {
+        let removed = self.on_disk_layers.remove(name);
+        if let Some(removed) = &removed {
+            resident_metric.sub(removed.file_size());
+        }
+        removed
+    }
+
+    /// `local_path`
+    fn touch_layer<F>(
+        &mut self,
+        conf: &'static PageServerConf,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+        touched: &HeatMapLayer,
+        resident_metric: &UIntGauge,
+        local_path: F,
+    ) where
+        F: FnOnce() -> Utf8PathBuf,
+    {
+        use std::collections::hash_map::Entry;
+        match self.on_disk_layers.entry(touched.name.clone()) {
+            Entry::Occupied(mut v) => {
+                v.get_mut().access_time = touched.access_time;
+            }
+            Entry::Vacant(e) => {
+                e.insert(OnDiskState::new(
+                    conf,
+                    tenant_shard_id,
+                    timeline_id,
+                    touched.name.clone(),
+                    touched.metadata.clone(),
+                    touched.access_time,
+                    local_path(),
+                ));
+                resident_metric.add(touched.metadata.file_size);
+            }
+        }
+    }
 }
 
 // Aspects of a heatmap that we remember after downloading it
@@ -158,7 +209,7 @@ pub(super) struct SecondaryDetail {
 
     last_download: Option<DownloadSummary>,
     next_download: Option<Instant>,
-    pub(super) timelines: HashMap<TimelineId, SecondaryDetailTimeline>,
+    timelines: HashMap<TimelineId, SecondaryDetailTimeline>,
 }
 
 /// Helper for logging SystemTime
@@ -188,6 +239,38 @@ impl SecondaryDetail {
             last_download: None,
             next_download: None,
             timelines: HashMap::new(),
+        }
+    }
+
+    pub(super) fn evict_layer(
+        &mut self,
+        name: LayerName,
+        timeline_id: &TimelineId,
+        now: SystemTime,
+        resident_metric: &UIntGauge,
+    ) -> Option<OnDiskState> {
+        let timeline = self.timelines.get_mut(timeline_id)?;
+        let removed = timeline.remove_layer(&name, resident_metric);
+        if removed.is_some() {
+            timeline.evicted_at.insert(name, now);
+        }
+        removed
+    }
+
+    pub(super) fn remove_timeline(
+        &mut self,
+        timeline_id: &TimelineId,
+        resident_metric: &UIntGauge,
+    ) {
+        let removed = self.timelines.remove(timeline_id);
+        if let Some(removed) = removed {
+            resident_metric.sub(
+                removed
+                    .on_disk_layers
+                    .values()
+                    .map(|l| l.metadata.file_size)
+                    .sum(),
+            );
         }
     }
 
@@ -262,6 +345,7 @@ impl scheduler::RunningJob for RunningDownload {
 struct CompleteDownload {
     secondary_state: Arc<SecondaryTenant>,
     completed_at: Instant,
+    result: Result<(), UpdateError>,
 }
 
 impl scheduler::Completion for CompleteDownload {
@@ -286,21 +370,33 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         let CompleteDownload {
             secondary_state,
             completed_at: _completed_at,
+            result,
         } = completion;
 
         tracing::debug!("Secondary tenant download completed");
 
         let mut detail = secondary_state.detail.lock().unwrap();
 
-        let period = detail
-            .last_download
-            .as_ref()
-            .map(|d| d.upload_period)
-            .unwrap_or(DEFAULT_DOWNLOAD_INTERVAL);
+        match result {
+            Err(UpdateError::Restart) => {
+                // Start downloading again as soon as we can.  This will involve waiting for the scheduler's
+                // scheduling interval.  This slightly reduces the peak download speed of tenants that hit their
+                // deadline and keep restarting, but that also helps give other tenants a chance to execute rather
+                // that letting one big tenant dominate for a long time.
+                detail.next_download = Some(Instant::now());
+            }
+            _ => {
+                let period = detail
+                    .last_download
+                    .as_ref()
+                    .map(|d| d.upload_period)
+                    .unwrap_or(DEFAULT_DOWNLOAD_INTERVAL);
 
-        // We advance next_download irrespective of errors: we don't want error cases to result in
-        // expensive busy-polling.
-        detail.next_download = Some(Instant::now() + period_jitter(period, 5));
+                // We advance next_download irrespective of errors: we don't want error cases to result in
+                // expensive busy-polling.
+                detail.next_download = Some(Instant::now() + period_jitter(period, 5));
+            }
+        }
     }
 
     async fn schedule(&mut self) -> SchedulingResult<PendingDownload> {
@@ -396,9 +492,10 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
         (RunningDownload { barrier }, Box::pin(async move {
             let _completion = completion;
 
-            match TenantDownloader::new(conf, &remote_storage, &secondary_state)
+            let result = TenantDownloader::new(conf, &remote_storage, &secondary_state)
                 .download(&download_ctx)
-                .await
+                .await;
+            match &result
             {
                 Err(UpdateError::NoData) => {
                     tracing::info!("No heatmap found for tenant.  This is fine if it is new.");
@@ -415,6 +512,9 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
                 Err(e @ (UpdateError::DownloadError(_) | UpdateError::Other(_))) => {
                     tracing::error!("Error while downloading tenant: {e}");
                 },
+                Err(UpdateError::Restart) => {
+                    tracing::info!("Download reached deadline & will restart to update heatmap")
+                }
                 Ok(()) => {}
             };
 
@@ -436,6 +536,7 @@ impl JobGenerator<PendingDownload, RunningDownload, CompleteDownload, DownloadCo
             CompleteDownload {
                 secondary_state,
                 completed_at: Instant::now(),
+                result
             }
         }.instrument(info_span!(parent: None, "secondary_download", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))))
     }
@@ -452,6 +553,11 @@ struct TenantDownloader<'a> {
 /// Errors that may be encountered while updating a tenant
 #[derive(thiserror::Error, Debug)]
 enum UpdateError {
+    /// This is not a true failure, but it's how a download indicates that it would like to be restarted by
+    /// the scheduler, to pick up the latest heatmap
+    #[error("Reached deadline, restarting downloads")]
+    Restart,
+
     #[error("No remote data found")]
     NoData,
     #[error("Insufficient local storage space")]
@@ -578,8 +684,13 @@ impl<'a> TenantDownloader<'a> {
                 Some(t) => t,
                 None => {
                     // We have no existing state: need to scan local disk for layers first.
-                    let timeline_state =
-                        init_timeline_state(self.conf, tenant_shard_id, timeline).await;
+                    let timeline_state = init_timeline_state(
+                        self.conf,
+                        tenant_shard_id,
+                        timeline,
+                        &self.secondary_state.resident_size_metric,
+                    )
+                    .await;
 
                     // Re-acquire detail lock now that we're done with async load from local FS
                     self.secondary_state
@@ -603,6 +714,26 @@ impl<'a> TenantDownloader<'a> {
                 self.prepare_timelines(&heatmap, heatmap_mtime).await?;
         }
 
+        // Calculate a deadline for downloads: if downloading takes longer than this, it is useful to drop out and start again,
+        // so that we are always using reasonably a fresh heatmap.  Otherwise, if we had really huge content to download, we might
+        // spend 10s of minutes downloading layers we don't need.
+        // (see https://github.com/neondatabase/neon/issues/8182)
+        let deadline = {
+            let period = self
+                .secondary_state
+                .detail
+                .lock()
+                .unwrap()
+                .last_download
+                .as_ref()
+                .map(|d| d.upload_period)
+                .unwrap_or(DEFAULT_DOWNLOAD_INTERVAL);
+
+            // Use double the period: we are not promising to complete within the period, this is just a heuristic
+            // to keep using a "reasonably fresh" heatmap.
+            Instant::now() + period * 2
+        };
+
         // Download the layers in the heatmap
         for timeline in heatmap.timelines {
             let timeline_state = timeline_states
@@ -618,7 +749,7 @@ impl<'a> TenantDownloader<'a> {
             }
 
             let timeline_id = timeline.timeline_id;
-            self.download_timeline(timeline, timeline_state, ctx)
+            self.download_timeline(timeline, timeline_state, deadline, ctx)
                 .instrument(tracing::info_span!(
                     "secondary_download_timeline",
                     tenant_id=%tenant_shard_id.tenant_id,
@@ -626,6 +757,25 @@ impl<'a> TenantDownloader<'a> {
                     %timeline_id
                 ))
                 .await?;
+        }
+
+        // Metrics consistency check in testing builds
+        if cfg!(feature = "testing") {
+            let detail = self.secondary_state.detail.lock().unwrap();
+            let resident_size = detail
+                .timelines
+                .values()
+                .map(|tl| {
+                    tl.on_disk_layers
+                        .values()
+                        .map(|v| v.metadata.file_size)
+                        .sum::<u64>()
+                })
+                .sum::<u64>();
+            assert_eq!(
+                resident_size,
+                self.secondary_state.resident_size_metric.get()
+            );
         }
 
         // Only update last_etag after a full successful download: this way will not skip
@@ -740,7 +890,7 @@ impl<'a> TenantDownloader<'a> {
             for delete_timeline in &delete_timelines {
                 // We haven't removed from disk yet, but optimistically remove from in-memory state: if removal
                 // from disk fails that will be a fatal error.
-                detail.timelines.remove(delete_timeline);
+                detail.remove_timeline(delete_timeline, &self.secondary_state.resident_size_metric);
             }
         }
 
@@ -758,7 +908,7 @@ impl<'a> TenantDownloader<'a> {
             let Some(timeline_state) = detail.timelines.get_mut(&timeline_id) else {
                 continue;
             };
-            timeline_state.on_disk_layers.remove(&layer_name);
+            timeline_state.remove_layer(&layer_name, &self.secondary_state.resident_size_metric);
         }
 
         for timeline_id in delete_timelines {
@@ -827,26 +977,28 @@ impl<'a> TenantDownloader<'a> {
         .and_then(|x| x)
     }
 
-    async fn download_timeline(
+    /// Download heatmap layers that are not present on local disk, or update their
+    /// access time if they are already present.
+    async fn download_timeline_layers(
         &self,
+        tenant_shard_id: &TenantShardId,
         timeline: HeatMapTimeline,
         timeline_state: SecondaryDetailTimeline,
+        deadline: Instant,
         ctx: &RequestContext,
-    ) -> Result<(), UpdateError> {
-        debug_assert_current_span_has_tenant_and_timeline_id();
-        let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
-
+    ) -> (Result<(), UpdateError>, Vec<HeatMapLayer>) {
         // Accumulate updates to the state
         let mut touched = Vec::new();
 
-        tracing::debug!(timeline_id=%timeline.timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
-
-        // Download heatmap layers that are not present on local disk, or update their
-        // access time if they are already present.
         for layer in timeline.layers {
             if self.secondary_state.cancel.is_cancelled() {
                 tracing::debug!("Cancelled -- dropping out of layer loop");
-                return Err(UpdateError::Cancelled);
+                return (Err(UpdateError::Cancelled), touched);
+            }
+
+            if Instant::now() > deadline {
+                // We've been running downloads for a while, restart to download latest heatmap.
+                return (Err(UpdateError::Restart), touched);
             }
 
             // Existing on-disk layers: just update their access time.
@@ -916,52 +1068,66 @@ impl<'a> TenantDownloader<'a> {
 
             match self
                 .download_layer(tenant_shard_id, &timeline.timeline_id, layer, ctx)
-                .await?
+                .await
             {
-                Some(layer) => touched.push(layer),
-                None => {
+                Ok(Some(layer)) => touched.push(layer),
+                Ok(None) => {
                     // Not an error but we didn't download it: remote layer is missing.  Don't add it to the list of
                     // things to consider touched.
                 }
-            }
-        }
-
-        // Write updates to state to record layers we just downloaded or touched.
-        {
-            let mut detail = self.secondary_state.detail.lock().unwrap();
-            let timeline_detail = detail.timelines.entry(timeline.timeline_id).or_default();
-
-            tracing::info!("Wrote timeline_detail for {} touched layers", touched.len());
-
-            for t in touched {
-                use std::collections::hash_map::Entry;
-                match timeline_detail.on_disk_layers.entry(t.name.clone()) {
-                    Entry::Occupied(mut v) => {
-                        v.get_mut().access_time = t.access_time;
-                    }
-                    Entry::Vacant(e) => {
-                        let local_path = local_layer_path(
-                            self.conf,
-                            tenant_shard_id,
-                            &timeline.timeline_id,
-                            &t.name,
-                            &t.metadata.generation,
-                        );
-                        e.insert(OnDiskState::new(
-                            self.conf,
-                            tenant_shard_id,
-                            &timeline.timeline_id,
-                            t.name,
-                            t.metadata.clone(),
-                            t.access_time,
-                            local_path,
-                        ));
-                    }
+                Err(e) => {
+                    return (Err(e), touched);
                 }
             }
         }
 
-        Ok(())
+        (Ok(()), touched)
+    }
+
+    async fn download_timeline(
+        &self,
+        timeline: HeatMapTimeline,
+        timeline_state: SecondaryDetailTimeline,
+        deadline: Instant,
+        ctx: &RequestContext,
+    ) -> Result<(), UpdateError> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
+        let timeline_id = timeline.timeline_id;
+
+        tracing::debug!(timeline_id=%timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
+
+        let (result, touched) = self
+            .download_timeline_layers(tenant_shard_id, timeline, timeline_state, deadline, ctx)
+            .await;
+
+        // Write updates to state to record layers we just downloaded or touched, irrespective of whether the overall result was successful
+        {
+            let mut detail = self.secondary_state.detail.lock().unwrap();
+            let timeline_detail = detail.timelines.entry(timeline_id).or_default();
+
+            tracing::info!("Wrote timeline_detail for {} touched layers", touched.len());
+            touched.into_iter().for_each(|t| {
+                timeline_detail.touch_layer(
+                    self.conf,
+                    tenant_shard_id,
+                    &timeline_id,
+                    &t,
+                    &self.secondary_state.resident_size_metric,
+                    || {
+                        local_layer_path(
+                            self.conf,
+                            tenant_shard_id,
+                            &timeline_id,
+                            &t.name,
+                            &t.metadata.generation,
+                        )
+                    },
+                )
+            });
+        }
+
+        result
     }
 
     /// Call this during timeline download if a layer will _not_ be downloaded, to update progress statistics
@@ -1067,6 +1233,7 @@ async fn init_timeline_state(
     conf: &'static PageServerConf,
     tenant_shard_id: &TenantShardId,
     heatmap: &HeatMapTimeline,
+    resident_metric: &UIntGauge,
 ) -> SecondaryDetailTimeline {
     let timeline_path = conf.timeline_path(tenant_shard_id, &heatmap.timeline_id);
     let mut detail = SecondaryDetailTimeline::default();
@@ -1142,17 +1309,13 @@ async fn init_timeline_state(
                         } else {
                             // We expect the access time to be initialized immediately afterwards, when
                             // the latest heatmap is applied to the state.
-                            detail.on_disk_layers.insert(
-                                name.clone(),
-                                OnDiskState::new(
-                                    conf,
-                                    tenant_shard_id,
-                                    &heatmap.timeline_id,
-                                    name,
-                                    remote_meta.metadata.clone(),
-                                    remote_meta.access_time,
-                                    file_path,
-                                ),
+                            detail.touch_layer(
+                                conf,
+                                tenant_shard_id,
+                                &heatmap.timeline_id,
+                                remote_meta,
+                                resident_metric,
+                                || file_path,
                             );
                         }
                     }

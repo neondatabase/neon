@@ -9,7 +9,7 @@ use crate::proxy::retry::CouldRetry;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ConsoleError {
     pub error: Box<str>,
     #[serde(skip)]
@@ -82,41 +82,19 @@ impl CouldRetry for ConsoleError {
             .details
             .error_info
             .map_or(Reason::Unknown, |e| e.reason);
-        match reason {
-            // not a transitive error
-            Reason::RoleProtected => false,
-            // on retry, it will still not be found
-            Reason::ResourceNotFound
-            | Reason::ProjectNotFound
-            | Reason::EndpointNotFound
-            | Reason::BranchNotFound => false,
-            // we were asked to go away
-            Reason::RateLimitExceeded
-            | Reason::NonDefaultBranchComputeTimeExceeded
-            | Reason::ActiveTimeQuotaExceeded
-            | Reason::ComputeTimeQuotaExceeded
-            | Reason::WrittenDataQuotaExceeded
-            | Reason::DataTransferQuotaExceeded
-            | Reason::LogicalSizeQuotaExceeded => false,
-            // transitive error. control plane is currently busy
-            // but might be ready soon
-            Reason::RunningOperations => true,
-            Reason::ConcurrencyLimitReached => true,
-            Reason::LockAlreadyTaken => true,
-            // unknown error. better not retry it.
-            Reason::Unknown => false,
-        }
+
+        reason.can_retry()
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Status {
     pub code: Box<str>,
     pub message: Box<str>,
     pub details: Details,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Details {
     pub error_info: Option<ErrorInfo>,
     pub retry_info: Option<RetryInfo>,
@@ -199,6 +177,34 @@ impl Reason {
                 | Reason::BranchNotFound
         )
     }
+
+    pub fn can_retry(&self) -> bool {
+        match self {
+            // do not retry role protected errors
+            // not a transitive error
+            Reason::RoleProtected => false,
+            // on retry, it will still not be found
+            Reason::ResourceNotFound
+            | Reason::ProjectNotFound
+            | Reason::EndpointNotFound
+            | Reason::BranchNotFound => false,
+            // we were asked to go away
+            Reason::RateLimitExceeded
+            | Reason::NonDefaultBranchComputeTimeExceeded
+            | Reason::ActiveTimeQuotaExceeded
+            | Reason::ComputeTimeQuotaExceeded
+            | Reason::WrittenDataQuotaExceeded
+            | Reason::DataTransferQuotaExceeded
+            | Reason::LogicalSizeQuotaExceeded => false,
+            // transitive error. control plane is currently busy
+            // but might be ready soon
+            Reason::RunningOperations
+            | Reason::ConcurrencyLimitReached
+            | Reason::LockAlreadyTaken => true,
+            // unknown error. better not retry it.
+            Reason::Unknown => false,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Deserialize)]
@@ -206,7 +212,7 @@ pub struct RetryInfo {
     pub retry_delay_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct UserFacingMessage {
     pub message: Box<str>,
 }

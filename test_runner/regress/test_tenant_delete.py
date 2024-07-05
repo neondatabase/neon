@@ -67,8 +67,9 @@ def test_tenant_delete_smoke(
 
     # first try to delete non existing tenant
     tenant_id = TenantId.generate()
-    env.pageserver.allowed_errors.append(".*NotFound.*")
-    env.pageserver.allowed_errors.append(".*simulated failure.*")
+    env.pageserver.allowed_errors.extend(
+        [".*NotFound.*", ".*simulated failure.*", ".*failed to delete .+ objects.*"]
+    )
 
     # Check that deleting a non-existent tenant gives the expected result: this is a loop because we
     # may need to retry on some remote storage errors injected by the test harness

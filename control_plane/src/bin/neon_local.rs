@@ -21,10 +21,8 @@ use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
-use pageserver_api::controller_api::PlacementPolicy;
-use pageserver_api::models::{
-    ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
-};
+use pageserver_api::controller_api::{PlacementPolicy, TenantCreateRequest};
+use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
@@ -600,13 +598,9 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
         Some(("import", import_match)) => {
             let tenant_id = get_tenant_id(import_match, env)?;
             let timeline_id = parse_timeline_id(import_match)?.expect("No timeline id provided");
-            let name = import_match
-                .get_one::<String>("node-name")
-                .ok_or_else(|| anyhow!("No node name provided"))?;
-            let update_catalog = import_match
-                .get_one::<bool>("update-catalog")
-                .cloned()
-                .unwrap_or_default();
+            let branch_name = import_match
+                .get_one::<String>("branch-name")
+                .ok_or_else(|| anyhow!("No branch name provided"))?;
 
             // Parse base inputs
             let base_tarfile = import_match
@@ -633,24 +627,11 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let mut cplane = ComputeControlPlane::load(env.clone())?;
             println!("Importing timeline into pageserver ...");
             pageserver
                 .timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)
                 .await?;
-            env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
-
-            println!("Creating endpoint for imported timeline ...");
-            cplane.new_endpoint(
-                name,
-                tenant_id,
-                timeline_id,
-                None,
-                None,
-                pg_version,
-                ComputeMode::Primary,
-                !update_catalog,
-            )?;
+            env.register_branch_mapping(branch_name.to_string(), tenant_id, timeline_id)?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -865,20 +846,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             let allow_multiple = sub_args.get_flag("allow-multiple");
 
-            // If --safekeepers argument is given, use only the listed safekeeper nodes.
-            let safekeepers =
-                if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
-                    let mut safekeepers: Vec<NodeId> = Vec::new();
-                    for sk_id in safekeepers_str.split(',').map(str::trim) {
-                        let sk_id = NodeId(u64::from_str(sk_id).map_err(|_| {
-                            anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list")
-                        })?);
-                        safekeepers.push(sk_id);
-                    }
-                    safekeepers
-                } else {
-                    env.safekeepers.iter().map(|sk| sk.id).collect()
-                };
+            // If --safekeepers argument is given, use only the listed
+            // safekeeper nodes; otherwise all from the env.
+            let safekeepers = if let Some(safekeepers) = parse_safekeepers(sub_args)? {
+                safekeepers
+            } else {
+                env.safekeepers.iter().map(|sk| sk.id).collect()
+            };
 
             let endpoint = cplane
                 .endpoints
@@ -982,7 +956,10 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                         })
                         .collect::<Vec<_>>()
                 };
-            endpoint.reconfigure(pageservers, None).await?;
+            // If --safekeepers argument is given, use only the listed
+            // safekeeper nodes; otherwise all from the env.
+            let safekeepers = parse_safekeepers(sub_args)?;
+            endpoint.reconfigure(pageservers, None, safekeepers).await?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -1002,6 +979,23 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
     }
 
     Ok(())
+}
+
+/// Parse --safekeepers as list of safekeeper ids.
+fn parse_safekeepers(sub_args: &ArgMatches) -> Result<Option<Vec<NodeId>>> {
+    if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
+        let mut safekeepers: Vec<NodeId> = Vec::new();
+        for sk_id in safekeepers_str.split(',').map(str::trim) {
+            let sk_id = NodeId(
+                u64::from_str(sk_id)
+                    .map_err(|_| anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list"))?,
+            );
+            safekeepers.push(sk_id);
+        }
+        Ok(Some(safekeepers))
+    } else {
+        Ok(None)
+    }
 }
 
 fn handle_mappings(sub_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Result<()> {
@@ -1487,8 +1481,7 @@ fn cli() -> Command {
                 .about("Import timeline from basebackup directory")
                 .arg(tenant_id_arg.clone())
                 .arg(timeline_id_arg.clone())
-                .arg(Arg::new("node-name").long("node-name")
-                    .help("Name to assign to the imported timeline"))
+                .arg(branch_name_arg.clone())
                 .arg(Arg::new("base-tarfile")
                     .long("base-tarfile")
                     .value_parser(value_parser!(PathBuf))
@@ -1504,7 +1497,6 @@ fn cli() -> Command {
                 .arg(Arg::new("end-lsn").long("end-lsn")
                     .help("Lsn the basebackup ends at"))
                 .arg(pg_version_arg.clone())
-                .arg(update_catalog.clone())
             )
         ).subcommand(
             Command::new("tenant")
@@ -1609,7 +1601,7 @@ fn cli() -> Command {
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
                     .arg(endpoint_id_arg.clone())
                     .arg(endpoint_pageserver_id_arg.clone())
-                    .arg(safekeepers_arg)
+                    .arg(safekeepers_arg.clone())
                     .arg(remote_ext_config_args)
                     .arg(create_test_user)
                     .arg(allow_multiple.clone())
@@ -1618,6 +1610,7 @@ fn cli() -> Command {
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")
                             .arg(endpoint_pageserver_id_arg)
+                            .arg(safekeepers_arg)
                             .arg(endpoint_id_arg.clone())
                             .arg(tenant_id_arg.clone())
                 )

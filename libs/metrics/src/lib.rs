@@ -103,9 +103,10 @@ static MAXRSS_KB: Lazy<IntGauge> = Lazy::new(|| {
     .expect("Failed to register maxrss_kb int gauge")
 });
 
-pub const DISK_WRITE_SECONDS_BUCKETS: &[f64] = &[
-    0.000_050, 0.000_100, 0.000_500, 0.001, 0.003, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5,
-];
+/// Most common fsync latency is 50 µs - 100 µs, but it can be much higher,
+/// especially during many concurrent disk operations.
+pub const DISK_FSYNC_SECONDS_BUCKETS: &[f64] =
+    &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0];
 
 pub struct BuildInfo {
     pub revision: &'static str,

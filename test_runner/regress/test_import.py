@@ -76,7 +76,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         start_lsn = manifest["WAL-Ranges"][0]["Start-LSN"]
         end_lsn = manifest["WAL-Ranges"][0]["End-LSN"]
 
-    endpoint_id = "ep-import_from_vanilla"
+    branch_name = "import_from_vanilla"
     tenant = TenantId.generate()
     timeline = TimelineId.generate()
 
@@ -106,8 +106,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
                 str(tenant),
                 "--timeline-id",
                 str(timeline),
-                "--node-name",
-                endpoint_id,
+                "--branch-name",
+                branch_name,
                 "--base-lsn",
                 start_lsn,
                 "--base-tarfile",
@@ -146,7 +146,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     wait_for_upload(client, tenant, timeline, Lsn(end_lsn))
 
     # Check it worked
-    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant)
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
     vanilla_pg.stop()
@@ -265,7 +265,7 @@ def _import(
     tenant = TenantId.generate()
 
     # Import to pageserver
-    endpoint_id = "ep-import_from_pageserver"
+    branch_name = "import_from_pageserver"
     client = env.pageserver.http_client()
     env.pageserver.tenant_create(tenant)
     env.neon_cli.raw_cli(
@@ -276,8 +276,8 @@ def _import(
             str(tenant),
             "--timeline-id",
             str(timeline),
-            "--node-name",
-            endpoint_id,
+            "--branch-name",
+            branch_name,
             "--base-lsn",
             str(lsn),
             "--base-tarfile",
@@ -292,7 +292,7 @@ def _import(
     wait_for_upload(client, tenant, timeline, lsn)
 
     # Check it worked
-    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant, lsn=lsn)
+    endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant, lsn=lsn)
     assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     # Take another fullbackup

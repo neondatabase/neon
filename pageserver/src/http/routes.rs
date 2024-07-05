@@ -22,6 +22,7 @@ use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::LsnLease;
+use pageserver_api::models::LsnLeaseRequest;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
@@ -42,7 +43,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
-use tenant_size_model::{SizeResult, StorageModel};
+use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
@@ -53,7 +54,6 @@ use utils::http::request::{get_request_param, must_get_query_param, parse_query_
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
-use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::{LocationConf, TenantConfOpt};
@@ -75,13 +75,12 @@ use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
-use crate::tenant::SpawnMode;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
-    StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
-    TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
+    StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
+    TimelineInfo,
 };
 use utils::{
     auth::SwappableJwtAuth,
@@ -229,7 +228,7 @@ impl From<UpsertLocationError> for ApiError {
             BadRequest(e) => ApiError::BadRequest(e),
             Unavailable(_) => ApiError::ShuttingDown,
             e @ InProgress => ApiError::Conflict(format!("{e}")),
-            Flush(e) | Other(e) => ApiError::InternalServerError(e),
+            Flush(e) | InternalError(e) => ApiError::InternalServerError(e),
         }
     }
 }
@@ -408,6 +407,8 @@ async fn build_timeline_info_common(
 
     let walreceiver_status = timeline.walreceiver_status();
 
+    let (pitr_history_size, within_ancestor_pitr) = timeline.get_pitr_history_stats();
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -428,6 +429,8 @@ async fn build_timeline_info_common(
         directory_entries_counts: timeline.get_directory_metrics().to_vec(),
         current_physical_size,
         current_logical_size_non_incremental: None,
+        pitr_history_size,
+        within_ancestor_pitr,
         timeline_dir_layer_file_size_sum: None,
         wal_source_connstr,
         last_received_msg_lsn,
@@ -887,7 +890,9 @@ async fn tenant_list_handler(
             state: state.clone(),
             current_physical_size: None,
             attachment_status: state.attachment_status(),
-            generation: (*gen).into(),
+            generation: (*gen)
+                .into()
+                .expect("Tenants are always attached with a generation"),
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -935,7 +940,10 @@ async fn tenant_status(
                 state: state.clone(),
                 current_physical_size: Some(current_physical_size),
                 attachment_status: state.attachment_status(),
-                generation: tenant.generation().into(),
+                generation: tenant
+                    .generation()
+                    .into()
+                    .expect("Tenants are always attached with a generation"),
             },
             walredo: tenant.wal_redo_manager_status(),
             timelines: tenant.list_timeline_ids(),
@@ -1188,10 +1196,15 @@ fn synthetic_size_html_response(
         timeline_map.insert(ti.timeline_id, index);
         timeline_ids.push(ti.timeline_id.to_string());
     }
-    let seg_to_branch: Vec<usize> = inputs
+    let seg_to_branch: Vec<(usize, SvgBranchKind)> = inputs
         .segments
         .iter()
-        .map(|seg| *timeline_map.get(&seg.timeline_id).unwrap())
+        .map(|seg| {
+            (
+                *timeline_map.get(&seg.timeline_id).unwrap(),
+                seg.kind.into(),
+            )
+        })
         .collect();
 
     let svg =
@@ -1230,75 +1243,6 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
         .body(Body::from(data.as_bytes().to_vec()))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
-}
-
-/// Helper for requests that may take a generation, which is mandatory
-/// when control_plane_api is set, but otherwise defaults to Generation::none()
-fn get_request_generation(state: &State, req_gen: Option<u32>) -> Result<Generation, ApiError> {
-    if state.conf.control_plane_api.is_some() {
-        req_gen
-            .map(Generation::new)
-            .ok_or(ApiError::BadRequest(anyhow!(
-                "generation attribute missing"
-            )))
-    } else {
-        // Legacy mode: all tenants operate with no generation
-        Ok(Generation::none())
-    }
-}
-
-async fn tenant_create_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let request_data: TenantCreateRequest = json_request(&mut request).await?;
-    let target_tenant_id = request_data.new_tenant_id;
-    check_permission(&request, None)?;
-
-    let _timer = STORAGE_TIME_GLOBAL
-        .get_metric_with_label_values(&[StorageTimeOperation::CreateTenant.into()])
-        .expect("bug")
-        .start_timer();
-
-    let tenant_conf =
-        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
-
-    let state = get_state(&request);
-
-    let generation = get_request_generation(state, request_data.generation)?;
-
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    let location_conf =
-        LocationConf::attached_single(tenant_conf, generation, &request_data.shard_parameters);
-
-    let new_tenant = state
-        .tenant_manager
-        .upsert_location(
-            target_tenant_id,
-            location_conf,
-            None,
-            SpawnMode::Create,
-            &ctx,
-        )
-        .await?;
-
-    let Some(new_tenant) = new_tenant else {
-        // This should never happen: indicates a bug in upsert_location
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "Upsert succeeded but didn't return tenant!"
-        )));
-    };
-    // We created the tenant. Existing API semantics are that the tenant
-    // is Active when this function returns.
-    new_tenant
-        .wait_to_become_active(ACTIVE_TENANT_TIMEOUT)
-        .await?;
-
-    json_response(
-        StatusCode::CREATED,
-        TenantCreateResponse(new_tenant.tenant_shard_id().tenant_id),
-    )
 }
 
 async fn get_tenant_config_handler(
@@ -1362,7 +1306,7 @@ async fn update_tenant_config_handler(
 
     crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
     tenant.set_new_tenant_config(new_tenant_conf);
 
     json_response(StatusCode::OK, ())
@@ -1593,15 +1537,13 @@ async fn handle_tenant_break(
 
 // Obtains an lsn lease on the given timeline.
 async fn lsn_lease_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
-
-    let lsn: Lsn = parse_query_param(&request, "lsn")?
-        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'lsn' query parameter")))?;
+    let lsn = json_request::<LsnLeaseRequest>(&mut request).await?.lsn;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
@@ -2606,7 +2548,6 @@ pub fn make_router(
             api_handler(r, reload_auth_validation_keys_handler)
         })
         .get("/v1/tenant", |r| api_handler(r, tenant_list_handler))
-        .post("/v1/tenant", |r| api_handler(r, tenant_create_handler))
         .get("/v1/tenant/:tenant_shard_id", |r| {
             api_handler(r, tenant_status)
         })

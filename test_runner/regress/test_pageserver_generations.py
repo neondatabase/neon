@@ -249,10 +249,6 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     assert timeline["remote_consistent_lsn"] == timeline["remote_consistent_lsn_visible"]
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
 
-    main_pageserver.allowed_errors.extend(
-        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
-    )
-
     # Now advance the generation in the control plane: subsequent validations
     # from the running pageserver will fail.  No more deletions should happen.
     env.storage_controller.attach_hook_issue(env.initial_tenant, other_pageserver.id)
@@ -397,8 +393,6 @@ def test_deletion_queue_recovery(
         #   validated before restart.
         assert get_deletion_queue_executed(ps_http) == before_restart_depth
     else:
-        main_pageserver.allowed_errors.extend([".*Dropping stale deletions.*"])
-
         # If we lost the attachment, we should have dropped our pre-restart deletions.
         assert get_deletion_queue_dropped(ps_http) == before_restart_depth
 
@@ -552,13 +546,6 @@ def test_multi_attach(
     http_clients = list([p.http_client() for p in pageservers])
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
-
-    # We will intentionally create situations where stale deletions happen from non-latest-generation
-    # nodes when the tenant is multiply-attached
-    for ps in env.pageservers:
-        ps.allowed_errors.extend(
-            [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
-        )
 
     # Initially, the tenant will be attached to the first pageserver (first is default in our test harness)
     wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))

@@ -1,6 +1,5 @@
 use std::{fmt::Debug, num::NonZeroUsize, str::FromStr, time::Duration};
 
-use anyhow::bail;
 use aws_sdk_s3::types::StorageClass;
 use camino::Utf8PathBuf;
 
@@ -176,20 +175,8 @@ fn serialize_storage_class<S: serde::Serializer>(
 impl RemoteStorageConfig {
     pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
 
-    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
-        let document: toml_edit::Document = match toml {
-            toml_edit::Item::Table(toml) => toml.clone().into(),
-            toml_edit::Item::Value(toml_edit::Value::InlineTable(toml)) => {
-                toml.clone().into_table().into()
-            }
-            _ => bail!("toml not a table or inline table"),
-        };
-
-        if document.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(toml_edit::de::from_document(document)?))
+    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
+        Ok(utils::toml_edit_ext::deserialize_item(toml)?)
     }
 }
 
@@ -197,7 +184,7 @@ impl RemoteStorageConfig {
 mod tests {
     use super::*;
 
-    fn parse(input: &str) -> anyhow::Result<Option<RemoteStorageConfig>> {
+    fn parse(input: &str) -> anyhow::Result<RemoteStorageConfig> {
         let toml = input.parse::<toml_edit::Document>().unwrap();
         RemoteStorageConfig::from_toml(toml.as_item())
     }
@@ -207,7 +194,7 @@ mod tests {
         let input = "local_path = '.'
 timeout = '5s'";
 
-        let config = parse(input).unwrap().expect("it exists");
+        let config = parse(input).unwrap();
 
         assert_eq!(
             config,
@@ -229,7 +216,7 @@ timeout = '5s'";
     timeout = '7s'
     ";
 
-        let config = parse(toml).unwrap().expect("it exists");
+        let config = parse(toml).unwrap();
 
         assert_eq!(
             config,
@@ -257,7 +244,7 @@ timeout = '5s'";
     timeout = '7s'
     ";
 
-        let config = parse(toml).unwrap().expect("it exists");
+        let config = parse(toml).unwrap();
 
         assert_eq!(
             config,

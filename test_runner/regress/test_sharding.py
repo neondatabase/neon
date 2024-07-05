@@ -542,6 +542,13 @@ def test_sharding_split_smoke(
             for k, v in non_default_tenant_config.items():
                 assert config.effective_config[k] == v
 
+            # Check that heatmap uploads remain enabled after shard split
+            # (https://github.com/neondatabase/neon/issues/8189)
+            assert (
+                config.effective_config["heatmap_period"]
+                and config.effective_config["heatmap_period"] != "0s"
+            )
+
     # Validate pageserver state: expect every child shard to have an attached and secondary location
     (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
     assert sum(attached.values()) == split_shard_count
@@ -1137,10 +1144,6 @@ def test_sharding_split_failures(
     )
 
     for ps in env.pageservers:
-        # When we do node failures and abandon a shard, it will de-facto have old generation and
-        # thereby be unable to publish remote consistent LSN updates
-        ps.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
-
         # If we're using a failure that will panic the storage controller, all background
         # upcalls from the pageserver can fail
         ps.allowed_errors.append(".*calling control plane generation validation API failed.*")

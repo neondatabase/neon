@@ -10,7 +10,7 @@ use crate::walproposer_sim::{
 pub mod walproposer_sim;
 
 // Generates 2000 random seeds and runs a schedule for each of them.
-// If you seed this test fail, please report the last seed to the
+// If you see this test fail, please report the last seed to the
 // @safekeeper team.
 #[test]
 fn test_random_schedules() -> anyhow::Result<()> {

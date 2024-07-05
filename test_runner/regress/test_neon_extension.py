@@ -50,7 +50,7 @@ def test_neon_extension_compatibility(neon_env_builder: NeonEnvBuilder):
             # Ensure that the default version is also updated in the neon.control file
             assert cur.fetchone() == ("1.3",)
             cur.execute("SELECT * from neon.NEON_STAT_FILE_CACHE")
-            all_versions = ["1.3", "1.2", "1.1", "1.0"]
+            all_versions = ["1.4", "1.3", "1.2", "1.1", "1.0"]
             current_version = "1.3"
             for idx, begin_version in enumerate(all_versions):
                 for target_version in all_versions[idx + 1 :]:

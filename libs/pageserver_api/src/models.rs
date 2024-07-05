@@ -25,7 +25,6 @@ use utils::{
     serde_system_time,
 };
 
-use crate::controller_api::PlacementPolicy;
 use crate::{
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
@@ -229,6 +228,11 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LsnLeaseRequest {
+    pub lsn: Lsn,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TenantShardSplitRequest {
     pub new_shard_count: u8,
@@ -269,28 +273,6 @@ impl Default for ShardParameters {
             stripe_size: Self::DEFAULT_STRIPE_SIZE,
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct TenantCreateRequest {
-    pub new_tenant_id: TenantShardId,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
-
-    // If omitted, create a single shard with TenantShardId::unsharded()
-    #[serde(default)]
-    #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
-    pub shard_parameters: ShardParameters,
-
-    // This parameter is only meaningful in requests sent to the storage controller
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub placement_policy: Option<PlacementPolicy>,
-
-    #[serde(flatten)]
-    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 /// An alternative representation of `pageserver::tenant::TenantConf` with
@@ -455,6 +437,37 @@ pub enum CompactionAlgorithm {
     Tiered,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum_macros::FromRepr,
+    strum_macros::EnumString,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ImageCompressionAlgorithm {
+    /// Disabled for writes, and never decompress during reading.
+    /// Never set this after you've enabled compression once!
+    DisabledNoDecompress,
+    // Disabled for writes, support decompressing during read path
+    Disabled,
+    /// Zstandard compression. Level 0 means and None mean the same (default level). Levels can be negative as well.
+    /// For details, see the [manual](http://facebook.github.io/zstd/zstd_manual.html).
+    Zstd {
+        level: Option<i8>,
+    },
+}
+
+impl ImageCompressionAlgorithm {
+    pub fn allow_decompression(&self) -> bool {
+        !matches!(self, ImageCompressionAlgorithm::DisabledNoDecompress)
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionAlgorithmSettings {
     pub kind: CompactionAlgorithm,
@@ -547,10 +560,6 @@ pub struct LocationConfigListResponse {
     pub tenant_shards: Vec<(TenantShardId, Option<LocationConfig>)>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TenantCreateResponse(pub TenantId);
-
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub id: NodeId,
@@ -625,8 +634,7 @@ pub struct TenantInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
+    pub generation: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -670,6 +678,16 @@ pub struct TimelineInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
+
+    /// How many bytes of WAL are within this branch's pitr_interval.  If the pitr_interval goes
+    /// beyond the branch's branch point, we only count up to the branch point.
+    pub pitr_history_size: u64,
+
+    /// Whether this branch's branch point is within its ancestor's PITR interval (i.e. any
+    /// ancestor data used by this branch would have been retained anyway).  If this is false, then
+    /// this branch may be imposing a cost on the ancestor by causing it to retain layers that it would
+    /// otherwise be able to GC.
+    pub within_ancestor_pitr: bool,
 
     pub timeline_dir_layer_file_size_sum: Option<u64>,
 
@@ -1453,7 +1471,7 @@ mod tests {
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1463,7 +1481,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         let original_broken = TenantInfo {
@@ -1474,7 +1493,7 @@ mod tests {
             },
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -1488,7 +1507,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         assert_eq!(
@@ -1506,18 +1526,6 @@ mod tests {
 
     #[test]
     fn test_reject_unknown_field() {
-        let id = TenantId::generate();
-        let create_request = json!({
-            "new_tenant_id": id.to_string(),
-            "unknown_field": "unknown_value".to_string(),
-        });
-        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
-        );
-
         let id = TenantId::generate();
         let config_request = json!({
             "tenant_id": id.to_string(),

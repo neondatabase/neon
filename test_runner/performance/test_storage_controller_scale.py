@@ -1,16 +1,87 @@
 import concurrent.futures
 import random
 import time
+from collections import defaultdict
+from typing import Any, Dict
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-)
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
+
+
+def get_consistent_node_shard_counts(env: NeonEnv, total_shards) -> defaultdict[str, int]:
+    """
+    Get the number of shards attached to each node.
+    This function takes into account the intersection of the intent and the observed state.
+    If they do not match, it asserts out.
+    """
+    tenants = env.storage_controller.tenant_list()
+
+    intent = dict()
+    observed = dict()
+
+    tenant_placement: defaultdict[str, Dict[str, Any]] = defaultdict(
+        lambda: {
+            "observed": {"attached": None, "secondary": []},
+            "intent": {"attached": None, "secondary": []},
+        }
+    )
+
+    for t in tenants:
+        for node_id, loc_state in t["observed"]["locations"].items():
+            if (
+                loc_state is not None
+                and "conf" in loc_state
+                and loc_state["conf"] is not None
+                and loc_state["conf"]["mode"]
+                in set(["AttachedSingle", "AttachedMulti", "AttachedStale"])
+            ):
+                observed[t["tenant_shard_id"]] = int(node_id)
+                tenant_placement[t["tenant_shard_id"]]["observed"]["attached"] = int(node_id)
+
+            if (
+                loc_state is not None
+                and "conf" in loc_state
+                and loc_state["conf"] is not None
+                and loc_state["conf"]["mode"] == "Secondary"
+            ):
+                tenant_placement[t["tenant_shard_id"]]["observed"]["secondary"].append(int(node_id))
+
+        if "attached" in t["intent"]:
+            intent[t["tenant_shard_id"]] = t["intent"]["attached"]
+            tenant_placement[t["tenant_shard_id"]]["intent"]["attached"] = t["intent"]["attached"]
+
+        if "secondary" in t["intent"]:
+            tenant_placement[t["tenant_shard_id"]]["intent"]["secondary"] += t["intent"][
+                "secondary"
+            ]
+
+    log.info(f"{tenant_placement=}")
+
+    matching = {
+        tid: intent[tid] for tid in observed if tid in intent and intent[tid] == observed[tid]
+    }
+    assert len(matching) == total_shards
+
+    attached_per_node: defaultdict[str, int] = defaultdict(int)
+    for node_id in matching.values():
+        attached_per_node[node_id] += 1
+
+    return attached_per_node
+
+
+def assert_consistent_balanced_attachments(env: NeonEnv, total_shards):
+    attached_per_node = get_consistent_node_shard_counts(env, total_shards)
+
+    min_shard_count = min(attached_per_node.values())
+    max_shard_count = max(attached_per_node.values())
+
+    flake_factor = 5 / 100
+    assert max_shard_count - min_shard_count <= int(total_shards * flake_factor)
 
 
 @pytest.mark.timeout(3600)  # super long running test: should go down as we optimize
@@ -44,7 +115,8 @@ def test_storage_controller_many_tenants(
     # A small sleep on each call into the notify hook, to simulate the latency of doing a database write
     compute_reconfigure_listener.register_on_notify(lambda body: time.sleep(0.01))
 
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_configs()
+    neon_env_builder.start()
 
     # We will intentionally stress reconciler concurrrency, which triggers a warning when lots
     # of shards are hitting the delayed path.
@@ -60,14 +132,6 @@ def test_storage_controller_many_tenants(
     )
 
     for ps in env.pageservers:
-        # This can happen because when we do a loop over all pageservers and mark them offline/active,
-        # reconcilers might get cancelled, and the next reconcile can follow a not-so-elegant path of
-        # bumping generation before other attachments are detached.
-        #
-        # We could clean this up by making reconcilers respect the .observed of their predecessor, if
-        # we spawn with a wait for the predecessor.
-        ps.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
-
         # Storage controller is allowed to drop pageserver requests when the cancellation token
         # for a Reconciler fires.
         ps.allowed_errors.append(".*request was dropped before completing.*")
@@ -78,6 +142,8 @@ def test_storage_controller_many_tenants(
     # Shards per tenant
     shard_count = 2
     stripe_size = 1024
+
+    total_shards = tenant_count * shard_count
 
     tenants = set(TenantId.generate() for _i in range(0, tenant_count))
 
@@ -195,10 +261,44 @@ def test_storage_controller_many_tenants(
     env.storage_controller.consistency_check()
     check_memory()
 
-    # Restart pageservers: this exercises the /re-attach API
-    for pageserver in env.pageservers:
-        pageserver.stop()
-        pageserver.start()
+    shard_counts = get_consistent_node_shard_counts(env, total_shards)
+    log.info(f"Shard counts before rolling restart: {shard_counts}")
+
+    assert_consistent_balanced_attachments(env, total_shards)
+
+    # Restart pageservers gracefully: this exercises the /re-attach pageserver API
+    # and the storage controller drain and fill API
+    for ps in env.pageservers:
+        env.storage_controller.retryable_node_operation(
+            lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
+        )
+
+        env.storage_controller.poll_node_status(
+            ps.id, "PauseForRestart", max_attempts=24, backoff=5
+        )
+
+        shard_counts = get_consistent_node_shard_counts(env, total_shards)
+        log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
+        # Assert that we've drained the node
+        assert shard_counts[str(ps.id)] == 0
+        # Assert that those shards actually went somewhere
+        assert sum(shard_counts.values()) == total_shards
+
+        ps.restart()
+        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=24, backoff=1)
+
+        env.storage_controller.retryable_node_operation(
+            lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
+        )
+        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=24, backoff=5)
+
+        shard_counts = get_consistent_node_shard_counts(env, total_shards)
+        log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
+
+        assert_consistent_balanced_attachments(env, total_shards)
+
+        env.storage_controller.reconcile_until_idle()
+        env.storage_controller.consistency_check()
 
     # Consistency check is safe here: restarting pageservers should not have caused any Reconcilers to spawn,
     # as they were not offline long enough to trigger any scheduling changes.

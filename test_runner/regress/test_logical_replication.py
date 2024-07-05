@@ -4,7 +4,6 @@ from random import choice
 from string import ascii_lowercase
 
 import pytest
-from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     AuxFileStore,
@@ -13,7 +12,7 @@ from fixtures.neon_fixtures import (
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
-from fixtures.utils import query_scalar, wait_until
+from fixtures.utils import wait_until
 
 
 def random_string(n: int):
@@ -326,12 +325,17 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
         assert "could not receive data from WAL stream" not in logs
 
 
-# Test compute start at LSN page of which starts with contrecord
-# https://github.com/neondatabase/neon/issues/5749
+# Test replication of WAL record spanning page boundary (with contrecord) after
+# compute restart and WAL write of the page.
+#
+# See https://github.com/neondatabase/neon/issues/5749
+#
+# Most pages start with a contrecord, so we don't do anything special
+# to ensure that.
 @pytest.mark.parametrize(
     "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
 )
-def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
+def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
     env.neon_cli.create_branch("init")
@@ -355,52 +359,6 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
     logical_replication_sync(vanilla_pg, endpoint)
     vanilla_pg.stop()
-
-    with endpoint.cursor() as cur:
-        # measure how much space logical message takes. Sometimes first attempt
-        # creates huge message and then it stabilizes, have no idea why.
-        for _ in range(3):
-            lsn_before = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-            log.info(f"current_lsn={lsn_before}")
-            # Non-transactional logical message doesn't write WAL, only XLogInsert's
-            # it, so use transactional. Which is a bit problematic as transactional
-            # necessitates commit record. Alternatively we can do smth like
-            #   select neon_xlogflush(pg_current_wal_insert_lsn());
-            # but isn't much better + that particular call complains on 'xlog flush
-            # request 0/282C018 is not satisfied' as pg_current_wal_insert_lsn skips
-            # page headers.
-            payload = "blahblah"
-            cur.execute(f"select pg_logical_emit_message(true, 'pref', '{payload}')")
-            lsn_after_by_curr_wal_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-            lsn_diff = lsn_after_by_curr_wal_lsn - lsn_before
-            logical_message_base = lsn_after_by_curr_wal_lsn - lsn_before - len(payload)
-            log.info(
-                f"before {lsn_before}, after {lsn_after_by_curr_wal_lsn}, lsn diff is {lsn_diff}, base {logical_message_base}"
-            )
-
-        # and write logical message spanning exactly as we want
-        lsn_before = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        log.info(f"current_lsn={lsn_before}")
-        curr_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        offs = int(curr_lsn) % 8192
-        till_page = 8192 - offs
-        payload_len = (
-            till_page - logical_message_base - 8
-        )  # not sure why 8 is here, it is deduced from experiments
-        log.info(f"current_lsn={curr_lsn}, offs {offs}, till_page {till_page}")
-
-        # payload_len above would go exactly till the page boundary; but we want contrecord, so make it slightly longer
-        payload_len += 8
-
-        cur.execute(f"select pg_logical_emit_message(true, 'pref', 'f{'a' * payload_len}')")
-        supposedly_contrecord_end = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        log.info(f"supposedly_page_boundary={supposedly_contrecord_end}")
-        # The calculations to hit the page boundary are very fuzzy, so just
-        # ignore test if we fail to reach it.
-        if not (int(supposedly_contrecord_end) % 8192 == 32):
-            pytest.skip("missed page boundary, bad luck")
-
-        cur.execute("insert into replication_example values (2, 3)")
 
     wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
     endpoint.stop().start()
