@@ -2905,14 +2905,12 @@ impl Timeline {
 
     async fn find_layer(&self, layer_name: &LayerName) -> Option<Layer> {
         let guard = self.layers.read().await;
-        for historic_layer in guard.layer_map().iter_historic_layers() {
-            let historic_layer_name = historic_layer.layer_name();
-            if layer_name == &historic_layer_name {
-                return Some(guard.get_from_desc(&historic_layer));
-            }
-        }
-
-        None
+        let layer = guard
+            .layer_map()
+            .iter_historic_layers()
+            .find(|l| &l.layer_name() == layer_name)
+            .map(|found| guard.get_from_desc(&found));
+        layer
     }
 
     /// The timeline heatmap is a hint to secondary locations from the primary location,
