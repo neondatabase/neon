@@ -943,6 +943,8 @@ class NeonEnvBuilder:
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
                 ps_assert_metric_no_errors=(exc_type is None),
+                # do not fail on endpoint errors to allow the rest of cleanup to proceed
+                fail_on_endpoint_errors=False,
             )
             cleanup_error = None
 
@@ -1214,11 +1216,11 @@ class NeonEnv:
         for f in futs:
             f.result()
 
-    def stop(self, immediate=False, ps_assert_metric_no_errors=False):
+    def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.
         """
-        self.endpoints.stop_all()
+        self.endpoints.stop_all(fail_on_endpoint_errors)
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
@@ -3900,9 +3902,17 @@ class EndpointFactory:
             pageserver_id=pageserver_id,
         )
 
-    def stop_all(self) -> "EndpointFactory":
+    def stop_all(self, fail_on_error=True) -> "EndpointFactory":
+        exception = None
         for ep in self.endpoints:
-            ep.stop()
+            try:
+                ep.stop()
+            except Exception as e:
+                log.error(f"Failed to stop endpoint {ep.endpoint_id}: {e}")
+                exception = e
+
+        if fail_on_error and exception is not None:
+            raise exception
 
         return self
 
