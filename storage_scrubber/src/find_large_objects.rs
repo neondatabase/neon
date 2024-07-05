@@ -69,8 +69,7 @@ pub async fn find_large_objects(
             loop {
                 let fetch_response =
                     list_objects_with_retries(&s3_client, &tenant_root, continuation_token.clone())
-                        .await
-                        .expect("couldn't list objects");
+                        .await?;
                 for obj in fetch_response.contents().iter().filter(|o| {
                     if let Some(obj_size) = o.size {
                         min_size as i64 <= obj_size
