@@ -568,7 +568,7 @@ paths:
           type: string
       - name: timeline_id
         in: path
-        ŕequired: true
+        required: true
         schema:
           type: string
 
