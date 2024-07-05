@@ -6,6 +6,7 @@ use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use once_cell::sync::Lazy;
 use pageserver_api::key::Key;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
@@ -424,13 +425,10 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        let tenant = self
-            .get_active_tenant_with_timeout(tenant_id, ShardSelector::First, ACTIVE_TENANT_TIMEOUT)
-            .await?;
-
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
-        self.flush_cancellable(pgb, &tenant.cancel).await?;
+        static NO_CANCEL: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
+        self.flush_cancellable(pgb, &NO_CANCEL).await?;
 
         loop {
             let msg = tokio::select! {
@@ -557,7 +555,7 @@ impl PageServerHandler {
                     });
 
                     pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
-                    self.flush_cancellable(pgb, &tenant.cancel).await?;
+                    self.flush_cancellable(pgb, &NO_CANCEL).await?;
                 }
             }
         }
