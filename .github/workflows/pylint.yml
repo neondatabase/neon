@@ -20,6 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          echo pip install pylint psycopg2 pytest toml aiohttp backoff requests allure
           pip install pylint psycopg2 pytest toml aiohttp backoff requests allure
       - name: Analyzing code with pylint
         run: |
