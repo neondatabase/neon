@@ -399,15 +399,11 @@ impl FromStr for EndpointCacheConfig {
 #[derive(Debug)]
 pub struct MetricBackupCollectionConfig {
     pub interval: Duration,
-    pub remote_storage_config: OptRemoteStorageConfig,
+    pub remote_storage_config: Option<RemoteStorageConfig>,
     pub chunk_size: usize,
 }
 
-/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
-/// runtime type errors from the value parser we use.
-pub type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
-
-pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
+pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<RemoteStorageConfig> {
     RemoteStorageConfig::from_toml(&s.parse()?)
 }
 
