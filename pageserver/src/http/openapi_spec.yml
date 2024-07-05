@@ -1106,7 +1106,7 @@ components:
         reparented_timelines:
           type: array
           description: Set of reparented timeline ids
-          properties:
+          items:
             type: string
             format: hex
             description: TimelineId
