@@ -30,6 +30,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -92,14 +93,12 @@ use crate::tenant::storage_layer::ImageLayer;
 use crate::walredo;
 use crate::InitializationOrder;
 use std::collections::hash_map::Entry;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
-use std::ops::Bound::Included;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -2782,45 +2781,38 @@ impl Tenant {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let all_branchpoints: BTreeSet<(TimelineId, Lsn)> = {
-            let mut all_branchpoints = BTreeSet::new();
-            timelines.iter().for_each(|(_timeline_id, timeline_entry)| {
-                if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
-                    all_branchpoints
-                        .insert((*ancestor_timeline_id, timeline_entry.get_ancestor_lsn()));
-                }
-            });
-            all_branchpoints
-        };
+        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> = BTreeMap::new();
+        timelines.iter().for_each(|(timeline_id, timeline_entry)| {
+            if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
+                let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
+                ancestor_children.push((timeline_entry.get_ancestor_lsn(), *timeline_id));
+            }
+        });
 
         // The number of bytes we always keep, irrespective of PITR: this is a constant across timelines
         let horizon = self.get_gc_horizon();
 
         // Populate each timeline's GcInfo with information about its child branches
         for timeline in timelines.values() {
-            let branchpoints: Vec<Lsn> = all_branchpoints
-                .range((
-                    Included((timeline.timeline_id, Lsn(0))),
-                    Included((timeline.timeline_id, Lsn(u64::MAX))),
-                ))
-                .map(|&x| x.1)
-                .collect();
+            let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
+                .remove(&timeline.timeline_id)
+                .unwrap_or_default();
 
-            {
-                let mut target = timeline.gc_info.write().unwrap();
+            branchpoints.sort_by_key(|b| b.0);
 
-                target.retain_lsns = branchpoints;
+            let mut target = timeline.gc_info.write().unwrap();
 
-                let horizon_cutoff = timeline
-                    .get_last_record_lsn()
-                    .checked_sub(horizon)
-                    .unwrap_or(Lsn(0));
+            target.retain_lsns = branchpoints;
 
-                target.cutoffs = GcCutoffs {
-                    horizon: horizon_cutoff,
-                    pitr: Lsn::INVALID,
-                };
-            }
+            let horizon_cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
+
+            target.cutoffs = GcCutoffs {
+                horizon: horizon_cutoff,
+                pitr: Lsn::INVALID,
+            };
         }
     }
 
@@ -4308,7 +4300,7 @@ mod tests {
         {
             let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
             assert_eq!(branchpoints.len(), 1);
-            assert_eq!(branchpoints[0], Lsn(0x40));
+            assert_eq!(branchpoints[0], (Lsn(0x40), NEW_TIMELINE_ID));
         }
 
         // You can read the key from the child branch even though the parent is
