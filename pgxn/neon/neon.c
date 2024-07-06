@@ -32,6 +32,7 @@
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
 #include "utils/guc.h"
+#include "utils/guc_tables.h"
 #include "utils/wait_event.h"
 
 #include "extension_server.h"
@@ -581,7 +582,39 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		pfree(restored_xids);
 	if (prepared_xids)
 		pfree(prepared_xids);
-	return false;
+	return false;}
+
+
+/*
+ * Right now we only enable reporting of "search_path" to allow to use it
+ * in pgbouncer track_extra_parameters
+ */
+static void
+OverridePostgresGUCs(void)
+{
+#if PG_VERSION_NUM >= 160000
+	int gucCount = 0;
+	struct config_generic **guc_vars = get_guc_variables(&gucCount);
+#else
+	struct config_generic **guc_vars = get_guc_variables();
+	int gucCount = GetNumConfigOptions();
+#endif
+
+	for (int gucIndex = 0; gucIndex < gucCount; gucIndex++)
+	{
+		struct config_generic *var = (struct config_generic *) guc_vars[gucIndex];
+
+		/*
+		 * Turn on GUC_REPORT for search_path. GUC_REPORT provides that an S (Parameter Status)
+		 * packet is appended after the C (Command Complete) packet sent from the server
+		 * for SET command. S packet contains the new value of the parameter
+		 * if its value has been changed.
+		 */
+		if (strcmp(var->name, "search_path") == 0)
+		{
+			var->flags |= GUC_REPORT;
+		}
+	}
 }
 
 void
@@ -626,6 +659,8 @@ _PG_init(void)
 	 * extension was loaded will be removed.
 	 */
 	EmitWarningsOnPlaceholders("neon");
+
+	OverridePostgresGUCs();
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
