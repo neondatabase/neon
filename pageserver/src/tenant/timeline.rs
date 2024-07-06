@@ -460,7 +460,7 @@ pub(crate) struct GcInfo {
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<Lsn>,
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -5073,7 +5073,11 @@ impl Timeline {
 
             let space_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
             let time_cutoff = gc_info.cutoffs.time;
-            let retain_lsns = gc_info.retain_lsns.clone();
+            let retain_lsns = gc_info
+                .retain_lsns
+                .iter()
+                .map(|(lsn, _child_id)| *lsn)
+                .collect();
 
             // Gets the maximum LSN that holds the valid lease.
             //
