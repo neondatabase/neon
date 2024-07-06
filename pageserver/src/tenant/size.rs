@@ -271,10 +271,14 @@ pub(super) async fn gather_inputs(
         let mut lsns: Vec<(Lsn, LsnKind)> = gc_info
             .retain_lsns
             .iter()
-            .filter(|(lsn, _child_id)| lsn > &ancestor_lsn)
-            .copied()
-            // this assumes there are no other retain_lsns than the branchpoints
-            .map(|(lsn, _child_id)| (lsn, LsnKind::BranchPoint))
+            .filter_map(|(lsn, _child_id, _)| {
+                if lsn > &ancestor_lsn {
+                    // this assumes there are no other retain_lsns than the branchpoints
+                    Some((*lsn, LsnKind::BranchPoint))
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
 
         lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));

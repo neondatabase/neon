@@ -19,6 +19,7 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::TimelineState;
@@ -2786,11 +2787,12 @@ impl Tenant {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> = BTreeMap::new();
+        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId, Option<KeySpace>)>> =
+            BTreeMap::new();
         timelines.iter().for_each(|(timeline_id, timeline_entry)| {
             if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
                 let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
-                ancestor_children.push((timeline_entry.get_ancestor_lsn(), *timeline_id));
+                ancestor_children.push((timeline_entry.get_ancestor_lsn(), *timeline_id, None));
             }
         });
 
@@ -2799,7 +2801,7 @@ impl Tenant {
 
         // Populate each timeline's GcInfo with information about its child branches
         for timeline in timelines.values() {
-            let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
+            let mut branchpoints: Vec<(Lsn, TimelineId, Option<KeySpace>)> = all_branchpoints
                 .remove(&timeline.timeline_id)
                 .unwrap_or_default();
 
@@ -4305,7 +4307,7 @@ mod tests {
         {
             let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
             assert_eq!(branchpoints.len(), 1);
-            assert_eq!(branchpoints[0], (Lsn(0x40), NEW_TIMELINE_ID));
+            assert_eq!(branchpoints[0], (Lsn(0x40), NEW_TIMELINE_ID, None));
         }
 
         // You can read the key from the child branch even though the parent is

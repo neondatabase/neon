@@ -453,12 +453,12 @@ pub struct WalReceiverInfo {
 /// Garbage Collection.
 #[derive(Default)]
 pub(crate) struct GcInfo {
-    /// Specific LSNs that are needed.
+    /// Record which parts of this timeline's history are still needed by children
     ///
-    /// Currently, this includes all points where child branches have
-    /// been forked off from. In the future, could also include
-    /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<(Lsn, TimelineId)>,
+    /// Optionally store each child's keyspace at their branch LSN: parts of the keyspace not covered here may be dropped during GC, as
+    /// the child will never read them.  For example, a child which has covered its whole keyspace with image layers
+    /// will put an empty keyspace here.  Children populate this: if it is None, presume the child may read any part of the keyspace.
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId, Option<KeySpace>)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -476,12 +476,20 @@ impl GcInfo {
     }
 
     pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn) {
-        self.retain_lsns.push((child_lsn, child_id));
+        self.retain_lsns.push((child_lsn, child_id, None));
         self.retain_lsns.sort_by_key(|i| i.0);
     }
 
     pub(super) fn remove_child(&mut self, child_id: TimelineId) {
         self.retain_lsns.retain(|i| i.1 != child_id);
+    }
+
+    /// When the child re-calculates which parts of the keyspace it will read from the ancestor, it posts
+    /// and update to the parent using this function, to enable the parent to perhaps GC more layers.
+    pub(super) fn notify_child_keyspace(&mut self, child_id: TimelineId, key_space: KeySpace) {
+        if let Ok(idx) = self.retain_lsns.binary_search_by_key(&child_id, |i| i.1) {
+            self.retain_lsns.get_mut(idx).unwrap().2 = Some(key_space);
+        }
     }
 }
 
@@ -5089,7 +5097,7 @@ impl Timeline {
             let retain_lsns = gc_info
                 .retain_lsns
                 .iter()
-                .map(|(lsn, _child_id)| *lsn)
+                .map(|(lsn, _child_id, _)| *lsn)
                 .collect();
 
             // Gets the maximum LSN that holds the valid lease.
