@@ -1733,6 +1733,9 @@ impl Tenant {
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
 
+            // Before activation, populate each Timeline's GcInfo with information about its children
+            self.initialize_gc_info(&timelines_accessor);
+
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
             tasks::start_background_loops(self, background_jobs_can_start);
@@ -2765,6 +2768,62 @@ impl Tenant {
             .await
     }
 
+    /// Populate all Timelines' `GcInfo` with information about their children.  We do not set the
+    /// PITR cutoffs here, because that requires I/O: this is done later, before GC, by [`Self::refresh_gc_info_internal`]
+    ///
+    /// Subsequently, parent-child relationships are updated incrementally during timeline creation/deletion.
+    fn initialize_gc_info(
+        &self,
+        timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+    ) {
+        // This function must be called before activation: after activation timeline create/delete operations
+        // might happen, and this function is not safe to run concurrently with those.
+        assert!(!self.is_active());
+
+        // Scan all timelines. For each timeline, remember the timeline ID and
+        // the branch point where it was created.
+        let all_branchpoints: BTreeSet<(TimelineId, Lsn)> = {
+            let mut all_branchpoints = BTreeSet::new();
+            timelines.iter().for_each(|(_timeline_id, timeline_entry)| {
+                if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
+                    all_branchpoints
+                        .insert((*ancestor_timeline_id, timeline_entry.get_ancestor_lsn()));
+                }
+            });
+            all_branchpoints
+        };
+
+        // The number of bytes we always keep, irrespective of PITR: this is a constant across timelines
+        let horizon = self.get_gc_horizon();
+
+        // Populate each timeline's GcInfo with information about its child branches
+        for timeline in timelines.values() {
+            let branchpoints: Vec<Lsn> = all_branchpoints
+                .range((
+                    Included((timeline.timeline_id, Lsn(0))),
+                    Included((timeline.timeline_id, Lsn(u64::MAX))),
+                ))
+                .map(|&x| x.1)
+                .collect();
+
+            {
+                let mut target = timeline.gc_info.write().unwrap();
+
+                target.retain_lsns = branchpoints;
+
+                let horizon_cutoff = timeline
+                    .get_last_record_lsn()
+                    .checked_sub(horizon)
+                    .unwrap_or(Lsn(0));
+
+                target.cutoffs = GcCutoffs {
+                    horizon: horizon_cutoff,
+                    pitr: Lsn::INVALID,
+                };
+            }
+        }
+    }
+
     async fn refresh_gc_info_internal(
         &self,
         target_timeline_id: Option<TimelineId>,
@@ -2786,6 +2845,11 @@ impl Tenant {
             })
             .cloned()
             .collect::<Vec<_>>();
+
+        if target_timeline_id.is_some() && timelines.is_empty() {
+            // We were to act on a particular timeline and it wasn't found
+            return Err(GcError::TimelineNotFound);
+        }
 
         let mut gc_cutoffs: HashMap<TimelineId, GcCutoffs> =
             HashMap::with_capacity(timelines.len());
@@ -2809,67 +2873,14 @@ impl Tenant {
         // because that will stall branch creation.
         let gc_cs = self.gc_cs.lock().await;
 
-        // Scan all timelines. For each timeline, remember the timeline ID and
-        // the branch point where it was created.
-        let (all_branchpoints, timelines): (BTreeSet<(TimelineId, Lsn)>, _) = {
-            let timelines = self.timelines.lock().unwrap();
-            let mut all_branchpoints = BTreeSet::new();
-            let timelines = {
-                if let Some(target_timeline_id) = target_timeline_id.as_ref() {
-                    if timelines.get(target_timeline_id).is_none() {
-                        return Err(GcError::TimelineNotFound);
-                    }
-                };
-
-                timelines
-                    .iter()
-                    .map(|(_timeline_id, timeline_entry)| {
-                        if let Some(ancestor_timeline_id) =
-                            &timeline_entry.get_ancestor_timeline_id()
-                        {
-                            // If target_timeline is specified, we only need to know branchpoints of its children
-                            if let Some(timeline_id) = target_timeline_id {
-                                if ancestor_timeline_id == &timeline_id {
-                                    all_branchpoints.insert((
-                                        *ancestor_timeline_id,
-                                        timeline_entry.get_ancestor_lsn(),
-                                    ));
-                                }
-                            }
-                            // Collect branchpoints for all timelines
-                            else {
-                                all_branchpoints.insert((
-                                    *ancestor_timeline_id,
-                                    timeline_entry.get_ancestor_lsn(),
-                                ));
-                            }
-                        }
-
-                        timeline_entry.clone()
-                    })
-                    .collect::<Vec<_>>()
-            };
-            (all_branchpoints, timelines)
-        };
-
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
         let mut gc_timelines = Vec::with_capacity(timelines.len());
         for timeline in timelines {
-            // If target_timeline is specified, ignore all other timelines
+            // We filtered the timeline list above
             if let Some(target_timeline_id) = target_timeline_id {
-                if timeline.timeline_id != target_timeline_id {
-                    continue;
-                }
+                assert_eq!(target_timeline_id, timeline.timeline_id);
             }
-
-            let branchpoints: Vec<Lsn> = all_branchpoints
-                .range((
-                    Included((timeline.timeline_id, Lsn(0))),
-                    Included((timeline.timeline_id, Lsn(u64::MAX))),
-                ))
-                .map(|&x| x.1)
-                .collect();
 
             {
                 let mut target = timeline.gc_info.write().unwrap();
@@ -2908,20 +2919,12 @@ impl Tenant {
                         .0,
                 );
 
-                match gc_cutoffs.remove(&timeline.timeline_id) {
-                    Some(cutoffs) => {
-                        target.retain_lsns = branchpoints;
-                        target.cutoffs = cutoffs;
-                    }
-                    None => {
-                        // reasons for this being unavailable:
-                        // - this timeline was created while we were finding cutoffs
-                        // - lsn for timestamp search fails for this timeline repeatedly
-                        //
-                        // in both cases, refreshing the branchpoints is correct.
-                        target.retain_lsns = branchpoints;
-                    }
-                };
+                // Apply the cutoffs we found to the Timeline's GcInfo.  Why might we _not_ have cutoffs for a timeline?
+                // - this timeline was created while we were finding cutoffs
+                // - lsn for timestamp search fails for this timeline repeatedly
+                if let Some(cutoffs) = gc_cutoffs.remove(&timeline.timeline_id) {
+                    target.cutoffs = cutoffs;
+                }
             }
 
             gc_timelines.push(timeline);
