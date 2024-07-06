@@ -137,14 +137,14 @@ impl<'a> BlockCursor<'a> {
 }
 
 /// Reserved bits for length and compression
-const LEN_COMPRESSION_BIT_MASK: u8 = 0xf0;
+pub(super) const LEN_COMPRESSION_BIT_MASK: u8 = 0xf0;
 
 /// The maximum size of blobs we support. The highest few bits
 /// are reserved for compression and other further uses.
 const MAX_SUPPORTED_LEN: usize = 0x0fff_ffff;
 
-const BYTE_UNCOMPRESSED: u8 = 0x80;
-const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
+pub(super) const BYTE_UNCOMPRESSED: u8 = 0x80;
+pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 
 /// A wrapper of `VirtualFile` that allows users to write blobs.
 ///
