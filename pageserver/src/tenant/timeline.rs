@@ -476,6 +476,15 @@ impl GcInfo {
     pub(crate) fn min_cutoff(&self) -> Lsn {
         self.cutoffs.select_min()
     }
+
+    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn) {
+        self.retain_lsns.push((child_lsn, child_id));
+        self.retain_lsns.sort_by_key(|i| i.0);
+    }
+
+    pub(super) fn remove_child(&mut self, child_id: TimelineId) {
+        self.retain_lsns.retain(|i| i.1 != child_id);
+    }
 }
 
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this

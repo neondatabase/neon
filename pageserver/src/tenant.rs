@@ -637,6 +637,11 @@ impl Tenant {
                     timeline.maybe_spawn_flush_loop();
                 }
             }
+
+            if let Some(ancestor) = timeline.get_ancestor_timeline() {
+                let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
+                ancestor_gc_info.insert_child(timeline.timeline_id, timeline.get_ancestor_lsn());
+            }
         };
 
         // Sanity check: a timeline should have some content.

@@ -148,14 +148,14 @@ async fn cleanup_remaining_timeline_fs_traces(
 /// For more context see comments in [`DeleteTimelineFlow::prepare`]
 async fn remove_timeline_from_tenant(
     tenant: &Tenant,
-    timeline_id: TimelineId,
+    timeline: &Timeline,
     _: &DeletionGuard, // using it as a witness
 ) -> anyhow::Result<()> {
     // Remove the timeline from the map.
     let mut timelines = tenant.timelines.lock().unwrap();
     let children_exist = timelines
         .iter()
-        .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+        .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline.timeline_id));
     // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
     // We already deleted the layer files, so it's probably best to panic.
     // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
@@ -163,8 +163,14 @@ async fn remove_timeline_from_tenant(
         panic!("Timeline grew children while we removed layer files");
     }
 
+    // Unlink from parent
+    if let Some(ancestor) = timeline.get_ancestor_timeline() {
+        let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
+        ancestor_gc_info.remove_child(timeline.timeline_id);
+    }
+
     timelines
-        .remove(&timeline_id)
+        .remove(&timeline.timeline_id)
         .expect("timeline that we were deleting was concurrently removed from 'timelines' map");
 
     drop(timelines);
@@ -295,6 +301,9 @@ impl DeleteTimelineFlow {
         {
             let mut locked = tenant.timelines.lock().unwrap();
             locked.insert(timeline_id, Arc::clone(&timeline));
+
+            // Note that we do not insert this into the parent branch's GcInfo: the parent is not obliged to retain
+            // any data for child timelines being deleted.
         }
 
         guard.mark_in_progress()?;
@@ -415,7 +424,7 @@ impl DeleteTimelineFlow {
 
         pausable_failpoint!("in_progress_delete");
 
-        remove_timeline_from_tenant(tenant, timeline.timeline_id, &guard).await?;
+        remove_timeline_from_tenant(tenant, timeline, &guard).await?;
 
         *guard = Self::Finished;
 
