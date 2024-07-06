@@ -2993,6 +2993,17 @@ impl Timeline {
             .set((calculated_size, metrics_guard.calculation_result_saved()))
             .ok()
             .expect("only this task sets it");
+
+        // As a nice-to-have, calculate layer visibilties.  Otherwise this will
+        // be initialized on first compaction.  Doing it as early as possible
+        // enables code that depends on layer visibility (like uploading heatmaps)
+        // to execute earlier, rather than waiting for compaction.
+        match self.update_layer_visibility(&background_ctx).await {
+            Ok(_) | Err(CompactionError::ShuttingDown) => {}
+            Err(e) => {
+                tracing::warn!("Initial layer visibility calculation failed: {e}");
+            }
+        }
     }
 
     pub(crate) fn spawn_ondemand_logical_size_calculation(
