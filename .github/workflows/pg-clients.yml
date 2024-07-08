@@ -1,0 +1,115 @@
+name: Test Postgres client libraries
+
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:  '23 02 * * *' # run once a day, timezone is utc
+  pull_request:
+    paths:
+      - '.github/workflows/pg-clients.yml'
+      - 'test_runner/pg_clients/**'
+      - 'poetry.lock'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+env:
+  DEFAULT_PG_VERSION: 16
+  PLATFORM: neon-captest-new
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+  AWS_DEFAULT_REGION: eu-central-1
+
+jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name }}
+
+  check-build-tools-image:
+    needs: [ check-permissions ]
+    uses: ./.github/workflows/check-build-tools-image.yml
+
+  build-build-tools-image:
+    needs: [ check-build-tools-image ]
+    uses: ./.github/workflows/build-build-tools-image.yml
+    with:
+      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
+    secrets: inherit
+
+  test-postgres-client-libs:
+    needs: [ build-build-tools-image ]
+    runs-on: ubuntu-22.04
+
+    container:
+      image: ${{ needs.build-build-tools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init --user root
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    - name: Create Neon Project
+      id: create-neon-project
+      uses: ./.github/actions/neon-project-create
+      with:
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
+
+    - name: Run tests
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: remote
+        test_selection: pg_clients
+        run_in_parallel: false
+        extra_params: -m remote_cluster
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
+
+    - name: Delete Neon Project
+      if: always()
+      uses: ./.github/actions/neon-project-delete
+      with:
+        project_id: ${{ steps.create-neon-project.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Create Allure report
+      if: ${{ !cancelled() }}
+      id: create-allure-report
+      uses: ./.github/actions/allure-report-generate
+      with:
+        store-test-results-into-db: true
+      env:
+        REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
+
+    - name: Post to a Slack channel
+      if: github.event.schedule && failure()
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
+        slack-message: |
+          Testing Postgres clients: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ job.status }}> (<${{ steps.create-allure-report.outputs.report-url }}|test report>)
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

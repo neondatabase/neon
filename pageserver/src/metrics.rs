@@ -8,7 +8,7 @@ use metrics::{
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
-use strum::{EnumCount, IntoEnumIterator, VariantNames};
+use strum::{EnumCount, VariantNames};
 use strum_macros::{EnumVariantNames, IntoStaticStr};
 use tracing::warn;
 use utils::id::TimelineId;
@@ -464,6 +464,24 @@ static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static PITR_HISTORY_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_pitr_history_size",
+        "Data written since PITR cutoff on this timeline",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static TIMELINE_ARCHIVE_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_archive_size",
+        "Timeline's logical size if it is considered eligible for archival (outside PITR window), else zero",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 static STANDBY_HORIZON: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_standby_horizon",
@@ -476,7 +494,7 @@ static STANDBY_HORIZON: Lazy<IntGaugeVec> = Lazy::new(|| {
 static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_resident_physical_size",
-        "The size of the layer files present in the pageserver's filesystem.",
+        "The size of the layer files present in the pageserver's filesystem, for attached locations.",
         &["tenant_id", "shard_id", "timeline_id"]
     )
     .expect("failed to define a metric")
@@ -1076,21 +1094,12 @@ pub(crate) mod virtual_file_io_engine {
     });
 }
 
-#[derive(Debug)]
-struct GlobalAndPerTimelineHistogram {
-    global: Histogram,
-    per_tenant_timeline: Histogram,
-}
-
-impl GlobalAndPerTimelineHistogram {
-    fn observe(&self, value: f64) {
-        self.global.observe(value);
-        self.per_tenant_timeline.observe(value);
-    }
-}
-
 struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
-    h: &'a GlobalAndPerTimelineHistogram,
+    global_metric: &'a Histogram,
+
+    // Optional because not all op types are tracked per-timeline
+    timeline_metric: Option<&'a Histogram>,
+
     ctx: &'c RequestContext,
     start: std::time::Instant,
     op: SmgrQueryType,
@@ -1121,7 +1130,10 @@ impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
                 elapsed
             }
         };
-        self.h.observe(ex_throttled.as_secs_f64());
+        self.global_metric.observe(ex_throttled.as_secs_f64());
+        if let Some(timeline_metric) = self.timeline_metric {
+            timeline_metric.observe(ex_throttled.as_secs_f64());
+        }
     }
 }
 
@@ -1146,7 +1158,8 @@ pub enum SmgrQueryType {
 
 #[derive(Debug)]
 pub(crate) struct SmgrQueryTimePerTimeline {
-    metrics: [GlobalAndPerTimelineHistogram; SmgrQueryType::COUNT],
+    global_metrics: [Histogram; SmgrQueryType::COUNT],
+    per_timeline_getpage: Histogram,
 }
 
 static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
@@ -1224,27 +1237,32 @@ impl SmgrQueryTimePerTimeline {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_slug = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
-        let metrics = std::array::from_fn(|i| {
+        let global_metrics = std::array::from_fn(|i| {
             let op = SmgrQueryType::from_repr(i).unwrap();
-            let global = SMGR_QUERY_TIME_GLOBAL
+            SMGR_QUERY_TIME_GLOBAL
                 .get_metric_with_label_values(&[op.into()])
-                .unwrap();
-            let per_tenant_timeline = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
-                .get_metric_with_label_values(&[op.into(), &tenant_id, &shard_slug, &timeline_id])
-                .unwrap();
-            GlobalAndPerTimelineHistogram {
-                global,
-                per_tenant_timeline,
-            }
+                .unwrap()
         });
-        Self { metrics }
+
+        let per_timeline_getpage = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
+            .get_metric_with_label_values(&[
+                SmgrQueryType::GetPageAtLsn.into(),
+                &tenant_id,
+                &shard_slug,
+                &timeline_id,
+            ])
+            .unwrap();
+        Self {
+            global_metrics,
+            per_timeline_getpage,
+        }
     }
     pub(crate) fn start_timer<'c: 'a, 'a>(
         &'a self,
         op: SmgrQueryType,
         ctx: &'c RequestContext,
-    ) -> impl Drop + '_ {
-        let metric = &self.metrics[op as usize];
+    ) -> Option<impl Drop + '_> {
+        let global_metric = &self.global_metrics[op as usize];
         let start = Instant::now();
         match ctx.micros_spent_throttled.open() {
             Ok(()) => (),
@@ -1263,12 +1281,20 @@ impl SmgrQueryTimePerTimeline {
                 });
             }
         }
-        GlobalAndPerTimelineHistogramTimer {
-            h: metric,
+
+        let timeline_metric = if matches!(op, SmgrQueryType::GetPageAtLsn) {
+            Some(&self.per_timeline_getpage)
+        } else {
+            None
+        };
+
+        Some(GlobalAndPerTimelineHistogramTimer {
+            global_metric,
+            timeline_metric,
             ctx,
             start,
             op,
-        }
+        })
     }
 }
 
@@ -1315,17 +1341,9 @@ mod smgr_query_time_tests {
             let get_counts = || {
                 let global: u64 = ops
                     .iter()
-                    .map(|op| metrics.metrics[*op as usize].global.get_sample_count())
+                    .map(|op| metrics.global_metrics[*op as usize].get_sample_count())
                     .sum();
-                let per_tenant_timeline: u64 = ops
-                    .iter()
-                    .map(|op| {
-                        metrics.metrics[*op as usize]
-                            .per_tenant_timeline
-                            .get_sample_count()
-                    })
-                    .sum();
-                (global, per_tenant_timeline)
+                (global, metrics.per_timeline_getpage.get_sample_count())
             };
 
             let (pre_global, pre_per_tenant_timeline) = get_counts();
@@ -1336,7 +1354,12 @@ mod smgr_query_time_tests {
             drop(timer);
 
             let (post_global, post_per_tenant_timeline) = get_counts();
-            assert_eq!(post_per_tenant_timeline, 1);
+            if matches!(op, super::SmgrQueryType::GetPageAtLsn) {
+                // getpage ops are tracked per-timeline, others aren't
+                assert_eq!(post_per_tenant_timeline, 1);
+            } else {
+                assert_eq!(post_per_tenant_timeline, 0);
+            }
             assert!(post_global > pre_global);
         }
     }
@@ -1433,10 +1456,12 @@ impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
     }
 }
 
-pub(crate) static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_live_connections",
-        "Number of live network connections",
+pub(crate) static LIVE_CONNECTIONS: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_live_connections_started",
+        "Number of network connections that we started handling",
+        "pageserver_live_connections_finished",
+        "Number of network connections that we finished handling",
         &["pageserver_connection_kind"]
     )
     .expect("failed to define a metric")
@@ -1447,7 +1472,6 @@ pub(crate) enum ComputeCommandKind {
     PageStreamV2,
     PageStream,
     Basebackup,
-    GetLastRecordRlsn,
     Fullbackup,
     ImportBasebackup,
     ImportWal,
@@ -1689,6 +1713,15 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
     )
     .expect("failed to define a metric"),
 }
+});
+
+pub(crate) static SECONDARY_RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_secondary_resident_physical_size",
+        "The size of the layer files present in the pageserver's filesystem, for secondary locations.",
+        &["tenant_id", "shard_id"]
+    )
+    .expect("failed to define a metric")
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2093,6 +2126,8 @@ pub(crate) struct TimelineMetrics {
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
+    pub pitr_history_size: UIntGauge,
+    pub archival_size: UIntGauge,
     pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -2166,6 +2201,15 @@ impl TimelineMetrics {
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+
+        let pitr_history_size = PITR_HISTORY_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
+        let archival_size = TIMELINE_ARCHIVE_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         let standby_horizon_gauge = STANDBY_HORIZON
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -2218,6 +2262,8 @@ impl TimelineMetrics {
             find_gc_cutoffs_histo,
             load_layer_map_histo,
             last_record_gauge,
+            pitr_history_size,
+            archival_size,
             standby_horizon_gauge,
             resident_physical_size_gauge,
             current_logical_size_gauge,
@@ -2275,6 +2321,10 @@ impl TimelineMetrics {
         if let Some(metric) = Lazy::get(&DIRECTORY_ENTRIES_COUNT) {
             let _ = metric.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         }
+
+        let _ = TIMELINE_ARCHIVE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = PITR_HISTORY_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = VALID_LSN_LEASE_COUNT.remove_label_values(&[tenant_id, shard_id, timeline_id]);
@@ -2308,14 +2358,12 @@ impl TimelineMetrics {
             let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
         }
 
-        for op in SmgrQueryType::iter() {
-            let _ = SMGR_QUERY_TIME_PER_TENANT_TIMELINE.remove_label_values(&[
-                op.into(),
-                tenant_id,
-                shard_id,
-                timeline_id,
-            ]);
-        }
+        let _ = SMGR_QUERY_TIME_PER_TENANT_TIMELINE.remove_label_values(&[
+            SmgrQueryType::GetPageAtLsn.into(),
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
     }
 }
 

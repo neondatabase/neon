@@ -943,6 +943,8 @@ class NeonEnvBuilder:
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
                 ps_assert_metric_no_errors=(exc_type is None),
+                # do not fail on endpoint errors to allow the rest of cleanup to proceed
+                fail_on_endpoint_errors=False,
             )
             cleanup_error = None
 
@@ -1167,7 +1169,9 @@ class NeonEnv:
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True
             if self.safekeepers_remote_storage is not None:
-                sk_cfg["remote_storage"] = self.safekeepers_remote_storage.to_toml_inline_table()
+                sk_cfg[
+                    "remote_storage"
+                ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
             self.safekeepers.append(Safekeeper(env=self, id=id, port=port))
             cfg["safekeepers"].append(sk_cfg)
 
@@ -1212,11 +1216,11 @@ class NeonEnv:
         for f in futs:
             f.result()
 
-    def stop(self, immediate=False, ps_assert_metric_no_errors=False):
+    def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.
         """
-        self.endpoints.stop_all()
+        self.endpoints.stop_all(fail_on_endpoint_errors)
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
@@ -2112,6 +2116,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return self
 
     @staticmethod
+    def retryable_node_operation(op, ps_id, max_attempts, backoff):
+        while max_attempts > 0:
+            try:
+                op(ps_id)
+                return
+            except StorageControllerApiException as e:
+                max_attempts -= 1
+                log.info(f"Operation failed ({max_attempts} attempts left): {e}")
+
+                if max_attempts == 0:
+                    raise e
+
+                time.sleep(backoff)
+
+    @staticmethod
     def raise_api_exception(res: requests.Response):
         try:
             res.raise_for_status()
@@ -2450,6 +2469,38 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info("storage controller passed consistency check")
+
+    def poll_node_status(
+        self, node_id: int, desired_scheduling_policy: str, max_attempts: int, backoff: int
+    ):
+        """
+        Poll the node status until it reaches 'desired_scheduling_policy' or 'max_attempts' have been exhausted
+        """
+        log.info(f"Polling {node_id} for {desired_scheduling_policy} scheduling policy")
+        while max_attempts > 0:
+            try:
+                status = self.node_status(node_id)
+                policy = status["scheduling"]
+                if policy == desired_scheduling_policy:
+                    return
+                else:
+                    max_attempts -= 1
+                    log.info(f"Status call returned {policy=} ({max_attempts} attempts left)")
+
+                    if max_attempts == 0:
+                        raise AssertionError(
+                            f"Status for {node_id=} did not reach {desired_scheduling_policy=}"
+                        )
+
+                    time.sleep(backoff)
+            except StorageControllerApiException as e:
+                max_attempts -= 1
+                log.info(f"Status call failed ({max_attempts} retries left): {e}")
+
+                if max_attempts == 0:
+                    raise e
+
+                time.sleep(backoff)
 
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):
@@ -3850,9 +3901,17 @@ class EndpointFactory:
             pageserver_id=pageserver_id,
         )
 
-    def stop_all(self) -> "EndpointFactory":
+    def stop_all(self, fail_on_error=True) -> "EndpointFactory":
+        exception = None
         for ep in self.endpoints:
-            ep.stop()
+            try:
+                ep.stop()
+            except Exception as e:
+                log.error(f"Failed to stop endpoint {ep.endpoint_id}: {e}")
+                exception = e
+
+        if fail_on_error and exception is not None:
+            raise exception
 
         return self
 

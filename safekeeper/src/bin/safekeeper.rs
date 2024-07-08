@@ -12,7 +12,6 @@ use sd_notify::NotifyState;
 use tokio::runtime::Handle;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinError;
-use toml_edit::Document;
 use utils::logging::SecretString;
 
 use std::env::{var, VarError};
@@ -126,7 +125,7 @@ struct Args {
     peer_recovery: bool,
     /// Remote storage configuration for WAL backup (offloading to s3) as TOML
     /// inline table, e.g.
-    ///   {"max_concurrent_syncs" = 17, "max_sync_errors": 13, "bucket_name": "<BUCKETNAME>", "bucket_region":"<REGION>", "concurrency_limit": 119}
+    ///   {max_concurrent_syncs = 17, max_sync_errors = 13, bucket_name = "<BUCKETNAME>", bucket_region = "<REGION>", concurrency_limit = 119}
     /// Safekeeper offloads WAL to
     ///   [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring
     /// structure on the file system.
@@ -446,6 +445,19 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .map(|res| ("WAL service main".to_owned(), res));
     tasks_handles.push(Box::pin(wal_service_handle));
 
+    let timeline_housekeeping_handle = current_thread_rt
+        .as_ref()
+        .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
+        .spawn(async move {
+            const TOMBSTONE_TTL: Duration = Duration::from_secs(3600 * 24);
+            loop {
+                tokio::time::sleep(TOMBSTONE_TTL).await;
+                GlobalTimelines::housekeeping(&TOMBSTONE_TTL);
+            }
+        })
+        .map(|res| ("Timeline map housekeeping".to_owned(), res));
+    tasks_handles.push(Box::pin(timeline_housekeeping_handle));
+
     if let Some(pg_listener_tenant_only) = pg_listener_tenant_only {
         let conf_ = conf.clone();
         let wal_service_handle = current_thread_rt
@@ -553,16 +565,8 @@ fn set_id(workdir: &Utf8Path, given_id: Option<NodeId>) -> Result<NodeId> {
     Ok(my_id)
 }
 
-// Parse RemoteStorage from TOML table.
 fn parse_remote_storage(storage_conf: &str) -> anyhow::Result<RemoteStorageConfig> {
-    // funny toml doesn't consider plain inline table as valid document, so wrap in a key to parse
-    let storage_conf_toml = format!("remote_storage = {storage_conf}");
-    let parsed_toml = storage_conf_toml.parse::<Document>()?; // parse
-    let (_, storage_conf_parsed_toml) = parsed_toml.iter().next().unwrap(); // and strip key off again
-    RemoteStorageConfig::from_toml(storage_conf_parsed_toml).and_then(|parsed_config| {
-        // XXX: Don't print the original toml here, there might be some sensitive data
-        parsed_config.context("Incorrectly parsed remote storage toml as no remote storage config")
-    })
+    RemoteStorageConfig::from_toml(&storage_conf.parse()?)
 }
 
 #[test]
