@@ -1,7 +1,5 @@
 use anyhow::bail;
 use anyhow::Result;
-use pageserver_api::shard::ShardCount;
-use pageserver_api::shard::ShardNumber;
 use postgres::{NoTls, SimpleQueryMessage};
 use std::{
     str::FromStr,
@@ -14,7 +12,10 @@ use utils::id::TimelineId;
 
 use compute_api::spec::ComputeMode;
 use tracing::{error, info};
-use utils::{lsn::Lsn, shard::TenantShardId};
+use utils::{
+    lsn::Lsn,
+    shard::{ShardCount, ShardNumber, TenantShardId},
+};
 
 use crate::compute::{ComputeNode, ComputeState};
 
