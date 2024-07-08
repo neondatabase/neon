@@ -854,10 +854,9 @@ impl Timeline {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = self.list_dbdirs(lsn, ctx).await?;
+        let mut dbs: Vec<((Oid, Oid), bool)> = dbdir.into_iter().collect();
 
-        let mut dbs: Vec<((Oid, Oid), bool)> = dbdir.dbdirs.iter().map(|(k, v)| (*k, *v)).collect();
         dbs.sort_unstable_by(|(k_a, _), (k_b, _)| k_a.cmp(k_b));
         for ((spcnode, dbnode), has_relmap_file) in dbs {
             if has_relmap_file {
