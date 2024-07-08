@@ -24,6 +24,20 @@ pub struct GcSummary {
     ancestor_layers_deleted: usize,
 }
 
+impl GcSummary {
+    fn merge(&mut self, other: Self) {
+        let Self {
+            indices_deleted,
+            remote_storage_errors,
+            ancestor_layers_deleted,
+        } = other;
+
+        self.indices_deleted = indices_deleted;
+        self.remote_storage_errors += remote_storage_errors;
+        self.ancestor_layers_deleted += ancestor_layers_deleted;
+    }
+}
+
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 pub enum GcMode {
     // Delete nothing
@@ -481,10 +495,7 @@ pub async fn pageserver_physical_gc(
         let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
 
         while let Some(i) = timelines.next().await {
-            let tl_summary = i?;
-
-            summary.indices_deleted += tl_summary.indices_deleted;
-            summary.remote_storage_errors += tl_summary.remote_storage_errors;
+            summary.merge(i?);
         }
     }
 
