@@ -111,22 +111,10 @@ impl LayerManager {
     }
 
     pub(crate) fn likely_resident_layers(&self) -> impl Iterator<Item = Layer> + '_ {
-        use either::Either::{Left, Right};
-        use LayerManager::*;
-
-        match self {
-            Open(OpenLayerManager {
-                layer_map,
-                layer_fmgr,
-            }) => Left(layer_map.iter_historic_layers().filter_map(|desc| {
-                layer_fmgr
-                    .0
-                    .get(&desc.key())
-                    .filter(|l| l.is_likely_resident())
-                    .cloned()
-            })),
-            Closed { layers } => Right(layers.values().filter(|l| l.is_likely_resident()).cloned()),
-        }
+        self.layers()
+            .values()
+            .filter(|l| l.is_likely_resident())
+            .cloned()
     }
 
     pub(crate) fn contains(&self, layer: &Layer) -> bool {
