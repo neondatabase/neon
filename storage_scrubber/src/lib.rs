@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use aws_sdk_s3::config::Region;
+use aws_sdk_s3::error::DisplayErrorContext;
 use aws_sdk_s3::Client;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -310,8 +311,11 @@ async fn list_objects_with_retries(
                         .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
                 }
                 error!(
-                    "list_objects_v2 query failed: {e}, bucket_name={}, prefix={}, delimiter={}",
-                    s3_target.bucket_name, s3_target.prefix_in_bucket, s3_target.delimiter
+                    "list_objects_v2 query failed: bucket_name={}, prefix={}, delimiter={}, error={}",
+                    s3_target.bucket_name,
+                    s3_target.prefix_in_bucket,
+                    s3_target.delimiter,
+                    DisplayErrorContext(e),
                 );
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
