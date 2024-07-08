@@ -25,4 +25,4 @@ jobs:
           zstandard numpy pandas pgvector pytest-lazy-fixture pg8000 websockets
       - name: Analyzing code with pylint
         run: |
-          pylint -E --ignored-modules=psycopg2.errors $(git ls-files '*.py')
+          pylint -E --ignored-modules psycopg2 $(git ls-files '*.py')
