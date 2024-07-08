@@ -32,7 +32,7 @@ impl GcSummary {
             ancestor_layers_deleted,
         } = other;
 
-        self.indices_deleted = indices_deleted;
+        self.indices_deleted += indices_deleted;
         self.remote_storage_errors += remote_storage_errors;
         self.ancestor_layers_deleted += ancestor_layers_deleted;
     }
