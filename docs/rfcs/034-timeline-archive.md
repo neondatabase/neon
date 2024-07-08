@@ -301,7 +301,9 @@ of its own may be immediately re-written as a series of image layers before bein
 
 ### Consumption metrics
 
-Archived timelines and offloaded timelines will be excluded from the synthetic size calculation.
+Archived timelines and offloaded timelines will be excluded from the synthetic size calculation, in anticipating
+that billing structures based on consumption metrics are highly likely to apply different $/GB rates to archived
+vs. ordinary content.
 
 Archived and offloaded timelines' logical size will be reported under the existing `timeline_logical_size`
 variant of `MetricsKey`: receivers are then free to bill on this metric as they please.
