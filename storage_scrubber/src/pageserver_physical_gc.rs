@@ -387,16 +387,16 @@ async fn gc_ancestor(
 /// make sure that object listings don't get slowed down by large numbers of garbage objects.
 pub async fn pageserver_physical_gc(
     bucket_config: BucketConfig,
-    tenant_ids: Vec<TenantShardId>,
+    tenant_shard_ids: Vec<TenantShardId>,
     min_age: Duration,
     mode: GcMode,
 ) -> anyhow::Result<GcSummary> {
     let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
 
-    let tenants = if tenant_ids.is_empty() {
+    let tenants = if tenant_shard_ids.is_empty() {
         futures::future::Either::Left(stream_tenants(&s3_client, &target))
     } else {
-        futures::future::Either::Right(futures::stream::iter(tenant_ids.into_iter().map(Ok)))
+        futures::future::Either::Right(futures::stream::iter(tenant_shard_ids.into_iter().map(Ok)))
     };
 
     // How many tenants to process in parallel.  We need to be mindful of pageservers
