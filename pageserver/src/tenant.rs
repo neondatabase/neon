@@ -1365,7 +1365,7 @@ impl Tenant {
         initdb_lsn: Lsn,
         pg_version: u32,
         ctx: &RequestContext,
-        delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
+        delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -1816,9 +1816,15 @@ impl Tenant {
         // If we're still attaching, fire the cancellation token early to drop out: this
         // will prevent us flushing, but ensures timely shutdown if some I/O during attach
         // is very slow.
-        if matches!(self.current_state(), TenantState::Attaching) {
+        let shutdown_mode = if matches!(self.current_state(), TenantState::Attaching) {
             self.cancel.cancel();
-        }
+
+            // Having fired our cancellation token, do not try and flush timelines: their cancellation tokens
+            // are children of ours, so their flush loops will have shut down already
+            timeline::ShutdownMode::Hard
+        } else {
+            shutdown_mode
+        };
 
         match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
@@ -2868,6 +2874,7 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
+                // Cull any expired leases
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
 
@@ -2875,6 +2882,31 @@ impl Tenant {
                     .metrics
                     .valid_lsn_lease_count_gauge
                     .set(target.leases.len() as u64);
+
+                // Look up parent's PITR cutoff to update the child's knowledge of whether it is within parent's PITR
+                if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
+                    if let Some(ancestor_gc_cutoffs) = gc_cutoffs.get(&ancestor_id) {
+                        target.within_ancestor_pitr =
+                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.pitr;
+                    }
+                }
+
+                // Update metrics that depend on GC state
+                timeline
+                    .metrics
+                    .archival_size
+                    .set(if target.within_ancestor_pitr {
+                        timeline.metrics.current_logical_size_gauge.get()
+                    } else {
+                        0
+                    });
+                timeline.metrics.pitr_history_size.set(
+                    timeline
+                        .get_last_record_lsn()
+                        .checked_sub(target.cutoffs.pitr)
+                        .unwrap_or(Lsn(0))
+                        .0,
+                );
 
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
@@ -2927,7 +2959,7 @@ impl Tenant {
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
-        delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
+        delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -3927,7 +3959,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
-    use timeline::GcInfo;
+    use timeline::{DeltaLayerTestDesc, GcInfo};
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
@@ -6223,27 +6255,6 @@ mod tests {
             .await
             .unwrap();
 
-        async fn get_vectored_impl_wrapper(
-            tline: &Arc<Timeline>,
-            key: Key,
-            lsn: Lsn,
-            ctx: &RequestContext,
-        ) -> Result<Option<Bytes>, GetVectoredError> {
-            let mut reconstruct_state = ValuesReconstructState::new();
-            let mut res = tline
-                .get_vectored_impl(
-                    KeySpace::single(key..key.next()),
-                    lsn,
-                    &mut reconstruct_state,
-                    ctx,
-                )
-                .await?;
-            Ok(res.pop_last().map(|(k, v)| {
-                assert_eq!(k, key);
-                v.unwrap()
-            }))
-        }
-
         let lsn = Lsn(0x30);
 
         // test vectored get on parent timeline
@@ -6318,27 +6329,6 @@ mod tests {
             )
             .await
             .unwrap();
-
-        async fn get_vectored_impl_wrapper(
-            tline: &Arc<Timeline>,
-            key: Key,
-            lsn: Lsn,
-            ctx: &RequestContext,
-        ) -> Result<Option<Bytes>, GetVectoredError> {
-            let mut reconstruct_state = ValuesReconstructState::new();
-            let mut res = tline
-                .get_vectored_impl(
-                    KeySpace::single(key..key.next()),
-                    lsn,
-                    &mut reconstruct_state,
-                    ctx,
-                )
-                .await?;
-            Ok(res.pop_last().map(|(k, v)| {
-                assert_eq!(k, key);
-                v.unwrap()
-            }))
-        }
 
         let lsn = Lsn(0x30);
 
@@ -6415,9 +6405,18 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
-                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
-                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
+                        vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
                 ],
                 // image layers
                 vec![
@@ -6483,17 +6482,29 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
-                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
-                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
-                    vec![
-                        (key0, Lsn(0x30), Value::Image(test_img("metadata key 0"))),
-                        (key3, Lsn(0x30), Value::Image(test_img("metadata key 3"))),
-                    ],
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
+                        vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x30)..Lsn(0x40),
+                        vec![
+                            (key0, Lsn(0x30), Value::Image(test_img("metadata key 0"))),
+                            (key3, Lsn(0x30), Value::Image(test_img("metadata key 3"))),
+                        ],
+                    ),
                 ],
                 // image layers
                 vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
-                Lsn(0x30),
+                Lsn(0x40),
             )
             .await
             .unwrap();
@@ -6516,7 +6527,7 @@ mod tests {
 
         // Image layers are created at last_record_lsn
         let images = tline
-            .inspect_image_layers(Lsn(0x30), &ctx)
+            .inspect_image_layers(Lsn(0x40), &ctx)
             .await
             .unwrap()
             .into_iter()
@@ -6542,9 +6553,18 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
-                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
-                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
+                        vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
                 ],
                 // image layers
                 vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
@@ -6592,15 +6612,21 @@ mod tests {
             key
         }
 
-        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        // We create
+        // - one bottom-most image layer,
+        // - a delta layer D1 crossing the GC horizon with data below and above the horizon,
+        // - a delta layer D2 crossing the GC horizon with data only below the horizon,
+        // - a delta layer D3 above the horizon.
         //
-        //  | D1 |                       | D3 |
+        //                             | D3 |
+        //  | D1 |
         // -|    |-- gc horizon -----------------
         //  |    |                | D2 |
         // --------- img layer ------------------
         //
         // What we should expact from this compaction is:
-        //  | Part of D1 |               | D3 |
+        //                             | D3 |
+        //  | Part of D1 |
         // --------- img layer with D1+D2 at GC horizon------------------
 
         // img layer at 0x10
@@ -6640,13 +6666,13 @@ mod tests {
         let delta3 = vec![
             (
                 get_key(8),
-                Lsn(0x40),
-                Value::Image(Bytes::from("value 8@0x40")),
+                Lsn(0x48),
+                Value::Image(Bytes::from("value 8@0x48")),
             ),
             (
                 get_key(9),
-                Lsn(0x40),
-                Value::Image(Bytes::from("value 9@0x40")),
+                Lsn(0x48),
+                Value::Image(Bytes::from("value 9@0x48")),
             ),
         ];
 
@@ -6656,7 +6682,11 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
-                vec![delta1, delta2, delta3], // delta layers
+                vec![
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
+                ], // delta layers
                 vec![(Lsn(0x10), img_layer)], // image layers
                 Lsn(0x50),
             )
@@ -6677,8 +6707,8 @@ mod tests {
             Bytes::from_static(b"value 5@0x20"),
             Bytes::from_static(b"value 6@0x20"),
             Bytes::from_static(b"value 7@0x10"),
-            Bytes::from_static(b"value 8@0x40"),
-            Bytes::from_static(b"value 9@0x40"),
+            Bytes::from_static(b"value 8@0x48"),
+            Bytes::from_static(b"value 9@0x48"),
         ];
 
         for (idx, expected) in expected_result.iter().enumerate() {
@@ -6766,10 +6796,10 @@ mod tests {
                     lsn_range: Lsn(0x30)..Lsn(0x41),
                     is_delta: true
                 },
-                // The delta layer we created and should not be picked for the compaction
+                // The delta3 layer that should not be picked for the compaction
                 PersistentLayerKey {
                     key_range: get_key(8)..get_key(10),
-                    lsn_range: Lsn(0x40)..Lsn(0x41),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
                     is_delta: true
                 }
             ]
@@ -6833,7 +6863,10 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
-                vec![delta1],              // delta layers
+                vec![DeltaLayerTestDesc::new_with_inferred_key_range(
+                    Lsn(0x10)..Lsn(0x40),
+                    delta1,
+                )], // delta layers
                 vec![(Lsn(0x10), image1)], // image layers
                 Lsn(0x50),
             )
@@ -6957,15 +6990,21 @@ mod tests {
             key
         }
 
-        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        // We create
+        // - one bottom-most image layer,
+        // - a delta layer D1 crossing the GC horizon with data below and above the horizon,
+        // - a delta layer D2 crossing the GC horizon with data only below the horizon,
+        // - a delta layer D3 above the horizon.
         //
-        //  | D1 |                       | D3 |
+        //                             | D3 |
+        //  | D1 |
         // -|    |-- gc horizon -----------------
         //  |    |                | D2 |
         // --------- img layer ------------------
         //
         // What we should expact from this compaction is:
-        //  | Part of D1 |               | D3 |
+        //                             | D3 |
+        //  | Part of D1 |
         // --------- img layer with D1+D2 at GC horizon------------------
 
         // img layer at 0x10
@@ -7015,13 +7054,13 @@ mod tests {
         let delta3 = vec![
             (
                 get_key(8),
-                Lsn(0x40),
-                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+                Lsn(0x48),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x48")),
             ),
             (
                 get_key(9),
-                Lsn(0x40),
-                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+                Lsn(0x48),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x48")),
             ),
         ];
 
@@ -7031,7 +7070,11 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
-                vec![delta1, delta2, delta3], // delta layers
+                vec![
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
+                ], // delta layers
                 vec![(Lsn(0x10), img_layer)], // image layers
                 Lsn(0x50),
             )
@@ -7046,6 +7089,7 @@ mod tests {
                     horizon: Lsn(0x30),
                 },
                 leases: Default::default(),
+                within_ancestor_pitr: false,
             };
         }
 
@@ -7058,8 +7102,8 @@ mod tests {
             Bytes::from_static(b"value 5@0x10@0x20"),
             Bytes::from_static(b"value 6@0x10@0x20"),
             Bytes::from_static(b"value 7@0x10"),
-            Bytes::from_static(b"value 8@0x10@0x40"),
-            Bytes::from_static(b"value 9@0x10@0x40"),
+            Bytes::from_static(b"value 8@0x10@0x48"),
+            Bytes::from_static(b"value 9@0x10@0x48"),
         ];
 
         let expected_result_at_gc_horizon = [

@@ -386,10 +386,6 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     # generation nubmers out of order.
     env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
 
-    # Our multiple creation requests will advance generation quickly, and when we skip
-    # a generation number we can generate these warnings
-    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates for tenant .+")
-
     # Timeline::flush_and_shutdown cannot tell if it is hitting a failure because of
     # an incomplete attach, or some other problem.  In the field this should be rare,
     # so we allow it to log at WARN, even if it is occasionally a false positive.

@@ -16,6 +16,8 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
+from werkzeug.wrappers.request import Request
+from werkzeug.wrappers.response import Response
 
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
@@ -59,7 +61,7 @@ def evict_random_layers(
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
-def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
+def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, seed: int):
     """
     Issue many location configuration changes, ensure that tenants
     remain readable & we don't get any unexpected errors.  We should
@@ -73,6 +75,20 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=s3_storage(),
     )
+    neon_env_builder.control_plane_compute_hook_api = (
+        f"http://{make_httpserver.host}:{make_httpserver.port}/notify-attach"
+    )
+
+    def ignore_notify(request: Request):
+        # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
+        # so we send controller notifications to /dev/null to prevent it fighting the test for control of the compute.
+        log.info(f"Ignoring storage controller compute notification: {request.json}")
+        return Response(status=200)
+
+    make_httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(
+        ignore_notify
+    )
+
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
     pageservers = env.pageservers
@@ -83,9 +99,6 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     for ps in env.pageservers:
         ps.allowed_errors.extend(
             [
-                # We will make no effort to avoid stale attachments
-                ".*Dropped remote consistent LSN updates.*",
-                ".*Dropping stale deletions.*",
                 # page_service_conn_main{peer_addr=[::1]:41176}: query handler for 'pagestream 3b19aec5038c796f64b430b30a555121 d07776761d44050b8aab511df1657d83' failed: Tenant 3b19aec5038c796f64b430b30a555121 not found
                 ".*query handler.*Tenant.*not found.*",
                 # page_service_conn_main{peer_addr=[::1]:45552}: query handler for 'pagestream 414ede7ad50f775a8e7d9ba0e43b9efc a43884be16f44b3626482b6981b2c745' failed: Tenant 414ede7ad50f775a8e7d9ba0e43b9efc is not active
@@ -101,6 +114,15 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     workload = Workload(env, tenant_id, timeline_id)
     workload.init(env.pageservers[0].id)
     workload.write_rows(256, env.pageservers[0].id)
+
+    # Discourage the storage controller from interfering with the changes we will make directly on the pageserver
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "scheduling": "Stop",
+        },
+    )
+    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy Stop.*")
 
     # We use a fixed seed to make the test reproducible: we want a randomly
     # chosen order, but not to change the order every time we run the test.

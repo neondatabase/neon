@@ -259,7 +259,7 @@ pub(crate) enum BlobDataParseResult {
     Incorrect(Vec<String>),
 }
 
-fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generation), String> {
+pub(crate) fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generation), String> {
     match name.rsplit_once('-') {
         // FIXME: this is gross, just use a regex?
         Some((layer_filename, gen)) if gen.len() == 8 => {
