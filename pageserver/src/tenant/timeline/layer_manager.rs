@@ -110,11 +110,8 @@ impl LayerManager {
             .sum()
     }
 
-    pub(crate) fn likely_resident_layers(&self) -> impl Iterator<Item = Layer> + '_ {
-        self.layers()
-            .values()
-            .filter(|l| l.is_likely_resident())
-            .cloned()
+    pub(crate) fn likely_resident_layers(&self) -> impl Iterator<Item = &'_ Layer> + '_ {
+        self.layers().values().filter(|l| l.is_likely_resident())
     }
 
     pub(crate) fn contains(&self, layer: &Layer) -> bool {

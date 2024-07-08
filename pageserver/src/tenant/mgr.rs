@@ -1767,14 +1767,9 @@ impl TenantManager {
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
                 tracing::info!(timeline_id=%timeline.timeline_id, "Loading list of layers to hardlink");
-                let timeline_layers = timeline
-                    .layers
-                    .read()
-                    .await
-                    .likely_resident_layers()
-                    .collect::<Vec<_>>();
+                let layers = timeline.layers.read().await;
 
-                for layer in timeline_layers {
+                for layer in layers.likely_resident_layers() {
                     let relative_path = layer
                         .local_path()
                         .strip_prefix(&parent_path)
