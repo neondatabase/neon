@@ -486,7 +486,7 @@ def assert_size_approx_equal(size_a, size_b):
     """
 
     # Determined empirically from examples of equality failures: they differ
-    # by page multiples of 8272, and usually by 1-4 pages.  Tolerate 5 to avoid
+    # by page multiples of 8272, and usually by 1-3 pages.  Tolerate 4 to avoid
     # failing on outliers from that observed range.
     threshold = 4 * 8272
 
@@ -743,6 +743,7 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
     conf = {
         "pitr_interval": "0s" if zero_gc else "3600s",
         "gc_period": "0s",
+        "compaction_period": "0s",
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=conf)

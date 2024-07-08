@@ -728,6 +728,9 @@ impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
             CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            CreateImageLayersError::Other(e) => {
+                CompactionError::Other(e.context("create image layers"))
+            }
             _ => CompactionError::Other(e.into()),
         }
     }
