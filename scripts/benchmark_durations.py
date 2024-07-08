@@ -119,7 +119,7 @@ def main(args: argparse.Namespace):
                 cur.execute(BENCHMARKS_DURATION_QUERY, (percentile, interval_days))
                 rows = cur.fetchall()
     except psycopg2.OperationalError as exc:
-        logging.error("cannot fetch benchmarks duration from the DB due to an error", exc)
+        logging.error("cannot fetch benchmarks duration from the DB due to an error %s", exc)
         rows = []
         res = FALLBACK_DURATION
 

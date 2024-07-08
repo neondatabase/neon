@@ -272,6 +272,7 @@ class S3Storage:
         return f"{self.tenant_path(tenant_id)}/{TENANT_HEATMAP_FILE_NAME}"
 
     def heatmap_content(self, tenant_id: TenantId):
+        # pylint: disable=assignment-from-no-return
         r = self.client.get_object(Bucket=self.bucket_name, Key=self.heatmap_key(tenant_id))
         return json.loads(r["Body"].read().decode("utf-8"))
 

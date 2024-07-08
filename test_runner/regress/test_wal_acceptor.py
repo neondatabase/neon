@@ -366,6 +366,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     ]
     assert all(os.path.exists(p) for p in first_segments)
 
+    http_cli_other = http_cli_noauth = None
     if not auth_enabled:
         http_cli = env.safekeepers[0].http_client()
     else:
@@ -1633,6 +1634,7 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
                 cur.execute("CREATE TABLE t(key int primary key)")
     sk = env.safekeepers[0]
     sk_data_dir = sk.data_dir
+    sk_http_noauth = None
     if not auth_enabled:
         sk_http = sk.http_client()
         sk_http_other = sk_http

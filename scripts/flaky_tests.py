@@ -44,7 +44,7 @@ def main(args: argparse.Namespace):
                 cur.execute(FLAKY_TESTS_QUERY, (interval_days,))
                 rows = cur.fetchall()
     except psycopg2.OperationalError as exc:
-        logging.error("cannot fetch flaky tests from the DB due to an error", exc)
+        logging.error("cannot fetch flaky tests from the DB due to an error")
         rows = []
 
     # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not tokio-epoll-uring),
