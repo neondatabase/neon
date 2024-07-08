@@ -267,8 +267,8 @@ pub fn init_logging(file_name: &str) -> Option<WorkerGuard> {
             .with_writer(file_writer);
         tracing_subscriber::registry()
             .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-            .with(file_logs)
             .with(stderr_logs)
+            .with(file_logs)
             .init();
         Some(guard)
     }
