@@ -490,6 +490,13 @@ impl StreamingVectoredReadPlanner {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Error;
+
+    use crate::context::DownloadBehavior;
+    use crate::page_cache::PAGE_SZ;
+    use crate::task_mgr::TaskKind;
+
+    use super::super::blob_io::tests::{random_array, write_maybe_compressed};
     use super::*;
 
     fn validate_read(read: &VectoredRead, offset_range: &[(Key, Lsn, u64, BlobFlag)]) {
@@ -579,5 +586,72 @@ mod tests {
         for (idx, read) in reads.iter().enumerate() {
             validate_read(read, ranges[idx]);
         }
+    }
+
+    async fn round_trip_test_compressed<const BUFFERED: bool>(
+        blobs: &[Vec<u8>],
+        compression: bool,
+    ) -> Result<(), Error> {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let (_temp_dir, pathbuf, offsets) =
+            write_maybe_compressed::<BUFFERED>(blobs, compression, &ctx).await?; // COMP
+
+        let file = VirtualFile::open(&pathbuf, &ctx).await?;
+        let file_len = std::fs::metadata(&pathbuf)?.len();
+
+        // Multiply by two (compressed data might need more space), and add a few bytes for the header
+        let reserved_bytes = blobs.iter().map(|bl| bl.len()).max().unwrap() * 2 + 16;
+        let mut buf = BytesMut::with_capacity(reserved_bytes);
+
+        let vectored_blob_reader = VectoredBlobReader::new(&file);
+        let meta = BlobMeta {
+            key: Key::MIN,
+            lsn: Lsn(0),
+        };
+
+        for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
+            let end = offsets.get(idx + 1).unwrap_or_else(|| &file_len);
+            if idx + 1 == offsets.len() {
+                continue;
+            }
+            let read_builder = VectoredReadBuilder::new(*offset, *end, meta, None);
+            let read = read_builder.build();
+            let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
+            assert_eq!(result.blobs.len(), 1);
+            let read_blob = &result.blobs[0];
+            let read_buf = &result.buf[read_blob.start..read_blob.end];
+            assert_eq!(blob, read_buf, "mismatch for idx={idx} at offset={offset}");
+            buf = result.buf;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_really_big_array() -> Result<(), Error> {
+        let blobs = &[
+            b"test".to_vec(),
+            random_array(10 * PAGE_SZ),
+            b"hello".to_vec(),
+            random_array(66 * PAGE_SZ),
+            vec![0xf3; 24 * PAGE_SZ],
+            b"foobar".to_vec(),
+        ];
+        round_trip_test_compressed::<false>(blobs, false).await?;
+        round_trip_test_compressed::<true>(blobs, false).await?;
+        round_trip_test_compressed::<false>(blobs, true).await?;
+        round_trip_test_compressed::<true>(blobs, true).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_arrays_inc() -> Result<(), Error> {
+        let blobs = (0..PAGE_SZ / 8)
+            .map(|v| random_array(v * 16))
+            .collect::<Vec<_>>();
+        round_trip_test_compressed::<false>(&blobs, false).await?;
+        round_trip_test_compressed::<true>(&blobs, false).await?;
+        round_trip_test_compressed::<false>(&blobs, true).await?;
+        round_trip_test_compressed::<true>(&blobs, true).await?;
+        Ok(())
     }
 }

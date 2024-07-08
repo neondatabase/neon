@@ -395,22 +395,24 @@ impl BlobWriter<false> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
+    use camino::Utf8PathBuf;
+    use camino_tempfile::Utf8TempDir;
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         round_trip_test_compressed::<BUFFERED>(blobs, false).await
     }
 
-    async fn round_trip_test_compressed<const BUFFERED: bool>(
+    pub(crate) async fn write_maybe_compressed<const BUFFERED: bool>(
         blobs: &[Vec<u8>],
         compression: bool,
-    ) -> Result<(), Error> {
+        ctx: &RequestContext,
+    ) -> Result<(Utf8TempDir, Utf8PathBuf, Vec<u64>), Error> {
         let temp_dir = camino_tempfile::tempdir()?;
         let pathbuf = temp_dir.path().join("file");
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
@@ -438,8 +440,18 @@ mod tests {
             println!("Writing final blob at offs={offs}");
             wtr.flush_buffer(&ctx).await?;
         }
+        Ok((temp_dir, pathbuf, offsets))
+    }
 
-        let file = VirtualFile::open(pathbuf.as_path(), &ctx).await?;
+    async fn round_trip_test_compressed<const BUFFERED: bool>(
+        blobs: &[Vec<u8>],
+        compression: bool,
+    ) -> Result<(), Error> {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let (_temp_dir, pathbuf, offsets) =
+            write_maybe_compressed::<BUFFERED>(blobs, compression, &ctx).await?;
+
+        let file = VirtualFile::open(pathbuf, &ctx).await?;
         let rdr = BlockReaderRef::VirtualFile(&file);
         let rdr = BlockCursor::new_with_compression(rdr, compression);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
@@ -452,7 +464,7 @@ mod tests {
         Ok(())
     }
 
-    fn random_array(len: usize) -> Vec<u8> {
+    pub(crate) fn random_array(len: usize) -> Vec<u8> {
         let mut rng = rand::thread_rng();
         (0..len).map(|_| rng.gen()).collect::<_>()
     }
