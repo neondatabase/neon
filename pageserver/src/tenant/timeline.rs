@@ -4123,17 +4123,11 @@ impl Timeline {
 
     /// Return true if the value changed
     ///
-    /// This function must only be used from the layer flush task, and may not be called concurrently.
+    /// This function must only be used from the layer flush task.
     fn set_disk_consistent_lsn(&self, new_value: Lsn) -> bool {
-        // We do a simple load/store cycle: that's why this function isn't safe for concurrent use.
-        let old_value = self.disk_consistent_lsn.load();
-        if new_value != old_value {
-            assert!(new_value >= old_value);
-            self.disk_consistent_lsn.store(new_value);
-            true
-        } else {
-            false
-        }
+        let old_value = self.disk_consistent_lsn.fetch_max(new_value);
+        assert!(new_value >= old_value);
+        new_value != old_value
     }
 
     /// Update metadata file
