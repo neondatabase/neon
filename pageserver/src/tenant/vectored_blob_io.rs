@@ -68,7 +68,7 @@ impl VectoredRead {
     }
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Debug)]
 pub(crate) enum VectoredReadExtended {
     Yes,
     No,
@@ -378,8 +378,8 @@ impl<'a> VectoredBlobReader<'a> {
 }
 
 /// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`]. It provides a streaming API for
-/// getting read blobs. It returns a batch when `handle` gets called and when the current key would exceed the read_size and
-/// max_cnt constraints. Underlying it uses [`VectoredReadPlanner`].
+/// getting read blobs. It returns a batch when `handle` gets called and when the current key would just exceed the read_size and
+/// max_cnt constraints.
 #[cfg(test)]
 pub struct StreamingVectoredReadPlanner {
     read_builder: Option<VectoredReadBuilder>,
@@ -448,7 +448,8 @@ impl StreamingVectoredReadPlanner {
     ) -> Option<VectoredRead> {
         match &mut self.read_builder {
             Some(read_builder) => {
-                read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn });
+                let extended = read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn });
+                assert_eq!(extended, VectoredReadExtended::Yes);
             }
             None => {
                 self.read_builder = Some(VectoredReadBuilder::new_with_controlled_limit(
@@ -532,7 +533,7 @@ mod tests {
 
         assert_eq!(reads.len(), 6);
 
-        // TODO: should we produce 5 reads instead? Currently, the last read has the same start=end=652*1024, a zero-sized read.
+        // TODO: could remove zero reads to produce 5 reads here
 
         for (idx, read) in reads.iter().enumerate() {
             validate_read(read, ranges[idx]);
