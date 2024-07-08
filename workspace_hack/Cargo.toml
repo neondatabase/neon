@@ -69,6 +69,7 @@ sha2 = { version = "0.10", features = ["asm"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "write"] }
 subtle = { version = "2" }
 sync_wrapper = { version = "0.1", default-features = false, features = ["futures"] }
+tikv-jemalloc-sys = { version = "0.5" }
 time = { version = "0.3", features = ["macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-rustls = { version = "0.24" }
