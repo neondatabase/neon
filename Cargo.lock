@@ -7469,6 +7469,7 @@ dependencies = [
  "syn 1.0.109",
  "syn 2.0.52",
  "sync_wrapper",
+ "tikv-jemalloc-sys",
  "time",
  "time-macros",
  "tokio",
