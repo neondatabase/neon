@@ -22,6 +22,7 @@ use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::LsnLease;
+use pageserver_api::models::LsnLeaseRequest;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigResponse;
@@ -42,7 +43,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
-use tenant_size_model::{SizeResult, StorageModel};
+use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
@@ -406,6 +407,8 @@ async fn build_timeline_info_common(
 
     let walreceiver_status = timeline.walreceiver_status();
 
+    let (pitr_history_size, within_ancestor_pitr) = timeline.get_pitr_history_stats();
+
     let info = TimelineInfo {
         tenant_id: timeline.tenant_shard_id,
         timeline_id: timeline.timeline_id,
@@ -426,6 +429,8 @@ async fn build_timeline_info_common(
         directory_entries_counts: timeline.get_directory_metrics().to_vec(),
         current_physical_size,
         current_logical_size_non_incremental: None,
+        pitr_history_size,
+        within_ancestor_pitr,
         timeline_dir_layer_file_size_sum: None,
         wal_source_connstr,
         last_received_msg_lsn,
@@ -1191,10 +1196,15 @@ fn synthetic_size_html_response(
         timeline_map.insert(ti.timeline_id, index);
         timeline_ids.push(ti.timeline_id.to_string());
     }
-    let seg_to_branch: Vec<usize> = inputs
+    let seg_to_branch: Vec<(usize, SvgBranchKind)> = inputs
         .segments
         .iter()
-        .map(|seg| *timeline_map.get(&seg.timeline_id).unwrap())
+        .map(|seg| {
+            (
+                *timeline_map.get(&seg.timeline_id).unwrap(),
+                seg.kind.into(),
+            )
+        })
         .collect();
 
     let svg =
@@ -1527,15 +1537,13 @@ async fn handle_tenant_break(
 
 // Obtains an lsn lease on the given timeline.
 async fn lsn_lease_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
-
-    let lsn: Lsn = parse_query_param(&request, "lsn")?
-        .ok_or_else(|| ApiError::BadRequest(anyhow!("missing 'lsn' query parameter")))?;
+    let lsn = json_request::<LsnLeaseRequest>(&mut request).await?.lsn;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 

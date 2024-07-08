@@ -76,10 +76,6 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
-    # Our re-attach may race with the deletion queue processing LSN updates
-    # from the original attachment.
-    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
-
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t(key int primary key, value text)")
@@ -349,10 +345,6 @@ def test_detach_while_attaching(
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
-    # Our re-attach may race with the deletion queue processing LSN updates
-    # from the original attachment.
-    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
-
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
     # from shared_buffers without hitting the page server, which defeats the point
@@ -421,10 +413,6 @@ def test_detach_while_activating(
     timeline_id = env.initial_timeline
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
-
-    # Our re-attach may race with the deletion queue processing LSN updates
-    # from the original attachment.
-    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
 
     data_id = 1
     data_secret = "very secret secret"

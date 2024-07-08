@@ -9,6 +9,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
+    str::FromStr,
     sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
@@ -228,6 +229,11 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LsnLeaseRequest {
+    pub lsn: Lsn,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TenantShardSplitRequest {
     pub new_shard_count: u8,
@@ -432,22 +438,49 @@ pub enum CompactionAlgorithm {
     Tiered,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    strum_macros::FromRepr,
-    strum_macros::EnumString,
-)]
-#[strum(serialize_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageCompressionAlgorithm {
+    /// Disabled for writes, and never decompress during reading.
+    /// Never set this after you've enabled compression once!
+    DisabledNoDecompress,
+    // Disabled for writes, support decompressing during read path
+    Disabled,
     /// Zstandard compression. Level 0 means and None mean the same (default level). Levels can be negative as well.
     /// For details, see the [manual](http://facebook.github.io/zstd/zstd_manual.html).
-    Zstd { level: Option<i8> },
+    Zstd {
+        level: Option<i8>,
+    },
+}
+
+impl ImageCompressionAlgorithm {
+    pub fn allow_decompression(&self) -> bool {
+        !matches!(self, ImageCompressionAlgorithm::DisabledNoDecompress)
+    }
+}
+
+impl FromStr for ImageCompressionAlgorithm {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut components = s.split(['(', ')']);
+        let first = components
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("empty string"))?;
+        match first {
+            "disabled-no-decompress" => Ok(ImageCompressionAlgorithm::DisabledNoDecompress),
+            "disabled" => Ok(ImageCompressionAlgorithm::Disabled),
+            "zstd" => {
+                let level = if let Some(v) = components.next() {
+                    let v: i8 = v.parse()?;
+                    Some(v)
+                } else {
+                    None
+                };
+
+                Ok(ImageCompressionAlgorithm::Zstd { level })
+            }
+            _ => anyhow::bail!("invalid specifier '{first}'"),
+        }
+    }
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -660,6 +693,16 @@ pub struct TimelineInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
+
+    /// How many bytes of WAL are within this branch's pitr_interval.  If the pitr_interval goes
+    /// beyond the branch's branch point, we only count up to the branch point.
+    pub pitr_history_size: u64,
+
+    /// Whether this branch's branch point is within its ancestor's PITR interval (i.e. any
+    /// ancestor data used by this branch would have been retained anyway).  If this is false, then
+    /// this branch may be imposing a cost on the ancestor by causing it to retain layers that it would
+    /// otherwise be able to GC.
+    pub within_ancestor_pitr: bool,
 
     pub timeline_dir_layer_file_size_sum: Option<u64>,
 
@@ -1630,6 +1673,31 @@ mod tests {
         assert_eq!(
             AuxFilePolicy::from_str("cross-validation").unwrap(),
             AuxFilePolicy::CrossValidation
+        );
+    }
+
+    #[test]
+    fn test_image_compression_algorithm_parsing() {
+        use ImageCompressionAlgorithm::*;
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("disabled").unwrap(),
+            Disabled
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("disabled-no-decompress").unwrap(),
+            DisabledNoDecompress
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd").unwrap(),
+            Zstd { level: None }
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd(18)").unwrap(),
+            Zstd { level: Some(18) }
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd(-3)").unwrap(),
+            Zstd { level: Some(-3) }
         );
     }
 }

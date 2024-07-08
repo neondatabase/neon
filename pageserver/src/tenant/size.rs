@@ -3,6 +3,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use tenant_size_model::svg::SvgBranchKind;
 use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -87,6 +88,9 @@ impl SegmentMeta {
             LsnKind::BranchPoint => true,
             LsnKind::GcCutOff => true,
             LsnKind::BranchEnd => false,
+            LsnKind::LeasePoint => true,
+            LsnKind::LeaseStart => false,
+            LsnKind::LeaseEnd => false,
         }
     }
 }
@@ -103,6 +107,21 @@ pub enum LsnKind {
     GcCutOff,
     /// Last record LSN
     BranchEnd,
+    /// A LSN lease is granted here.
+    LeasePoint,
+    /// A lease starts from here.
+    LeaseStart,
+    /// Last record LSN for the lease (should have the same LSN as the previous [`LsnKind::LeaseStart`]).
+    LeaseEnd,
+}
+
+impl From<LsnKind> for SvgBranchKind {
+    fn from(kind: LsnKind) -> Self {
+        match kind {
+            LsnKind::LeasePoint | LsnKind::LeaseStart | LsnKind::LeaseEnd => SvgBranchKind::Lease,
+            _ => SvgBranchKind::Timeline,
+        }
+    }
 }
 
 /// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
@@ -124,6 +143,9 @@ pub struct TimelineInputs {
 
     /// Cutoff point calculated from the user-supplied 'max_retention_period'
     retention_param_cutoff: Option<Lsn>,
+
+    /// Lease points on the timeline
+    lease_points: Vec<Lsn>,
 }
 
 /// Gathers the inputs for the tenant sizing model.
@@ -234,6 +256,13 @@ pub(super) async fn gather_inputs(
             None
         };
 
+        let lease_points = gc_info
+            .leases
+            .keys()
+            .filter(|&&lsn| lsn > ancestor_lsn)
+            .copied()
+            .collect::<Vec<_>>();
+
         // next_gc_cutoff in parent branch are not of interest (right now at least), nor do we
         // want to query any logical size before initdb_lsn.
         let branch_start_lsn = cmp::max(ancestor_lsn, timeline.initdb_lsn);
@@ -247,6 +276,8 @@ pub(super) async fn gather_inputs(
             // this assumes there are no other retain_lsns than the branchpoints
             .map(|lsn| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
+
+        lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));
 
         drop(gc_info);
 
@@ -296,6 +327,7 @@ pub(super) async fn gather_inputs(
             if kind == LsnKind::BranchPoint {
                 branchpoint_segments.insert((timeline_id, lsn), segments.len());
             }
+
             segments.push(SegmentMeta {
                 segment: Segment {
                     parent: Some(parent),
@@ -306,7 +338,45 @@ pub(super) async fn gather_inputs(
                 timeline_id: timeline.timeline_id,
                 kind,
             });
-            parent += 1;
+
+            parent = segments.len() - 1;
+
+            if kind == LsnKind::LeasePoint {
+                // Needs `LeaseStart` and `LeaseEnd` as well to model lease as a read-only branch that never writes data
+                // (i.e. it's lsn has not advanced from ancestor_lsn), and therefore the three segments have the same LSN
+                // value. Without the other two segments, the calculation code would not count the leased LSN as a point
+                // to be retained.
+                // Did not use `BranchStart` or `BranchEnd` so we can differentiate branches and leases during debug.
+                //
+                // Alt Design: rewrite the entire calculation code to be independent of timeline id. Both leases and
+                // branch points can be given a synthetic id so we can unite them.
+                let mut lease_parent = parent;
+
+                // Start of a lease.
+                segments.push(SegmentMeta {
+                    segment: Segment {
+                        parent: Some(lease_parent),
+                        lsn: lsn.0,
+                        size: None,                   // Filled in later, if necessary
+                        needed: lsn > next_gc_cutoff, // only needed if the point is within rentention.
+                    },
+                    timeline_id: timeline.timeline_id,
+                    kind: LsnKind::LeaseStart,
+                });
+                lease_parent += 1;
+
+                // End of the lease.
+                segments.push(SegmentMeta {
+                    segment: Segment {
+                        parent: Some(lease_parent),
+                        lsn: lsn.0,
+                        size: None,   // Filled in later, if necessary
+                        needed: true, // everything at the lease LSN must be readable => is needed
+                    },
+                    timeline_id: timeline.timeline_id,
+                    kind: LsnKind::LeaseEnd,
+                });
+            }
         }
 
         // Current end of the timeline
@@ -332,6 +402,7 @@ pub(super) async fn gather_inputs(
             pitr_cutoff,
             next_gc_cutoff,
             retention_param_cutoff,
+            lease_points,
         });
     }
 
@@ -674,7 +745,8 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/2210CD0",
       "pitr_cutoff": "0/2210CD0",
       "next_gc_cutoff": "0/2210CD0",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     },
     {
       "timeline_id": "454626700469f0a9914949b9d018e876",
@@ -684,7 +756,8 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/1817770",
       "pitr_cutoff": "0/1817770",
       "next_gc_cutoff": "0/1817770",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     },
     {
       "timeline_id": "cb5e3cbe60a4afc00d01880e1a37047f",
@@ -694,7 +767,8 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/18B3D98",
       "pitr_cutoff": "0/18B3D98",
       "next_gc_cutoff": "0/18B3D98",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     }
   ]
 }
@@ -749,7 +823,8 @@ fn verify_size_for_one_branch() {
       "horizon_cutoff": "47/240A5860",
       "pitr_cutoff": "47/240A5860",
       "next_gc_cutoff": "47/240A5860",
-      "retention_param_cutoff": "0/0"
+      "retention_param_cutoff": "0/0",
+      "lease_points": []
     }
   ]
 }"#;
