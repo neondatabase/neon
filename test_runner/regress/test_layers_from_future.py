@@ -39,9 +39,6 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_configs()
     env.start()
-    env.pageserver.allowed_errors.extend(
-        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
-    )
 
     ps_http = env.pageserver.http_client()
 
