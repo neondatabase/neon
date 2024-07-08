@@ -33,7 +33,8 @@ I refer to this effect as the "malloc latency backscatter" caused by buffered IO
 **Direct IO** allows application's read/write system calls to bypass the kernel page cache. The filesystem
 is still involved because it is ultimately in charge of mapping the concept of files & offsets within them
 to sectors on block devices. Typically, the filesystem poses size and alignment requirements for memory buffers
-and file offsets (statx `Dio_mem_align` / `Dio_offset_align`), see [this gist](https://gist.github.com/problame/1c35cac41b7cd617779f8aae50f97155).
+and file offsets (statx `Dio_mem_align` / `Dio_offset_align`), see [this gist](https://gist.github.com/problame/1c35cac41b7cd617779f8aae50f97155). The IO operations will fail at runtime if the alignment requirements
+are not met.
 
 **"buffered" vs "direct"**: the central distinction between buffered and direct IO is about who allocates and
 fills the IO buffers, and who controls when exactly the IOs are issued. In buffered IO, it's the syscall handlers,
@@ -112,4 +113,211 @@ Explicitness & Tangibility of resource usage.
 * It is desriable and valuable to be *explicit* about the main resources we use. For example:
 * We can build true observability of resource usage ("what tenant is causing the actual IOs that are sent to the disk?").
 * We can build accounting & QoS by implementing an IO scheduler that is tenant aware.
+
+## Definition of Done
+
+All IOs of the Pageserver data path use direct IO, thereby bypassing the kernel page cache.
+
+In particular, the "data path" includes the wal ingest path and anything on the `Timline::get` / `Timline::get_vectored` path.
+
+The production Pageserver config are tuned such that we get equivalent hit rates for the indirect blocks in layers (disk btree blocks) in the PS PageCache compared to what we previously got from the kernel page cache.
+
+The CPU utilization is equivalent or ideally lower.
+
+There are no regressions to ingest latency.
+
+Getpage & basebackup latencies under high memory pressure are equivalent to when we used with kernel page cache.
+Getpage & basebackup latencies under low memory pressure will be worse than when we used kernel page cache, but they are predictable, i.e., proportional to number of layers & blocks visited per layer.
+
+## Non-Goals
+
+We're not eliminating the remaining use of PS `PageCache` as part of this work.
+
+## Impacted Components
+
+Pageserver.
+
+## Proposed Implementation
+
+The work breaks down into the following high-level items:
+
+* Risk assessment: determine that our production filesystem (ext4) and Linux kernel version allows mixing direct IO and buffered IO.
+* Alignment requirements: make all VirtualFile follow IO alignment requirements (`Dio_mem_align` / `Dio_offset_align`).
+* Add Pageserver config option to configure direct vs buffered IO.
+* Determine new production configuration for PS PageCache size: when we roll out direct IO, it needs to hold the working set of indirect blocks.
+* Performance evaluation, esp avoiding regressions.
+
+The risk assessment is to understand
+1. the impact of an implementation bug where we issue some but not all IOs using direct IO, as well as
+2. the degree to which this project can be safely partially completed, i.e., if we cannot convert all code paths in the time alotted.
+
+The bulk of the design & coding work is to ensure adherence to the alignment requirements.
+
+Our automed benchmarks are insufficient to rule out performance regressions.
+Manual benchmarking / new automated benchmarks will be required for the last two items (new PS PageCache size, avoiding regressions).
+
+### Meeting Direct IO Alignment Requirements
+
+We need to fix all the places where we do tiny and/or unaligned IOs.
+Otherwise the kernel will fail the operation with an error.
+We can implement a fallback to buffered IO for a transitory period, to avoid user impact.
+But the **goal is to systematically ensure that we issue properly aligned IOs to the kernel/filesystem**.
+
+Ideally, we'd use the Rust type system to compile-time-ensure that we only use VirtualFile with aligned buffers.
+Feasibility of this will be explored early in the project.
+
+An alternative is to add runtime checks and potentially a runtime fallback to buffered IO so we avoid user-facing downtime.
+
+Genearlly, this work is open-ended (=> hard to estimate!).
+It is a fixpoint iteration on the code base until all the places are fixed.
+The runtime-check based approach is more amenable to doing this incrementally over many commits.
+The value of a type-system-based approach can still be realized retroactively, and it will avoid regressions.
+
+From some [early scoping experiments in January](https://www.notion.so/neondatabase/2024-01-30-benchmark-tokio-epoll-uring-less-Page-Cache-O_DIRECT-request-local-page-cache-aa026802b5214c58b17518d7f6a4219b?pvs=4),
+we know the broad categories of changes required:
+
+- Tiny IOs
+    - example: writes: blob_io BUFFERED=false writer for ImageLayer
+    - example reads: blob_io / vectored_blob_io
+    - We have to move the IO buffer from inside the kernel into userspace. The perf upside is huge because we avoid the syscalls.
+    - Will very likely be caught by runtime checking.
+    - recipe for writes: use streaming IO abstractions that do IO using aligned buffers (see below)
+    - recipe for reads: shot-lived IO buffers from buffer pool (see below)
+
+- Larger IOs that are unaligned
+    - typical case for this would be a Vec or Bytes that’s short-lived and used as an IoBuf / IoBufMut
+    - These are not guaranteed to be sufficiently aligned, and often are not.
+    - => need to replace with buffers that are guaranteed aligned
+    - recipe:
+      - generally these short-lived buffers should have a bounded size, it's a pre-existing design flaw if they don't
+      - if they have bounded size: can use buffer pool (see below)
+      - unbounded size: try hard to convert these to bounded size or better use streaming IO (see below)
+      - generally, unbounded size buffers are an accepted risk to timely completion of this project
+
+- *Accidentally* aligned IOs
+    - Like `Larger IOs` section above, but, for some reason, they're aligned.
+    - The runtime-check won't detect them.
+    - example: current PageCache slots are sometimes aligned
+    - recipe: ???
+      - for PageCache slots: malloc the page cache slots are with correct algignment.
+
+### Buffer Pool
+
+The **buffer pool** mentioned to above will be a load-bearing component.
+Its basic function is to provide callers with a memory buffer of adequate alignment and size (statx `Dio_mem_align` / `Dio_offset_align`).
+Callers `get()` a buffer from the pool. Size is specified at `get` time and is fixed (not growable).
+Callers own the buffer and are responsible for filling it with valid data.
+They then use it to perform the IO.
+Either the IO completes and returns the buffer, or the caller loses interest, which hands over ownership to tokio-epoll-uring until IO completion.
+The buffer may be re-used, but eventually it gets dropped.
+The drop handler returns the buffer to the buffer pool.
+
+The buffer pool enforces a maximum amount of IO memory by stalling `get()` calls if all buffers are in use.
+This ensures `page_cache + buffer_pools + slop < user memory` where slop is all other memory allocations.
+
+The buffer pool buffers can optionally be wrapped by the **streaming IO abstraction** in `owned_bufers_io::write` for use as the IO buffer.
+This guarantees that the streaming IOs are issued from aligned buffers.
+
+The tricky part is buffers whose size isn't know ahead of time.
+The buffer pool can't provide such buffers.
+One workaround is to use slop space (such as a Vec) to collect all the data, then memcpy it into buffer pool buffers like so:
+```rust
+let vec = ... /* code that produces variable amount of data */;
+for chunk in vec.chunks(bufpool.buffer_size()) {
+    let buf = bufpool.get();
+    assert_eq!(buf.len(), bufpool.buffer_size());
+    buf.copy_from_slice(chunk);
+    file.write_at(..., buf, ...);
+}
+```
+However, the `vec` in that code still needs to be sized in multiples of the filesystem block size.
+The best way to ensure this is to completely refactor to `owned_bufers_io::write`, which also avoids the double-copying.
+
+If we **have** to do writes of non-block-size-multiple length, the solution is to do read-modify-write for the unaligned parts.
+We don't have infrastructure for this yet.
+It would be best to avoid this, and from my scoping work in January, I cannot remember a need for it.
+
+## Execution
+
+### Phase 1
+In this phase we build a bunch of foundational pieces. The work is parallelizable to some extend.
+
+* Explore type-system level way to find all unaligned IO/s
+    * idea: create custom IO buffer marker traits / types , e.g. extend IoBuf / IoBufMut to IoBufAligned and IoBufMutAligned.
+    * could take this as a general opportunity to clean up the owned buffers APIs
+* Runtime-check for alignment requirements
+* Perf simulation mode: pad VirtualFile op latencies to typical NVMe latencies
+    * Such low latencies are tricky to precisely simulate, as, e.g., tokio doesn’t guarantee that timer resolution.
+    * Maybe do a fake direct IO to some fake file in addition to the buffered IO? Doubles amount of tokio-epoll-uring traffic but it’s probably closest to reality.
+    * Can we make this safely usable in production?
+* Pageserver config changes to expose the new mdoes:
+  ```rust
+    ...
+    virtual_file_direct_io: enum  {
+        #[default]
+        Disabled,
+        Evaluate {
+            check_alignment: no | log | error
+            pad_timing: enum {
+                No,
+                TokioSleep,
+                FakeFile { path: PathBuf }
+            }
+        },
+        Enabled {
+            on_alignment_error: error | fallback_to_buffered
+        }
+    }
+    ...
+  ```
+* VirtualFile API to support direct IO
+    * What's better: Require all callers to be explicit vs just always do direct IO?
+* Basic buffer pool implementation
+  * See next section for the vision for the efficient implementation, design API to accomodate that,
+    esp wrt RequestContext integration.
+  * Sketching & peer review is recommneded here.
+
+## Phase 2
+In this phase, we do the bulk of the coding work, leveraging the runtime check to get feedback.
+Also, we use the performance simulator mode to get a worst-case estimate on the perf impact.
+
+* Leverage runtime check for alignment (= monitor for its `warn!` logs)
+  - in regress test CI => matrix build like we did for tokio-epoll-uring/vectored get/compaction algorithms
+  - in staging
+  - in benchmarks (pre-prod, nightly staging)
+  - in production?
+
+* Find & fix unaligned IOs.
+  * See section `Meeting Direct IO Alignment Requirements`
+  * This is the bulk of the work, and it's hard to estimate because we may have to refactor
+    existing code away from bad practices such as unbounded allocation / not using streaming IO.
+
+* Use performance simulator mode to get worst-case estimate for perf impact **early**
+  * in manual testing on a developer-managed EC2 instance
+  * in staging / pre-prod => work with QA team
+
+## Phase 3: Performance
+Functionally we're ready, now we have to understand the performance impact and ensure there are no regressions.
+Also, we left room for optimization with the buffer pool implementation so let's improve there as well.
+
+* Perf testing to validate perf requirements listed in "Definition of Done" section
+  * Our automated tests are insufficient at this time.
+  * => develop new automated tests or do manual testing
+
+* Understand where the bottlenecks are.
+  * Manual testing is advisable for this => recommended to set up an EC2 instance with
+    a local Grafana + Prometheus + node_exporter stack.
+  * This work is time-consuming and open-ended. Get help if inexperienced.
+
+* Obvious bottleneck candidate: CPU overhead of buffer pool => make buffer pool implementation efficient
+  * No global state, pass it through the app. RequestContext is the way to go.
+  * Explore further `RequestContext` integration: two-staged pool, with a tiny pool in the `RequestContext`
+    to avoid contention on the global pool.
+  * Explore designs / prior art to avoid contention on the global buffer pool
+  * Should be able to draw from PS PageCache as a last resort mechanism to avoid OOMs
+    (PageCache thrashing will alert operators!)
+    * Longer-term, should have model of worst-case / p9X peak buffer usage per request
+      and admit not more requests than what configured buffer pool size allows.
+      Out of scope of this project, though.
+
 
