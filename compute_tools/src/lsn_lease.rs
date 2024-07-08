@@ -13,9 +13,8 @@ use utils::id::TenantId;
 use utils::id::TimelineId;
 
 use compute_api::spec::ComputeMode;
-use pageserver_api::shard::TenantShardId;
 use tracing::{error, info};
-use utils::lsn::Lsn;
+use utils::{lsn::Lsn, shard::TenantShardId};
 
 use crate::compute::{ComputeNode, ComputeState};
 

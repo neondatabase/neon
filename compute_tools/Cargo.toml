@@ -36,7 +36,6 @@ thiserror.workspace = true
 url.workspace = true
 
 compute_api.workspace = true
-pageserver_api.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
 toml_edit.workspace = true

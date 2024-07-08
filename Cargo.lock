@@ -1232,7 +1232,6 @@ dependencies = [
  "notify",
  "num_cpus",
  "opentelemetry",
- "pageserver_api",
  "postgres",
  "regex",
  "remote_storage",
