@@ -6,6 +6,7 @@ from typing import Optional
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.neon_fixtures import (
+    NeonEnv,
     NeonEnvBuilder,
     StorageScrubber,
 )
@@ -112,7 +113,7 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     workload.validate()
 
 
-def drop_local_state(env, tenant_id):
+def drop_local_state(env: NeonEnv, tenant_id: TenantId):
     env.storage_controller.tenant_policy_update(tenant_id, {"placement": "Detached"})
     env.storage_controller.reconcile_until_idle()
 
@@ -234,7 +235,7 @@ def test_scrubber_physical_gc_ancestors(
         ps.http_client().timeline_compact(shard, timeline_id)
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
-    # We will use a 1s threshold for deletion, let it pass
+    # We will use a min_age_secs=1 threshold for deletion, let it pass
     time.sleep(2)
 
     # Our time threshold should be respected: check that with a high threshold we delete nothing
