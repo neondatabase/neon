@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use crate::checks::{list_timeline_blobs, BlobDataParseResult};
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
@@ -176,17 +176,13 @@ async fn is_old_enough(
                 summary.remote_storage_errors += 1;
                 return false;
             }
-            Some(last_modified) => {
-                let last_modified =
-                    UNIX_EPOCH + Duration::from_secs_f64(last_modified.as_secs_f64());
-                match last_modified.elapsed() {
-                    Ok(e) => e,
-                    Err(_) => {
-                        tracing::warn!("Bad last_modified time: {last_modified:?}");
-                        return false;
-                    }
+            Some(last_modified) => match SystemTime::try_from(last_modified).map(|t| t.elapsed()) {
+                Ok(Ok(e)) => e,
+                Err(_) | Ok(Err(_)) => {
+                    tracing::warn!("Bad last_modified time: {last_modified:?}");
+                    return false;
                 }
-            }
+            },
         },
         Err(e) => {
             tracing::warn!("Failed to HEAD {key}: {e}");
