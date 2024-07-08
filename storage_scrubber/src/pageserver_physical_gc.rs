@@ -199,8 +199,8 @@ async fn is_old_enough(
     if !old_enough {
         tracing::info!(
             "Skipping young object {} < {}",
-            age.as_secs_f64(),
-            min_age.as_secs_f64()
+            humantime::format_duration(age),
+            humantime::format_duration(*min_age)
         );
     }
 
