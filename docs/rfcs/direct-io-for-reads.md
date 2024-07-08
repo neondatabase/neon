@@ -32,7 +32,8 @@ I refer to this effect as the "malloc latency backscatter" caused by buffered IO
 
 **Direct IO** allows application's read/write system calls to bypass the kernel page cache. The filesystem
 is still involved because it is ultimately in charge of mapping the concept of files & offsets within them
-to sectors on block devices.
+to sectors on block devices. Typically, the filesystem poses size and alignment requirements for memory buffers
+and file offsets (statx `Dio_mem_align` / `Dio_offset_align`), see [this gist](https://gist.github.com/problame/1c35cac41b7cd617779f8aae50f97155).
 
 **"buffered" vs "direct"**: the central distinction between buffered and direct IO is about who allocates and
 fills the IO buffers, and who controls when exactly the IOs are issued. In buffered IO, it's the syscall handlers,
