@@ -7,7 +7,7 @@ OBJS = \
 	neontest.o
 
 EXTENSION = neon_test_utils
-DATA = neon_test_utils--1.2.sql
+DATA = neon_test_utils--1.3.sql
 PGFILEDESC = "neon_test_utils - helpers for neon testing and debugging"
 
 PG_CONFIG = pg_config
