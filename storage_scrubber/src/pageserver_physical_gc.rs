@@ -112,7 +112,7 @@ impl TenantRefAccumulator {
     /// Consume Self and return a vector of ancestor tenant shards that should be GC'd, and map of referenced ancestor layers to preserve
     fn into_gc_ancestors(self) -> (Vec<TenantShardId>, AncestorRefs) {
         let mut ancestors_to_gc = Vec::new();
-        for (tenant_id, shard_indices) in self.shards_seen {
+        for (tenant_id, mut shard_indices) in self.shards_seen {
             // Find the highest shard count
             let latest_count = shard_indices
                 .iter()
@@ -120,35 +120,32 @@ impl TenantRefAccumulator {
                 .max()
                 .expect("Always at least one shard");
 
+            let (latest_shards, ancestor_shards) = {
+                let at =
+                    itertools::partition(&mut shard_indices, |i| i.shard_count == latest_count);
+                (&shard_indices[0..at], &shard_indices[at..])
+            };
+
             // Check that we have a complete view of the latest shard count: this should always be the case unless we happened
             // to scan the S3 bucket halfway through a shard split.
-            if shard_indices
-                .iter()
-                .filter(|i| i.shard_count == latest_count)
-                .count()
-                != latest_count.count() as usize
-            {
+            if latest_shards.len() != latest_count.count() as usize {
                 // This should be extremely rare, so we warn on it.
                 tracing::warn!(%tenant_id, "Missed some shards at count {:?}", latest_count);
                 continue;
             }
 
             // Check if we have any non-latest-count shards
-            if shard_indices.len() == latest_count.count() as usize {
+            if ancestor_shards.is_empty() {
                 tracing::debug!(%tenant_id, "No ancestor shards to clean up");
                 continue;
             }
 
             // GC ancestor shards
-            for ancestor_shard in shard_indices
-                .into_iter()
-                .filter(|i| i.shard_count != latest_count)
-                .map(|idx| TenantShardId {
-                    tenant_id,
-                    shard_count: idx.shard_count,
-                    shard_number: idx.shard_number,
-                })
-            {
+            for ancestor_shard in ancestor_shards.iter().map(|idx| TenantShardId {
+                tenant_id,
+                shard_count: idx.shard_count,
+                shard_number: idx.shard_number,
+            }) {
                 ancestors_to_gc.push(ancestor_shard);
             }
         }
