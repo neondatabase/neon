@@ -4062,7 +4062,14 @@ impl Service {
                 placement_policy: Some(PlacementPolicy::Attached(0)), // No secondaries, for convenient debug/hacking
 
                 // There is no way to know what the tenant's config was: revert to defaults
-                config: TenantConfig::default(),
+                //
+                // TODO: remove `switch_aux_file_policy` once we finish auxv2 migration
+                //
+                // we write to both v1+v2 storage, so that the test case can use either storage format for testing
+                config: TenantConfig {
+                    switch_aux_file_policy: Some(models::AuxFilePolicy::CrossValidation),
+                    ..TenantConfig::default()
+                },
             })
             .await?;
 
