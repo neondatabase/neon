@@ -61,7 +61,7 @@ jobs:
         include:
           - DEFAULT_PG_VERSION: 14
             PLATFORM: "neon-staging"
-            region_id: 'aws-us-east-2'
+            region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
             provisioner: 'k8s-pod' 
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
@@ -96,7 +96,7 @@ jobs:
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        region_id: ${{ github.event.inputs.region_id || matrix.region_id }}
+        region_id: ${{ matrix.region_id }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
         provisioner: ${{ matrix.provisioner }}
