@@ -527,10 +527,22 @@ pub(crate) enum PageReconstructError {
     MissingKey(MissingKeyError),
 }
 
+impl From<layer_manager::Shutdown> for PageReconstructError {
+    fn from(_: layer_manager::Shutdown) -> Self {
+        PageReconstructError::Cancelled
+    }
+}
+
 impl GetVectoredError {
     #[cfg(test)]
     pub(crate) fn is_missing_key_error(&self) -> bool {
         matches!(self, Self::MissingKey(_))
+    }
+}
+
+impl From<layer_manager::Shutdown> for GetVectoredError {
+    fn from(_: layer_manager::Shutdown) -> Self {
+        GetVectoredError::Cancelled
     }
 }
 
@@ -597,6 +609,12 @@ pub(crate) enum CreateImageLayersError {
     Other(#[from] anyhow::Error),
 }
 
+impl From<layer_manager::Shutdown> for CreateImageLayersError {
+    fn from(_: layer_manager::Shutdown) -> Self {
+        CreateImageLayersError::Cancelled
+    }
+}
+
 #[derive(thiserror::Error, Debug, Clone)]
 pub(crate) enum FlushLayerError {
     /// Timeline cancellation token was cancelled
@@ -631,6 +649,12 @@ impl FlushLayerError {
         } else {
             Self::Other(Arc::new(err))
         }
+    }
+}
+
+impl From<layer_manager::Shutdown> for FlushLayerError {
+    fn from(_: layer_manager::Shutdown) -> Self {
+        FlushLayerError::Cancelled
     }
 }
 
@@ -1198,12 +1222,7 @@ impl Timeline {
     /// Hence, the result **does not represent local filesystem usage**.
     pub(crate) async fn layer_size_sum(&self) -> u64 {
         let guard = self.layers.read().await;
-        let layer_map = guard.layer_map();
-        let mut size = 0;
-        for l in layer_map.iter_historic_layers() {
-            size += l.file_size;
-        }
-        size
+        guard.layer_size_sum()
     }
 
     pub(crate) fn resident_physical_size(&self) -> u64 {
@@ -1393,12 +1412,20 @@ impl Timeline {
             return;
         };
 
+        // FIXME: why not early exit? because before #7927 the state would had been cleared every
+        // time, and this was missed.
+        // if write_guard.is_none() { return; }
+
         let Ok(layers_guard) = self.layers.try_read() else {
             // Don't block if the layer lock is busy
             return;
         };
 
-        let Some(open_layer) = &layers_guard.layer_map().open_layer else {
+        let Ok(lm) = layers_guard.layer_map() else {
+            return;
+        };
+
+        let Some(open_layer) = &lm.open_layer else {
             // If there is no open layer, we have no layer freezing to do.  However, we might need to generate
             // some updates to disk_consistent_lsn and remote_consistent_lsn, in case we ingested some WAL regions
             // that didn't result in writes to this shard.
@@ -1476,13 +1503,18 @@ impl Timeline {
                     // Upgrade to a write lock and freeze the layer
                     drop(layers_guard);
                     let mut layers_guard = self.layers.write().await;
-                    let res = layers_guard
-                        .try_freeze_in_memory_layer(
-                            current_lsn,
-                            &self.last_freeze_at,
-                            &mut write_guard,
-                        )
-                        .await;
+                    let res = layers_guard.open_mut();
+
+                    let res = match res {
+                        Ok(open) => Ok(open
+                            .try_freeze_in_memory_layer(
+                                current_lsn,
+                                &self.last_freeze_at,
+                                &mut write_guard,
+                            )
+                            .await),
+                        Err(e) => Err(e),
+                    };
 
                     // it is possible the LayerManager shutdown happened between us releasing the
                     // read lock and re-acquiring the write lock; in such case, silently do
@@ -1652,6 +1684,11 @@ impl Timeline {
                     // about corner cases like s3 suddenly hanging up?
                     self.remote_client.shutdown().await;
                 }
+                Err(FlushLayerError::Cancelled) => {
+                    // this is likely the second shutdown, ignore silently.
+                    // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
+                    debug_assert!(self.cancel.is_cancelled());
+                }
                 Err(e) => {
                     // Non-fatal.  Shutdown is infallible.  Failures to flush just mean that
                     // we have some extra WAL replay to do next time the timeline starts.
@@ -1681,17 +1718,14 @@ impl Timeline {
         )
         .await;
 
-        // TODO: work toward making this a no-op. See this funciton's doc comment for more context.
+        // TODO: work toward making this a no-op. See this function's doc comment for more context.
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         {
             // Allow any remaining in-memory layers to do cleanup.
             let mut write_guard = self.write_lock.lock().await;
-            self.layers
-                .write()
-                .await
-                .drop_inmemory_layers(&mut write_guard);
+            self.layers.write().await.shutdown(&mut write_guard);
         }
 
         // Finally wait until any gate-holders are complete.
@@ -1787,9 +1821,12 @@ impl Timeline {
         }
     }
 
-    pub(crate) async fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
+    pub(crate) async fn layer_map_info(
+        &self,
+        reset: LayerAccessStatsReset,
+    ) -> Result<LayerMapInfo, layer_manager::Shutdown> {
         let guard = self.layers.read().await;
-        let layer_map = guard.layer_map();
+        let layer_map = guard.layer_map()?;
         let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
         if let Some(open_layer) = &layer_map.open_layer {
             in_memory_layers.push(open_layer.info());
@@ -1798,16 +1835,15 @@ impl Timeline {
             in_memory_layers.push(frozen_layer.info());
         }
 
-        let mut historic_layers = Vec::new();
-        for historic_layer in layer_map.iter_historic_layers() {
-            let historic_layer = guard.get_from_desc(&historic_layer);
-            historic_layers.push(historic_layer.info(reset));
-        }
+        let historic_layers = layer_map
+            .iter_historic_layers()
+            .map(|desc| guard.get_from_desc(&desc).info(reset))
+            .collect();
 
-        LayerMapInfo {
+        Ok(LayerMapInfo {
             in_memory_layers,
             historic_layers,
-        }
+        })
     }
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_shard_id.tenant_id, shard_id = %self.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id))]
@@ -1815,7 +1851,7 @@ impl Timeline {
         &self,
         layer_file_name: &LayerName,
     ) -> anyhow::Result<Option<bool>> {
-        let Some(layer) = self.find_layer(layer_file_name).await else {
+        let Some(layer) = self.find_layer(layer_file_name).await? else {
             return Ok(None);
         };
 
@@ -1836,7 +1872,7 @@ impl Timeline {
             .enter()
             .map_err(|_| anyhow::anyhow!("Shutting down"))?;
 
-        let Some(local_layer) = self.find_layer(layer_file_name).await else {
+        let Some(local_layer) = self.find_layer(layer_file_name).await? else {
             return Ok(None);
         };
 
@@ -2322,7 +2358,10 @@ impl Timeline {
         let mut layers = self.layers.try_write().expect(
             "in the context where we call this function, no other task has access to the object",
         );
-        layers.initialize_empty(Lsn(start_lsn.0));
+        layers
+            .open_mut()
+            .expect("in this context the LayerManager must still be open")
+            .initialize_empty(Lsn(start_lsn.0));
     }
 
     /// Scan the timeline directory, cleanup, populate the layer map, and schedule uploads for local-only
@@ -2454,7 +2493,10 @@ impl Timeline {
 
         let num_layers = loaded_layers.len();
 
-        guard.initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
+        guard
+            .open_mut()
+            .expect("layermanager must be open during init")
+            .initialize_local_layers(loaded_layers, disk_consistent_lsn + 1);
 
         self.remote_client
             .schedule_layer_file_deletion(&needs_cleanup)?;
@@ -2489,7 +2531,7 @@ impl Timeline {
 
         // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
         drop(guard); // drop write lock, update_layer_visibility will take a read lock.
-        self.update_layer_visibility().await;
+        self.update_layer_visibility().await?;
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
@@ -2911,14 +2953,17 @@ impl Timeline {
         }
     }
 
-    async fn find_layer(&self, layer_name: &LayerName) -> Option<Layer> {
+    async fn find_layer(
+        &self,
+        layer_name: &LayerName,
+    ) -> Result<Option<Layer>, layer_manager::Shutdown> {
         let guard = self.layers.read().await;
         let layer = guard
-            .layer_map()
+            .layer_map()?
             .iter_historic_layers()
             .find(|l| &l.layer_name() == layer_name)
             .map(|found| guard.get_from_desc(&found));
-        layer
+        Ok(layer)
     }
 
     /// The timeline heatmap is a hint to secondary locations from the primary location,
@@ -2969,6 +3014,7 @@ impl Timeline {
 }
 
 impl Timeline {
+    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
@@ -3120,7 +3166,7 @@ impl Timeline {
             // which turns out to be a perf bottleneck in some cases.
             if !unmapped_keyspace.is_empty() {
                 let guard = timeline.layers.read().await;
-                let layers = guard.layer_map();
+                let layers = guard.layer_map()?;
 
                 let in_memory_layer = layers.find_in_memory_layer(|l| {
                     let start_lsn = l.get_lsn_range().start;
@@ -3294,6 +3340,7 @@ impl Timeline {
         );
 
         let layer = guard
+            .open_mut()?
             .get_layer_for_write(
                 lsn,
                 self.conf,
@@ -3321,6 +3368,8 @@ impl Timeline {
         let frozen = {
             let mut guard = self.layers.write().await;
             guard
+                .open_mut()
+                .expect("layer manager cannot be shutdown, because we are holding the write_lock")
                 .try_freeze_in_memory_layer(at, &self.last_freeze_at, write_lock)
                 .await
         };
@@ -3364,7 +3413,11 @@ impl Timeline {
 
                 let layer_to_flush = {
                     let guard = self.layers.read().await;
-                    guard.layer_map().frozen_layers.front().cloned()
+                    let Ok(lm) = guard.layer_map() else {
+                        info!("dropping out of flush loop for timeline shutdown");
+                        return;
+                    };
+                    lm.frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
                 let Some(layer_to_flush) = layer_to_flush else {
@@ -3622,11 +3675,11 @@ impl Timeline {
         {
             let mut guard = self.layers.write().await;
 
-            if self.cancel.is_cancelled() {
-                return Err(FlushLayerError::Cancelled);
-            }
-
-            guard.finish_flush_l0_layer(delta_layer_to_add.as_ref(), &frozen_layer, &self.metrics);
+            guard.open_mut()?.finish_flush_l0_layer(
+                delta_layer_to_add.as_ref(),
+                &frozen_layer,
+                &self.metrics,
+            );
 
             if self.set_disk_consistent_lsn(disk_consistent_lsn) {
                 // Schedule remote uploads that will reflect our new disk_consistent_lsn
@@ -3834,7 +3887,9 @@ impl Timeline {
         let threshold = self.get_image_creation_threshold();
 
         let guard = self.layers.read().await;
-        let layers = guard.layer_map();
+        let Ok(layers) = guard.layer_map() else {
+            return false;
+        };
 
         let mut max_deltas = 0;
         for part_range in &partition.ranges {
@@ -4242,13 +4297,16 @@ impl Timeline {
         let mut guard = self.layers.write().await;
 
         // FIXME: we could add the images to be uploaded *before* returning from here, but right
-        // now they are being scheduled outside of write lock
-        guard.track_new_image_layers(&image_layers, &self.metrics);
+        // now they are being scheduled outside of write lock; current way is inconsistent with
+        // compaction lock order.
+        guard
+            .open_mut()?
+            .track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
         timer.stop_and_record();
 
         // Creating image layers may have caused some previously visible layers to be covered
-        self.update_layer_visibility().await;
+        self.update_layer_visibility().await?;
 
         Ok(image_layers)
     }
@@ -4407,6 +4465,12 @@ impl CompactionError {
     }
 }
 
+impl From<layer_manager::Shutdown> for CompactionError {
+    fn from(_: layer_manager::Shutdown) -> Self {
+        CompactionError::ShuttingDown
+    }
+}
+
 #[serde_as]
 #[derive(serde::Serialize)]
 struct RecordedDuration(#[serde_as(as = "serde_with::DurationMicroSeconds")] Duration);
@@ -4512,11 +4576,14 @@ impl Timeline {
             .collect();
 
         if !new_images.is_empty() {
-            guard.track_new_image_layers(new_images, &self.metrics);
+            guard
+                .open_mut()?
+                .track_new_image_layers(new_images, &self.metrics);
         }
 
-        // deletion will happen later, the layer file manager calls garbage_collect_on_drop
-        guard.finish_compact_l0(&remove_layers, &insert_layers, &self.metrics);
+        guard
+            .open_mut()?
+            .finish_compact_l0(&remove_layers, &insert_layers, &self.metrics);
 
         self.remote_client
             .schedule_compaction_update(&remove_layers, new_deltas)?;
@@ -4530,7 +4597,7 @@ impl Timeline {
         self: &Arc<Self>,
         mut replace_layers: Vec<(Layer, ResidentLayer)>,
         mut drop_layers: Vec<Layer>,
-    ) -> Result<(), super::upload_queue::NotInitialized> {
+    ) -> Result<(), CompactionError> {
         let mut guard = self.layers.write().await;
 
         // Trim our lists in case our caller (compaction) raced with someone else (GC) removing layers: we want
@@ -4538,7 +4605,9 @@ impl Timeline {
         replace_layers.retain(|(l, _)| guard.contains(l));
         drop_layers.retain(|l| guard.contains(l));
 
-        guard.rewrite_layers(&replace_layers, &drop_layers, &self.metrics);
+        guard
+            .open_mut()?
+            .rewrite_layers(&replace_layers, &drop_layers, &self.metrics);
 
         let upload_layers: Vec<_> = replace_layers.into_iter().map(|r| r.1).collect();
 
@@ -4827,7 +4896,7 @@ impl Timeline {
         //
         // TODO holding a write lock is too agressive and avoidable
         let mut guard = self.layers.write().await;
-        let layers = guard.layer_map();
+        let layers = guard.layer_map()?;
         'outer: for l in layers.iter_historic_layers() {
             result.layers_total += 1;
 
@@ -4955,7 +5024,7 @@ impl Timeline {
                     }
                 })?;
 
-            guard.finish_gc_timeline(&gc_layers);
+            guard.open_mut()?.finish_gc_timeline(&gc_layers);
 
             #[cfg(feature = "testing")]
             {
@@ -5111,9 +5180,13 @@ impl Timeline {
 
         let remaining = {
             let guard = self.layers.read().await;
-            guard
-                .layer_map()
-                .iter_historic_layers()
+            let Ok(lm) = guard.layer_map() else {
+                // technically here we could look into iterating accessible layers, but downloading
+                // all layers of a shutdown timeline makes no sense regardless.
+                tracing::info!("attempted to download all layers of shutdown timeline");
+                return;
+            };
+            lm.iter_historic_layers()
                 .map(|desc| guard.get_from_desc(&desc))
                 .collect::<Vec<_>>()
         };
@@ -5308,7 +5381,7 @@ impl Timeline {
 
         {
             let mut guard = self.layers.write().await;
-            guard.force_insert_layer(image_layer);
+            guard.open_mut().unwrap().force_insert_layer(image_layer);
         }
 
         Ok(())
@@ -5352,7 +5425,7 @@ impl Timeline {
             }
 
             let guard = self.layers.read().await;
-            for layer in guard.layer_map().iter_historic_layers() {
+            for layer in guard.layer_map()?.iter_historic_layers() {
                 if layer.is_delta()
                     && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
                     && layer.lsn_range != deltas.lsn_range
@@ -5382,7 +5455,7 @@ impl Timeline {
 
         {
             let mut guard = self.layers.write().await;
-            guard.force_insert_layer(delta_layer);
+            guard.open_mut().unwrap().force_insert_layer(delta_layer);
         }
 
         Ok(())
@@ -5397,7 +5470,7 @@ impl Timeline {
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
         let mut all_data = Vec::new();
         let guard = self.layers.read().await;
-        for layer in guard.layer_map().iter_historic_layers() {
+        for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
                 let mut reconstruct_data = ValuesReconstructState::default();
@@ -5425,7 +5498,7 @@ impl Timeline {
     ) -> anyhow::Result<Vec<super::storage_layer::PersistentLayerKey>> {
         let mut layers = Vec::new();
         let guard = self.layers.read().await;
-        for layer in guard.layer_map().iter_historic_layers() {
+        for layer in guard.layer_map()?.iter_historic_layers() {
             layers.push(layer.key());
         }
         Ok(layers)
@@ -5739,6 +5812,7 @@ mod tests {
         let layers = timeline.layers.read().await;
         let desc = layers
             .layer_map()
+            .unwrap()
             .iter_historic_layers()
             .next()
             .expect("must find one layer to evict");

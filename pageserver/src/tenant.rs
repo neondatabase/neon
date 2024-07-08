@@ -601,6 +601,12 @@ impl From<PageReconstructError> for GcError {
     }
 }
 
+impl From<timeline::layer_manager::Shutdown> for GcError {
+    fn from(_: timeline::layer_manager::Shutdown) -> Self {
+        GcError::TimelineCancelled
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum LoadConfigError {
     #[error("TOML deserialization error: '{0}'")]
@@ -710,6 +716,7 @@ impl Tenant {
                     .read()
                     .await
                     .layer_map()
+                    .expect("currently loading, layer manager cannot be shutdown already")
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -4674,7 +4681,7 @@ mod tests {
 
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map
-            .layer_map()
+            .layer_map()?
             .level0_deltas()
             .iter()
             .map(|desc| layer_map.get_from_desc(desc))
@@ -4908,11 +4915,13 @@ mod tests {
         let inserted = bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         let guard = tline.layers.read().await;
-        guard.layer_map().dump(true, &ctx).await?;
+        let lm = guard.layer_map()?;
+
+        lm.dump(true, &ctx).await?;
 
         let mut reads = Vec::new();
         let mut prev = None;
-        guard.layer_map().iter_historic_layers().for_each(|desc| {
+        lm.iter_historic_layers().for_each(|desc| {
             if !desc.is_delta() {
                 prev = Some(desc.clone());
                 return;
@@ -5918,11 +5927,12 @@ mod tests {
             tline.freeze_and_flush().await?; // force create a delta layer
         }
 
-        let before_num_l0_delta_files = tline.layers.read().await.layer_map().level0_deltas().len();
+        let before_num_l0_delta_files =
+            tline.layers.read().await.layer_map()?.level0_deltas().len();
 
         tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
 
-        let after_num_l0_delta_files = tline.layers.read().await.layer_map().level0_deltas().len();
+        let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
 
         assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
 
