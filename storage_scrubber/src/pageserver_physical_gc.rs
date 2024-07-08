@@ -331,20 +331,6 @@ async fn gc_ancestor(
 
             tracing::info!(%ttid, "Ancestor layer {layer_name} is not referenced");
 
-            // match ttid_refs {
-            //     None => {
-            //         tracing::debug!(%ttid, "no refs for this ttid, {} ttids have refs", refs.len());
-            //     },
-            //     Some(ttid_refs) => {
-
-            //     tracing::debug!("references for this ttid:");
-            //     for (layer_name, shard_index) in ttid_refs {
-            //         tracing::debug!("{}: {}", layer_name, shard_index);
-            //     }
-            //     }
-
-            // }
-
             // Build the key for the layer we are considering deleting
             let key = root_target.absolute_key(&remote_layer_path(
                 &ttid.tenant_shard_id.tenant_id,
