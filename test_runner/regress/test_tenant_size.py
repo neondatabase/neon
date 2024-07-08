@@ -714,7 +714,10 @@ def mask_model_inputs(x):
 
 
 @pytest.mark.parametrize("zero_gc", [True, False])
-def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path, zero_gc: bool):
+@pytest.mark.parametrize("repeat", range(50))
+def test_lsn_lease_size(
+    neon_env_builder: NeonEnvBuilder, test_output_dir: Path, zero_gc: bool, repeat
+):
     """
     Compare a LSN lease to a read-only branch for synthetic size calculation.
     They should have the same effect.
@@ -754,7 +757,11 @@ def insert_with_action(
     """
 
     client = env.pageserver.http_client()
-    with env.endpoints.create_start("main", tenant_id=tenant) as ep:
+    with env.endpoints.create_start(
+        "main",
+        tenant_id=tenant,
+        config_lines=["autovacuum=off"],
+    ) as ep:
         initial_size = client.tenant_size(tenant)
         log.info(f"initial size: {initial_size}")
 
