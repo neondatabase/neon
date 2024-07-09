@@ -123,7 +123,7 @@ impl<'a> BlockCursor<'a> {
         }
 
         if let Some(dstbuf) = compression {
-            if compression_bits == BYTE_ZSTD {
+            if compression_bits == BYTE_ZSTD + 1 {
                 let mut decoder = async_compression::tokio::write::ZstdDecoder::new(dstbuf);
                 decoder.write_all(buf_to_write).await?;
                 decoder.flush().await?;
