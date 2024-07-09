@@ -1768,7 +1768,7 @@ threshold = "20m"
 remote_storage = {}
         "#;
         let doc = toml_edit::Document::from_str(input).unwrap();
-        let err = PageServerConf::parse_and_validate(&doc, &workdir)
+        let err = PageServerConf::parse_and_validate(NodeId(222), &doc, &workdir)
             .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
         assert!(format!("{err}").contains("remote_storage"), "{err}");
     }
