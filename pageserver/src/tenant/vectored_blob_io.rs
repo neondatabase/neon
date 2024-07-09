@@ -105,22 +105,6 @@ impl VectoredReadBuilder {
             max_read_size: Some(max_read_size),
         }
     }
-
-    #[cfg(test)]
-    fn new_with_controlled_limit(start_offset: u64, end_offset: u64, meta: BlobMeta) -> Self {
-        let mut blobs_at = VecMap::default();
-        blobs_at
-            .append(start_offset, meta)
-            .expect("First insertion always succeeds");
-
-        Self {
-            start: start_offset,
-            end: end_offset,
-            blobs_at,
-            max_read_size: None,
-        }
-    }
-
     /// Attempt to extend the current read with a new blob if the start
     /// offset matches with the current end of the vectored read
     /// and the resuting size is below the max read size
@@ -444,7 +428,7 @@ impl StreamingVectoredReadPlanner {
         lsn: Lsn,
         start_offset: u64,
         end_offset: u64,
-        is_last_batch: bool,
+        is_last_blob_in_read: bool,
     ) -> Option<VectoredRead> {
         match &mut self.read_builder {
             Some(read_builder) => {
@@ -452,16 +436,24 @@ impl StreamingVectoredReadPlanner {
                 assert_eq!(extended, VectoredReadExtended::Yes);
             }
             None => {
-                self.read_builder = Some(VectoredReadBuilder::new_with_controlled_limit(
-                    start_offset,
-                    end_offset,
-                    BlobMeta { key, lsn },
-                ));
+                self.read_builder = {
+                    let mut blobs_at = VecMap::default();
+                    blobs_at
+                        .append(start_offset, BlobMeta { key, lsn })
+                        .expect("First insertion always succeeds");
+
+                    Some(VectoredReadBuilder {
+                        start: start_offset,
+                        end: end_offset,
+                        blobs_at,
+                        max_read_size: None,
+                    })
+                };
             }
         }
         let read_builder = self.read_builder.as_mut().unwrap();
         self.cnt += 1;
-        if is_last_batch
+        if is_last_blob_in_read
             || read_builder.size() >= self.max_read_size as usize
             || self.cnt >= self.max_cnt
         {
