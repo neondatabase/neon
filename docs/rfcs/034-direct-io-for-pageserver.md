@@ -154,8 +154,10 @@ The risk assessment is to understand
 
 The bulk of the design & coding work is to ensure adherence to the alignment requirements.
 
-Our automed benchmarks are insufficient to rule out performance regressions.
+Our automated benchmarks are insufficient to rule out performance regressions.
 Manual benchmarking / new automated benchmarks will be required for the last two items (new PS PageCache size, avoiding regressions).
+The metrics we care about were already listed in the "Definition of Done" section of this document.
+More details on benchmarking later in this doc (Phase 3).
 
 ### Meeting Direct IO Alignment Requirements
 
@@ -315,10 +317,24 @@ Functionally we're ready, now we have to understand the performance impact and e
 Also, we left room for optimization with the buffer pool implementation so let's improve there as well.
 
 * Perf testing to validate perf requirements listed in "Definition of Done" section
-  * Our automated tests are insufficient at this time.
-  * => develop new automated tests or do manual testing
 
 * Understand where the bottlenecks are.
   * Manual testing is advisable for this => recommended to set up an EC2 instance with
     a local Grafana + Prometheus + node_exporter stack.
   * This work is time-consuming and open-ended. Get help if inexperienced.
+
+Pagebench, pgbench, and nightly prodlike cloudbench, are workload *drivers*.
+They are
+* sufficient for producing the metrics listed in "Definition of Done",
+* representative enough to detect severe regressions,
+* expose bottlenecks.
+
+However, we do not have sufficient automation for
+* creating high memory pressure secenario (e.g. with cgroups)
+* quantifying and recording before-and-after resource consumption (*CPU utilization, memory, IO*)
+* recording pageserver metrics.
+Hence, diligent perf testing will require **setting up a manually managed testbench in EC2** that resembles prod,
+with a local prometheus + grafana stack + node_exporter +scraping of the local pageserver.
+In the past, I have found having such a testbench to be most effective and flexible for diligent benchmarking.
+
+For the high memory pressure configuration, it might make sense to extend `neon_local` to manage a cgroup hierarchy.
