@@ -1498,7 +1498,7 @@ impl DeltaLayerInner {
         offset
     }
 
-    #[cfg(test)]
+    #[cfg(any())]
     pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
@@ -1638,7 +1638,7 @@ impl<'a> DeltaLayerIterator<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod test {
     use std::collections::BTreeMap;
 

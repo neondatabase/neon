@@ -86,7 +86,7 @@ pub(crate) enum BlockReaderRef<'a> {
     Slice(&'a [u8]),
     #[cfg(test)]
     TestDisk(&'a super::disk_btree::tests::TestDisk),
-    #[cfg(test)]
+    #[cfg(any())]
     VirtualFile(&'a VirtualFile),
 }
 
@@ -105,7 +105,7 @@ impl<'a> BlockReaderRef<'a> {
             Slice(s) => Self::read_blk_slice(s, blknum),
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
-            #[cfg(test)]
+            #[cfg(any())]
             VirtualFile(r) => r.read_blk(blknum, ctx).await,
         }
     }
