@@ -237,6 +237,12 @@ If we **have** to do writes of non-block-size-multiple length, the solution is t
 We don't have infrastructure for this yet.
 It would be best to avoid this, and from my scoping work in January, I cannot remember a need for it.
 
+In the future, we might want to use [io_uring registered buffers](https://unixism.net/loti/ref-iouring/io_uring_register.html).
+It's out of reach at this time because we use tokio-epoll-uring in thread-local executor mode, meaning we'd have to register
+each buffer with all thread-local executors. However, above API requirements for the buffer pool implicitly require the buffer
+handle that's returned by `get()` to be a custom smart pointer type. We will be able to extend it in the future to include the
+io_uring registered buffer index without having to touch the entire code base.
+
 ## Execution
 
 ### Phase 1
