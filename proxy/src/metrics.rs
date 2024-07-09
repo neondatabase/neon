@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
 use measured::{
-    label::{FixedCardinalitySet, LabelName, LabelSet, LabelValue, StaticLabelSet},
+    label::{FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet},
     metric::{histogram::Thresholds, name::MetricName},
     Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
     LabelGroup, MetricGroup,
@@ -574,6 +574,32 @@ impl LabelValue for ThreadPoolWorkerId {
 impl LabelGroup for ThreadPoolWorkerId {
     fn visit_values(&self, v: &mut impl measured::label::LabelGroupVisitor) {
         v.write_value(LabelName::from_str("worker"), self);
+    }
+}
+
+impl LabelGroupSet for ThreadPoolWorkers {
+    type Group<'a> = ThreadPoolWorkerId;
+
+    fn cardinality(&self) -> Option<usize> {
+        Some(self.0)
+    }
+
+    fn encode_dense(&self, value: Self::Unique) -> Option<usize> {
+        Some(value)
+    }
+
+    fn decode_dense(&self, value: usize) -> Self::Group<'_> {
+        ThreadPoolWorkerId(value)
+    }
+
+    type Unique = usize;
+
+    fn encode(&self, value: Self::Group<'_>) -> Option<Self::Unique> {
+        Some(value.0)
+    }
+
+    fn decode(&self, value: &Self::Unique) -> Self::Group<'_> {
+        ThreadPoolWorkerId(*value)
     }
 }
 

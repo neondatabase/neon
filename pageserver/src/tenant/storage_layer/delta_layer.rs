@@ -49,7 +49,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::LayerAccessKind;
+use pageserver_api::models::{ImageCompressionAlgorithm, LayerAccessKind};
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -457,7 +457,12 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-        let (val, res) = self.blob_writer.write_blob(val, ctx).await;
+        // We don't want to use compression in delta layer creation
+        let compression = ImageCompressionAlgorithm::DisabledNoDecompress;
+        let (val, res) = self
+            .blob_writer
+            .write_blob_maybe_compressed(val, ctx, compression)
+            .await;
         let off = match res {
             Ok(off) => off,
             Err(e) => return (val, Err(anyhow::anyhow!(e))),

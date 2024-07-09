@@ -1,4 +1,5 @@
 {
+  "originHash" : "8eff8c577ba246ce7824d3434839acefced2b1a1d2b1ad700554502538a50558",
   "pins" : [
     {
       "identity" : "bluesocket",
@@ -19,15 +20,6 @@
       }
     },
     {
-      "identity" : "openssl",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Kitura/OpenSSL.git",
-      "state" : {
-        "revision" : "5dc8cb4f971135c17343e3c6df4f28904a0600e2",
-        "version" : "2.3.1"
-      }
-    },
-    {
       "identity" : "postgresclientkit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/codewinsdotcom/PostgresClientKit.git",
@@ -37,5 +29,5 @@
       }
     }
   ],
-  "version" : 2
+  "version" : 3
 }

@@ -873,9 +873,8 @@ impl ComputeNode {
         Ok(())
     }
 
-    // We could've wrapped this around `pg_ctl reload`, but right now we don't use
-    // `pg_ctl` for start / stop, so this just seems much easier to do as we already
-    // have opened connection to Postgres and superuser access.
+    // Wrapped this around `pg_ctl reload`, but right now we don't use
+    // `pg_ctl` for start / stop.
     #[instrument(skip_all)]
     fn pg_reload_conf(&self) -> Result<()> {
         let pgctl_bin = Path::new(&self.pgbin).parent().unwrap().join("pg_ctl");
@@ -1387,7 +1386,9 @@ pub fn forward_termination_signal() {
     let pg_pid = PG_PID.load(Ordering::SeqCst);
     if pg_pid != 0 {
         let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
-        // use 'immediate' shutdown (SIGQUIT): https://www.postgresql.org/docs/current/server-shutdown.html
-        kill(pg_pid, Signal::SIGQUIT).ok();
+        // Use 'fast' shutdown (SIGINT) because it also creates a shutdown checkpoint, which is important for
+        // ROs to get a list of running xacts faster instead of going through the CLOG.
+        // See https://www.postgresql.org/docs/current/server-shutdown.html for the list of modes and signals.
+        kill(pg_pid, Signal::SIGINT).ok();
     }
 }
