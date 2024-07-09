@@ -315,7 +315,7 @@ impl<'a> VectoredBlobReader<'a> {
             read.size(),
             buf.capacity()
         );
-        let buf = self
+        let mut buf = self
             .file
             .read_exact_at(buf.slice(0..read.size()), read.start, ctx)
             .await?
@@ -363,6 +363,8 @@ impl<'a> VectoredBlobReader<'a> {
             };
 
             assert_eq!(end - start, blob_size);
+
+            buf[start as usize..end as usize].fill(0xaf);
 
             metas.push(VectoredBlob {
                 start: start as usize,
