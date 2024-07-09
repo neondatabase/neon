@@ -145,6 +145,10 @@ pub static WAL_SERVICE_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("WAL service worker")
         .enable_all()
+        // Default is 2 MiB at time of writing.
+        // With that, the `postgres_backend::Handler` overflows the stack in debug builds.
+        // => use 4 MiB
+        .thread_stack_size(4 * 1024 * 1024)
         .build()
         .expect("Failed to create WAL service runtime")
 });
