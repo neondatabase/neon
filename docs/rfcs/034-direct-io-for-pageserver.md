@@ -76,6 +76,7 @@ The outcome of the above will be that
 The norm will be very low baseline replacement rates in PS `PageCache`.
 High baseline replacement rates will be treated as a signal of resource exhaustion (page cache insufficient to host working set of the PS).
 It will be remediated by the storage controller, migrating tenants away to relieve pressure.
+(Such a migration mechanism in storage controller is not part of this project.)
 
 In the future, we may elminate the `PageCache` even for indirect blocks.
 For example with an LRU cache that has as unit the entire disk btree content
