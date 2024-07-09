@@ -87,6 +87,8 @@ from fixtures.utils import (
 )
 from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
+from .neon_api import NeonAPI
+
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.
@@ -182,6 +184,25 @@ def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Ite
 
     log.info(f"versioned_pg_distrib_dir is {versioned_dir}")
     yield versioned_dir
+
+
+@pytest.fixture(scope="session")
+def neon_api_key() -> str:
+    api_key = os.getenv("NEON_API_KEY")
+    if not api_key:
+        raise AssertionError("Set the NEON_API_KEY environment variable")
+
+    return api_key
+
+
+@pytest.fixture(scope="session")
+def neon_api_base_url() -> str:
+    return os.getenv("NEON_API_BASE_URL", "https://console-stage.neon.build/api/v2")
+
+
+@pytest.fixture(scope="session")
+def neon_api(neon_api_key: str, neon_api_base_url: str) -> NeonAPI:
+    return NeonAPI(neon_api_key, neon_api_base_url)
 
 
 def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "function"]:
@@ -2862,14 +2883,21 @@ class PgBin:
         env.update(env_add)
         return env
 
-    def run(
+    def _log_env(self, env: dict[str, str]) -> None:
+        env_s = {}
+        for k, v in env.items():
+            if k.startswith("PG") and k != "PGPASSWORD":
+                env_s[k] = v
+        log.debug(f"Environment: {env_s}")
+
+    def run_nonblocking(
         self,
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[Union[str, Path]] = None,
-    ):
+    ) -> subprocess.Popen[Any]:
         """
-        Run one of the postgres binaries.
+        Run one of the postgres binaries, not waiting for it to finish
 
         The command should be in list form, e.g. ['pgbench', '-p', '55432']
 
@@ -2880,11 +2908,34 @@ class PgBin:
 
         If you want stdout/stderr captured to files, use `run_capture` instead.
         """
-
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
-        subprocess.run(command, env=env, cwd=cwd, check=True)
+        self._log_env(env)
+        return subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE, text=True)
+
+    def run(
+        self,
+        command: List[str],
+        env: Optional[Env] = None,
+        cwd: Optional[Union[str, Path]] = None,
+    ) -> None:
+        """
+        Run one of the postgres binaries, waiting for it to finish
+
+        The command should be in list form, e.g. ['pgbench', '-p', '55432']
+
+        All the necessary environment variables will be set.
+
+        If the first argument (the command name) doesn't include a path (no '/'
+        characters present), then it will be edited to include the correct path.
+
+        If you want stdout/stderr captured to files, use `run_capture` instead.
+        """
+        proc = self.run_nonblocking(command, env, cwd)
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
     def run_capture(
         self,
@@ -2904,6 +2955,7 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
+        self._log_env(env)
         base_path, _, _ = subprocess_capture(
             self.log_dir,
             command,
