@@ -272,10 +272,17 @@ In this phase we build a bunch of foundational pieces. The work is parallelizabl
   ```
 * VirtualFile API to support direct IO
     * What's better: Require all callers to be explicit vs just always do direct IO?
-* Basic buffer pool implementation
-  * See next section for the vision for the efficient implementation, design API to accomodate that,
-    esp wrt RequestContext integration.
-  * Sketching & peer review is recommneded here.
+* Buffer pool design & implementation
+  * Explore designs / prior art to avoid contention on the global buffer pool
+  * No implicit global state, create the instance in `main()` and pass it through the app. `RequestContext` is the way to go.
+  * Explore further `RequestContext` integration: two-staged pool, with a tiny pool in the `RequestContext`
+    to avoid contention on the global pool.
+  * Should be able to draw from PS PageCache as a last resort mechanism to avoid OOMs
+    (PageCache thrashing will alert operators!)
+    * Longer-term, should have model of worst-case / p9X peak buffer usage per request
+      and admit not more requests than what configured buffer pool size allows.
+      Out of scope of this project, though.
+
 
 ## Phase 2
 In this phase, we do the bulk of the coding work, leveraging the runtime check to get feedback.
@@ -308,16 +315,3 @@ Also, we left room for optimization with the buffer pool implementation so let's
   * Manual testing is advisable for this => recommended to set up an EC2 instance with
     a local Grafana + Prometheus + node_exporter stack.
   * This work is time-consuming and open-ended. Get help if inexperienced.
-
-* Obvious bottleneck candidate: CPU overhead of buffer pool => make buffer pool implementation efficient
-  * No global state, pass it through the app. RequestContext is the way to go.
-  * Explore further `RequestContext` integration: two-staged pool, with a tiny pool in the `RequestContext`
-    to avoid contention on the global pool.
-  * Explore designs / prior art to avoid contention on the global buffer pool
-  * Should be able to draw from PS PageCache as a last resort mechanism to avoid OOMs
-    (PageCache thrashing will alert operators!)
-    * Longer-term, should have model of worst-case / p9X peak buffer usage per request
-      and admit not more requests than what configured buffer pool size allows.
-      Out of scope of this project, though.
-
-
