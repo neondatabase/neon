@@ -4,9 +4,7 @@
 use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
-use bytes::Bytes;
 use futures::stream::FuturesUnordered;
-use futures::Stream;
 use futures::StreamExt;
 use pageserver_api::key::Key;
 use pageserver_api::models::TenantState;
@@ -28,7 +26,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::net::TcpListener;
-use std::pin::pin;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -37,7 +34,6 @@ use std::time::Instant;
 use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::ConnectionId;
@@ -53,7 +49,6 @@ use crate::auth::check_permission;
 use crate::basebackup;
 use crate::basebackup::BasebackupError;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::import_datadir::import_wal_from_tar;
 use crate::metrics;
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
@@ -66,7 +61,6 @@ use crate::tenant::mgr::GetTenantError;
 use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
-use crate::tenant::timeline::FlushLayerError;
 use crate::tenant::timeline::WaitLsnError;
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
@@ -82,56 +76,6 @@ use postgres_ffi::BLCKSZ;
 // is not yet in state [`TenantState::Active`].
 const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
-/// Read the end of a tar archive.
-///
-/// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
-/// `tokio_tar` already read the first such block. Read the second all-zeros block,
-/// and check that there is no more data after the EOF marker.
-///
-/// 'tar' command can also write extra blocks of zeros, up to a record
-/// size, controlled by the --record-size argument. Ignore them too.
-async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()> {
-    use tokio::io::AsyncReadExt;
-    let mut buf = [0u8; 512];
-
-    // Read the all-zeros block, and verify it
-    let mut total_bytes = 0;
-    while total_bytes < 512 {
-        let nbytes = reader.read(&mut buf[total_bytes..]).await?;
-        total_bytes += nbytes;
-        if nbytes == 0 {
-            break;
-        }
-    }
-    if total_bytes < 512 {
-        anyhow::bail!("incomplete or invalid tar EOF marker");
-    }
-    if !buf.iter().all(|&x| x == 0) {
-        anyhow::bail!("invalid tar EOF marker");
-    }
-
-    // Drain any extra zero-blocks after the EOF marker
-    let mut trailing_bytes = 0;
-    let mut seen_nonzero_bytes = false;
-    loop {
-        let nbytes = reader.read(&mut buf).await?;
-        trailing_bytes += nbytes;
-        if !buf.iter().all(|&x| x == 0) {
-            seen_nonzero_bytes = true;
-        }
-        if nbytes == 0 {
-            break;
-        }
-    }
-    if seen_nonzero_bytes {
-        anyhow::bail!("unexpected non-zero bytes after the tar archive");
-    }
-    if trailing_bytes % 512 != 0 {
-        anyhow::bail!("unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive");
-    }
-    Ok(())
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 
 ///
@@ -141,7 +85,6 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 ///
 pub async fn libpq_listener_main(
     tenant_manager: Arc<TenantManager>,
-    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
@@ -186,7 +129,6 @@ pub async fn libpq_listener_main(
                     false,
                     page_service_conn_main(
                         tenant_manager.clone(),
-                        broker_client.clone(),
                         local_auth,
                         socket,
                         auth_type,
@@ -209,7 +151,6 @@ pub async fn libpq_listener_main(
 #[instrument(skip_all, fields(peer_addr))]
 async fn page_service_conn_main(
     tenant_manager: Arc<TenantManager>,
-    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
@@ -262,8 +203,7 @@ async fn page_service_conn_main(
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler =
-        PageServerHandler::new(tenant_manager, broker_client, auth, connection_ctx);
+    let mut conn_handler = PageServerHandler::new(tenant_manager, auth, connection_ctx);
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
@@ -294,7 +234,6 @@ struct HandlerTimeline {
 }
 
 struct PageServerHandler {
-    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
@@ -386,13 +325,11 @@ impl From<WaitLsnError> for QueryError {
 impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
-        broker_client: storage_broker::BrokerClientChannel,
         auth: Option<Arc<SwappableJwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {
             tenant_manager,
-            broker_client,
             auth,
             claims: None,
             connection_ctx,
@@ -473,73 +410,6 @@ impl PageServerHandler {
                 Err(QueryError::Shutdown)
             }
         )
-    }
-
-    fn copyin_stream<'a, IO>(
-        &'a self,
-        pgb: &'a mut PostgresBackend<IO>,
-        cancel: &'a CancellationToken,
-    ) -> impl Stream<Item = io::Result<Bytes>> + 'a
-    where
-        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
-    {
-        async_stream::try_stream! {
-            loop {
-                let msg = tokio::select! {
-                    biased;
-
-                    _ = cancel.cancelled() => {
-                        // We were requested to shut down.
-                        let msg = "pageserver is shutting down";
-                        let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
-                        Err(QueryError::Shutdown)
-                    }
-
-                    msg = pgb.read_message() => { msg.map_err(QueryError::from)}
-                };
-
-                match msg {
-                    Ok(Some(message)) => {
-                        let copy_data_bytes = match message {
-                            FeMessage::CopyData(bytes) => bytes,
-                            FeMessage::CopyDone => { break },
-                            FeMessage::Sync => continue,
-                            FeMessage::Terminate => {
-                                let msg = "client terminated connection with Terminate message during COPY";
-                                let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                                // error can't happen here, ErrorResponse serialization should be always ok
-                                pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                                Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
-                                break;
-                            }
-                            m => {
-                                let msg = format!("unexpected message {m:?}");
-                                // error can't happen here, ErrorResponse serialization should be always ok
-                                pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
-                                Err(io::Error::new(io::ErrorKind::Other, msg))?;
-                                break;
-                            }
-                        };
-
-                        yield copy_data_bytes;
-                    }
-                    Ok(None) => {
-                        let msg = "client closed connection during COPY";
-                        let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                        // error can't happen here, ErrorResponse serialization should be always ok
-                        pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
-                        self.flush_cancellable(pgb, cancel).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                        Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
-                    }
-                    Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
-                        Err(io_error)?;
-                    }
-                    Err(other) => {
-                        Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
-                    }
-                };
-            }
-        }
     }
 
     #[instrument(skip_all)]
@@ -710,128 +580,6 @@ impl PageServerHandler {
                 }
             }
         }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(%base_lsn, end_lsn=%_end_lsn, %pg_version))]
-    async fn handle_import_basebackup<IO>(
-        &self,
-        pgb: &mut PostgresBackend<IO>,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        base_lsn: Lsn,
-        _end_lsn: Lsn,
-        pg_version: u32,
-        ctx: RequestContext,
-    ) -> Result<(), QueryError>
-    where
-        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
-    {
-        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
-
-        // Create empty timeline
-        info!("creating new timeline");
-        let tenant = self
-            .get_active_tenant_with_timeout(tenant_id, ShardSelector::Zero, ACTIVE_TENANT_TIMEOUT)
-            .await?;
-        let timeline = tenant
-            .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
-            .await?;
-
-        // TODO mark timeline as not ready until it reaches end_lsn.
-        // We might have some wal to import as well, and we should prevent compute
-        // from connecting before that and writing conflicting wal.
-        //
-        // This is not relevant for pageserver->pageserver migrations, since there's
-        // no wal to import. But should be fixed if we want to import from postgres.
-
-        // TODO leave clean state on error. For now you can use detach to clean
-        // up broken state from a failed import.
-
-        // Import basebackup provided via CopyData
-        info!("importing basebackup");
-        pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        self.flush_cancellable(pgb, &tenant.cancel).await?;
-
-        let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &tenant.cancel)));
-        timeline
-            .import_basebackup_from_tar(
-                tenant.clone(),
-                &mut copyin_reader,
-                base_lsn,
-                self.broker_client.clone(),
-                &ctx,
-            )
-            .await?;
-
-        // Read the end of the tar archive.
-        read_tar_eof(copyin_reader).await?;
-
-        // TODO check checksum
-        // Meanwhile you can verify client-side by taking fullbackup
-        // and checking that it matches in size with what was imported.
-        // It wouldn't work if base came from vanilla postgres though,
-        // since we discard some log files.
-
-        info!("done");
-        Ok(())
-    }
-
-    #[instrument(skip_all, fields(shard_id, %start_lsn, %end_lsn))]
-    async fn handle_import_wal<IO>(
-        &self,
-        pgb: &mut PostgresBackend<IO>,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        start_lsn: Lsn,
-        end_lsn: Lsn,
-        ctx: RequestContext,
-    ) -> Result<(), QueryError>
-    where
-        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
-    {
-        let timeline = self
-            .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
-            .await?;
-        let last_record_lsn = timeline.get_last_record_lsn();
-        if last_record_lsn != start_lsn {
-            return Err(QueryError::Other(
-                anyhow::anyhow!("Cannot import WAL from Lsn {start_lsn} because timeline does not start from the same lsn: {last_record_lsn}"))
-            );
-        }
-
-        // TODO leave clean state on error. For now you can use detach to clean
-        // up broken state from a failed import.
-
-        // Import wal provided via CopyData
-        info!("importing wal");
-        pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        self.flush_cancellable(pgb, &timeline.cancel).await?;
-        let mut copyin_reader = pin!(StreamReader::new(self.copyin_stream(pgb, &timeline.cancel)));
-        import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
-        info!("wal import complete");
-
-        // Read the end of the tar archive.
-        read_tar_eof(copyin_reader).await?;
-
-        // TODO Does it make sense to overshoot?
-        if timeline.get_last_record_lsn() < end_lsn {
-            return Err(QueryError::Other(
-                anyhow::anyhow!("Cannot import WAL from Lsn {start_lsn} because timeline does not start from the same lsn: {last_record_lsn}"))
-            );
-        }
-
-        // Flush data to disk, then upload to s3. No need for a forced checkpoint.
-        // We only want to persist the data, and it doesn't matter if it's in the
-        // shape of deltas or images.
-        info!("flushing layers");
-        timeline.freeze_and_flush().await.map_err(|e| match e {
-            FlushLayerError::Cancelled => QueryError::Shutdown,
-            other => QueryError::Other(other.into()),
-        })?;
-
-        info!("done");
         Ok(())
     }
 
@@ -1705,109 +1453,6 @@ where
             )
             .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        } else if query_string.starts_with("import basebackup ") {
-            // Import the `base` section (everything but the wal) of a basebackup.
-            // Assumes the tenant already exists on this pageserver.
-            //
-            // Files are scheduled to be persisted to remote storage, and the
-            // caller should poll the http api to check when that is done.
-            //
-            // Example import command:
-            // 1. Get start/end LSN from backup_manifest file
-            // 2. Run:
-            // cat my_backup/base.tar | psql -h $PAGESERVER \
-            //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
-            let params = &parts[2..];
-            if params.len() != 5 {
-                return Err(QueryError::Other(anyhow::anyhow!(
-                    "invalid param number for import basebackup command"
-                )));
-            }
-            let tenant_id = TenantId::from_str(params[0])
-                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
-            let timeline_id = TimelineId::from_str(params[1])
-                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
-            let base_lsn = Lsn::from_str(params[2])
-                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
-            let end_lsn = Lsn::from_str(params[3])
-                .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
-            let pg_version = u32::from_str(params[4])
-                .with_context(|| format!("Failed to parse pg_version from {}", params[4]))?;
-
-            tracing::Span::current()
-                .record("tenant_id", field::display(tenant_id))
-                .record("timeline_id", field::display(timeline_id));
-
-            self.check_permission(Some(tenant_id))?;
-
-            COMPUTE_COMMANDS_COUNTERS
-                .for_command(ComputeCommandKind::ImportBasebackup)
-                .inc();
-
-            match self
-                .handle_import_basebackup(
-                    pgb,
-                    tenant_id,
-                    timeline_id,
-                    base_lsn,
-                    end_lsn,
-                    pg_version,
-                    ctx,
-                )
-                .await
-            {
-                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
-                Err(e) => {
-                    error!("error importing base backup between {base_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message_noflush(&BeMessage::ErrorResponse(
-                        &e.to_string(),
-                        Some(e.pg_error_code()),
-                    ))?
-                }
-            };
-        } else if query_string.starts_with("import wal ") {
-            // Import the `pg_wal` section of a basebackup.
-            //
-            // Files are scheduled to be persisted to remote storage, and the
-            // caller should poll the http api to check when that is done.
-            let params = &parts[2..];
-            if params.len() != 4 {
-                return Err(QueryError::Other(anyhow::anyhow!(
-                    "invalid param number for import wal command"
-                )));
-            }
-            let tenant_id = TenantId::from_str(params[0])
-                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
-            let timeline_id = TimelineId::from_str(params[1])
-                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
-            let start_lsn = Lsn::from_str(params[2])
-                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
-            let end_lsn = Lsn::from_str(params[3])
-                .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
-
-            tracing::Span::current()
-                .record("tenant_id", field::display(tenant_id))
-                .record("timeline_id", field::display(timeline_id));
-
-            self.check_permission(Some(tenant_id))?;
-
-            COMPUTE_COMMANDS_COUNTERS
-                .for_command(ComputeCommandKind::ImportWal)
-                .inc();
-
-            match self
-                .handle_import_wal(pgb, tenant_id, timeline_id, start_lsn, end_lsn, ctx)
-                .await
-            {
-                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
-                Err(e) => {
-                    error!("error importing WAL between {start_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message_noflush(&BeMessage::ErrorResponse(
-                        &e.to_string(),
-                        Some(e.pg_error_code()),
-                    ))?
-                }
-            };
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
