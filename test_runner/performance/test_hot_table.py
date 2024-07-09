@@ -28,8 +28,19 @@ def test_hot_table(env: PgCompare):
             with env.record_duration("write"):
                 cur.execute("create table t (i integer primary key);")
                 cur.execute(f"insert into t values (generate_series(1,{num_rows}));")
-                for i in range(num_writes):
-                    cur.execute(f"update t set i = {i + num_rows} WHERE i = {i};")
+                # PL/pgSQL block to perform updates (and avoid latency between client and server)
+                cur.execute(
+                    f"""
+                DO $$
+                DECLARE
+                    r integer := {num_rows};
+                BEGIN
+                    FOR j IN 1..{num_writes} LOOP
+                        UPDATE t SET i = j + r WHERE i = j;
+                    END LOOP;
+                END $$;
+                """
+                )
 
             # Read the table
             with env.record_duration("read"):
