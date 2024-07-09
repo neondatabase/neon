@@ -267,7 +267,7 @@ async fn page_service_conn_main(
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
-        .run(&mut conn_handler, task_mgr::shutdown_watcher)
+        .run(&mut conn_handler, &task_mgr::shutdown_token())
         .await
     {
         Ok(()) => {

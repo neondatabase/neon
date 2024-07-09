@@ -6,8 +6,9 @@ use anyhow::Context;
 use once_cell::sync::Lazy;
 use postgres_backend::{AuthType, PostgresBackend, PostgresBackendTCP, QueryError};
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
-use std::{convert::Infallible, future};
+use std::convert::Infallible;
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, Instrument};
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
@@ -67,7 +68,9 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
 
 async fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None)?;
-    pgbackend.run(&mut MgmtHandler, future::pending::<()>).await
+    pgbackend
+        .run(&mut MgmtHandler, &CancellationToken::new())
+        .await
 }
 
 /// A message received by `mgmt` when a compute node is ready.
