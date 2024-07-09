@@ -16,8 +16,8 @@ from pytest_lazyfixture import lazy_fixture
 )
 def test_hot_table(env: PgCompare):
     # Update a small table many times, then measure read performance
-    num_rows = 100000  # Slightly larger than shared buffers size  TODO validate
-    num_writes = 1000000
+    num_rows = 100000  # initial table size only about 4 MB
+    num_writes = 10000000  # write approximately 349 MB blocks > 128 MB shared_buffers
     num_reads = 10
 
     with closing(env.pg.connect()) as conn:

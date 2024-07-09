@@ -115,7 +115,7 @@ jobs:
         extra_params:
           -m remote_cluster
           --sparse-ordering
-          --timeout 5400
+          --timeout 7200
           --ignore test_runner/performance/test_perf_olap.py
           --ignore test_runner/performance/test_perf_pgvector_queries.py
           --ignore test_runner/performance/test_logical_replication.py
