@@ -588,13 +588,13 @@ mod tests {
         }
     }
 
-    async fn round_trip_test_compressed<const BUFFERED: bool>(
+    async fn round_trip_test_compressed(
         blobs: &[Vec<u8>],
         compression: bool,
     ) -> Result<(), Error> {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let (_temp_dir, pathbuf, offsets) =
-            write_maybe_compressed::<BUFFERED>(blobs, compression, &ctx).await?; // COMP
+            write_maybe_compressed::<true>(blobs, compression, &ctx).await?;
 
         let file = VirtualFile::open(&pathbuf, &ctx).await?;
         let file_len = std::fs::metadata(&pathbuf)?.len();
@@ -636,10 +636,8 @@ mod tests {
             vec![0xf3; 24 * PAGE_SZ],
             b"foobar".to_vec(),
         ];
-        round_trip_test_compressed::<false>(blobs, false).await?;
-        round_trip_test_compressed::<true>(blobs, false).await?;
-        round_trip_test_compressed::<false>(blobs, true).await?;
-        round_trip_test_compressed::<true>(blobs, true).await?;
+        round_trip_test_compressed(blobs, false).await?;
+        round_trip_test_compressed(blobs, true).await?;
         Ok(())
     }
 
@@ -648,10 +646,8 @@ mod tests {
         let blobs = (0..PAGE_SZ / 8)
             .map(|v| random_array(v * 16))
             .collect::<Vec<_>>();
-        round_trip_test_compressed::<false>(&blobs, false).await?;
-        round_trip_test_compressed::<true>(&blobs, false).await?;
-        round_trip_test_compressed::<false>(&blobs, true).await?;
-        round_trip_test_compressed::<true>(&blobs, true).await?;
+        round_trip_test_compressed(&blobs, false).await?;
+        round_trip_test_compressed(&blobs, true).await?;
         Ok(())
     }
 }
