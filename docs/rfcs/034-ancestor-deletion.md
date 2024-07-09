@@ -221,9 +221,10 @@ restart the Timeline.
 
 ## Concurrent timeline creation
 
-If new historic timelines are created using the parent as an ancestor while the detach ancestor API is running, they will not be re-parented to the child. This doesn't break
-anything, but it leaves the parent in a state where it might not be possible
-to delete it.
+If new historic timelines are created using the parent as an ancestor while the
+detach ancestor API is running, they will not be re-parented to the child. This
+doesn't break anything, but it leaves the parent in a state where it might not
+be possible to delete it.
 
 Since timeline creations are an explicit user action, this is not something we need to
 worry about as the storage layer: a user who wants to delete their parent timeline will not create
