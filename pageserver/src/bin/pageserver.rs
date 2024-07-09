@@ -660,7 +660,6 @@ fn start_pageserver(
                 async move {
                     page_service::libpq_listener_main(
                         tenant_manager,
-                        broker_client,
                         pg_auth,
                         pageserver_listener,
                         conf.pg_auth_type,

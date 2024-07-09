@@ -151,6 +151,10 @@ struct ServiceState {
 /// controller API.
 fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
     match e {
+        mgmt_api::Error::SendRequest(e) => {
+            // Presume errors sending requests are connectivity/availability issues
+            ApiError::ResourceUnavailable(format!("{node} error sending request: {e}").into())
+        }
         mgmt_api::Error::ReceiveErrorBody(str) => {
             // Presume errors receiving body are connectivity/availability issues
             ApiError::ResourceUnavailable(
