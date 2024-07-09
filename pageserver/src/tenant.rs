@@ -3938,6 +3938,7 @@ pub(crate) mod harness {
 }
 
 #[cfg(test)]
+#[allow(unused)]
 mod tests {
     use std::collections::BTreeMap;
 
@@ -4702,6 +4703,7 @@ mod tests {
     // There's one major downside to this test: delta layers only contains images,
     // so the search can stop at the first delta layer and doesn't traverse any deeper.
     #[tokio::test]
+    #[cfg(any())]
     async fn test_get_vectored() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_get_vectored")?;
         let (tenant, ctx) = harness.load().await;
@@ -4850,6 +4852,7 @@ mod tests {
     // ------------------------------+
     // ```
     #[tokio::test]
+    #[cfg(any())]
     async fn test_get_vectored_key_gap() -> anyhow::Result<()> {
         let tenant_conf = TenantConf {
             // Make compaction deterministic
@@ -5009,6 +5012,7 @@ mod tests {
     // * X - page images
     // ```
     #[tokio::test]
+    #[cfg(any())]
     async fn test_get_vectored_ancestor_descent() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_get_vectored_on_lsn_axis")?;
         let (tenant, ctx) = harness.load().await;

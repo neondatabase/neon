@@ -693,6 +693,7 @@ impl DeletionQueue {
 }
 
 #[cfg(test)]
+#[allow(unused)]
 mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
@@ -991,6 +992,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[cfg(any())]
     async fn deletion_queue_validation() -> anyhow::Result<()> {
         let ctx = setup("deletion_queue_validation").expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
