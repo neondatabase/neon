@@ -28,13 +28,13 @@ pub struct SnapshotDownloader {
 }
 
 impl SnapshotDownloader {
-    pub fn new(
+    pub async fn new(
         bucket_config: BucketConfig,
         tenant_id: TenantId,
         output_path: Utf8PathBuf,
         concurrency: usize,
     ) -> anyhow::Result<Self> {
-        let (s3_client, s3_root) = init_remote(bucket_config.clone(), NodeKind::Pageserver)?;
+        let (s3_client, s3_root) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
         Ok(Self {
             s3_client,
             s3_root,
@@ -215,7 +215,8 @@ impl SnapshotDownloader {
     }
 
     pub async fn download(&self) -> anyhow::Result<()> {
-        let (s3_client, target) = init_remote(self.bucket_config.clone(), NodeKind::Pageserver)?;
+        let (s3_client, target) =
+            init_remote(self.bucket_config.clone(), NodeKind::Pageserver).await?;
 
         // Generate a stream of TenantShardId
         let shards = stream_tenant_shards(&s3_client, &target, self.tenant_id).await?;
