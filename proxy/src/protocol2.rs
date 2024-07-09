@@ -16,13 +16,7 @@ pin_project! {
     pub struct ChainRW<T> {
         #[pin]
         pub inner: T,
-        pub buf: BytesMut,
-    }
-}
-
-impl<T> ChainRW<T> {
-    pub fn with_buf(inner: T, buf: BytesMut) -> Self {
-        Self { inner, buf }
+        buf: BytesMut,
     }
 }
 
