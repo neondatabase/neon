@@ -128,7 +128,8 @@ impl<'a> BlockCursor<'a> {
                 decoder.write_all(buf_to_write).await?;
                 decoder.flush().await?;
             } else {
-                unreachable!("already checked above")
+                dstbuf.extend_from_slice(&buf_to_write);
+                //unreachable!("already checked above")
             }
         }
 
