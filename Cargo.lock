@@ -4094,6 +4094,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls 0.25.0",
+ "tokio-util",
  "tracing",
  "workspace_hack",
 ]
@@ -7458,10 +7459,8 @@ dependencies = [
  "either",
  "fail",
  "futures-channel",
- "futures-core",
  "futures-executor",
  "futures-io",
- "futures-sink",
  "futures-util",
  "getrandom 0.2.11",
  "hashbrown 0.14.5",

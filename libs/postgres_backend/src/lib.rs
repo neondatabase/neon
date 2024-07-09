@@ -16,6 +16,7 @@ use std::{fmt, io};
 use std::{future::Future, str::FromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
@@ -400,21 +401,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
     }
 
     /// Wrapper for run_message_loop() that shuts down socket when we are done
-    pub async fn run<F, S>(
+    pub async fn run(
         mut self,
         handler: &mut impl Handler<IO>,
-        shutdown_watcher: F,
-    ) -> Result<(), QueryError>
-    where
-        F: Fn() -> S + Clone,
-        S: Future,
-    {
-        let ret = self
-            .run_message_loop(handler, shutdown_watcher.clone())
-            .await;
+        cancel: &CancellationToken,
+    ) -> Result<(), QueryError> {
+        let ret = self.run_message_loop(handler, cancel).await;
 
         tokio::select! {
-            _ = shutdown_watcher() => {
+            _ = cancel.cancelled() => {
                 // do nothing; we most likely got already stopped by shutdown and will log it next.
             }
             _ = self.framed.shutdown() => {
@@ -444,21 +439,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         }
     }
 
-    async fn run_message_loop<F, S>(
+    async fn run_message_loop(
         &mut self,
         handler: &mut impl Handler<IO>,
-        shutdown_watcher: F,
-    ) -> Result<(), QueryError>
-    where
-        F: Fn() -> S,
-        S: Future,
-    {
+        cancel: &CancellationToken,
+    ) -> Result<(), QueryError> {
         trace!("postgres backend to {:?} started", self.peer_addr);
 
         tokio::select!(
             biased;
 
-            _ = shutdown_watcher() => {
+            _ = cancel.cancelled() => {
                 // We were requested to shut down.
                 tracing::info!("shutdown request received during handshake");
                 return Err(QueryError::Shutdown)
@@ -473,7 +464,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         let mut query_string = Bytes::new();
         while let Some(msg) = tokio::select!(
             biased;
-            _ = shutdown_watcher() => {
+            _ = cancel.cancelled() => {
                 // We were requested to shut down.
                 tracing::info!("shutdown request received in run_message_loop");
                 return Err(QueryError::Shutdown)
@@ -485,7 +476,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             let result = self.process_message(handler, msg, &mut query_string).await;
             tokio::select!(
                 biased;
-                _ = shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     // We were requested to shut down.
                     tracing::info!("shutdown request received during response flush");
 
