@@ -66,7 +66,9 @@ impl fmt::Debug for ProtocolVersion {
 #[derive(Debug)]
 pub enum FeStartupPacket {
     CancelRequest(CancelKeyData),
-    SslRequest,
+    SslRequest {
+        direct: bool,
+    },
     GssEncRequest,
     StartupMessage {
         version: ProtocolVersion,
@@ -339,7 +341,7 @@ impl FeStartupPacket {
         // (It can't be a Postgres startup length because in network byte order
         // that would be a startup packet hundreds of megabytes long)
         if buf.first() == Some(&0x16) {
-            return Ok(Some(FeStartupPacket::SslRequest));
+            return Ok(Some(FeStartupPacket::SslRequest { direct: true }));
         }
 
         // need at least 4 bytes with packet len
@@ -390,7 +392,7 @@ impl FeStartupPacket {
             }
             NEGOTIATE_SSL_CODE => {
                 // Requested upgrade to SSL (aka TLS)
-                FeStartupPacket::SslRequest
+                FeStartupPacket::SslRequest { direct: false }
             }
             NEGOTIATE_GSS_CODE => {
                 // Requested upgrade to GSSAPI

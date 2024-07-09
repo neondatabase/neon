@@ -88,13 +88,20 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
         use FeStartupPacket::*;
         match msg {
-            SslRequest => match stream.get_ref() {
+            SslRequest { direct } => match stream.get_ref() {
                 Stream::Raw { .. } if !tried_ssl => {
                     tried_ssl = true;
 
                     // We can't perform TLS handshake without a config
-                    let enc = tls.is_some();
-                    stream.write_message(&Be::EncryptionResponse(enc)).await?;
+                    let have_tls = tls.is_some();
+                    if !direct {
+                        stream
+                            .write_message(&Be::EncryptionResponse(have_tls))
+                            .await?;
+                    } else if !have_tls {
+                        return Err(HandshakeError::ProtocolViolation);
+                    }
+
                     if let Some(tls) = tls.take() {
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.
