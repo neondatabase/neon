@@ -10,6 +10,7 @@ pub mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
 pub use copy_bidirectional::ErrorSource;
 
+use crate::protocol2::ChainRW;
 use crate::{
     auth,
     cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
@@ -246,7 +247,8 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
-) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
+) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, ChainRW<S>>>, ClientRequestError>
+{
     info!(
         protocol = %ctx.protocol,
         "handling interactive connection from client"
