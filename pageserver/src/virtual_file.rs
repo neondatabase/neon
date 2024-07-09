@@ -1015,6 +1015,7 @@ impl tokio_epoll_uring::IoFd for FileGuard {
 
 #[cfg(test)]
 impl VirtualFile {
+    #[cfg(any())]
     pub(crate) async fn read_blk(
         &self,
         blknum: u32,

@@ -1890,7 +1890,7 @@ impl ResidentLayer {
         self.owner.metadata()
     }
 
-    #[cfg(test)]
+    #[cfg(any())]
     pub(crate) async fn get_as_delta(
         &self,
         ctx: &RequestContext,

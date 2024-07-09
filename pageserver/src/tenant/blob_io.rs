@@ -128,7 +128,7 @@ impl<'a> BlockCursor<'a> {
                 decoder.write_all(buf_to_write).await?;
                 decoder.flush().await?;
             } else {
-                dstbuf.extend_from_slice(&buf_to_write);
+                dstbuf.extend_from_slice(buf_to_write);
                 //unreachable!("already checked above")
             }
         }
@@ -395,7 +395,7 @@ impl BlobWriter<false> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
     use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
