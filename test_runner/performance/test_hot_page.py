@@ -42,7 +42,8 @@ def test_hot_page(env: PgCompare):
                 """
                 )
 
-            # Write 3-4 MB to evict t from compute cache
+            # Write ca 350 MB to evict t from compute shared buffers (128 MB)
+            # however it will still be in LFC, so I do not really understand the point of this test
             cur.execute("create table f (i integer);")
             cur.execute("insert into f values (generate_series(1,100000));")
 
