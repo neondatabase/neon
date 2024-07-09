@@ -242,24 +242,36 @@ impl ConsoleConfig {
     }
 }
 
-pub fn init_logging(file_name: &str) -> WorkerGuard {
-    let (file_writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::never("./logs/", file_name));
-
-    let file_logs = fmt::Layer::new()
-        .with_target(false)
-        .with_ansi(false)
-        .with_writer(file_writer);
+pub fn init_logging(file_name: &str) -> Option<WorkerGuard> {
     let stderr_logs = fmt::Layer::new()
         .with_target(false)
         .with_writer(std::io::stderr);
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(file_logs)
-        .with(stderr_logs)
-        .init();
 
-    guard
+    let disable_file_logging = match std::env::var("PAGESERVER_DISABLE_FILE_LOGGING") {
+        Ok(s) => s == "1" || s.to_lowercase() == "true",
+        Err(_) => false,
+    };
+
+    if disable_file_logging {
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(stderr_logs)
+            .init();
+        None
+    } else {
+        let (file_writer, guard) =
+            tracing_appender::non_blocking(tracing_appender::rolling::never("./logs/", file_name));
+        let file_logs = fmt::Layer::new()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(file_writer);
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(stderr_logs)
+            .with(file_logs)
+            .init();
+        Some(guard)
+    }
 }
 
 pub fn init_s3_client(bucket_region: Region) -> Client {
