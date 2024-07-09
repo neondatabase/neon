@@ -15,6 +15,7 @@
 #include "access/relation.h"
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/xlog_internal.h"
 #include "catalog/namespace.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -41,6 +42,8 @@ PG_FUNCTION_INFO_V1(clear_buffer_cache);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
 PG_FUNCTION_INFO_V1(neon_xlogflush);
+PG_FUNCTION_INFO_V1(trigger_panic);
+PG_FUNCTION_INFO_V1(trigger_segfault);
 
 /*
  * Linkage to functions in neon module.
@@ -48,10 +51,10 @@ PG_FUNCTION_INFO_V1(neon_xlogflush);
  */
 #if PG_MAJORVERSION_NUM < 16
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, XLogRecPtr not_modified_since, char *buffer);
+									   neon_request_lsns request_lsns, char *buffer);
 #else
 typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-									   XLogRecPtr request_lsn, XLogRecPtr not_modified_since, void *buffer);
+									   neon_request_lsns request_lsns, void *buffer);
 #endif
 
 static neon_read_at_lsn_type neon_read_at_lsn_ptr;
@@ -298,9 +301,7 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	text	   *relname;
 	text	   *forkname;
 	uint32		blkno;
-
-	XLogRecPtr	request_lsn;
-	XLogRecPtr	not_modified_since;
+	neon_request_lsns	request_lsns;
 
 	if (PG_NARGS() != 5)
 		elog(ERROR, "unexpected number of arguments in SQL function signature");
@@ -312,8 +313,15 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	forkname = PG_GETARG_TEXT_PP(1);
 	blkno = PG_GETARG_UINT32(2);
 
-	request_lsn = PG_ARGISNULL(3) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(3);
-	not_modified_since = PG_ARGISNULL(4) ? request_lsn : PG_GETARG_LSN(4);
+	request_lsns.request_lsn = PG_ARGISNULL(3) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(3);
+	request_lsns.not_modified_since = PG_ARGISNULL(4) ? request_lsns.request_lsn : PG_GETARG_LSN(4);
+	/*
+	 * For the time being, use the same LSN for request and
+	 * effective request LSN. If any test needed to use UINT64_MAX
+	 * as the request LSN, we'd need to add effective_request_lsn
+	 * as a new argument.
+	 */
+	request_lsns.effective_request_lsn = request_lsns.request_lsn;
 
 	if (!superuser())
 		ereport(ERROR,
@@ -367,7 +375,8 @@ get_raw_page_at_lsn(PG_FUNCTION_ARGS)
 	SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 	raw_page_data = VARDATA(raw_page);
 
-	neon_read_at_lsn(InfoFromRelation(rel), forknum, blkno, request_lsn, not_modified_since, raw_page_data);
+	neon_read_at_lsn(InfoFromRelation(rel), forknum, blkno, request_lsns,
+					 raw_page_data);
 
 	relation_close(rel, AccessShareLock);
 
@@ -413,31 +422,93 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 
 		ForkNumber	forknum = PG_GETARG_UINT32(3);
 		uint32		blkno = PG_GETARG_UINT32(4);
-		XLogRecPtr	request_lsn;
-		XLogRecPtr	not_modified_since;
+		neon_request_lsns	request_lsns;
 
 		/* Initialize buffer to copy to */
 		bytea	   *raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
 
-		request_lsn = PG_ARGISNULL(5) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(5);
-		not_modified_since = PG_ARGISNULL(6) ? request_lsn : PG_GETARG_LSN(6);
+		request_lsns.request_lsn = PG_ARGISNULL(5) ? GetXLogInsertRecPtr() : PG_GETARG_LSN(5);
+		request_lsns.not_modified_since = PG_ARGISNULL(6) ? request_lsns.request_lsn : PG_GETARG_LSN(6);
+		/*
+		 * For the time being, use the same LSN for request
+		 * and effective request LSN. If any test needed to
+		 * use UINT64_MAX as the request LSN, we'd need to add
+		 * effective_request_lsn as a new argument.
+		 */
+		request_lsns.effective_request_lsn = request_lsns.request_lsn;
 
 		SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
 		raw_page_data = VARDATA(raw_page);
 
-		neon_read_at_lsn(rinfo, forknum, blkno, request_lsn, not_modified_since, raw_page_data);
+		neon_read_at_lsn(rinfo, forknum, blkno, request_lsns, raw_page_data);
 		PG_RETURN_BYTEA_P(raw_page);
 	}
 }
 
 /*
  * Directly calls XLogFlush(lsn) to flush WAL buffers.
+ *
+ * If 'lsn' is not specified (is NULL), flush all generated WAL.
  */
 Datum
 neon_xlogflush(PG_FUNCTION_ARGS)
 {
-	XLogRecPtr	lsn = PG_GETARG_LSN(0);
+	XLogRecPtr	lsn;
+
+	if (RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("recovery is in progress"),
+				 errhint("cannot flush WAL during recovery.")));
+
+	if (!PG_ARGISNULL(0))
+		lsn = PG_GETARG_LSN(0);
+	else
+	{
+		lsn = GetXLogInsertRecPtr();
+
+		/*---
+		 * The LSN returned by GetXLogInsertRecPtr() is the position where the
+		 * next inserted record would begin. If the last record ended just at
+		 * the page boundary, the next record will begin after the page header
+		 * on the next page, but the next page's page header has not been
+		 * written yet. If we tried to flush it, XLogFlush() would throw an
+		 * error:
+		 *
+		 * ERROR : xlog flush request %X/%X is not satisfied --- flushed only to %X/%X
+		 *
+		 * To avoid that, if the insert position points to just after the page
+		 * header, back off to page boundary.
+		 */
+		if (lsn % XLOG_BLCKSZ == SizeOfXLogShortPHD &&
+			XLogSegmentOffset(lsn, wal_segment_size) > XLOG_BLCKSZ)
+			lsn -= SizeOfXLogShortPHD;
+		else if (lsn % XLOG_BLCKSZ == SizeOfXLogLongPHD &&
+				 XLogSegmentOffset(lsn, wal_segment_size) < XLOG_BLCKSZ)
+			lsn -= SizeOfXLogLongPHD;
+	}
 
 	XLogFlush(lsn);
 	PG_RETURN_VOID();
+}
+
+/*
+ * Function to trigger panic.
+ */
+Datum
+trigger_panic(PG_FUNCTION_ARGS)
+{
+    elog(PANIC, "neon_test_utils: panic");
+    PG_RETURN_VOID();
+}
+
+/*
+ * Function to trigger a segfault.
+ */
+Datum
+trigger_segfault(PG_FUNCTION_ARGS)
+{
+    int *ptr = NULL;
+    *ptr = 42;
+    PG_RETURN_VOID();
 }

@@ -311,7 +311,7 @@ impl DeletionList {
                 result.extend(
                     timeline_layers
                         .into_iter()
-                        .map(|l| timeline_remote_path.join(&Utf8PathBuf::from(l))),
+                        .map(|l| timeline_remote_path.join(Utf8PathBuf::from(l))),
                 );
             }
         }
@@ -382,17 +382,6 @@ pub enum DeletionQueueError {
 }
 
 impl DeletionQueueClient {
-    pub(crate) fn broken() -> Self {
-        // Channels whose receivers are immediately dropped.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (executor_tx, _executor_rx) = tokio::sync::mpsc::channel(1);
-        Self {
-            tx,
-            executor_tx,
-            lsn_table: Arc::default(),
-        }
-    }
-
     /// This is cancel-safe.  If you drop the future before it completes, the message
     /// is not pushed, although in the context of the deletion queue it doesn't matter: once
     /// we decide to do a deletion the decision is always final.
@@ -632,7 +621,7 @@ impl DeletionQueue {
     ///
     /// If remote_storage is None, then the returned workers will also be None.
     pub fn new<C>(
-        remote_storage: Option<GenericRemoteStorage>,
+        remote_storage: GenericRemoteStorage,
         control_plane_client: Option<C>,
         conf: &'static PageServerConf,
     ) -> (Self, Option<DeletionQueueWorkers<C>>)
@@ -657,23 +646,6 @@ impl DeletionQueue {
         // the general pageserver shutdown token, because it stays alive a bit
         // longer to flush after Tenants have all been torn down.
         let cancel = CancellationToken::new();
-
-        let remote_storage = match remote_storage {
-            None => {
-                return (
-                    Self {
-                        client: DeletionQueueClient {
-                            tx,
-                            executor_tx,
-                            lsn_table: lsn_table.clone(),
-                        },
-                        cancel,
-                    },
-                    None,
-                )
-            }
-            Some(r) => r,
-        };
 
         (
             Self {
@@ -765,7 +737,7 @@ mod test {
         /// Simulate a pageserver restart by destroying and recreating the deletion queue
         async fn restart(&mut self) {
             let (deletion_queue, workers) = DeletionQueue::new(
-                Some(self.storage.clone()),
+                self.storage.clone(),
                 Some(self.mock_control_plane.clone()),
                 self.harness.conf,
             );
@@ -867,7 +839,9 @@ mod test {
         std::fs::create_dir_all(remote_fs_dir)?;
         let remote_fs_dir = harness.conf.workdir.join("remote_fs").canonicalize_utf8()?;
         let storage_config = RemoteStorageConfig {
-            storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            storage: RemoteStorageKind::LocalFs {
+                local_path: remote_fs_dir.clone(),
+            },
             timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         };
         let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
@@ -875,7 +849,7 @@ mod test {
         let mock_control_plane = MockControlPlane::new();
 
         let (deletion_queue, worker) = DeletionQueue::new(
-            Some(storage.clone()),
+            storage.clone(),
             Some(mock_control_plane.clone()),
             harness.conf,
         );

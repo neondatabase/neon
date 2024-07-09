@@ -144,20 +144,7 @@ impl PgConnectionConfig {
             // implement and this function is hardly a bottleneck. The function is only called around
             // establishing a new connection.
             #[allow(unstable_name_collisions)]
-            config.options(
-                &self
-                    .options
-                    .iter()
-                    .map(|s| {
-                        if s.contains(['\\', ' ']) {
-                            Cow::Owned(s.replace('\\', "\\\\").replace(' ', "\\ "))
-                        } else {
-                            Cow::Borrowed(s.as_str())
-                        }
-                    })
-                    .intersperse(Cow::Borrowed(" ")) // TODO: use impl from std once it's stabilized
-                    .collect::<String>(),
-            );
+            config.options(&encode_options(&self.options));
         }
         config
     }
@@ -175,6 +162,28 @@ impl PgConnectionConfig {
         self.to_tokio_postgres_config()
             .connect(postgres::NoTls)
             .await
+    }
+}
+
+#[allow(unstable_name_collisions)]
+fn encode_options(options: &[String]) -> String {
+    options
+        .iter()
+        .map(|s| {
+            if s.contains(['\\', ' ']) {
+                Cow::Owned(s.replace('\\', "\\\\").replace(' ', "\\ "))
+            } else {
+                Cow::Borrowed(s.as_str())
+            }
+        })
+        .intersperse(Cow::Borrowed(" ")) // TODO: use impl from std once it's stabilized
+        .collect::<String>()
+}
+
+impl fmt::Display for PgConnectionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // The password is intentionally hidden and not part of this display string.
+        write!(f, "postgresql://{}:{}", self.host, self.port)
     }
 }
 
@@ -199,7 +208,7 @@ impl fmt::Debug for PgConnectionConfig {
 
 #[cfg(test)]
 mod tests_pg_connection_config {
-    use crate::PgConnectionConfig;
+    use crate::{encode_options, PgConnectionConfig};
     use once_cell::sync::Lazy;
     use url::Host;
 
@@ -248,18 +257,12 @@ mod tests_pg_connection_config {
 
     #[test]
     fn test_with_options() {
-        let cfg = PgConnectionConfig::new_host_port(STUB_HOST.clone(), 123).extend_options([
-            "hello",
-            "world",
-            "with space",
-            "and \\ backslashes",
+        let options = encode_options(&[
+            "hello".to_owned(),
+            "world".to_owned(),
+            "with space".to_owned(),
+            "and \\ backslashes".to_owned(),
         ]);
-        assert_eq!(cfg.host(), &*STUB_HOST);
-        assert_eq!(cfg.port(), 123);
-        assert_eq!(cfg.raw_address(), "stub.host.example:123");
-        assert_eq!(
-            cfg.to_tokio_postgres_config().get_options(),
-            Some("hello world with\\ space and\\ \\\\\\ backslashes")
-        );
+        assert_eq!(options, "hello world with\\ space and\\ \\\\\\ backslashes");
     }
 }

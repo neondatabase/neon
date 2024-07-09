@@ -774,44 +774,21 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
     // !BE SURE TO ONLY ADD MIGRATIONS TO THE END OF THIS ARRAY. IF YOU DO NOT, VERY VERY BAD THINGS MAY HAPPEN!
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+    // Add new migrations in numerical order.
     let migrations = [
-        "ALTER ROLE neon_superuser BYPASSRLS",
-        r#"
-DO $$
-DECLARE
-    role_name text;
-BEGIN
-    FOR role_name IN SELECT rolname FROM pg_roles WHERE pg_has_role(rolname, 'neon_superuser', 'member')
-    LOOP
-        RAISE NOTICE 'EXECUTING ALTER ROLE % INHERIT', quote_ident(role_name);
-        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' INHERIT';
-    END LOOP;
-
-    FOR role_name IN SELECT rolname FROM pg_roles
-        WHERE
-            NOT pg_has_role(rolname, 'neon_superuser', 'member') AND NOT starts_with(rolname, 'pg_')
-    LOOP
-        RAISE NOTICE 'EXECUTING ALTER ROLE % NOBYPASSRLS', quote_ident(role_name);
-        EXECUTE 'ALTER ROLE ' || quote_ident(role_name) || ' NOBYPASSRLS';
-    END LOOP;
-END $$;
-"#,
-        r#"
-DO $$
-BEGIN
-    IF (SELECT setting::numeric >= 160000 FROM pg_settings WHERE name = 'server_version_num') THEN
-        EXECUTE 'GRANT pg_create_subscription TO neon_superuser';
-    END IF;
-END
-$$;"#,
-        "GRANT pg_monitor TO neon_superuser WITH ADMIN OPTION",
-        // Don't remove: these are some SQLs that we originally applied in migrations but turned out to execute somewhere else.
-        "",
-        "",
-        "",
-        "",
-        "",
-        // Add new migrations below.
+        include_str!("./migrations/0000-neon_superuser_bypass_rls.sql"),
+        include_str!("./migrations/0001-alter_roles.sql"),
+        include_str!("./migrations/0002-grant_pg_create_subscription_to_neon_superuser.sql"),
+        include_str!("./migrations/0003-grant_pg_monitor_to_neon_superuser.sql"),
+        include_str!("./migrations/0004-grant_all_on_tables_to_neon_superuser.sql"),
+        include_str!("./migrations/0005-grant_all_on_sequences_to_neon_superuser.sql"),
+        include_str!(
+            "./migrations/0006-grant_all_on_tables_to_neon_superuser_with_grant_option.sql"
+        ),
+        include_str!(
+            "./migrations/0007-grant_all_on_sequences_to_neon_superuser_with_grant_option.sql"
+        ),
+        include_str!("./migrations/0008-revoke_replication_for_previously_allowed_roles.sql"),
     ];
 
     let mut func = || {
@@ -847,10 +824,13 @@ $$;"#,
 
     while current_migration < migrations.len() {
         let migration = &migrations[current_migration];
-        if migration.is_empty() {
-            info!("Skip migration id={}", current_migration);
+        if migration.starts_with("-- SKIP") {
+            info!("Skipping migration id={}", current_migration);
         } else {
-            info!("Running migration:\n{}\n", migration);
+            info!(
+                "Running migration id={}:\n{}\n",
+                current_migration, migration
+            );
             client.simple_query(migration).with_context(|| {
                 format!("handle_migrations current_migration={}", current_migration)
             })?;

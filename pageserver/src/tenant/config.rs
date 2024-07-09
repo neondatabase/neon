@@ -11,7 +11,9 @@
 use anyhow::bail;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::CompactionAlgorithm;
+use pageserver_api::models::CompactionAlgorithmSettings;
 use pageserver_api::models::EvictionPolicy;
+use pageserver_api::models::LsnLease;
 use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
@@ -279,22 +281,6 @@ impl LocationConf {
     }
 }
 
-impl Default for LocationConf {
-    // TODO: this should be removed once tenant loading can guarantee that we are never
-    // loading from a directory without a configuration.
-    // => tech debt since https://github.com/neondatabase/neon/issues/1555
-    fn default() -> Self {
-        Self {
-            mode: LocationMode::Attached(AttachedLocationConfig {
-                generation: Generation::none(),
-                attach_mode: AttachmentMode::Single,
-            }),
-            tenant_conf: TenantConfOpt::default(),
-            shard: ShardIdentity::unsharded(),
-        }
-    }
-}
-
 /// A tenant's calcuated configuration, which is the result of merging a
 /// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
 ///
@@ -320,7 +306,7 @@ pub struct TenantConf {
     pub compaction_period: Duration,
     // Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
-    pub compaction_algorithm: CompactionAlgorithm,
+    pub compaction_algorithm: CompactionAlgorithmSettings,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is #of bytes of WAL.
@@ -373,7 +359,19 @@ pub struct TenantConf {
 
     /// Switch to a new aux file policy. Switching this flag requires the user has not written any aux file into
     /// the storage before, and this flag cannot be switched back. Otherwise there will be data corruptions.
+    /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
+    /// file is written.
     pub switch_aux_file_policy: AuxFilePolicy,
+
+    /// The length for an explicit LSN lease request.
+    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length: Duration,
+
+    /// The length for an implicit LSN lease granted as part of `get_lsn_by_timestamp` request.
+    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length_for_ts: Duration,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -404,7 +402,7 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub compaction_algorithm: Option<CompactionAlgorithm>,
+    pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -473,6 +471,16 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub lsn_lease_length: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub lsn_lease_length_for_ts: Option<Duration>,
 }
 
 impl TenantConfOpt {
@@ -495,7 +503,9 @@ impl TenantConfOpt {
                 .unwrap_or(global_conf.compaction_threshold),
             compaction_algorithm: self
                 .compaction_algorithm
-                .unwrap_or(global_conf.compaction_algorithm),
+                .as_ref()
+                .unwrap_or(&global_conf.compaction_algorithm)
+                .clone(),
             gc_horizon: self.gc_horizon.unwrap_or(global_conf.gc_horizon),
             gc_period: self.gc_period.unwrap_or(global_conf.gc_period),
             image_creation_threshold: self
@@ -533,6 +543,12 @@ impl TenantConfOpt {
             switch_aux_file_policy: self
                 .switch_aux_file_policy
                 .unwrap_or(global_conf.switch_aux_file_policy),
+            lsn_lease_length: self
+                .lsn_lease_length
+                .unwrap_or(global_conf.lsn_lease_length),
+            lsn_lease_length_for_ts: self
+                .lsn_lease_length_for_ts
+                .unwrap_or(global_conf.lsn_lease_length_for_ts),
         }
     }
 }
@@ -548,7 +564,9 @@ impl Default for TenantConf {
             compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
                 .expect("cannot parse default compaction period"),
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
-            compaction_algorithm: DEFAULT_COMPACTION_ALGORITHM,
+            compaction_algorithm: CompactionAlgorithmSettings {
+                kind: DEFAULT_COMPACTION_ALGORITHM,
+            },
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),
@@ -574,7 +592,9 @@ impl Default for TenantConf {
             lazy_slru_download: false,
             timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
-            switch_aux_file_policy: AuxFilePolicy::V1,
+            switch_aux_file_policy: AuxFilePolicy::default_tenant_config(),
+            lsn_lease_length: LsnLease::DEFAULT_LENGTH,
+            lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
         }
     }
 }
@@ -650,6 +670,8 @@ impl From<TenantConfOpt> for models::TenantConfig {
             timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
             switch_aux_file_policy: value.switch_aux_file_policy,
+            lsn_lease_length: value.lsn_lease_length.map(humantime),
+            lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
         }
     }
 }

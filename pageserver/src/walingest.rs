@@ -234,6 +234,7 @@ impl WalIngest {
                         modification,
                         &parsed_xact,
                         info == pg_constants::XLOG_XACT_COMMIT,
+                        decoded.origin_id,
                         ctx,
                     )
                     .await?;
@@ -246,6 +247,7 @@ impl WalIngest {
                         modification,
                         &parsed_xact,
                         info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
+                        decoded.origin_id,
                         ctx,
                     )
                     .await?;
@@ -341,7 +343,33 @@ impl WalIngest {
                         xlog_checkpoint.oldestActiveXid,
                         self.checkpoint.oldestActiveXid
                     );
-                    self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
+
+                    // A shutdown checkpoint has `oldestActiveXid == InvalidTransactionid`,
+                    // because at shutdown, all in-progress transactions will implicitly
+                    // end. Postgres startup code knows that, and allows hot standby to start
+                    // immediately from a shutdown checkpoint.
+                    //
+                    // In Neon, Postgres hot standby startup always behaves as if starting from
+                    // an online checkpoint. It needs a valid `oldestActiveXid` value, so
+                    // instead of overwriting self.checkpoint.oldestActiveXid with
+                    // InvalidTransactionid from the checkpoint WAL record, update it to a
+                    // proper value, knowing that there are no in-progress transactions at this
+                    // point, except for prepared transactions.
+                    //
+                    // See also the neon code changes in the InitWalRecovery() function.
+                    if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
+                        && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+                    {
+                        let mut oldest_active_xid = self.checkpoint.nextXid.value as u32;
+                        for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                            if (xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
+                                oldest_active_xid = xid;
+                            }
+                        }
+                        self.checkpoint.oldestActiveXid = oldest_active_xid;
+                    } else {
+                        self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
+                    }
 
                     // Write a new checkpoint key-value pair on every checkpoint record, even
                     // if nothing really changed. Not strictly required, but it seems nice to
@@ -373,6 +401,19 @@ impl WalIngest {
                 if info == pg_constants::XLOG_RUNNING_XACTS {
                     let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
                     self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+                    self.checkpoint_modified = true;
+                }
+            }
+            pg_constants::RM_REPLORIGIN_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                if info == pg_constants::XLOG_REPLORIGIN_SET {
+                    let xlrec = crate::walrecord::XlReploriginSet::decode(&mut buf);
+                    modification
+                        .set_replorigin(xlrec.node_id, xlrec.remote_lsn)
+                        .await?
+                } else if info == pg_constants::XLOG_REPLORIGIN_DROP {
+                    let xlrec = crate::walrecord::XlReploriginDrop::decode(&mut buf);
+                    modification.drop_replorigin(xlrec.node_id).await?
                 }
             }
             _x => {
@@ -1178,6 +1219,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         parsed: &XlXactParsedRecord,
         is_commit: bool,
+        origin_id: u16,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Record update of CLOG pages
@@ -1243,6 +1285,11 @@ impl WalIngest {
                 }
             }
         }
+        if origin_id != 0 {
+            modification
+                .set_replorigin(origin_id, parsed.origin_lsn)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1257,13 +1304,10 @@ impl WalIngest {
             xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db
         );
 
-        // Here we treat oldestXid and oldestXidDB
-        // differently from postgres redo routines.
-        // In postgres checkpoint.oldestXid lags behind xlrec.oldest_xid
-        // until checkpoint happens and updates the value.
-        // Here we can use the most recent value.
-        // It's just an optimization, though and can be deleted.
-        // TODO Figure out if there will be any issues with replica.
+        // In Postgres, oldestXid and oldestXidDB are updated in memory when the CLOG is
+        // truncated, but a checkpoint record with the updated values isn't written until
+        // later. In Neon, a server can start at any LSN, not just on a checkpoint record,
+        // so we keep the oldestXid and oldestXidDB up-to-date.
         self.checkpoint.oldestXid = xlrec.oldest_xid;
         self.checkpoint.oldestXidDB = xlrec.oldest_xid_db;
         self.checkpoint_modified = true;
@@ -1364,14 +1408,31 @@ impl WalIngest {
             // Note: The multixact members can wrap around, even within one WAL record.
             offset = offset.wrapping_add(n_this_page as u32);
         }
-        if xlrec.mid >= self.checkpoint.nextMulti {
-            self.checkpoint.nextMulti = xlrec.mid + 1;
+        let next_offset = offset;
+        assert!(xlrec.moff.wrapping_add(xlrec.nmembers) == next_offset);
+
+        // Update next-multi-xid and next-offset
+        //
+        // NB: In PostgreSQL, the next-multi-xid stored in the control file is allowed to
+        // go to 0, and it's fixed up by skipping to FirstMultiXactId in functions that
+        // read it, like GetNewMultiXactId(). This is different from how nextXid is
+        // incremented! nextXid skips over < FirstNormalTransactionId when the the value
+        // is stored, so it's never 0 in a checkpoint.
+        //
+        // I don't know why it's done that way, it seems less error-prone to skip over 0
+        // when the value is stored rather than when it's read. But let's do it the same
+        // way here.
+        let next_multi_xid = xlrec.mid.wrapping_add(1);
+
+        if self
+            .checkpoint
+            .update_next_multixid(next_multi_xid, next_offset)
+        {
             self.checkpoint_modified = true;
         }
-        if xlrec.moff + xlrec.nmembers > self.checkpoint.nextMultiOffset {
-            self.checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
-            self.checkpoint_modified = true;
-        }
+
+        // Also update the next-xid with the highest member. According to the comments in
+        // multixact_redo(), this shouldn't be necessary, but let's do the same here.
         let max_mbr_xid = xlrec.members.iter().fold(None, |acc, mbr| {
             if let Some(max_xid) = acc {
                 if mbr.xid.wrapping_sub(max_xid) as i32 > 0 {

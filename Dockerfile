@@ -42,12 +42,13 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/v16/lib                       pg_install/v16/lib
 COPY --chown=nonroot . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
-    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build  \
+    && PQ_LIB_DIR=$(pwd)/pg_install/v16/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
@@ -56,6 +57,7 @@ RUN set -e \
       --bin storage_controller  \
       --bin proxy  \
       --bin neon_local \
+      --bin storage_scrubber \
       --locked --release \
     && cachepot -s
 
@@ -69,8 +71,6 @@ RUN set -e \
     && apt install -y \
         libreadline-dev \
         libseccomp-dev \
-        libicu67 \
-        openssl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \
@@ -84,6 +84,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker 
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_scrubber    /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/

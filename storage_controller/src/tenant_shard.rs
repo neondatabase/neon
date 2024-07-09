@@ -8,9 +8,11 @@ use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
     reconciler::ReconcileUnits,
-    scheduler::{AffinityScore, MaySchedule, ScheduleContext},
+    scheduler::{AffinityScore, MaySchedule, RefCountUpdate, ScheduleContext},
 };
-use pageserver_api::controller_api::{PlacementPolicy, ShardSchedulingPolicy};
+use pageserver_api::controller_api::{
+    NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
+};
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
@@ -153,7 +155,7 @@ impl IntentState {
     }
     pub(crate) fn single(scheduler: &mut Scheduler, node_id: Option<NodeId>) -> Self {
         if let Some(node_id) = node_id {
-            scheduler.node_inc_ref(node_id);
+            scheduler.update_node_ref_counts(node_id, RefCountUpdate::Attach);
         }
         Self {
             attached: node_id,
@@ -164,10 +166,10 @@ impl IntentState {
     pub(crate) fn set_attached(&mut self, scheduler: &mut Scheduler, new_attached: Option<NodeId>) {
         if self.attached != new_attached {
             if let Some(old_attached) = self.attached.take() {
-                scheduler.node_dec_ref(old_attached);
+                scheduler.update_node_ref_counts(old_attached, RefCountUpdate::Detach);
             }
             if let Some(new_attached) = &new_attached {
-                scheduler.node_inc_ref(*new_attached);
+                scheduler.update_node_ref_counts(*new_attached, RefCountUpdate::Attach);
             }
             self.attached = new_attached;
         }
@@ -177,22 +179,27 @@ impl IntentState {
     /// secondary to attached while maintaining the scheduler's reference counts.
     pub(crate) fn promote_attached(
         &mut self,
-        _scheduler: &mut Scheduler,
+        scheduler: &mut Scheduler,
         promote_secondary: NodeId,
     ) {
         // If we call this with a node that isn't in secondary, it would cause incorrect
         // scheduler reference counting, since we assume the node is already referenced as a secondary.
         debug_assert!(self.secondary.contains(&promote_secondary));
 
-        // TODO: when scheduler starts tracking attached + secondary counts separately, we will
-        // need to call into it here.
         self.secondary.retain(|n| n != &promote_secondary);
+
+        let demoted = self.attached;
         self.attached = Some(promote_secondary);
+
+        scheduler.update_node_ref_counts(promote_secondary, RefCountUpdate::PromoteSecondary);
+        if let Some(demoted) = demoted {
+            scheduler.update_node_ref_counts(demoted, RefCountUpdate::DemoteAttached);
+        }
     }
 
     pub(crate) fn push_secondary(&mut self, scheduler: &mut Scheduler, new_secondary: NodeId) {
         debug_assert!(!self.secondary.contains(&new_secondary));
-        scheduler.node_inc_ref(new_secondary);
+        scheduler.update_node_ref_counts(new_secondary, RefCountUpdate::AddSecondary);
         self.secondary.push(new_secondary);
     }
 
@@ -200,27 +207,27 @@ impl IntentState {
     pub(crate) fn remove_secondary(&mut self, scheduler: &mut Scheduler, node_id: NodeId) {
         let index = self.secondary.iter().position(|n| *n == node_id);
         if let Some(index) = index {
-            scheduler.node_dec_ref(node_id);
+            scheduler.update_node_ref_counts(node_id, RefCountUpdate::RemoveSecondary);
             self.secondary.remove(index);
         }
     }
 
     pub(crate) fn clear_secondary(&mut self, scheduler: &mut Scheduler) {
         for secondary in self.secondary.drain(..) {
-            scheduler.node_dec_ref(secondary);
+            scheduler.update_node_ref_counts(secondary, RefCountUpdate::RemoveSecondary);
         }
     }
 
     /// Remove the last secondary node from the list of secondaries
     pub(crate) fn pop_secondary(&mut self, scheduler: &mut Scheduler) {
         if let Some(node_id) = self.secondary.pop() {
-            scheduler.node_dec_ref(node_id);
+            scheduler.update_node_ref_counts(node_id, RefCountUpdate::RemoveSecondary);
         }
     }
 
     pub(crate) fn clear(&mut self, scheduler: &mut Scheduler) {
         if let Some(old_attached) = self.attached.take() {
-            scheduler.node_dec_ref(old_attached);
+            scheduler.update_node_ref_counts(old_attached, RefCountUpdate::Detach);
         }
 
         self.clear_secondary(scheduler);
@@ -251,12 +258,11 @@ impl IntentState {
     /// forget the location on the offline node.
     ///
     /// Returns true if a change was made
-    pub(crate) fn demote_attached(&mut self, node_id: NodeId) -> bool {
+    pub(crate) fn demote_attached(&mut self, scheduler: &mut Scheduler, node_id: NodeId) -> bool {
         if self.attached == Some(node_id) {
-            // TODO: when scheduler starts tracking attached + secondary counts separately, we will
-            // need to call into it here.
             self.attached = None;
             self.secondary.push(node_id);
+            scheduler.update_node_ref_counts(node_id, RefCountUpdate::DemoteAttached);
             true
         } else {
             false
@@ -305,6 +311,12 @@ pub(crate) struct ReconcilerWaiter {
     error_seq_wait: std::sync::Arc<SeqWait<Sequence, Sequence>>,
     error: std::sync::Arc<std::sync::Mutex<Option<Arc<ReconcileError>>>>,
     seq: Sequence,
+}
+
+pub(crate) enum ReconcilerStatus {
+    Done,
+    Failed,
+    InProgress,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -368,6 +380,16 @@ impl ReconcilerWaiter {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn get_status(&self) -> ReconcilerStatus {
+        if self.seq_wait.would_wait_for(self.seq).is_err() {
+            ReconcilerStatus::Done
+        } else if self.error_seq_wait.would_wait_for(self.seq).is_err() {
+            ReconcilerStatus::Failed
+        } else {
+            ReconcilerStatus::InProgress
+        }
     }
 }
 
@@ -593,7 +615,7 @@ impl TenantShard {
             Secondary => {
                 if let Some(node_id) = self.intent.get_attached() {
                     // Populate secondary by demoting the attached node
-                    self.intent.demote_attached(*node_id);
+                    self.intent.demote_attached(scheduler, *node_id);
                     modified = true;
                 } else if self.intent.secondary.is_empty() {
                     // Populate secondary by scheduling a fresh node
@@ -624,6 +646,48 @@ impl TenantShard {
         Ok(())
     }
 
+    /// Reschedule this tenant shard to one of its secondary locations. Returns a scheduling error
+    /// if the swap is not possible and leaves the intent state in its original state.
+    ///
+    /// Arguments:
+    /// `attached_to`: the currently attached location matching the intent state (may be None if the
+    /// shard is not attached)
+    /// `promote_to`: an optional secondary location of this tenant shard. If set to None, we ask
+    /// the scheduler to recommend a node
+    pub(crate) fn reschedule_to_secondary(
+        &mut self,
+        promote_to: Option<NodeId>,
+        scheduler: &mut Scheduler,
+    ) -> Result<(), ScheduleError> {
+        let promote_to = match promote_to {
+            Some(node) => node,
+            None => match scheduler.node_preferred(self.intent.get_secondary()) {
+                Some(node) => node,
+                None => {
+                    return Err(ScheduleError::ImpossibleConstraint);
+                }
+            },
+        };
+
+        assert!(self.intent.get_secondary().contains(&promote_to));
+
+        if let Some(node) = self.intent.get_attached() {
+            let demoted = self.intent.demote_attached(scheduler, *node);
+            if !demoted {
+                return Err(ScheduleError::ImpossibleConstraint);
+            }
+        }
+
+        self.intent.promote_attached(scheduler, promote_to);
+
+        // Increment the sequence number for the edge case where a
+        // reconciler is already running to avoid waiting on the
+        // current reconcile instead of spawning a new one.
+        self.sequence = self.sequence.next();
+
+        Ok(())
+    }
+
     /// Optimize attachments: if a shard has a secondary location that is preferable to
     /// its primary location based on soft constraints, switch that secondary location
     /// to be attached.
@@ -648,13 +712,17 @@ impl TenantShard {
         let mut scores = all_pageservers
             .iter()
             .flat_map(|node_id| {
-                if matches!(
-                    nodes
-                        .get(node_id)
-                        .map(|n| n.may_schedule())
-                        .unwrap_or(MaySchedule::No),
-                    MaySchedule::No
+                let node = nodes.get(node_id);
+                if node.is_none() {
+                    None
+                } else if matches!(
+                    node.unwrap().get_scheduling(),
+                    NodeSchedulingPolicy::Filling
                 ) {
+                    // If the node is currently filling, don't count it as a candidate to avoid,
+                    // racing with the background fill.
+                    None
+                } else if matches!(node.unwrap().may_schedule(), MaySchedule::No) {
                     None
                 } else {
                     let affinity_score = schedule_context.get_node_affinity(*node_id);
@@ -783,7 +851,7 @@ impl TenantShard {
                 old_attached_node_id,
                 new_attached_node_id,
             }) => {
-                self.intent.demote_attached(old_attached_node_id);
+                self.intent.demote_attached(scheduler, old_attached_node_id);
                 self.intent
                     .promote_attached(scheduler, new_attached_node_id);
             }
@@ -840,12 +908,8 @@ impl TenantShard {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf = attached_location_conf(
-                generation,
-                &self.shard,
-                &self.config,
-                !self.intent.secondary.is_empty(),
-            );
+            let wanted_conf =
+                attached_location_conf(generation, &self.shard, &self.config, &self.policy);
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -1031,6 +1095,7 @@ impl TenantShard {
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
+            placement_policy: self.policy.clone(),
             generation: self.generation,
             intent: reconciler_intent,
             detach,
@@ -1321,7 +1386,9 @@ pub(crate) mod tests {
         assert_ne!(attached_node_id, secondary_node_id);
 
         // Notifying the attached node is offline should demote it to a secondary
-        let changed = tenant_shard.intent.demote_attached(attached_node_id);
+        let changed = tenant_shard
+            .intent
+            .demote_attached(&mut scheduler, attached_node_id);
         assert!(changed);
         assert!(tenant_shard.intent.attached.is_none());
         assert_eq!(tenant_shard.intent.secondary.len(), 2);
@@ -1604,7 +1671,10 @@ pub(crate) mod tests {
 
         // We should see equal number of locations on the two nodes.
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 4);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 2);
+
         assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 4);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 2);
 
         // Add another two nodes: we should see the shards spread out when their optimize
         // methods are called
@@ -1613,9 +1683,16 @@ pub(crate) mod tests {
         optimize_til_idle(&nodes, &mut scheduler, &mut shards);
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 2);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 1);
+
         assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 2);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 1);
+
         assert_eq!(scheduler.get_node_shard_count(NodeId(3)), 2);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(3)), 1);
+
         assert_eq!(scheduler.get_node_shard_count(NodeId(4)), 2);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(4)), 1);
 
         for shard in shards.iter_mut() {
             shard.intent.clear(&mut scheduler);

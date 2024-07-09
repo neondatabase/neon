@@ -17,6 +17,16 @@ pub struct KeySpace {
     pub ranges: Vec<Range<Key>>,
 }
 
+impl std::fmt::Display for KeySpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[")?;
+        for range in &self.ranges {
+            write!(f, "{}..{},", range.start, range.end)?;
+        }
+        write!(f, "]")
+    }
+}
+
 /// A wrapper type for sparse keyspaces.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SparseKeySpace(pub KeySpace);
@@ -307,7 +317,7 @@ impl KeySpace {
     }
 
     /// Merge another keyspace into the current one.
-    /// Note: the keyspaces must not ovelap (enforced via assertions)
+    /// Note: the keyspaces must not overlap (enforced via assertions). To merge overlapping key ranges, use `KeySpaceRandomAccum`.
     pub fn merge(&mut self, other: &KeySpace) {
         let all_ranges = self
             .ranges
@@ -556,6 +566,12 @@ impl KeySpaceRandomAccum {
 
     pub fn add_range(&mut self, range: Range<Key>) {
         self.ranges.push(range);
+    }
+
+    pub fn add_keyspace(&mut self, keyspace: KeySpace) {
+        for range in keyspace.ranges {
+            self.add_range(range);
+        }
     }
 
     pub fn to_keyspace(mut self) -> KeySpace {

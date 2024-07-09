@@ -1,0 +1,155 @@
+name: Periodic pagebench performance test on dedicated EC2 machine in eu-central-1 region
+
+on:
+  schedule:
+    # * is a special character in YAML so you have to quote this string
+    #          ┌───────────── minute (0 - 59)
+    #          │ ┌───────────── hour (0 - 23)
+    #          │ │ ┌───────────── day of the month (1 - 31)
+    #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
+    #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
+    - cron:  '0 18 * * *' # Runs at 6 PM UTC every day
+  workflow_dispatch: # Allows manual triggering of the workflow
+    inputs:
+      commit_hash:
+        type: string
+        description: 'The long neon repo commit hash for the system under test (pageserver) to be tested.'
+        required: false
+        default: ''
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  trigger_bench_on_ec2_machine_in_eu_central_1:
+    runs-on: [ self-hosted, gen3, small ]
+    container:
+      image: neondatabase/build-tools:pinned
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init
+    timeout-minutes: 360  # Set the timeout to 6 hours
+    env:
+      API_KEY: ${{ secrets.PERIODIC_PAGEBENCH_EC2_RUNNER_API_KEY }}
+      RUN_ID: ${{ github.run_id }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_EC2_US_TEST_RUNNER_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY : ${{ secrets.AWS_EC2_US_TEST_RUNNER_ACCESS_KEY_SECRET }}
+      AWS_DEFAULT_REGION : "eu-central-1"
+      AWS_INSTANCE_ID : "i-02a59a3bf86bc7e74"
+    steps:
+    # we don't need the neon source code because we run everything remotely
+    # however we still need the local github actions to run the allure step below
+    - uses: actions/checkout@v4
+
+    - name: Show my own (github runner) external IP address - usefull for IP allowlisting
+      run: curl https://ifconfig.me
+
+    - name: Start EC2 instance and wait for the instance to boot up
+      run: |
+        aws ec2 start-instances --instance-ids $AWS_INSTANCE_ID
+        aws ec2 wait instance-running --instance-ids $AWS_INSTANCE_ID
+        sleep 60 # sleep some time to allow cloudinit and our API server to start up
+
+    - name: Determine public IP of the EC2 instance and set env variable EC2_MACHINE_URL_US
+      run: |
+        public_ip=$(aws ec2 describe-instances --instance-ids $AWS_INSTANCE_ID --query 'Reservations[*].Instances[*].PublicIpAddress' --output text)
+        echo "Public IP of the EC2 instance: $public_ip"
+        echo "EC2_MACHINE_URL_US=https://${public_ip}:8443" >> $GITHUB_ENV
+
+    - name: Determine commit hash
+      env:
+        INPUT_COMMIT_HASH: ${{ github.event.inputs.commit_hash }}
+      run: |
+        if [ -z "$INPUT_COMMIT_HASH" ]; then
+          echo "COMMIT_HASH=$(curl -s https://api.github.com/repos/neondatabase/neon/commits/main | jq -r '.sha')" >> $GITHUB_ENV
+        else
+          echo "COMMIT_HASH=$INPUT_COMMIT_HASH" >> $GITHUB_ENV
+        fi
+
+    - name: Start Bench with run_id   
+      run: |
+        curl -k -X 'POST' \
+        "${EC2_MACHINE_URL_US}/start_test/${GITHUB_RUN_ID}" \
+        -H 'accept: application/json' \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $API_KEY" \
+        -d "{\"neonRepoCommitHash\": \"${COMMIT_HASH}\"}"
+
+    - name: Poll Test Status
+      id: poll_step
+      run: |
+        status=""
+        while [[ "$status" != "failure" && "$status" != "success" ]]; do
+          response=$(curl -k -X 'GET' \
+          "${EC2_MACHINE_URL_US}/test_status/${GITHUB_RUN_ID}" \
+          -H 'accept: application/json' \
+          -H "Authorization: Bearer $API_KEY")
+          echo "Response: $response"
+          set +x
+          status=$(echo $response | jq -r '.status')
+          echo "Test status: $status"
+          if [[ "$status" == "failure" ]]; then
+            echo "Test failed"
+            exit 1 # Fail the job step if status is failure
+          elif [[ "$status" == "success" || "$status" == "null" ]]; then
+            break
+          elif [[ "$status" == "too_many_runs" ]]; then
+            echo "Too many runs already running"
+            echo "too_many_runs=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          sleep 60 # Poll every 60 seconds
+        done
+
+    - name: Retrieve Test Logs
+      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
+      run: |
+        curl -k -X 'GET' \
+        "${EC2_MACHINE_URL_US}/test_log/${GITHUB_RUN_ID}" \
+        -H 'accept: application/gzip' \
+        -H "Authorization: Bearer $API_KEY" \
+        --output "test_log_${GITHUB_RUN_ID}.gz"
+    
+    - name: Unzip Test Log and Print it into this job's log
+      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
+      run: |
+        gzip -d "test_log_${GITHUB_RUN_ID}.gz"
+        cat "test_log_${GITHUB_RUN_ID}"
+
+    - name: Create Allure report
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
+
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C033QLM5P7D" # dev-staging-stream
+        slack-message: "Periodic pagebench testing on dedicated hardware: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+    - name: Cleanup Test Resources
+      if: always() 
+      run: |
+        curl -k -X 'POST' \
+        "${EC2_MACHINE_URL_US}/cleanup_test/${GITHUB_RUN_ID}" \
+        -H 'accept: application/json' \
+        -H "Authorization: Bearer $API_KEY" \
+        -d ''
+
+    - name: Stop EC2 instance and wait for the instance to be stopped
+      if: always() && steps.poll_step.outputs.too_many_runs != 'true'
+      run: |
+        aws ec2 stop-instances --instance-ids $AWS_INSTANCE_ID
+        aws ec2 wait instance-stopped --instance-ids $AWS_INSTANCE_ID

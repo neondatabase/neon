@@ -47,7 +47,7 @@ use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -158,12 +158,14 @@ pub struct ImageLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
+    key_range: Range<Key>,
     lsn: Lsn,
 
     file: VirtualFile,
     file_id: FileId,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
+    compressed_reads: bool,
 }
 
 impl std::fmt::Debug for ImageLayerInner {
@@ -177,7 +179,8 @@ impl std::fmt::Debug for ImageLayerInner {
 
 impl ImageLayerInner {
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let block_reader =
+            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
         let tree_reader = DiskBtreeReader::<_, KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
@@ -265,9 +268,10 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
-            .await
-            .and_then(|res| res)?;
+        let loaded =
+            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, false, ctx)
+                .await
+                .and_then(|res| res)?;
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
@@ -376,6 +380,7 @@ impl ImageLayerInner {
         lsn: Lsn,
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
+        support_compressed_reads: bool,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
         let file = match VirtualFile::open(path, ctx).await {
@@ -419,6 +424,8 @@ impl ImageLayerInner {
             file,
             file_id,
             max_vectored_read_bytes,
+            compressed_reads: support_compressed_reads,
+            key_range: actual_summary.key_range,
         }))
     }
 
@@ -428,7 +435,8 @@ impl ImageLayerInner {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let block_reader =
+            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
 
@@ -471,19 +479,56 @@ impl ImageLayerInner {
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         let reads = self
-            .plan_reads(keyspace, ctx)
+            .plan_reads(keyspace, None, ctx)
             .await
             .map_err(GetVectoredError::Other)?;
 
         self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
+        reconstruct_state.on_image_layer_visited(&self.key_range);
+
         Ok(())
     }
 
+    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
+    pub(super) async fn load_key_values(
+        &self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
+        let block_reader =
+            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
+        let mut result = Vec::new();
+        let mut stream = Box::pin(tree_reader.into_stream(&[0; KEY_SIZE], ctx));
+        let block_reader =
+            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let cursor = block_reader.block_cursor();
+        while let Some(item) = stream.next().await {
+            // TODO: dedup code with get_reconstruct_value
+            let (raw_key, offset) = item?;
+            let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+            // TODO: ctx handling and sharding
+            let blob = cursor
+                .read_blob(offset, ctx)
+                .await
+                .with_context(|| format!("failed to read value from offset {}", offset))?;
+            let value = Bytes::from(blob);
+            result.push((key, self.lsn, Value::Image(value)));
+        }
+        Ok(result)
+    }
+
+    /// Traverse the layer's index to build read operations on the overlap of the input keyspace
+    /// and the keys in this layer.
+    ///
+    /// If shard_identity is provided, it will be used to filter keys down to those stored on
+    /// this shard.
     async fn plan_reads(
         &self,
         keyspace: KeySpace,
+        shard_identity: Option<&ShardIdentity>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>> {
         let mut planner = VectoredReadPlanner::new(
@@ -493,7 +538,8 @@ impl ImageLayerInner {
                 .into(),
         );
 
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let block_reader =
+            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
 
@@ -503,11 +549,10 @@ impl ImageLayerInner {
 
         for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
-
             let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
             range.start.write_to_byte_slice(&mut search_key);
 
-            let index_stream = tree_reader.get_stream_from(&search_key, &ctx);
+            let index_stream = tree_reader.clone().into_stream(&search_key, &ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
@@ -516,12 +561,22 @@ impl ImageLayerInner {
                 let key = Key::from_slice(&raw_key[..KEY_SIZE]);
                 assert!(key >= range.start);
 
+                let flag = if let Some(shard_identity) = shard_identity {
+                    if shard_identity.is_key_disposable(&key) {
+                        BlobFlag::Ignore
+                    } else {
+                        BlobFlag::None
+                    }
+                } else {
+                    BlobFlag::None
+                };
+
                 if key >= range.end {
                     planner.handle_range_end(offset);
                     range_end_handled = true;
                     break;
                 } else {
-                    planner.handle(key, self.lsn, offset, BlobFlag::None);
+                    planner.handle(key, self.lsn, offset, flag);
                 }
             }
 
@@ -532,6 +587,50 @@ impl ImageLayerInner {
         }
 
         Ok(planner.finish())
+    }
+
+    /// Given a key range, select the parts of that range that should be retained by the ShardIdentity,
+    /// then execute vectored GET operations, passing the results of all read keys into the writer.
+    pub(super) async fn filter(
+        &self,
+        shard_identity: &ShardIdentity,
+        writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<usize> {
+        // Fragment the range into the regions owned by this ShardIdentity
+        let plan = self
+            .plan_reads(
+                KeySpace {
+                    // If asked for the total key space, plan_reads will give us all the keys in the layer
+                    ranges: vec![Key::MIN..Key::MAX],
+                },
+                Some(shard_identity),
+                ctx,
+            )
+            .await?;
+
+        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let mut key_count = 0;
+        for read in plan.into_iter() {
+            let buf_size = read.size();
+
+            let buf = BytesMut::with_capacity(buf_size);
+            let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
+
+            let frozen_buf = blobs_buf.buf.freeze();
+
+            for meta in blobs_buf.blobs.iter() {
+                let img_buf = frozen_buf.slice(meta.start..meta.end);
+
+                key_count += 1;
+                writer
+                    .put_image(meta.meta.key, img_buf, ctx)
+                    .await
+                    .context(format!("Storing key {}", meta.meta.key))?;
+            }
+        }
+
+        Ok(key_count)
     }
 
     async fn do_reads_and_update_state(
@@ -598,6 +697,25 @@ impl ImageLayerInner {
             };
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
+        let block_reader =
+            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
+        ImageLayerIterator {
+            image_layer: self,
+            ctx,
+            index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
+            key_values_batch: std::collections::VecDeque::new(),
+            is_end: false,
+            planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner::new(
+                1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+                1024,        // The default value. Unit tests might use a different value
+            ),
+        }
+    }
 }
 
 /// A builder object for constructing a new image layer.
@@ -646,7 +764,7 @@ impl ImageLayerWriterInner {
                 lsn,
             },
         );
-        info!("new image layer {path}");
+        trace!("creating image layer {}", path);
         let mut file = {
             VirtualFile::open_with_options(
                 &path,
@@ -766,7 +884,7 @@ impl ImageLayerWriterInner {
         // FIXME: why not carry the virtualfile here, it supports renaming?
         let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
 
-        trace!("created image layer {}", layer.local_path());
+        info!("created image layer {}", layer.local_path());
 
         Ok(layer)
     }
@@ -848,6 +966,380 @@ impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             inner.blob_writer.into_inner().remove();
+        }
+    }
+}
+
+#[cfg(test)]
+pub struct ImageLayerIterator<'a> {
+    image_layer: &'a ImageLayerInner,
+    ctx: &'a RequestContext,
+    planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner,
+    index_iter: crate::tenant::disk_btree::DiskBtreeIterator<'a>,
+    key_values_batch: std::collections::VecDeque<(Key, Lsn, Value)>,
+    is_end: bool,
+}
+
+#[cfg(test)]
+impl<'a> ImageLayerIterator<'a> {
+    /// Retrieve a batch of key-value pairs into the iterator buffer.
+    async fn next_batch(&mut self) -> anyhow::Result<()> {
+        assert!(self.key_values_batch.is_empty());
+        assert!(!self.is_end);
+
+        let plan = loop {
+            if let Some(res) = self.index_iter.next().await {
+                let (raw_key, offset) = res?;
+                if let Some(batch_plan) = self.planner.handle(
+                    Key::from_slice(&raw_key[..KEY_SIZE]),
+                    self.image_layer.lsn,
+                    offset,
+                    BlobFlag::None,
+                ) {
+                    break batch_plan;
+                }
+            } else {
+                self.is_end = true;
+                let payload_end = self.image_layer.index_start_blk as u64 * PAGE_SZ as u64;
+                break self.planner.handle_range_end(payload_end);
+            }
+        };
+        let vectored_blob_reader = VectoredBlobReader::new(&self.image_layer.file);
+        let mut next_batch = std::collections::VecDeque::new();
+        let buf_size = plan.size();
+        let buf = BytesMut::with_capacity(buf_size);
+        let blobs_buf = vectored_blob_reader
+            .read_blobs(&plan, buf, self.ctx)
+            .await?;
+        let frozen_buf: Bytes = blobs_buf.buf.freeze();
+        for meta in blobs_buf.blobs.iter() {
+            let img_buf = frozen_buf.slice(meta.start..meta.end);
+            next_batch.push_back((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
+        }
+        self.key_values_batch = next_batch;
+        Ok(())
+    }
+
+    pub async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+        if self.key_values_batch.is_empty() {
+            if self.is_end {
+                return Ok(None);
+            }
+            self.next_batch().await?;
+        }
+        Ok(Some(
+            self.key_values_batch
+                .pop_front()
+                .expect("should not be empty"),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::{sync::Arc, time::Duration};
+
+    use bytes::Bytes;
+    use itertools::Itertools;
+    use pageserver_api::{
+        key::Key,
+        shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
+    };
+    use utils::{
+        generation::Generation,
+        id::{TenantId, TimelineId},
+        lsn::Lsn,
+    };
+
+    use crate::{
+        context::RequestContext,
+        repository::Value,
+        tenant::{
+            config::TenantConf,
+            harness::{TenantHarness, TIMELINE_ID},
+            storage_layer::ResidentLayer,
+            vectored_blob_io::StreamingVectoredReadPlanner,
+            Tenant, Timeline,
+        },
+        DEFAULT_PG_VERSION,
+    };
+
+    use super::{ImageLayerIterator, ImageLayerWriter};
+
+    #[tokio::test]
+    async fn image_layer_rewrite() {
+        let tenant_conf = TenantConf {
+            gc_period: Duration::ZERO,
+            compaction_period: Duration::ZERO,
+            ..TenantConf::default()
+        };
+        let tenant_id = TenantId::generate();
+        let mut gen = Generation::new(0xdead0001);
+        let mut get_next_gen = || {
+            let ret = gen;
+            gen = gen.next();
+            ret
+        };
+        // The LSN at which we will create an image layer to filter
+        let lsn = Lsn(0xdeadbeef0000);
+        let timeline_id = TimelineId::generate();
+
+        //
+        // Create an unsharded parent with a layer.
+        //
+
+        let harness = TenantHarness::create_custom(
+            "test_image_layer_rewrite--parent",
+            tenant_conf.clone(),
+            tenant_id,
+            ShardIdentity::unsharded(),
+            get_next_gen(),
+        )
+        .unwrap();
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        // This key range contains several 0x8000 page stripes, only one of which belongs to shard zero
+        let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
+        let input_end = Key::from_hex("000000067f00000001000000ae0000020000").unwrap();
+        let range = input_start..input_end;
+
+        // Build an image layer to filter
+        let resident = {
+            let mut writer = ImageLayerWriter::new(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                &range,
+                lsn,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+            let foo_img = Bytes::from_static(&[1, 2, 3, 4]);
+            let mut key = range.start;
+            while key < range.end {
+                writer.put_image(key, foo_img.clone(), &ctx).await.unwrap();
+
+                key = key.next();
+            }
+            writer.finish(&timeline, &ctx).await.unwrap()
+        };
+        let original_size = resident.metadata().file_size;
+
+        //
+        // Create child shards and do the rewrite, exercising filter().
+        // TODO: abstraction in TenantHarness for splits.
+        //
+
+        // Filter for various shards: this exercises cases like values at start of key range, end of key
+        // range, middle of key range.
+        let shard_count = ShardCount::new(4);
+        for shard_number in 0..shard_count.count() {
+            //
+            // mimic the shard split
+            //
+            let shard_identity = ShardIdentity::new(
+                ShardNumber(shard_number),
+                shard_count,
+                ShardStripeSize(0x8000),
+            )
+            .unwrap();
+            let harness = TenantHarness::create_custom(
+                Box::leak(Box::new(format!(
+                    "test_image_layer_rewrite--child{}",
+                    shard_identity.shard_slug()
+                ))),
+                tenant_conf.clone(),
+                tenant_id,
+                shard_identity,
+                // NB: in reality, the shards would each fork off their own gen number sequence from the parent.
+                // But here, all we care about is that the gen number is unique.
+                get_next_gen(),
+            )
+            .unwrap();
+            let (tenant, ctx) = harness.load().await;
+            let timeline = tenant
+                .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
+                .await
+                .unwrap();
+
+            //
+            // use filter() and make assertions
+            //
+
+            let mut filtered_writer = ImageLayerWriter::new(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                &range,
+                lsn,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+            let wrote_keys = resident
+                .filter(&shard_identity, &mut filtered_writer, &ctx)
+                .await
+                .unwrap();
+            let replacement = if wrote_keys > 0 {
+                Some(filtered_writer.finish(&timeline, &ctx).await.unwrap())
+            } else {
+                None
+            };
+
+            // This exact size and those below will need updating as/when the layer encoding changes, but
+            // should be deterministic for a given version of the format, as we used no randomness generating the input.
+            assert_eq!(original_size, 1597440);
+
+            match shard_number {
+                0 => {
+                    // We should have written out just one stripe for our shard identity
+                    assert_eq!(wrote_keys, 0x8000);
+                    let replacement = replacement.unwrap();
+
+                    // We should have dropped some of the data
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+
+                    // Assert that we dropped ~3/4 of the data.
+                    assert_eq!(replacement.metadata().file_size, 417792);
+                }
+                1 => {
+                    // Shard 1 has no keys in our input range
+                    assert_eq!(wrote_keys, 0x0);
+                    assert!(replacement.is_none());
+                }
+                2 => {
+                    // Shard 2 has one stripes in the input range
+                    assert_eq!(wrote_keys, 0x8000);
+                    let replacement = replacement.unwrap();
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+                    assert_eq!(replacement.metadata().file_size, 417792);
+                }
+                3 => {
+                    // Shard 3 has two stripes in the input range
+                    assert_eq!(wrote_keys, 0x10000);
+                    let replacement = replacement.unwrap();
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+                    assert_eq!(replacement.metadata().file_size, 811008);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    async fn produce_image_layer(
+        tenant: &Tenant,
+        tline: &Arc<Timeline>,
+        mut images: Vec<(Key, Bytes)>,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
+        images.sort();
+        let (key_start, _) = images.first().unwrap();
+        let (key_last, _) = images.last().unwrap();
+        let key_end = key_last.next();
+        let key_range = *key_start..key_end;
+        let mut writer = ImageLayerWriter::new(
+            tenant.conf,
+            tline.timeline_id,
+            tenant.tenant_shard_id,
+            &key_range,
+            lsn,
+            ctx,
+        )
+        .await?;
+
+        for (key, img) in images {
+            writer.put_image(key, img, ctx).await?;
+        }
+        let img_layer = writer.finish(tline, ctx).await?;
+
+        Ok::<_, anyhow::Error>(img_layer)
+    }
+
+    async fn assert_img_iter_equal(
+        img_iter: &mut ImageLayerIterator<'_>,
+        expect: &[(Key, Bytes)],
+        expect_lsn: Lsn,
+    ) {
+        let mut expect_iter = expect.iter();
+        loop {
+            let o1 = img_iter.next().await.unwrap();
+            let o2 = expect_iter.next();
+            match (o1, o2) {
+                (None, None) => break,
+                (Some((k1, l1, v1)), Some((k2, i2))) => {
+                    let Value::Image(i1) = v1 else {
+                        panic!("expect Value::Image")
+                    };
+                    assert_eq!(&k1, k2);
+                    assert_eq!(l1, expect_lsn);
+                    assert_eq!(&i1, i2);
+                }
+                (o1, o2) => panic!("iterators length mismatch: {:?}, {:?}", o1, o2),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn image_layer_iterator() {
+        let harness = TenantHarness::create("image_layer_iterator").unwrap();
+        let (tenant, ctx) = harness.load().await;
+
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        fn get_key(id: u32) -> Key {
+            let mut key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+        const N: usize = 1000;
+        let test_imgs = (0..N)
+            .map(|idx| (get_key(idx as u32), Bytes::from(format!("img{idx:05}"))))
+            .collect_vec();
+        let resident_layer =
+            produce_image_layer(&tenant, &tline, test_imgs.clone(), Lsn(0x10), &ctx)
+                .await
+                .unwrap();
+        let img_layer = resident_layer.get_as_image(&ctx).await.unwrap();
+        for max_read_size in [1, 1024] {
+            for batch_size in [1, 2, 4, 8, 3, 7, 13] {
+                println!("running with batch_size={batch_size} max_read_size={max_read_size}");
+                // Test if the batch size is correctly determined
+                let mut iter = img_layer.iter(&ctx);
+                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut num_items = 0;
+                for _ in 0..3 {
+                    iter.next_batch().await.unwrap();
+                    num_items += iter.key_values_batch.len();
+                    if max_read_size == 1 {
+                        // every key should be a batch b/c the value is larger than max_read_size
+                        assert_eq!(iter.key_values_batch.len(), 1);
+                    } else {
+                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                    }
+                    if num_items >= N {
+                        break;
+                    }
+                    iter.key_values_batch.clear();
+                }
+                // Test if the result is correct
+                let mut iter = img_layer.iter(&ctx);
+                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                assert_img_iter_equal(&mut iter, &test_imgs, Lsn(0x10)).await;
+            }
         }
     }
 }

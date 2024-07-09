@@ -6,6 +6,7 @@
 
 mod draw_timeline_dir;
 mod index_part;
+mod key;
 mod layer_map_analyzer;
 mod layers;
 
@@ -61,6 +62,8 @@ enum Commands {
     AnalyzeLayerMap(AnalyzeLayerMapCmd),
     #[command(subcommand)]
     Layer(LayerCmd),
+    /// Debug print a hex key found from logs
+    Key(key::DescribeKeyCommand),
 }
 
 /// Read and update pageserver metadata file
@@ -175,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
             let toml_item = toml_document
                 .get("remote_storage")
                 .expect("need remote_storage");
-            let config = RemoteStorageConfig::from_toml(toml_item)?.expect("incomplete config");
+            let config = RemoteStorageConfig::from_toml(toml_item)?;
             let storage = remote_storage::GenericRemoteStorage::from_config(&config);
             let cancel = CancellationToken::new();
             storage
@@ -183,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
                 .time_travel_recover(Some(&prefix), timestamp, done_if_after, &cancel)
                 .await?;
         }
+        Commands::Key(dkc) => dkc.execute(),
     };
     Ok(())
 }
@@ -219,6 +223,7 @@ fn handle_metadata(
     let mut meta = TimelineMetadata::from_bytes(&metadata_bytes)?;
     println!("Current metadata:\n{meta:?}");
     let mut update_meta = false;
+    // TODO: simplify this part
     if let Some(disk_consistent_lsn) = disk_consistent_lsn {
         meta = TimelineMetadata::new(
             *disk_consistent_lsn,

@@ -7,6 +7,7 @@
 //! ```
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{io, result};
 
 use anyhow::Context;
@@ -14,6 +15,7 @@ use camino::Utf8PathBuf;
 use postgres_connection::PgConnectionConfig;
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
+use utils::auth::{Claims, Scope};
 use utils::{http::error::HttpErrorBody, id::NodeId};
 
 use crate::{
@@ -110,11 +112,16 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<()> {
+    pub async fn start(
+        &self,
+        extra_opts: Vec<String>,
+        retry_timeout: &Duration,
+    ) -> anyhow::Result<()> {
         print!(
-            "Starting safekeeper at '{}' in '{}'",
+            "Starting safekeeper at '{}' in '{}', retrying for {:?}",
             self.pg_connection_config.raw_address(),
-            self.datadir_path().display()
+            self.datadir_path().display(),
+            retry_timeout,
         );
         io::stdout().flush().unwrap();
 
@@ -197,8 +204,9 @@ impl SafekeeperNode {
             &datadir,
             &self.env.safekeeper_bin(),
             &args,
-            [],
+            self.safekeeper_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
+            retry_timeout,
             || async {
                 match self.check_status().await {
                     Ok(()) => Ok(true),
@@ -208,6 +216,18 @@ impl SafekeeperNode {
             },
         )
         .await
+    }
+
+    fn safekeeper_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
+        // Generate a token to connect from safekeeper to peers
+        if self.conf.auth_enabled {
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+            Ok(vec![("SAFEKEEPER_AUTH_TOKEN".to_owned(), token)])
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     ///

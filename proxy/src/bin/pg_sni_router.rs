@@ -9,7 +9,8 @@ use futures::future::Either;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
-use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled};
+use proxy::metrics::{Metrics, ThreadPoolMetrics};
+use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
 
@@ -64,6 +65,8 @@ async fn main() -> anyhow::Result<()> {
     let _logging_guard = proxy::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
+
+    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
 
     let args = cli().get_matches();
     let destination: String = args.get_one::<String>("dest").unwrap().parse()?;
@@ -283,7 +286,10 @@ async fn handle_client(
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
-    let _ = copy_bidirectional_client_compute(&mut tls_stream, &mut client).await?;
 
-    Ok(())
+    match copy_bidirectional_client_compute(&mut tls_stream, &mut client).await {
+        Ok(_) => Ok(()),
+        Err(ErrorSource::Client(err)) => Err(err).context("client"),
+        Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
+    }
 }

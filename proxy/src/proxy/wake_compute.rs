@@ -1,17 +1,16 @@
 use crate::config::RetryConfig;
+use crate::console::messages::{ConsoleError, Reason};
 use crate::console::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::context::RequestMonitoring;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
     WakeupFailureKind,
 };
-use crate::proxy::retry::retry_after;
+use crate::proxy::retry::{retry_after, should_retry};
 use hyper1::StatusCode;
-use std::ops::ControlFlow;
 use tracing::{error, info, warn};
 
 use super::connect_compute::ComputeConnectBackend;
-use super::retry::ShouldRetry;
 
 pub async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
@@ -21,9 +20,8 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
 ) -> Result<CachedNodeInfo, WakeComputeError> {
     let retry_type = RetryType::WakeCompute;
     loop {
-        let wake_res = api.wake_compute(ctx).await;
-        match handle_try_wake(wake_res, *num_retries, config) {
-            Err(e) => {
+        match api.wake_compute(ctx).await {
+            Err(e) if !should_retry(&e, *num_retries, config) => {
                 error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
                 report_error(&e, false);
                 Metrics::get().proxy.retries_metric.observe(
@@ -35,11 +33,11 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
                 );
                 return Err(e);
             }
-            Ok(ControlFlow::Continue(e)) => {
+            Err(e) => {
                 warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
                 report_error(&e, true);
             }
-            Ok(ControlFlow::Break(n)) => {
+            Ok(n) => {
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Success,
@@ -62,62 +60,60 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
     }
 }
 
-/// Attempts to wake up the compute node.
-/// * Returns Ok(Continue(e)) if there was an error waking but retries are acceptable
-/// * Returns Ok(Break(node)) if the wakeup succeeded
-/// * Returns Err(e) if there was an error
-pub fn handle_try_wake(
-    result: Result<CachedNodeInfo, WakeComputeError>,
-    num_retries: u32,
-    config: RetryConfig,
-) -> Result<ControlFlow<CachedNodeInfo, WakeComputeError>, WakeComputeError> {
-    match result {
-        Err(err) => match &err {
-            WakeComputeError::ApiError(api) if api.should_retry(num_retries, config) => {
-                Ok(ControlFlow::Continue(err))
-            }
-            _ => Err(err),
-        },
-        // Ready to try again.
-        Ok(new) => Ok(ControlFlow::Break(new)),
-    }
-}
-
 fn report_error(e: &WakeComputeError, retry: bool) {
     use crate::console::errors::ApiError;
     let kind = match e {
         WakeComputeError::BadComputeAddress(_) => WakeupFailureKind::BadComputeAddress,
         WakeComputeError::ApiError(ApiError::Transport(_)) => WakeupFailureKind::ApiTransportError,
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::LOCKED,
-            ref text,
-        }) if text.contains("written data quota exceeded")
-            || text.contains("the limit for current plan reached") =>
-        {
-            WakeupFailureKind::QuotaExceeded
-        }
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            ref text,
-        }) if text.contains("compute time quota of non-primary branches is exceeded") => {
-            WakeupFailureKind::QuotaExceeded
-        }
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::LOCKED,
-            ..
-        }) => WakeupFailureKind::ApiConsoleLocked,
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::BAD_REQUEST,
-            ..
-        }) => WakeupFailureKind::ApiConsoleBadRequest,
-        WakeComputeError::ApiError(ApiError::Console { status, .. })
-            if status.is_server_error() =>
-        {
-            WakeupFailureKind::ApiConsoleOtherServerError
-        }
-        WakeComputeError::ApiError(ApiError::Console { .. }) => {
-            WakeupFailureKind::ApiConsoleOtherError
-        }
+        WakeComputeError::ApiError(ApiError::Console(e)) => match e.get_reason() {
+            Reason::RoleProtected => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::ResourceNotFound => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::ProjectNotFound => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::EndpointNotFound => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::BranchNotFound => WakeupFailureKind::ApiConsoleBadRequest,
+            Reason::RateLimitExceeded => WakeupFailureKind::ApiConsoleLocked,
+            Reason::NonDefaultBranchComputeTimeExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::ActiveTimeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::ComputeTimeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::WrittenDataQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::DataTransferQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::LogicalSizeQuotaExceeded => WakeupFailureKind::QuotaExceeded,
+            Reason::ConcurrencyLimitReached => WakeupFailureKind::ApiConsoleLocked,
+            Reason::LockAlreadyTaken => WakeupFailureKind::ApiConsoleLocked,
+            Reason::RunningOperations => WakeupFailureKind::ApiConsoleLocked,
+            Reason::Unknown => match e {
+                ConsoleError {
+                    http_status_code: StatusCode::LOCKED,
+                    ref error,
+                    ..
+                } if error.contains("written data quota exceeded")
+                    || error.contains("the limit for current plan reached") =>
+                {
+                    WakeupFailureKind::QuotaExceeded
+                }
+                ConsoleError {
+                    http_status_code: StatusCode::UNPROCESSABLE_ENTITY,
+                    ref error,
+                    ..
+                } if error.contains("compute time quota of non-primary branches is exceeded") => {
+                    WakeupFailureKind::QuotaExceeded
+                }
+                ConsoleError {
+                    http_status_code: StatusCode::LOCKED,
+                    ..
+                } => WakeupFailureKind::ApiConsoleLocked,
+                ConsoleError {
+                    http_status_code: StatusCode::BAD_REQUEST,
+                    ..
+                } => WakeupFailureKind::ApiConsoleBadRequest,
+                ConsoleError {
+                    http_status_code, ..
+                } if http_status_code.is_server_error() => {
+                    WakeupFailureKind::ApiConsoleOtherServerError
+                }
+                ConsoleError { .. } => WakeupFailureKind::ApiConsoleOtherError,
+            },
+        },
         WakeComputeError::TooManyConnections => WakeupFailureKind::ApiConsoleLocked,
         WakeComputeError::TooManyConnectionAttempts(_) => WakeupFailureKind::TimeoutError,
     };

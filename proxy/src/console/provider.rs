@@ -2,7 +2,7 @@
 pub mod mock;
 pub mod neon;
 
-use super::messages::MetricsAuxInfo;
+use super::messages::{ConsoleError, MetricsAuxInfo};
 use crate::{
     auth::{
         backend::{ComputeCredentialKeys, ComputeUserInfo},
@@ -15,36 +15,33 @@ use crate::{
     error::ReportableError,
     intern::ProjectIdInt,
     metrics::ApiLockMetrics,
+    rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token},
     scram, EndpointCacheKey,
 };
 use dashmap::DashMap;
 use std::{hash::Hash, sync::Arc, time::Duration};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tracing::info;
 
 pub mod errors {
     use crate::{
+        console::messages::{self, ConsoleError, Reason},
         error::{io_error, ReportableError, UserFacingError},
-        http,
-        proxy::retry::ShouldRetry,
+        proxy::retry::CouldRetry,
     };
     use thiserror::Error;
 
     use super::ApiLockError;
 
     /// A go-to error message which doesn't leak any detail.
-    const REQUEST_FAILED: &str = "Console request failed";
+    pub const REQUEST_FAILED: &str = "Console request failed";
 
     /// Common console API error.
     #[derive(Debug, Error)]
     pub enum ApiError {
         /// Error returned by the console itself.
-        #[error("{REQUEST_FAILED} with {}: {}", .status, .text)]
-        Console {
-            status: http::StatusCode,
-            text: Box<str>,
-        },
+        #[error("{REQUEST_FAILED} with {0}")]
+        Console(ConsoleError),
 
         /// Various IO errors like broken pipe or malformed payload.
         #[error("{REQUEST_FAILED}: {0}")]
@@ -53,11 +50,11 @@ pub mod errors {
 
     impl ApiError {
         /// Returns HTTP status code if it's the reason for failure.
-        pub fn http_status_code(&self) -> Option<http::StatusCode> {
+        pub fn get_reason(&self) -> messages::Reason {
             use ApiError::*;
             match self {
-                Console { status, .. } => Some(*status),
-                _ => None,
+                Console(e) => e.get_reason(),
+                _ => messages::Reason::Unknown,
             }
         }
     }
@@ -67,22 +64,7 @@ pub mod errors {
             use ApiError::*;
             match self {
                 // To minimize risks, only select errors are forwarded to users.
-                // Ask @neondatabase/control-plane for review before adding more.
-                Console { status, .. } => match *status {
-                    http::StatusCode::NOT_FOUND => {
-                        // Status 404: failed to get a project-related resource.
-                        format!("{REQUEST_FAILED}: endpoint cannot be found")
-                    }
-                    http::StatusCode::NOT_ACCEPTABLE => {
-                        // Status 406: endpoint is disabled (we don't allow connections).
-                        format!("{REQUEST_FAILED}: endpoint is disabled")
-                    }
-                    http::StatusCode::LOCKED | http::StatusCode::UNPROCESSABLE_ENTITY => {
-                        // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
-                        format!("{REQUEST_FAILED}: endpoint is temporarily unavailable. Check your quotas and/or contact our support.")
-                    }
-                    _ => REQUEST_FAILED.to_owned(),
-                },
+                Console(c) => c.get_user_facing_message(),
                 _ => REQUEST_FAILED.to_owned(),
             }
         }
@@ -91,64 +73,68 @@ pub mod errors {
     impl ReportableError for ApiError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                ApiError::Console {
-                    status: http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
-                    ..
-                } => crate::error::ErrorKind::User,
-                ApiError::Console {
-                    status: http::StatusCode::UNPROCESSABLE_ENTITY,
-                    text,
-                } if text.contains("compute time quota of non-primary branches is exceeded") => {
-                    crate::error::ErrorKind::User
+                ApiError::Console(e) => {
+                    use crate::error::ErrorKind::*;
+                    match e.get_reason() {
+                        Reason::RoleProtected => User,
+                        Reason::ResourceNotFound => User,
+                        Reason::ProjectNotFound => User,
+                        Reason::EndpointNotFound => User,
+                        Reason::BranchNotFound => User,
+                        Reason::RateLimitExceeded => ServiceRateLimit,
+                        Reason::NonDefaultBranchComputeTimeExceeded => User,
+                        Reason::ActiveTimeQuotaExceeded => User,
+                        Reason::ComputeTimeQuotaExceeded => User,
+                        Reason::WrittenDataQuotaExceeded => User,
+                        Reason::DataTransferQuotaExceeded => User,
+                        Reason::LogicalSizeQuotaExceeded => User,
+                        Reason::ConcurrencyLimitReached => ControlPlane,
+                        Reason::LockAlreadyTaken => ControlPlane,
+                        Reason::RunningOperations => ControlPlane,
+                        Reason::Unknown => match &e {
+                            ConsoleError {
+                                http_status_code:
+                                    http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
+                                ..
+                            } => crate::error::ErrorKind::User,
+                            ConsoleError {
+                                http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
+                                error,
+                                ..
+                            } if error.contains(
+                                "compute time quota of non-primary branches is exceeded",
+                            ) =>
+                            {
+                                crate::error::ErrorKind::User
+                            }
+                            ConsoleError {
+                                http_status_code: http::StatusCode::LOCKED,
+                                error,
+                                ..
+                            } if error.contains("quota exceeded")
+                                || error.contains("the limit for current plan reached") =>
+                            {
+                                crate::error::ErrorKind::User
+                            }
+                            ConsoleError {
+                                http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
+                                ..
+                            } => crate::error::ErrorKind::ServiceRateLimit,
+                            ConsoleError { .. } => crate::error::ErrorKind::ControlPlane,
+                        },
+                    }
                 }
-                ApiError::Console {
-                    status: http::StatusCode::LOCKED,
-                    text,
-                } if text.contains("quota exceeded")
-                    || text.contains("the limit for current plan reached") =>
-                {
-                    crate::error::ErrorKind::User
-                }
-                ApiError::Console {
-                    status: http::StatusCode::TOO_MANY_REQUESTS,
-                    ..
-                } => crate::error::ErrorKind::ServiceRateLimit,
-                ApiError::Console { .. } => crate::error::ErrorKind::ControlPlane,
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
     }
 
-    impl ShouldRetry for ApiError {
+    impl CouldRetry for ApiError {
         fn could_retry(&self) -> bool {
             match self {
                 // retry some transport errors
                 Self::Transport(io) => io.could_retry(),
-                // retry some temporary failures because the compute was in a bad state
-                // (bad request can be returned when the endpoint was in transition)
-                Self::Console {
-                    status: http::StatusCode::BAD_REQUEST,
-                    ..
-                } => true,
-                // don't retry when quotas are exceeded
-                Self::Console {
-                    status: http::StatusCode::UNPROCESSABLE_ENTITY,
-                    ref text,
-                } => !text.contains("compute time quota of non-primary branches is exceeded"),
-                // locked can be returned when the endpoint was in transition
-                // or when quotas are exceeded. don't retry when quotas are exceeded
-                Self::Console {
-                    status: http::StatusCode::LOCKED,
-                    ref text,
-                } => {
-                    // written data quota exceeded
-                    // data transfer quota exceeded
-                    // compute time quota exceeded
-                    // logical size quota exceeded
-                    !text.contains("quota exceeded")
-                        && !text.contains("the limit for current plan reached")
-                }
-                _ => false,
+                Self::Console(e) => e.could_retry(),
             }
         }
     }
@@ -254,6 +240,17 @@ pub mod errors {
             }
         }
     }
+
+    impl CouldRetry for WakeComputeError {
+        fn could_retry(&self) -> bool {
+            match self {
+                WakeComputeError::BadComputeAddress(_) => false,
+                WakeComputeError::ApiError(e) => e.could_retry(),
+                WakeComputeError::TooManyConnections => false,
+                WakeComputeError::TooManyConnectionAttempts(_) => false,
+            }
+        }
+    }
 }
 
 /// Auth secret which is managed by the cloud.
@@ -320,8 +317,8 @@ impl NodeInfo {
     }
 }
 
-pub type NodeInfoCache = TimedLru<EndpointCacheKey, NodeInfo>;
-pub type CachedNodeInfo = Cached<&'static NodeInfoCache>;
+pub type NodeInfoCache = TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ConsoleError>>>;
+pub type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
 pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
@@ -443,8 +440,8 @@ impl ApiCaches {
 /// Various caches for [`console`](super).
 pub struct ApiLocks<K> {
     name: &'static str,
-    node_locks: DashMap<K, Arc<Semaphore>>,
-    permits: usize,
+    node_locks: DashMap<K, Arc<DynamicLimiter>>,
+    config: RateLimiterConfig,
     timeout: Duration,
     epoch: std::time::Duration,
     metrics: &'static ApiLockMetrics,
@@ -452,16 +449,13 @@ pub struct ApiLocks<K> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiLockError {
-    #[error("lock was closed")]
-    AcquireError(#[from] tokio::sync::AcquireError),
-    #[error("permit could not be acquired")]
+    #[error("timeout acquiring resource permit")]
     TimeoutError(#[from] tokio::time::error::Elapsed),
 }
 
 impl ReportableError for ApiLockError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            ApiLockError::AcquireError(_) => crate::error::ErrorKind::Service,
             ApiLockError::TimeoutError(_) => crate::error::ErrorKind::RateLimit,
         }
     }
@@ -470,7 +464,7 @@ impl ReportableError for ApiLockError {
 impl<K: Hash + Eq + Clone> ApiLocks<K> {
     pub fn new(
         name: &'static str,
-        permits: usize,
+        config: RateLimiterConfig,
         shards: usize,
         timeout: Duration,
         epoch: std::time::Duration,
@@ -479,7 +473,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         Ok(Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
-            permits,
+            config,
             timeout,
             epoch,
             metrics,
@@ -487,8 +481,10 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
     }
 
     pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
-        if self.permits == 0 {
-            return Ok(WakeComputePermit { permit: None });
+        if self.config.initial_limit == 0 {
+            return Ok(WakeComputePermit {
+                permit: Token::disabled(),
+            });
         }
         let now = Instant::now();
         let semaphore = {
@@ -500,24 +496,22 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
                     .entry(key.clone())
                     .or_insert_with(|| {
                         self.metrics.semaphores_registered.inc();
-                        Arc::new(Semaphore::new(self.permits))
+                        DynamicLimiter::new(self.config)
                     })
                     .clone()
             }
         };
-        let permit = tokio::time::timeout_at(now + self.timeout, semaphore.acquire_owned()).await;
+        let permit = semaphore.acquire_timeout(self.timeout).await;
 
         self.metrics
             .semaphore_acquire_seconds
             .observe(now.elapsed().as_secs_f64());
-
-        Ok(WakeComputePermit {
-            permit: Some(permit??),
-        })
+        info!("acquired permit {:?}", now.elapsed().as_secs_f64());
+        Ok(WakeComputePermit { permit: permit? })
     }
 
     pub async fn garbage_collect_worker(&self) {
-        if self.permits == 0 {
+        if self.config.initial_limit == 0 {
             return;
         }
         let mut interval =
@@ -547,12 +541,21 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
 }
 
 pub struct WakeComputePermit {
-    // None if the lock is disabled
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Token,
 }
 
 impl WakeComputePermit {
     pub fn should_check_cache(&self) -> bool {
-        self.permit.is_some()
+        !self.permit.is_disabled()
+    }
+    pub fn release(self, outcome: Outcome) {
+        self.permit.release(outcome)
+    }
+    pub fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
+        match res {
+            Ok(_) => self.release(Outcome::Success),
+            Err(_) => self.release(Outcome::Overload),
+        }
+        res
     }
 }

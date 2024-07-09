@@ -15,7 +15,6 @@ from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_tenant_status_404,
 )
 from fixtures.remote_storage import (
     LocalFsStorage,
@@ -204,8 +203,6 @@ def test_tenant_relocation(
         [
             # Needed for detach polling on the original pageserver
             f".*NotFound: tenant {tenant_id}.*",
-            # We will dual-attach in this test, so stale generations are expected
-            ".*Dropped remote consistent LSN updates.*",
         ]
     )
 
@@ -347,9 +344,6 @@ def test_tenant_relocation(
     # that all the data is there to be sure that old pageserver
     # is no longer involved, and if it is, we will see the error
     origin_http.tenant_detach(tenant_id)
-
-    # Wait a little, so that the detach operation has time to finish.
-    wait_tenant_status_404(origin_http, tenant_id, iterations=100, interval=1)
 
     post_migration_check(ep_main, 500500, old_local_path_main)
     post_migration_check(ep_second, 1001000, old_local_path_second)

@@ -6,11 +6,9 @@ mod scheduler;
 use std::{sync::Arc, time::SystemTime};
 
 use crate::{
-    config::PageServerConf,
     context::RequestContext,
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    virtual_file::MaybeFatalIo,
 };
 
 use self::{
@@ -21,11 +19,12 @@ use self::{
 use super::{
     config::{SecondaryLocationConfig, TenantConfOpt},
     mgr::TenantManager,
-    remote_timeline_client::LayerFileMetadata,
     span::debug_assert_current_span_has_tenant_id,
-    storage_layer::{layer::local_layer_path, LayerName},
+    storage_layer::LayerName,
 };
 
+use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;
+use metrics::UIntGauge;
 use pageserver_api::{
     models,
     shard::{ShardIdentity, TenantShardId},
@@ -102,6 +101,17 @@ pub(crate) struct SecondaryTenant {
 
     // Public state indicating overall progress of downloads relative to the last heatmap seen
     pub(crate) progress: std::sync::Mutex<models::SecondaryProgress>,
+
+    // Sum of layer sizes on local disk
+    pub(super) resident_size_metric: UIntGauge,
+}
+
+impl Drop for SecondaryTenant {
+    fn drop(&mut self) {
+        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
+        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+    }
 }
 
 impl SecondaryTenant {
@@ -111,6 +121,12 @@ impl SecondaryTenant {
         tenant_conf: TenantConfOpt,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
+        let resident_size_metric = SECONDARY_RESIDENT_PHYSICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id])
+            .unwrap();
+
         Arc::new(Self {
             tenant_shard_id,
             // todo: shall we make this a descendent of the
@@ -126,6 +142,8 @@ impl SecondaryTenant {
             detail: std::sync::Mutex::new(SecondaryDetail::new(config.clone())),
 
             progress: std::sync::Mutex::default(),
+
+            resident_size_metric,
         })
     }
 
@@ -178,13 +196,7 @@ impl SecondaryTenant {
 
     /// Cancellation safe, but on cancellation the eviction will go through
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline_id, name=%name))]
-    pub(crate) async fn evict_layer(
-        self: &Arc<Self>,
-        conf: &PageServerConf,
-        timeline_id: TimelineId,
-        name: LayerName,
-        metadata: LayerFileMetadata,
-    ) {
+    pub(crate) async fn evict_layer(self: &Arc<Self>, timeline_id: TimelineId, name: LayerName) {
         debug_assert_current_span_has_tenant_id();
 
         let guard = match self.gate.enter() {
@@ -196,42 +208,13 @@ impl SecondaryTenant {
         };
 
         let now = SystemTime::now();
-
-        let local_path = local_layer_path(
-            conf,
-            &self.tenant_shard_id,
-            &timeline_id,
-            &name,
-            &metadata.generation,
-        );
+        tracing::info!("Evicting secondary layer");
 
         let this = self.clone();
 
         // spawn it to be cancellation safe
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            // We tolerate ENOENT, because between planning eviction and executing
-            // it, the secondary downloader could have seen an updated heatmap that
-            // resulted in a layer being deleted.
-            // Other local I/O errors are process-fatal: these should never happen.
-            let deleted = std::fs::remove_file(local_path);
-
-            let not_found = deleted
-                .as_ref()
-                .is_err_and(|x| x.kind() == std::io::ErrorKind::NotFound);
-
-            let deleted = if not_found {
-                false
-            } else {
-                deleted
-                    .map(|()| true)
-                    .fatal_err("Deleting layer during eviction")
-            };
-
-            if !deleted {
-                // skip updating accounting and putting perhaps later timestamp
-                return;
-            }
 
             // Update the timeline's state.  This does not have to be synchronized with
             // the download process, because:
@@ -249,9 +232,12 @@ impl SecondaryTenant {
             // have to 100% match what is on disk, because it's a best-effort warming
             // of the cache.
             let mut detail = this.detail.lock().unwrap();
-            if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
-                timeline_detail.on_disk_layers.remove(&name);
-                timeline_detail.evicted_at.insert(name, now);
+            if let Some(removed) =
+                detail.evict_layer(name, &timeline_id, now, &this.resident_size_metric)
+            {
+                // We might race with removal of the same layer during downloads, so finding the layer we
+                // were trying to remove is optional.  Only issue the disk I/O to remove it if we found it.
+                removed.remove_blocking();
             }
         })
         .await

@@ -9,18 +9,18 @@ use super::{
 use crate::{
     auth::backend::ComputeUserInfo,
     compute,
-    console::messages::ColdStartInfo,
+    console::messages::{ColdStartInfo, Reason},
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::EndpointRateLimiter,
-    scram, EndpointCacheKey, Normalize,
+    scram, EndpointCacheKey,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 pub struct Api {
     endpoint: http::Endpoint,
@@ -94,12 +94,14 @@ impl Api {
             let body = match parse_body::<GetRoleSecret>(response).await {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
-                Err(e) => match e.http_status_code() {
-                    Some(http::StatusCode::NOT_FOUND) => {
+                // TODO(anna): retry
+                Err(e) => {
+                    if e.get_reason().is_not_found() {
                         return Ok(AuthInfo::default());
+                    } else {
+                        return Err(e.into());
                     }
-                    _otherwise => return Err(e.into()),
-                },
+                }
             };
 
             let secret = if body.role_secret.is_empty() {
@@ -271,49 +273,91 @@ impl super::Api for Api {
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key = user_info.endpoint_cache_key();
 
+        macro_rules! check_cache {
+            () => {
+                if let Some(cached) = self.caches.node_info.get(&key) {
+                    let (cached, info) = cached.take_value();
+                    let info = info.map_err(|c| {
+                        info!(key = &*key, "found cached wake_compute error");
+                        WakeComputeError::ApiError(ApiError::Console(*c))
+                    })?;
+
+                    debug!(key = &*key, "found cached compute node info");
+                    ctx.set_project(info.aux.clone());
+                    return Ok(cached.map(|()| info));
+                }
+            };
+        }
+
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(&key) {
-            info!(key = &*key, "found cached compute node info");
-            ctx.set_project(cached.aux.clone());
-            return Ok(cached);
-        }
-
-        // check rate limit
-        if !self
-            .wake_compute_endpoint_rate_limiter
-            .check(user_info.endpoint.normalize().into(), 1)
-        {
-            return Err(WakeComputeError::TooManyConnections);
-        }
+        check_cache!();
 
         let permit = self.locks.get_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
-            if let Some(cached) = self.caches.node_info.get(&key) {
-                info!(key = &*key, "found cached compute node info");
-                ctx.set_project(cached.aux.clone());
-                return Ok(cached);
-            }
+            check_cache!();
         }
 
-        let mut node = self.do_wake_compute(ctx, user_info).await?;
-        ctx.set_project(node.aux.clone());
-        let cold_start_info = node.aux.cold_start_info;
-        info!("woken up a compute node");
+        // check rate limit
+        if !self
+            .wake_compute_endpoint_rate_limiter
+            .check(user_info.endpoint.normalize_intern(), 1)
+        {
+            return Err(WakeComputeError::TooManyConnections);
+        }
 
-        // store the cached node as 'warm'
-        node.aux.cold_start_info = ColdStartInfo::WarmCached;
-        let (_, mut cached) = self.caches.node_info.insert(key.clone(), node);
-        cached.aux.cold_start_info = cold_start_info;
+        let node = permit.release_result(self.do_wake_compute(ctx, user_info).await);
+        match node {
+            Ok(node) => {
+                ctx.set_project(node.aux.clone());
+                debug!(key = &*key, "created a cache entry for woken compute node");
 
-        info!(key = &*key, "created a cache entry for compute node info");
+                let mut stored_node = node.clone();
+                // store the cached node as 'warm_cached'
+                stored_node.aux.cold_start_info = ColdStartInfo::WarmCached;
 
-        Ok(cached)
+                let (_, cached) = self.caches.node_info.insert_unit(key, Ok(stored_node));
+
+                Ok(cached.map(|()| node))
+            }
+            Err(err) => match err {
+                WakeComputeError::ApiError(ApiError::Console(err)) => {
+                    let Some(status) = &err.status else {
+                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                    };
+
+                    let reason = status
+                        .details
+                        .error_info
+                        .map_or(Reason::Unknown, |x| x.reason);
+
+                    // if we can retry this error, do not cache it.
+                    if reason.can_retry() {
+                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                    }
+
+                    // at this point, we should only have quota errors.
+                    debug!(
+                        key = &*key,
+                        "created a cache entry for the wake compute error"
+                    );
+
+                    self.caches.node_info.insert_ttl(
+                        key,
+                        Err(Box::new(err.clone())),
+                        Duration::from_secs(30),
+                    );
+
+                    Err(WakeComputeError::ApiError(ApiError::Console(err)))
+                }
+                err => return Err(err),
+            },
+        }
     }
 }
 
@@ -327,19 +371,24 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
         info!("request succeeded, processing the body");
         return Ok(response.json().await?);
     }
+    let s = response.bytes().await?;
+    // Log plaintext to be able to detect, whether there are some cases not covered by the error struct.
+    info!("response_error plaintext: {:?}", s);
 
     // Don't throw an error here because it's not as important
     // as the fact that the request itself has failed.
-    let body = response.json().await.unwrap_or_else(|e| {
+    let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
         ConsoleError {
             error: "reason unclear (malformed error message)".into(),
+            http_status_code: status,
+            status: None,
         }
     });
+    body.http_status_code = status;
 
-    let text = body.error;
-    error!("console responded with an error ({status}): {text}");
-    Err(ApiError::Console { status, text })
+    error!("console responded with an error ({status}): {body:?}");
+    Err(ApiError::Console(body))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

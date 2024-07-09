@@ -285,6 +285,21 @@ def test_foobar(neon_env_builder: NeonEnvBuilder):
     ...
 ```
 
+The env includes a default tenant and timeline. Therefore, you do not need to create your own
+tenant/timeline for testing.
+
+```python
+def test_foobar2(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start() # Start the environment
+    with env.endpoints.create_start("main") as endpoint:
+        # Start the compute endpoint
+    client = env.pageserver.http_client() # Get the pageserver client
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
+```
+
 For more information about pytest fixtures, see https://docs.pytest.org/en/stable/fixture.html
 
 At the end of a test, all the nodes in the environment are automatically stopped, so you

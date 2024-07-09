@@ -184,6 +184,12 @@ impl<L> Level<L> {
         }
         let mut events: Vec<Event<K>> = Vec::new();
         for (idx, l) in self.layers.iter().enumerate() {
+            let key_range = l.key_range();
+            if key_range.end == key_range.start.next() && l.is_delta() {
+                // Ignore single-key delta layers as they can be stacked on top of each other
+                // as that is the only way to cut further.
+                continue;
+            }
             events.push(Event {
                 key: l.key_range().start,
                 layer_idx: idx,

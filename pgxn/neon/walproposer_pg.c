@@ -63,6 +63,8 @@ char	   *wal_acceptors_list = "";
 int			wal_acceptor_reconnect_timeout = 1000;
 int			wal_acceptor_connection_timeout = 10000;
 
+/* Set to true in the walproposer bgw. */
+static bool am_walproposer;
 static WalproposerShmemState *walprop_shared;
 static WalProposerConfig walprop_config;
 static XLogRecPtr sentPtr = InvalidXLogRecPtr;
@@ -76,6 +78,7 @@ static HotStandbyFeedback agg_hs_feedback;
 
 static void nwp_shmem_startup_hook(void);
 static void nwp_register_gucs(void);
+static void assign_neon_safekeepers(const char *newval, void *extra);
 static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
 static bool backpressure_throttling_impl(void);
@@ -100,23 +103,19 @@ static void StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd);
 static void WalSndLoop(WalProposer *wp);
 static void XLogBroadcastWalProposer(WalProposer *wp);
 
-static void XLogWalPropWrite(WalProposer *wp, char *buf, Size nbytes, XLogRecPtr recptr);
-static void XLogWalPropClose(XLogRecPtr recptr);
-
 static void add_nwr_event_set(Safekeeper *sk, uint32 events);
 static void update_nwr_event_set(Safekeeper *sk, uint32 events);
 static void rm_safekeeper_event_set(Safekeeper *to_remove, bool is_sk);
 
 static void CheckGracefulShutdown(WalProposer *wp);
 
-static XLogRecPtr GetLogRepRestartLSN(WalProposer *wp);
-
 static void
 init_walprop_config(bool syncSafekeepers)
 {
 	walprop_config.neon_tenant = neon_tenant;
 	walprop_config.neon_timeline = neon_timeline;
-	walprop_config.safekeepers_list = wal_acceptors_list;
+	/* WalProposerCreate scribbles directly on it, so pstrdup */
+	walprop_config.safekeepers_list = pstrdup(wal_acceptors_list);
 	walprop_config.safekeeper_reconnect_timeout = wal_acceptor_reconnect_timeout;
 	walprop_config.safekeeper_connection_timeout = wal_acceptor_connection_timeout;
 	walprop_config.wal_segment_size = wal_segment_size;
@@ -156,6 +155,7 @@ WalProposerMain(Datum main_arg)
 
 	init_walprop_config(false);
 	walprop_pg_init_bgworker();
+	am_walproposer = true;
 	walprop_pg_load_libpqwalreceiver();
 
 	wp = WalProposerCreate(&walprop_config, walprop_pg);
@@ -194,10 +194,10 @@ nwp_register_gucs(void)
 							   NULL,	/* long_desc */
 							   &wal_acceptors_list, /* valueAddr */
 							   "",	/* bootValue */
-							   PGC_POSTMASTER,
+							   PGC_SIGHUP,
 							   GUC_LIST_INPUT,	/* extensions can't use*
 												 * GUC_LIST_QUOTE */
-							   NULL, NULL, NULL);
+							   NULL, assign_neon_safekeepers, NULL);
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_reconnect_timeout",
@@ -218,6 +218,33 @@ nwp_register_gucs(void)
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
+}
+
+/*
+ * GUC assign_hook for neon.safekeepers. Restarts walproposer through FATAL if
+ * the list changed.
+ */
+static void
+assign_neon_safekeepers(const char *newval, void *extra)
+{
+	if (!am_walproposer)
+		return;
+
+	if (!newval) {
+		/* should never happen */
+		wpg_log(FATAL, "neon.safekeepers is empty");
+	}
+
+	/* 
+	 * TODO: restarting through FATAL is stupid and introduces 1s delay before
+	 * next bgw start. We should refactor walproposer to allow graceful exit and
+	 * thus remove this delay.
+	 */
+	if (strcmp(wal_acceptors_list, newval) != 0)
+	{
+		wpg_log(FATAL, "restarting walproposer to change safekeeper list from %s to %s",
+				wal_acceptors_list, newval);
+	}
 }
 
 /*  Check if we need to suspend inserts because of lagging replication. */
@@ -368,7 +395,7 @@ walprop_register_bgworker(void)
 	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "WalProposerMain");
 	snprintf(bgw.bgw_name, BGW_MAXLEN, "WAL proposer");
 	snprintf(bgw.bgw_type, BGW_MAXLEN, "WAL proposer");
-	bgw.bgw_restart_time = 5;
+	bgw.bgw_restart_time = 1;
 	bgw.bgw_notify_pid = 0;
 	bgw.bgw_main_arg = (Datum) 0;
 
@@ -1236,8 +1263,6 @@ StartProposerReplication(WalProposer *wp, StartReplicationCmd *cmd)
 static void
 WalSndLoop(WalProposer *wp)
 {
-	XLogRecPtr	flushPtr;
-
 	/* Clear any already-pending wakeups */
 	ResetLatch(MyLatch);
 
@@ -1333,143 +1358,14 @@ XLogBroadcastWalProposer(WalProposer *wp)
 }
 
 /*
-  Used to download WAL before basebackup for logical walsenders from sk, no longer
-  needed because walsender always uses neon_walreader.
+  Used to download WAL before basebackup for walproposer/logical walsenders. No
+  longer used, replaced by neon_walreader; but callback still exists because
+  simulation tests use it.
  */
 static bool
 WalProposerRecovery(WalProposer *wp, Safekeeper *sk)
 {
 	return true;
-}
-
-/*
- * These variables are used similarly to openLogFile/SegNo,
- * but for walproposer to write the XLOG during recovery. walpropFileTLI is the TimeLineID
- * corresponding the filename of walpropFile.
- */
-static int	walpropFile = -1;
-static TimeLineID walpropFileTLI = 0;
-static XLogSegNo walpropSegNo = 0;
-
-/*
- * Write XLOG data to disk.
- */
-static void
-XLogWalPropWrite(WalProposer *wp, char *buf, Size nbytes, XLogRecPtr recptr)
-{
-	int			startoff;
-	int			byteswritten;
-
-	/*
-	 * Apart from walproposer, basebackup LSN page is also written out by
-	 * postgres itself which writes WAL only in pages, and in basebackup it is
-	 * inherently dummy (only safekeepers have historic WAL). Update WAL
-	 * buffers here to avoid dummy page overwriting correct one we download
-	 * here. Ugly, but alternatives are about the same ugly. We won't need
-	 * that if we switch to on-demand WAL download from safekeepers, without
-	 * writing to disk.
-	 *
-	 * https://github.com/neondatabase/neon/issues/5749
-	 */
-	if (!wp->config->syncSafekeepers)
-		XLogUpdateWalBuffers(buf, recptr, nbytes);
-
-	while (nbytes > 0)
-	{
-		int			segbytes;
-
-		/* Close the current segment if it's completed */
-		if (walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size))
-			XLogWalPropClose(recptr);
-
-		if (walpropFile < 0)
-		{
-#if PG_VERSION_NUM >= 150000
-			/* FIXME Is it ok to use hardcoded value here? */
-			TimeLineID	tli = 1;
-#else
-			bool		use_existent = true;
-#endif
-			/* Create/use new log file */
-			XLByteToSeg(recptr, walpropSegNo, wal_segment_size);
-#if PG_VERSION_NUM >= 150000
-			walpropFile = XLogFileInit(walpropSegNo, tli);
-			walpropFileTLI = tli;
-#else
-			walpropFile = XLogFileInit(walpropSegNo, &use_existent, false);
-			walpropFileTLI = ThisTimeLineID;
-#endif
-		}
-
-		/* Calculate the start offset of the received logs */
-		startoff = XLogSegmentOffset(recptr, wal_segment_size);
-
-		if (startoff + nbytes > wal_segment_size)
-			segbytes = wal_segment_size - startoff;
-		else
-			segbytes = nbytes;
-
-		/* OK to write the logs */
-		errno = 0;
-
-		byteswritten = pg_pwrite(walpropFile, buf, segbytes, (off_t) startoff);
-		if (byteswritten <= 0)
-		{
-			char		xlogfname[MAXFNAMELEN];
-			int			save_errno;
-
-			/* if write didn't set errno, assume no disk space */
-			if (errno == 0)
-				errno = ENOSPC;
-
-			save_errno = errno;
-			XLogFileName(xlogfname, walpropFileTLI, walpropSegNo, wal_segment_size);
-			errno = save_errno;
-			ereport(PANIC,
-					(errcode_for_file_access(),
-					 errmsg("could not write to log segment %s "
-							"at offset %u, length %lu: %m",
-							xlogfname, startoff, (unsigned long) segbytes)));
-		}
-
-		/* Update state for write */
-		recptr += byteswritten;
-
-		nbytes -= byteswritten;
-		buf += byteswritten;
-	}
-
-	/*
-	 * Close the current segment if it's fully written up in the last cycle of
-	 * the loop.
-	 */
-	if (walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size))
-	{
-		XLogWalPropClose(recptr);
-	}
-}
-
-/*
- * Close the current segment.
- */
-static void
-XLogWalPropClose(XLogRecPtr recptr)
-{
-	Assert(walpropFile >= 0 && !XLByteInSeg(recptr, walpropSegNo, wal_segment_size));
-
-	if (close(walpropFile) != 0)
-	{
-		char		xlogfname[MAXFNAMELEN];
-
-		XLogFileName(xlogfname, walpropFileTLI, walpropSegNo, wal_segment_size);
-
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not close log segment %s: %m",
-						xlogfname)));
-	}
-
-	walpropFile = -1;
 }
 
 static void
@@ -1776,6 +1672,18 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 #endif
 
 	/*
+	 * Process config if requested. This restarts walproposer if safekeepers
+	 * list changed. Don't do that for sync-safekeepers because quite probably
+	 * it (re-reading config) won't work without some effort, and
+	 * sync-safekeepers should be quick to finish anyway.
+	 */
+	if (!wp->config->syncSafekeepers && ConfigReloadPending)
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+	}
+
+	/*
 	 * If wait is terminated by latch set (walsenders' latch is set on each
 	 * wal flush). (no need for pm death check due to WL_EXIT_ON_PM_DEATH)
 	 */
@@ -1852,34 +1760,30 @@ static void
 CombineHotStanbyFeedbacks(HotStandbyFeedback *hs, WalProposer *wp)
 {
 	hs->ts = 0;
-	hs->xmin.value = ~0;		/* largest unsigned value */
-	hs->catalog_xmin.value = ~0;	/* largest unsigned value */
+	hs->xmin = InvalidFullTransactionId;
+	hs->catalog_xmin = InvalidFullTransactionId;
 
 	for (int i = 0; i < wp->n_safekeepers; i++)
 	{
-		if (wp->safekeeper[i].appendResponse.hs.ts != 0)
+
+		if (wp->safekeeper[i].state == SS_ACTIVE)
 		{
 			HotStandbyFeedback *skhs = &wp->safekeeper[i].appendResponse.hs;
 
 			if (FullTransactionIdIsNormal(skhs->xmin)
-				&& FullTransactionIdPrecedes(skhs->xmin, hs->xmin))
+				&& (!FullTransactionIdIsValid(hs->xmin) || FullTransactionIdPrecedes(skhs->xmin, hs->xmin)))
 			{
 				hs->xmin = skhs->xmin;
 				hs->ts = skhs->ts;
 			}
 			if (FullTransactionIdIsNormal(skhs->catalog_xmin)
-				&& FullTransactionIdPrecedes(skhs->catalog_xmin, hs->xmin))
+				&& (!FullTransactionIdIsValid(hs->catalog_xmin) || FullTransactionIdPrecedes(skhs->catalog_xmin, hs->catalog_xmin)))
 			{
 				hs->catalog_xmin = skhs->catalog_xmin;
 				hs->ts = skhs->ts;
 			}
 		}
 	}
-
-	if (hs->xmin.value == ~0)
-		hs->xmin = InvalidFullTransactionId;
-	if (hs->catalog_xmin.value == ~0)
-		hs->catalog_xmin = InvalidFullTransactionId;
 }
 
 /*
@@ -1946,14 +1850,28 @@ walprop_pg_process_safekeeper_feedback(WalProposer *wp, Safekeeper *sk)
 	}
 
 	CombineHotStanbyFeedbacks(&hsFeedback, wp);
-	if (hsFeedback.ts != 0 && memcmp(&hsFeedback, &agg_hs_feedback, sizeof hsFeedback) != 0)
+	if (memcmp(&hsFeedback, &agg_hs_feedback, sizeof hsFeedback) != 0)
 	{
+		FullTransactionId xmin = hsFeedback.xmin;
+		FullTransactionId catalog_xmin = hsFeedback.catalog_xmin;
+		FullTransactionId next_xid = ReadNextFullTransactionId();
+		/*
+		 * Page server is updating nextXid in checkpoint each 1024 transactions,
+		 * so feedback xmin can be actually larger then nextXid and
+		 * function TransactionIdInRecentPast return false in this case,
+		 * preventing update of slot's xmin.
+		 */
+		if (FullTransactionIdPrecedes(next_xid, xmin))
+			xmin = next_xid;
+		if (FullTransactionIdPrecedes(next_xid, catalog_xmin))
+			catalog_xmin = next_xid;
 		agg_hs_feedback = hsFeedback;
+		elog(DEBUG2, "ProcessStandbyHSFeedback(xmin=%d, catalog_xmin=%d", XidFromFullTransactionId(hsFeedback.xmin), XidFromFullTransactionId(hsFeedback.catalog_xmin));
 		ProcessStandbyHSFeedback(hsFeedback.ts,
-								 XidFromFullTransactionId(hsFeedback.xmin),
-								 EpochFromFullTransactionId(hsFeedback.xmin),
-								 XidFromFullTransactionId(hsFeedback.catalog_xmin),
-								 EpochFromFullTransactionId(hsFeedback.catalog_xmin));
+								 XidFromFullTransactionId(xmin),
+								 EpochFromFullTransactionId(xmin),
+								 XidFromFullTransactionId(catalog_xmin),
+								 EpochFromFullTransactionId(catalog_xmin));
 	}
 
 	CheckGracefulShutdown(wp);
@@ -1975,58 +1893,6 @@ static void
 walprop_pg_log_internal(WalProposer *wp, int level, const char *line)
 {
 	elog(FATAL, "unexpected log_internal message at level %d: %s", level, line);
-}
-
-static XLogRecPtr
-GetLogRepRestartLSN(WalProposer *wp)
-{
-	FILE	   *f;
-	XLogRecPtr	lrRestartLsn = InvalidXLogRecPtr;
-
-	/* We don't need to do anything in syncSafekeepers mode. */
-	if (wp->config->syncSafekeepers)
-		return InvalidXLogRecPtr;
-
-	/*
-	 * If there are active logical replication subscription we need to provide
-	 * enough WAL for their WAL senders based on th position of their
-	 * replication slots.
-	 */
-	f = fopen("restart.lsn", "rb");
-	if (f != NULL)
-	{
-		size_t		rc = fread(&lrRestartLsn, sizeof(lrRestartLsn), 1, f);
-
-		fclose(f);
-		if (rc == 1 && lrRestartLsn != InvalidXLogRecPtr)
-		{
-			uint64		download_range_mb;
-
-			wpg_log(LOG, "logical replication restart LSN %X/%X", LSN_FORMAT_ARGS(lrRestartLsn));
-
-			/*
-			 * If we need to download more than a max_slot_wal_keep_size,
-			 * don't do it to avoid risk of exploding pg_wal. Logical
-			 * replication won't work until recreated, but at least compute
-			 * would start; this also follows max_slot_wal_keep_size
-			 * semantics.
-			 */
-			download_range_mb = (wp->propEpochStartLsn - lrRestartLsn) / MB;
-			if (max_slot_wal_keep_size_mb > 0 && download_range_mb >= max_slot_wal_keep_size_mb)
-			{
-				wpg_log(WARNING, "not downloading WAL for logical replication since %X/%X as max_slot_wal_keep_size=%dMB",
-						LSN_FORMAT_ARGS(lrRestartLsn), max_slot_wal_keep_size_mb);
-				return InvalidXLogRecPtr;
-			}
-
-			/*
-			 * start from the beginning of the segment to fetch page headers
-			 * verifed by XLogReader
-			 */
-			lrRestartLsn = lrRestartLsn - XLogSegmentOffset(lrRestartLsn, wal_segment_size);
-		}
-	}
-	return lrRestartLsn;
 }
 
 void

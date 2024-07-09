@@ -8,6 +8,7 @@ pub mod passthrough;
 pub mod retry;
 pub mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
+pub use copy_bidirectional::ErrorSource;
 
 use crate::{
     auth,
@@ -91,7 +92,7 @@ pub async fn task_main(
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
 
         connections.spawn(async move {
-            let (socket, peer_addr) = match read_proxy_protocol(socket).await{
+            let (socket, peer_addr) = match read_proxy_protocol(socket).await {
                 Ok((socket, Some(addr))) => (socket, addr.ip()),
                 Err(e) => {
                     error!("per-client task finished with an error: {e:#}");
@@ -101,36 +102,38 @@ pub async fn task_main(
                     error!("missing required client IP");
                     return;
                 }
-                Ok((socket, None)) => (socket, peer_addr.ip())
+                Ok((socket, None)) => (socket, peer_addr.ip()),
             };
 
             match socket.inner.set_nodelay(true) {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(e) => {
                     error!("per-client task finished with an error: failed to set socket option: {e:#}");
                     return;
-                },
+                }
             };
 
             let mut ctx = RequestMonitoring::new(
-                    session_id,
-                    peer_addr,
-                    crate::metrics::Protocol::Tcp,
-                    &config.region,
-                );
+                session_id,
+                peer_addr,
+                crate::metrics::Protocol::Tcp,
+                &config.region,
+            );
             let span = ctx.span.clone();
 
-            let res = handle_client(
-                config,
-                &mut ctx,
-                cancellation_handler,
-                socket,
-                ClientMode::Tcp,
-                endpoint_rate_limiter2,
-                conn_gauge,
-            )
-            .instrument(span.clone())
-            .await;
+            let startup = Box::pin(
+                handle_client(
+                    config,
+                    &mut ctx,
+                    cancellation_handler,
+                    socket,
+                    ClientMode::Tcp,
+                    endpoint_rate_limiter2,
+                    conn_gauge,
+                )
+                .instrument(span.clone()),
+            );
+            let res = startup.await;
 
             match res {
                 Err(e) => {
@@ -146,8 +149,11 @@ pub async fn task_main(
                     ctx.log_connect();
                     match p.proxy_pass().instrument(span.clone()).await {
                         Ok(()) => {}
-                        Err(e) => {
-                            error!(parent: &span, "per-client task finished with an error: {e:#}");
+                        Err(ErrorSource::Client(e)) => {
+                            error!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
+                        }
+                        Err(ErrorSource::Compute(e)) => {
+                            error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");
                         }
                     }
                 }
@@ -266,6 +272,8 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
             }
         };
     drop(pause);
+
+    ctx.set_db_options(params.clone());
 
     let hostname = mode.hostname(stream.get_ref());
 

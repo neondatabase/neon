@@ -164,13 +164,14 @@ def test_remote_storage_backup_and_restore(
         "data": {"reason": "storage-sync-list-remote-timelines"},
     }
 
+    # Even though the tenant is broken, subsequent calls to location_conf API will succeed, but
+    # the tenant will always end up in a broken state as a result of the failpoint.
     # Ensure that even though the tenant is broken, retrying the attachment fails
-    with pytest.raises(Exception, match="Tenant state is Broken"):
-        # Use same generation as in previous attempt
-        gen_state = env.storage_controller.inspect(tenant_id)
-        assert gen_state is not None
-        generation = gen_state[0]
-        env.pageserver.tenant_attach(tenant_id, generation=generation)
+    tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+    gen_state = env.storage_controller.inspect(tenant_id)
+    assert gen_state is not None
+    generation = gen_state[0]
+    env.pageserver.tenant_attach(tenant_id, generation=generation)
 
     # Restart again, this implicitly clears the failpoint.
     # test_remote_failures=1 remains active, though, as it's in the pageserver config.
@@ -353,13 +354,6 @@ def test_remote_storage_upload_queue_retries(
 
     env.pageserver.stop(immediate=True)
     env.endpoints.stop_all()
-
-    # We are about to forcibly drop local dirs.  Storage controller will increment generation in re-attach before
-    # we later increment when actually attaching it again, leading to skipping a generation and potentially getting
-    # these warnings if there was a durable but un-executed deletion list at time of restart.
-    env.pageserver.allowed_errors.extend(
-        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
-    )
 
     dir_to_clear = env.pageserver.tenant_dir()
     shutil.rmtree(dir_to_clear)

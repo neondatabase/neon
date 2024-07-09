@@ -13,16 +13,15 @@ use parquet::{
     },
     record::RecordWriter,
 };
-use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
+use pq_proto::StartupMessageParams;
+use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
+use serde::ser::SerializeMap;
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
 use utils::backoff;
 
-use crate::{
-    config::{remote_storage_from_toml, OptRemoteStorageConfig},
-    context::LOG_CHAN_DISCONNECT,
-};
+use crate::{config::remote_storage_from_toml, context::LOG_CHAN_DISCONNECT};
 
 use super::{RequestMonitoring, LOG_CHAN};
 
@@ -31,11 +30,11 @@ pub struct ParquetUploadArgs {
     /// Storage location to upload the parquet files to.
     /// Encoded as toml (same format as pageservers), eg
     /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
-    #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
-    parquet_upload_remote_storage: OptRemoteStorageConfig,
+    #[clap(long, value_parser = remote_storage_from_toml)]
+    parquet_upload_remote_storage: Option<RemoteStorageConfig>,
 
-    #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
-    parquet_upload_disconnect_events_remote_storage: OptRemoteStorageConfig,
+    #[clap(long, value_parser = remote_storage_from_toml)]
+    parquet_upload_disconnect_events_remote_storage: Option<RemoteStorageConfig>,
 
     /// How many rows to include in a row group
     #[clap(long, default_value_t = 8192)]
@@ -87,6 +86,7 @@ pub struct RequestData {
     database: Option<String>,
     project: Option<String>,
     branch: Option<String>,
+    pg_options: Option<String>,
     auth_method: Option<&'static str>,
     error: Option<&'static str>,
     /// Success is counted if we form a HTTP response with sql rows inside
@@ -101,6 +101,23 @@ pub struct RequestData {
     disconnect_timestamp: Option<chrono::NaiveDateTime>,
 }
 
+struct Options<'a> {
+    options: &'a StartupMessageParams,
+}
+
+impl<'a> serde::Serialize for Options<'a> {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = s.serialize_map(None)?;
+        for (k, v) in self.options.iter() {
+            state.serialize_entry(k, v)?;
+        }
+        state.end()
+    }
+}
+
 impl From<&RequestMonitoring> for RequestData {
     fn from(value: &RequestMonitoring) -> Self {
         Self {
@@ -113,6 +130,10 @@ impl From<&RequestMonitoring> for RequestData {
             database: value.dbname.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
             branch: value.branch.as_deref().map(String::from),
+            pg_options: value
+                .pg_options
+                .as_ref()
+                .and_then(|options| serde_json::to_string(&Options { options }).ok()),
             auth_method: value.auth_method.as_ref().map(|x| match x {
                 super::AuthMethod::Web => "web",
                 super::AuthMethod::ScramSha256 => "scram_sha_256",
@@ -307,7 +328,7 @@ where
 }
 
 async fn upload_parquet(
-    w: SerializedFileWriter<Writer<BytesMut>>,
+    mut w: SerializedFileWriter<Writer<BytesMut>>,
     len: i64,
     storage: &GenericRemoteStorage,
 ) -> anyhow::Result<Writer<BytesMut>> {
@@ -319,11 +340,15 @@ async fn upload_parquet(
 
     // I don't know how compute intensive this is, although it probably isn't much... better be safe than sorry.
     // finish method only available on the fork: https://github.com/apache/arrow-rs/issues/5253
-    let (writer, metadata) = tokio::task::spawn_blocking(move || w.finish())
+    let (mut buffer, metadata) =
+        tokio::task::spawn_blocking(move || -> parquet::errors::Result<_> {
+            let metadata = w.finish()?;
+            let buffer = std::mem::take(w.inner_mut().get_mut());
+            Ok((buffer, metadata))
+        })
         .await
         .unwrap()?;
 
-    let mut buffer = writer.into_inner();
     let data = buffer.split().freeze();
 
     let compression = len as f64 / len_uncompressed as f64;
@@ -351,7 +376,7 @@ async fn upload_parquet(
         "{year:04}/{month:02}/{day:02}/{hour:02}/requests_{id}.parquet"
     ))?;
     let cancel = CancellationToken::new();
-    backoff::retry(
+    let maybe_err = backoff::retry(
         || async {
             let stream = futures::stream::once(futures::future::ready(Ok(data.clone())));
             storage
@@ -368,7 +393,12 @@ async fn upload_parquet(
     .await
     .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
-    .context("request_data_upload")?;
+    .context("request_data_upload")
+    .err();
+
+    if let Some(err) = maybe_err {
+        tracing::warn!(%id, %err, "failed to upload request data");
+    }
 
     Ok(buffer.writer())
 }
@@ -474,16 +504,18 @@ mod tests {
         RequestData {
             session_id: uuid::Builder::from_random_bytes(rng.gen()).into_uuid(),
             peer_addr: Ipv4Addr::from(rng.gen::<[u8; 4]>()).to_string(),
-            timestamp: chrono::NaiveDateTime::from_timestamp_millis(
+            timestamp: chrono::DateTime::from_timestamp_millis(
                 rng.gen_range(1703862754..1803862754),
             )
-            .unwrap(),
+            .unwrap()
+            .naive_utc(),
             application_name: Some("test".to_owned()),
             username: Some(hex::encode(rng.gen::<[u8; 4]>())),
             endpoint_id: Some(hex::encode(rng.gen::<[u8; 16]>())),
             database: Some(hex::encode(rng.gen::<[u8; 16]>())),
             project: Some(hex::encode(rng.gen::<[u8; 16]>())),
             branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            pg_options: None,
             auth_method: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
             region: "us-east-1",
@@ -508,7 +540,9 @@ mod tests {
         rx: impl Stream<Item = RequestData>,
     ) -> Vec<(u64, usize, i64)> {
         let remote_storage_config = RemoteStorageConfig {
-            storage: RemoteStorageKind::LocalFs(tmpdir.to_path_buf()),
+            storage: RemoteStorageKind::LocalFs {
+                local_path: tmpdir.to_path_buf(),
+            },
             timeout: std::time::Duration::from_secs(120),
         };
         let storage = GenericRemoteStorage::from_config(&remote_storage_config).unwrap();
@@ -560,15 +594,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1315008, 3, 6000),
-                (1315001, 3, 6000),
-                (1315061, 3, 6000),
-                (1315018, 3, 6000),
-                (1315148, 3, 6000),
-                (1314990, 3, 6000),
-                (1314782, 3, 6000),
-                (1315018, 3, 6000),
-                (438575, 1, 2000)
+                (1315874, 3, 6000),
+                (1315867, 3, 6000),
+                (1315927, 3, 6000),
+                (1315884, 3, 6000),
+                (1316014, 3, 6000),
+                (1315856, 3, 6000),
+                (1315648, 3, 6000),
+                (1315884, 3, 6000),
+                (438913, 1, 2000)
             ]
         );
 
@@ -598,11 +632,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1221738, 5, 10000),
-                (1227888, 5, 10000),
-                (1229682, 5, 10000),
-                (1229044, 5, 10000),
-                (1220322, 5, 10000)
+                (1223214, 5, 10000),
+                (1229364, 5, 10000),
+                (1231158, 5, 10000),
+                (1230520, 5, 10000),
+                (1221798, 5, 10000)
             ]
         );
 
@@ -634,11 +668,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1207385, 5, 10000),
-                (1207116, 5, 10000),
-                (1207409, 5, 10000),
-                (1207397, 5, 10000),
-                (1207652, 5, 10000)
+                (1208861, 5, 10000),
+                (1208592, 5, 10000),
+                (1208885, 5, 10000),
+                (1208873, 5, 10000),
+                (1209128, 5, 10000)
             ]
         );
 
@@ -663,15 +697,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1315008, 3, 6000),
-                (1315001, 3, 6000),
-                (1315061, 3, 6000),
-                (1315018, 3, 6000),
-                (1315148, 3, 6000),
-                (1314990, 3, 6000),
-                (1314782, 3, 6000),
-                (1315018, 3, 6000),
-                (438575, 1, 2000)
+                (1315874, 3, 6000),
+                (1315867, 3, 6000),
+                (1315927, 3, 6000),
+                (1315884, 3, 6000),
+                (1316014, 3, 6000),
+                (1315856, 3, 6000),
+                (1315648, 3, 6000),
+                (1315884, 3, 6000),
+                (438913, 1, 2000)
             ]
         );
 
@@ -708,7 +742,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(659240, 2, 3001), (658954, 2, 3000), (658750, 2, 2999)]
+            [(659836, 2, 3001), (659550, 2, 3000), (659346, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

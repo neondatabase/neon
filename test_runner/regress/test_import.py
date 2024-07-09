@@ -21,7 +21,7 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.utils import subprocess_capture
+from fixtures.utils import assert_pageserver_backups_equal, subprocess_capture
 
 
 def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
@@ -76,7 +76,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         start_lsn = manifest["WAL-Ranges"][0]["Start-LSN"]
         end_lsn = manifest["WAL-Ranges"][0]["End-LSN"]
 
-    endpoint_id = "ep-import_from_vanilla"
+    branch_name = "import_from_vanilla"
     tenant = TenantId.generate()
     timeline = TimelineId.generate()
 
@@ -106,8 +106,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
                 str(tenant),
                 "--timeline-id",
                 str(timeline),
-                "--node-name",
-                endpoint_id,
+                "--branch-name",
+                branch_name,
                 "--base-lsn",
                 start_lsn,
                 "--base-tarfile",
@@ -146,7 +146,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     wait_for_upload(client, tenant, timeline, Lsn(end_lsn))
 
     # Check it worked
-    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant)
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
     vanilla_pg.stop()
@@ -163,7 +163,7 @@ def test_import_from_pageserver_small(
 
     num_rows = 3000
     lsn = _generate_data(num_rows, endpoint)
-    _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir, test_output_dir)
+    _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)
 
 
 @pytest.mark.timeout(1800)
@@ -193,9 +193,7 @@ def test_import_from_pageserver_multisegment(
     log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
     assert logical_size > 1024**3  # = 1GB
 
-    tar_output_file = _import(
-        num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir, test_output_dir
-    )
+    tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)
 
     # Check if the backup data contains multiple segment files
     cnt_seg_files = 0
@@ -235,7 +233,6 @@ def _import(
     env: NeonEnv,
     pg_bin: PgBin,
     timeline: TimelineId,
-    pg_distrib_dir: Path,
     test_output_dir: Path,
 ) -> Path:
     """Test importing backup data to the pageserver.
@@ -248,15 +245,9 @@ def _import(
     path to the backup archive file"""
     log.info(f"start_backup_lsn = {lsn}")
 
-    # Set LD_LIBRARY_PATH in the env properly, otherwise we may use the wrong libpq.
-    # PgBin sets it automatically, but here we need to pipe psql output to the tar command.
-    psql_env = {"LD_LIBRARY_PATH": str(pg_distrib_dir / "lib")}
-
     # Get a fullbackup from pageserver
-    query = f"fullbackup { env.initial_tenant} {timeline} {lsn}"
     tar_output_file = test_output_dir / "fullbackup.tar"
-    cmd = ["psql", "--no-psqlrc", env.pageserver.connstr(), "-c", query, "-o", str(tar_output_file)]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(env.pageserver, env.initial_tenant, timeline, lsn, tar_output_file)
 
     # Stop the first pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -274,7 +265,7 @@ def _import(
     tenant = TenantId.generate()
 
     # Import to pageserver
-    endpoint_id = "ep-import_from_pageserver"
+    branch_name = "import_from_pageserver"
     client = env.pageserver.http_client()
     env.pageserver.tenant_create(tenant)
     env.neon_cli.raw_cli(
@@ -285,8 +276,8 @@ def _import(
             str(tenant),
             "--timeline-id",
             str(timeline),
-            "--node-name",
-            endpoint_id,
+            "--branch-name",
+            branch_name,
             "--base-lsn",
             str(lsn),
             "--base-tarfile",
@@ -301,26 +292,15 @@ def _import(
     wait_for_upload(client, tenant, timeline, lsn)
 
     # Check it worked
-    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant, lsn=lsn)
     assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     # Take another fullbackup
-    query = f"fullbackup { tenant} {timeline} {lsn}"
     new_tar_output_file = test_output_dir / "fullbackup-new.tar"
-    cmd = [
-        "psql",
-        "--no-psqlrc",
-        env.pageserver.connstr(),
-        "-c",
-        query,
-        "-o",
-        str(new_tar_output_file),
-    ]
-    pg_bin.run_capture(cmd, env=psql_env)
+    pg_bin.take_fullbackup(env.pageserver, tenant, timeline, lsn, new_tar_output_file)
 
     # Check it's the same as the first fullbackup
-    # TODO pageserver should be checking checksum
-    assert os.path.getsize(tar_output_file) == os.path.getsize(new_tar_output_file)
+    assert_pageserver_backups_equal(tar_output_file, new_tar_output_file, set())
 
     # Check that gc works
     pageserver_http = env.pageserver.http_client()

@@ -1,4 +1,5 @@
 use crate::{node::Node, tenant_shard::TenantShard};
+use itertools::Itertools;
 use pageserver_api::controller_api::UtilizationScore;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -29,6 +30,8 @@ pub enum MaySchedule {
 struct SchedulerNode {
     /// How many shards are currently scheduled on this node, via their [`crate::tenant_shard::IntentState`].
     shard_count: usize,
+    /// How many shards are currently attached on this node, via their [`crate::tenant_shard::IntentState`].
+    attached_shard_count: usize,
 
     /// Whether this node is currently elegible to have new shards scheduled (this is derived
     /// from a node's availability state and scheduling policy).
@@ -42,7 +45,9 @@ impl PartialEq for SchedulerNode {
             (MaySchedule::Yes(_), MaySchedule::Yes(_)) | (MaySchedule::No, MaySchedule::No)
         );
 
-        may_schedule_matches && self.shard_count == other.shard_count
+        may_schedule_matches
+            && self.shard_count == other.shard_count
+            && self.attached_shard_count == other.attached_shard_count
     }
 }
 
@@ -138,6 +143,15 @@ impl ScheduleContext {
     }
 }
 
+pub(crate) enum RefCountUpdate {
+    PromoteSecondary,
+    Attach,
+    Detach,
+    DemoteAttached,
+    AddSecondary,
+    RemoveSecondary,
+}
+
 impl Scheduler {
     pub(crate) fn new<'a>(nodes: impl Iterator<Item = &'a Node>) -> Self {
         let mut scheduler_nodes = HashMap::new();
@@ -146,6 +160,7 @@ impl Scheduler {
                 node.get_id(),
                 SchedulerNode {
                     shard_count: 0,
+                    attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
                 },
             );
@@ -171,6 +186,7 @@ impl Scheduler {
                 node.get_id(),
                 SchedulerNode {
                     shard_count: 0,
+                    attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
                 },
             );
@@ -179,7 +195,10 @@ impl Scheduler {
         for shard in shards {
             if let Some(node_id) = shard.intent.get_attached() {
                 match expect_nodes.get_mut(node_id) {
-                    Some(node) => node.shard_count += 1,
+                    Some(node) => {
+                        node.shard_count += 1;
+                        node.attached_shard_count += 1;
+                    }
                     None => anyhow::bail!(
                         "Tenant {} references nonexistent node {}",
                         shard.tenant_shard_id,
@@ -227,31 +246,80 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Increment the reference count of a node.  This reference count is used to guide scheduling
-    /// decisions, not for memory management: it represents one tenant shard whose IntentState targets
-    /// this node.
+    /// Update the reference counts of a node. These reference counts are used to guide scheduling
+    /// decisions, not for memory management: they represent the number of tenant shard whose IntentState
+    /// targets this node and the number of tenants shars whose IntentState is attached to this
+    /// node.
     ///
     /// It is an error to call this for a node that is not known to the scheduler (i.e. passed into
     /// [`Self::new`] or [`Self::node_upsert`])
-    pub(crate) fn node_inc_ref(&mut self, node_id: NodeId) {
+    pub(crate) fn update_node_ref_counts(&mut self, node_id: NodeId, update: RefCountUpdate) {
         let Some(node) = self.nodes.get_mut(&node_id) else {
-            tracing::error!("Scheduler missing node {node_id}");
             debug_assert!(false);
+            tracing::error!("Scheduler missing node {node_id}");
             return;
         };
 
-        node.shard_count += 1;
+        match update {
+            RefCountUpdate::PromoteSecondary => {
+                node.attached_shard_count += 1;
+            }
+            RefCountUpdate::Attach => {
+                node.shard_count += 1;
+                node.attached_shard_count += 1;
+            }
+            RefCountUpdate::Detach => {
+                node.shard_count -= 1;
+                node.attached_shard_count -= 1;
+            }
+            RefCountUpdate::DemoteAttached => {
+                node.attached_shard_count -= 1;
+            }
+            RefCountUpdate::AddSecondary => {
+                node.shard_count += 1;
+            }
+            RefCountUpdate::RemoveSecondary => {
+                node.shard_count -= 1;
+            }
+        }
     }
 
-    /// Decrement a node's reference count.  Inverse of [`Self::node_inc_ref`].
-    pub(crate) fn node_dec_ref(&mut self, node_id: NodeId) {
-        let Some(node) = self.nodes.get_mut(&node_id) else {
+    // Check if the number of shards attached to a given node is lagging below
+    // the cluster average. If that's the case, the node should be filled.
+    pub(crate) fn compute_fill_requirement(&self, node_id: NodeId) -> usize {
+        let Some(node) = self.nodes.get(&node_id) else {
             debug_assert!(false);
             tracing::error!("Scheduler missing node {node_id}");
-            return;
+            return 0;
         };
+        assert!(!self.nodes.is_empty());
+        let expected_attached_shards_per_node = self.expected_attached_shard_count();
 
-        node.shard_count -= 1;
+        for (node_id, node) in self.nodes.iter() {
+            tracing::trace!(%node_id, "attached_shard_count={} shard_count={} expected={}", node.attached_shard_count, node.shard_count, expected_attached_shards_per_node);
+        }
+
+        if node.attached_shard_count < expected_attached_shards_per_node {
+            expected_attached_shards_per_node - node.attached_shard_count
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn expected_attached_shard_count(&self) -> usize {
+        let total_attached_shards: usize =
+            self.nodes.values().map(|n| n.attached_shard_count).sum();
+
+        assert!(!self.nodes.is_empty());
+        total_attached_shards / self.nodes.len()
+    }
+
+    pub(crate) fn nodes_by_attached_shard_count(&self) -> Vec<(NodeId, usize)> {
+        self.nodes
+            .iter()
+            .map(|(node_id, stats)| (*node_id, stats.attached_shard_count))
+            .sorted_by(|lhs, rhs| Ord::cmp(&lhs.1, &rhs.1).reverse())
+            .collect()
     }
 
     pub(crate) fn node_upsert(&mut self, node: &Node) {
@@ -263,6 +331,7 @@ impl Scheduler {
             Vacant(entry) => {
                 entry.insert(SchedulerNode {
                     shard_count: 0,
+                    attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
                 });
             }
@@ -322,7 +391,7 @@ impl Scheduler {
             return Err(ScheduleError::NoPageservers);
         }
 
-        let mut scores: Vec<(NodeId, AffinityScore, usize)> = self
+        let mut scores: Vec<(NodeId, AffinityScore, usize, usize)> = self
             .nodes
             .iter()
             .filter_map(|(k, v)| {
@@ -333,6 +402,7 @@ impl Scheduler {
                         *k,
                         context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
                         v.shard_count,
+                        v.attached_shard_count,
                     ))
                 }
             })
@@ -340,9 +410,12 @@ impl Scheduler {
 
         // Sort by, in order of precedence:
         //  1st: Affinity score.  We should never pick a higher-score node if a lower-score node is available
-        //  2nd: Utilization.  Within nodes with the same affinity, use the least loaded nodes.
-        //  3rd: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
-        scores.sort_by_key(|i| (i.1, i.2, i.0));
+        //  2nd: Attached shard count.  Within nodes with the same affinity, we always pick the node with
+        //  the least number of attached shards.
+        //  3rd: Total shard count.  Within nodes with the same affinity and attached shard count, use nodes
+        //  with the lower total shard count.
+        //  4th: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
+        scores.sort_by_key(|i| (i.1, i.3, i.2, i.0));
 
         if scores.is_empty() {
             // After applying constraints, no pageservers were left.
@@ -384,6 +457,11 @@ impl Scheduler {
     #[cfg(test)]
     pub(crate) fn get_node_shard_count(&self, node_id: NodeId) -> usize {
         self.nodes.get(&node_id).unwrap().shard_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_node_attached_shard_count(&self, node_id: NodeId) -> usize {
+        self.nodes.get(&node_id).unwrap().attached_shard_count
     }
 }
 
@@ -437,18 +515,28 @@ mod tests {
         let scheduled = scheduler.schedule_shard(&[], &context)?;
         t2_intent.set_attached(&mut scheduler, Some(scheduled));
 
-        assert_eq!(scheduler.nodes.get(&NodeId(1)).unwrap().shard_count, 1);
-        assert_eq!(scheduler.nodes.get(&NodeId(2)).unwrap().shard_count, 1);
+        assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 1);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 1);
+
+        assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 1);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 1);
 
         let scheduled = scheduler.schedule_shard(&t1_intent.all_pageservers(), &context)?;
         t1_intent.push_secondary(&mut scheduler, scheduled);
 
-        assert_eq!(scheduler.nodes.get(&NodeId(1)).unwrap().shard_count, 1);
-        assert_eq!(scheduler.nodes.get(&NodeId(2)).unwrap().shard_count, 2);
+        assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 1);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 1);
+
+        assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 2);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 1);
 
         t1_intent.clear(&mut scheduler);
-        assert_eq!(scheduler.nodes.get(&NodeId(1)).unwrap().shard_count, 0);
-        assert_eq!(scheduler.nodes.get(&NodeId(2)).unwrap().shard_count, 1);
+        assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 0);
+        assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 1);
+
+        let total_attached = scheduler.get_node_attached_shard_count(NodeId(1))
+            + scheduler.get_node_attached_shard_count(NodeId(2));
+        assert_eq!(total_attached, 1);
 
         if cfg!(debug_assertions) {
             // Dropping an IntentState without clearing it causes a panic in debug mode,
@@ -459,8 +547,12 @@ mod tests {
             assert!(result.is_err());
         } else {
             t2_intent.clear(&mut scheduler);
-            assert_eq!(scheduler.nodes.get(&NodeId(1)).unwrap().shard_count, 0);
-            assert_eq!(scheduler.nodes.get(&NodeId(2)).unwrap().shard_count, 0);
+
+            assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 0);
+            assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 0);
+
+            assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 0);
+            assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 0);
         }
 
         Ok(())

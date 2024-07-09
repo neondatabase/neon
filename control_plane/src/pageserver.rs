@@ -17,8 +17,7 @@ use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use futures::SinkExt;
 use pageserver_api::models::{
-    self, AuxFilePolicy, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo,
-    TimelineInfo,
+    self, AuxFilePolicy, LocationConfig, TenantHistorySize, TenantInfo, TimelineInfo,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -163,8 +162,8 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
-        self.start_node().await
+    pub async fn start(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
+        self.start_node(retry_timeout).await
     }
 
     fn pageserver_init(&self, conf: NeonLocalInitPageserverConf) -> anyhow::Result<()> {
@@ -232,14 +231,15 @@ impl PageServerNode {
         Ok(())
     }
 
-    async fn start_node(&self) -> anyhow::Result<()> {
+    async fn start_node(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
-            "Starting pageserver node {} at '{}' in {:?}",
+            "Starting pageserver node {} at '{}' in {:?}, retrying for {:?}",
             self.conf.id,
             self.pg_connection_config.raw_address(),
-            datadir
+            datadir,
+            retry_timeout
         );
         io::stdout().flush().context("flush stdout")?;
 
@@ -257,6 +257,7 @@ impl PageServerNode {
             args,
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
+            retry_timeout,
             || async {
                 let st = self.check_status().await;
                 match st {
@@ -401,34 +402,16 @@ impl PageServerNode {
                 .map(|x| x.parse::<AuxFilePolicy>())
                 .transpose()
                 .context("Failed to parse 'switch_aux_file_policy'")?,
+            lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+            lsn_lease_length_for_ts: settings
+                .remove("lsn_lease_length_for_ts")
+                .map(|x| x.to_string()),
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
         } else {
             Ok(result)
         }
-    }
-
-    pub async fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let config = Self::parse_config(settings.clone())?;
-
-        let request = models::TenantCreateRequest {
-            new_tenant_id: TenantShardId::unsharded(new_tenant_id),
-            generation,
-            config,
-            shard_parameters: ShardParameters::default(),
-            // Placement policy is not meaningful for creations not done via storage controller
-            placement_policy: None,
-        };
-        if !settings.is_empty() {
-            bail!("Unrecognized tenant settings: {settings:?}")
-        }
-        Ok(self.http_client.tenant_create(&request).await?)
     }
 
     pub async fn tenant_config(
@@ -524,6 +507,10 @@ impl PageServerNode {
                     .map(|x| x.parse::<AuxFilePolicy>())
                     .transpose()
                     .context("Failed to parse 'switch_aux_file_policy'")?,
+                lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
+                lsn_lease_length_for_ts: settings
+                    .remove("lsn_lease_length_for_ts")
+                    .map(|x| x.to_string()),
             }
         };
 

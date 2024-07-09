@@ -9,7 +9,6 @@
 use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::metrics::WAL_INGEST;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use crate::{aux_file, repository::*};
@@ -18,8 +17,8 @@ use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
-    dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
-    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
+    relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
@@ -28,19 +27,24 @@ use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{Oid, TimestampTz, TransactionId};
+use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
+use utils::pausable_failpoint;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
-const MAX_AUX_FILE_DELTAS: usize = 1024;
+/// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
+pub const MAX_AUX_FILE_DELTAS: usize = 1024;
+
+/// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -75,11 +79,19 @@ pub enum LsnForTimestamp {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CalculateLogicalSizeError {
+pub(crate) enum CalculateLogicalSizeError {
     #[error("cancelled")]
     Cancelled,
+
+    /// Something went wrong while reading the metadata we use to calculate logical size
+    /// Note that cancellation variants of `PageReconstructError` are transformed to [`Self::Cancelled`]
+    /// in the `From` implementation for this variant.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    PageRead(PageReconstructError),
+
+    /// Something went wrong deserializing metadata that we read to calculate logical size
+    #[error("decode error: {0}")]
+    Decode(#[from] DeserializeError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,10 +116,8 @@ impl From<PageReconstructError> for CollectKeySpaceError {
 impl From<PageReconstructError> for CalculateLogicalSizeError {
     fn from(pre: PageReconstructError) -> Self {
         match pre {
-            PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
-                Self::Cancelled
-            }
-            _ => Self::Other(pre.into()),
+            PageReconstructError::Cancelled => Self::Cancelled,
+            _ => Self::PageRead(pre),
         }
     }
 }
@@ -400,6 +410,8 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
+        pausable_failpoint!("find-lsn-for-timestamp-pausable");
+
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         // We use this method to figure out the branching LSN for the new branch, but the
         // GC cutoff could be before the branching point and we cannot create a new branch
@@ -415,6 +427,7 @@ impl Timeline {
 
         let mut found_smaller = false;
         let mut found_larger = false;
+
         while low < high {
             if cancel.is_cancelled() {
                 return Err(PageReconstructError::Cancelled);
@@ -699,14 +712,30 @@ impl Timeline {
             .await
             .context("scan")?;
         let mut result = HashMap::new();
+        let mut sz = 0;
         for (_, v) in kv {
             let v = v.context("get value")?;
             let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
             for (fname, content) in v {
+                sz += fname.len();
+                sz += content.len();
                 result.insert(fname, content);
             }
         }
+        self.aux_file_size_estimator.on_initial(sz);
         Ok(result)
+    }
+
+    pub(crate) async fn trigger_aux_file_size_computation(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), PageReconstructError> {
+        let current_policy = self.last_aux_file_policy.load();
+        if let Some(AuxFilePolicy::V2) | Some(AuxFilePolicy::CrossValidation) = current_policy {
+            self.list_aux_files_v2(lsn, ctx).await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn list_aux_files(
@@ -714,10 +743,11 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        match self.get_switch_aux_file_policy() {
-            AuxFilePolicy::V1 => self.list_aux_files_v1(lsn, ctx).await,
-            AuxFilePolicy::V2 => self.list_aux_files_v2(lsn, ctx).await,
-            AuxFilePolicy::CrossValidation => {
+        let current_policy = self.last_aux_file_policy.load();
+        match current_policy {
+            Some(AuxFilePolicy::V1) | None => self.list_aux_files_v1(lsn, ctx).await,
+            Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
+            Some(AuxFilePolicy::CrossValidation) => {
                 let v1_result = self.list_aux_files_v1(lsn, ctx).await;
                 let v2_result = self.list_aux_files_v2(lsn, ctx).await;
                 match (v1_result, v2_result) {
@@ -746,6 +776,27 @@ impl Timeline {
         }
     }
 
+    pub(crate) async fn get_replorigins(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
+        let kv = self
+            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .await
+            .context("scan")?;
+        let mut result = HashMap::new();
+        for (k, v) in kv {
+            let v = v.context("get value")?;
+            let origin_id = k.field6 as RepOriginId;
+            let origin_lsn = Lsn::des(&v).unwrap();
+            if origin_lsn != Lsn::INVALID {
+                result.insert(origin_id, origin_lsn);
+            }
+        }
+        Ok(result)
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -755,7 +806,7 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn get_current_logical_size_non_incremental(
+    pub(crate) async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
@@ -764,7 +815,7 @@ impl Timeline {
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
+        let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
@@ -803,13 +854,14 @@ impl Timeline {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = self.list_dbdirs(lsn, ctx).await?;
+        let mut dbs: Vec<((Oid, Oid), bool)> = dbdir.into_iter().collect();
 
-        let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
-        dbs.sort_unstable();
-        for (spcnode, dbnode) in dbs {
-            result.add_key(relmap_file_key(spcnode, dbnode));
+        dbs.sort_unstable_by(|(k_a, _), (k_b, _)| k_a.cmp(k_b));
+        for ((spcnode, dbnode), has_relmap_file) in dbs {
+            if has_relmap_file {
+                result.add_key(relmap_file_key(spcnode, dbnode));
+            }
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
@@ -868,11 +920,59 @@ impl Timeline {
             result.add_key(AUX_FILES_KEY);
         }
 
-        Ok((
-            result.to_keyspace(),
-            /* AUX sparse key space */
-            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
-        ))
+        // Add extra keyspaces in the test cases. Some test cases write keys into the storage without
+        // creating directory keys. These test cases will add such keyspaces into `extra_test_dense_keyspace`
+        // and the keys will not be garbage-colllected.
+        #[cfg(test)]
+        {
+            let guard = self.extra_test_dense_keyspace.load();
+            for kr in &guard.ranges {
+                result.add_range(kr.clone());
+            }
+        }
+
+        let dense_keyspace = result.to_keyspace();
+        let sparse_keyspace = SparseKeySpace(KeySpace {
+            ranges: vec![Key::metadata_aux_key_range(), repl_origin_key_range()],
+        });
+
+        if cfg!(debug_assertions) {
+            // Verify if the sparse keyspaces are ordered and non-overlapping.
+
+            // We do not use KeySpaceAccum for sparse_keyspace because we want to ensure each
+            // category of sparse keys are split into their own image/delta files. If there
+            // are overlapping keyspaces, they will be automatically merged by keyspace accum,
+            // and we want the developer to keep the keyspaces separated.
+
+            let ranges = &sparse_keyspace.0.ranges;
+
+            // TODO: use a single overlaps_with across the codebase
+            fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
+                !(a.end <= b.start || b.end <= a.start)
+            }
+            for i in 0..ranges.len() {
+                for j in 0..i {
+                    if overlaps_with(&ranges[i], &ranges[j]) {
+                        panic!(
+                            "overlapping sparse keyspace: {}..{} and {}..{}",
+                            ranges[i].start, ranges[i].end, ranges[j].start, ranges[j].end
+                        );
+                    }
+                }
+            }
+            for i in 1..ranges.len() {
+                assert!(
+                    ranges[i - 1].end <= ranges[i].start,
+                    "unordered sparse keyspace: {}..{} and {}..{}",
+                    ranges[i - 1].start,
+                    ranges[i - 1].end,
+                    ranges[i].start,
+                    ranges[i].end
+                );
+            }
+        }
+
+        Ok((dense_keyspace, sparse_keyspace))
     }
 
     /// Get cached size of relation if it not updated after specified LSN
@@ -1138,6 +1238,20 @@ impl<'a> DatadirModification<'a> {
 
         self.put(twophase_file_key(xid), Value::Image(img));
         Ok(())
+    }
+
+    pub async fn set_replorigin(
+        &mut self,
+        origin_id: RepOriginId,
+        origin_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let key = repl_origin_key(origin_id);
+        self.put(key, Value::Image(origin_lsn.ser().unwrap().into()));
+        Ok(())
+    }
+
+    pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> anyhow::Result<()> {
+        self.set_replorigin(origin_id, Lsn::INVALID).await
     }
 
     pub fn put_control_file(&mut self, img: Bytes) -> anyhow::Result<()> {
@@ -1465,7 +1579,40 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let policy = self.tline.get_switch_aux_file_policy();
+        let switch_policy = self.tline.get_switch_aux_file_policy();
+
+        let policy = {
+            let current_policy = self.tline.last_aux_file_policy.load();
+            // Allowed switch path:
+            // * no aux files -> v1/v2/cross-validation
+            // * cross-validation->v2
+
+            let current_policy = if current_policy.is_none() {
+                // This path will only be hit once per tenant: we will decide the final policy in this code block.
+                // The next call to `put_file` will always have `last_aux_file_policy != None`.
+                let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+                let aux_files_key_v1 = self.tline.list_aux_files_v1(lsn, ctx).await?;
+                if aux_files_key_v1.is_empty() {
+                    None
+                } else {
+                    self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
+                    Some(AuxFilePolicy::V1)
+                }
+            } else {
+                current_policy
+            };
+
+            if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
+                self.tline.do_switch_aux_policy(switch_policy)?;
+                info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
+                switch_policy
+            } else {
+                // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
+                // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
+                current_policy.unwrap_or(AuxFilePolicy::default_tenant_config())
+            }
+        };
+
         if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
             let key = aux_file::encode_aux_file_key(path);
             // retrieve the key from the engine
@@ -1474,23 +1621,45 @@ impl<'a> DatadirModification<'a> {
                 Err(PageReconstructError::MissingKey(_)) => None,
                 Err(e) => return Err(e.into()),
             };
-            let files = if let Some(ref old_val) = old_val {
+            let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
                 aux_file::decode_file_value(old_val)?
             } else {
                 Vec::new()
             };
-            let new_files = if content.is_empty() {
-                files
-                    .into_iter()
-                    .filter(|(p, _)| &path != p)
-                    .collect::<Vec<_>>()
-            } else {
-                files
-                    .into_iter()
-                    .filter(|(p, _)| &path != p)
-                    .chain(std::iter::once((path, content)))
-                    .collect::<Vec<_>>()
-            };
+            let mut other_files = Vec::with_capacity(files.len());
+            let mut modifying_file = None;
+            for file @ (p, content) in files {
+                if path == p {
+                    assert!(
+                        modifying_file.is_none(),
+                        "duplicated entries found for {}",
+                        path
+                    );
+                    modifying_file = Some(content);
+                } else {
+                    other_files.push(file);
+                }
+            }
+            let mut new_files = other_files;
+            match (modifying_file, content.is_empty()) {
+                (Some(old_content), false) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_update(old_content.len(), content.len());
+                    new_files.push((path, content));
+                }
+                (Some(old_content), true) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_remove(old_content.len());
+                    // not adding the file key to the final `new_files` vec.
+                }
+                (None, false) => {
+                    self.tline.aux_file_size_estimator.on_add(content.len());
+                    new_files.push((path, content));
+                }
+                (None, true) => warn!("removing non-existing aux file: {}", path),
+            }
             let new_val = aux_file::encode_file_value(&new_files)?;
             self.put(key, Value::Image(new_val.into()));
         }
@@ -1543,8 +1712,7 @@ impl<'a> DatadirModification<'a> {
                         aux_files.dir = Some(dir);
                     }
                     Err(
-                        e @ (PageReconstructError::AncestorStopping(_)
-                        | PageReconstructError::Cancelled
+                        e @ (PageReconstructError::Cancelled
                         | PageReconstructError::AncestorLsnTimeout(_)),
                     ) => {
                         // Important that we do not interpret a shutdown error as "not found" and thereby
@@ -1616,7 +1784,7 @@ impl<'a> DatadirModification<'a> {
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
             for (lsn, value) in values {
-                if is_rel_block_key(&key) || is_slru_block_key(key) {
+                if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
                     writer.put(key, lsn, &value, ctx).await?;
@@ -1650,8 +1818,6 @@ impl<'a> DatadirModification<'a> {
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut writer = self.tline.writer().await;
-
-        let timer = WAL_INGEST.time_spent_on_ingest.start_timer();
 
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
@@ -1692,8 +1858,6 @@ impl<'a> DatadirModification<'a> {
             writer.update_directory_entries_count(kind, count as u64);
         }
 
-        timer.observe_duration();
-
         Ok(())
     }
 
@@ -1727,6 +1891,12 @@ impl<'a> DatadirModification<'a> {
         }
         let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
         self.tline.get(key, lsn, ctx).await
+    }
+
+    /// Only used during unit tests, force putting a key into the modification.
+    #[cfg(test)]
+    pub(crate) fn put_for_test(&mut self, key: Key, val: Value) {
+        self.put(key, val);
     }
 
     fn put(&mut self, key: Key, val: Value) {

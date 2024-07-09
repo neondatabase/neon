@@ -30,7 +30,6 @@ jobs:
   check-image:
     uses: ./.github/workflows/check-build-tools-image.yml
 
-  # This job uses older version of GitHub Actions because it's run on gen2 runners, which don't support node 20 (for newer versions)
   build-image:
     needs: [ check-image ]
     if: needs.check-image.outputs.found == 'false'
@@ -55,7 +54,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
       # The default value is ~/.docker
@@ -64,14 +63,16 @@ jobs:
           mkdir -p /tmp/.docker-custom
           echo DOCKER_CONFIG=/tmp/.docker-custom >> $GITHUB_ENV
 
-      - uses: docker/setup-buildx-action@v2
+      - uses: docker/setup-buildx-action@v3
+        with:
+          cache-binary: false
 
-      - uses: docker/login-action@v2
+      - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/build-push-action@v4
+      - uses: docker/build-push-action@v6
         with:
           context: .
           provenance: false
@@ -79,16 +80,17 @@ jobs:
           pull: true
           file: Dockerfile.build-tools
           cache-from: type=registry,ref=neondatabase/build-tools:cache-${{ matrix.arch }}
-          cache-to: type=registry,ref=neondatabase/build-tools:cache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=neondatabase/build-tools:cache-{0},mode=max', matrix.arch) || '' }}
           tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
 
       - name: Remove custom docker config directory
+        if: always()
         run: |
           rm -rf /tmp/.docker-custom
 
   merge-images:
     needs: [ build-image ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     env:
       IMAGE_TAG: ${{ inputs.image-tag }}

@@ -1,7 +1,7 @@
 //! Code to deal with safekeeper control file upgrades
 use crate::{
     safekeeper::{AcceptorState, PgUuid, ServerInfo, Term, TermHistory, TermLsn},
-    state::{PersistedPeers, TimelinePersistentState},
+    state::{EvictionState, PersistedPeers, TimelinePersistentState},
     wal_backup_partial,
 };
 use anyhow::{bail, Result};
@@ -183,6 +183,55 @@ pub struct SafeKeeperStateV7 {
     pub peers: PersistedPeers,
 }
 
+/// Persistent information stored on safekeeper node about timeline.
+/// On disk data is prefixed by magic and format version and followed by checksum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SafeKeeperStateV8 {
+    #[serde(with = "hex")]
+    pub tenant_id: TenantId,
+    #[serde(with = "hex")]
+    pub timeline_id: TimelineId,
+    /// persistent acceptor state
+    pub acceptor_state: AcceptorState,
+    /// information about server
+    pub server: ServerInfo,
+    /// Unique id of the last *elected* proposer we dealt with. Not needed
+    /// for correctness, exists for monitoring purposes.
+    #[serde(with = "hex")]
+    pub proposer_uuid: PgUuid,
+    /// Since which LSN this timeline generally starts. Safekeeper might have
+    /// joined later.
+    pub timeline_start_lsn: Lsn,
+    /// Since which LSN safekeeper has (had) WAL for this timeline.
+    /// All WAL segments next to one containing local_start_lsn are
+    /// filled with data from the beginning.
+    pub local_start_lsn: Lsn,
+    /// Part of WAL acknowledged by quorum *and available locally*. Always points
+    /// to record boundary.
+    pub commit_lsn: Lsn,
+    /// LSN that points to the end of the last backed up segment. Useful to
+    /// persist to avoid finding out offloading progress on boot.
+    pub backup_lsn: Lsn,
+    /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
+    /// of last record streamed to everyone). Persisting it helps skipping
+    /// recovery in walproposer, generally we compute it from peers. In
+    /// walproposer proto called 'truncate_lsn'. Updates are currently drived
+    /// only by walproposer.
+    pub peer_horizon_lsn: Lsn,
+    /// LSN of the oldest known checkpoint made by pageserver and successfully
+    /// pushed to s3. We don't remove WAL beyond it. Persisted only for
+    /// informational purposes, we receive it from pageserver (or broker).
+    pub remote_consistent_lsn: Lsn,
+    /// Peers and their state as we remember it. Knowing peers themselves is
+    /// fundamental; but state is saved here only for informational purposes and
+    /// obviously can be stale. (Currently not saved at all, but let's provision
+    /// place to have less file version upgrades).
+    pub peers: PersistedPeers,
+    /// Holds names of partial segments uploaded to remote storage. Used to
+    /// clean up old objects without leaving garbage in remote storage.
+    pub partial_backup: wal_backup_partial::State,
+}
+
 pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersistentState> {
     // migrate to storing full term history
     if version == 1 {
@@ -213,6 +262,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             remote_consistent_lsn: Lsn(0),
             peers: PersistedPeers(vec![]),
             partial_backup: wal_backup_partial::State::default(),
+            eviction_state: EvictionState::Present,
         });
     // migrate to hexing some ids
     } else if version == 2 {
@@ -237,6 +287,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             remote_consistent_lsn: Lsn(0),
             peers: PersistedPeers(vec![]),
             partial_backup: wal_backup_partial::State::default(),
+            eviction_state: EvictionState::Present,
         });
     // migrate to moving tenant_id/timeline_id to the top and adding some lsns
     } else if version == 3 {
@@ -261,6 +312,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             remote_consistent_lsn: Lsn(0),
             peers: PersistedPeers(vec![]),
             partial_backup: wal_backup_partial::State::default(),
+            eviction_state: EvictionState::Present,
         });
     // migrate to having timeline_start_lsn
     } else if version == 4 {
@@ -285,6 +337,7 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             remote_consistent_lsn: Lsn(0),
             peers: PersistedPeers(vec![]),
             partial_backup: wal_backup_partial::State::default(),
+            eviction_state: EvictionState::Present,
         });
     } else if version == 5 {
         info!("reading safekeeper control file version {}", version);
@@ -329,6 +382,26 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
             remote_consistent_lsn: oldstate.remote_consistent_lsn,
             peers: oldstate.peers,
             partial_backup: wal_backup_partial::State::default(),
+            eviction_state: EvictionState::Present,
+        });
+    } else if version == 8 {
+        let oldstate = SafeKeeperStateV8::des(&buf[..buf.len()])?;
+
+        return Ok(TimelinePersistentState {
+            tenant_id: oldstate.tenant_id,
+            timeline_id: oldstate.timeline_id,
+            acceptor_state: oldstate.acceptor_state,
+            server: oldstate.server,
+            proposer_uuid: oldstate.proposer_uuid,
+            timeline_start_lsn: oldstate.timeline_start_lsn,
+            local_start_lsn: oldstate.local_start_lsn,
+            commit_lsn: oldstate.commit_lsn,
+            backup_lsn: oldstate.backup_lsn,
+            peer_horizon_lsn: oldstate.peer_horizon_lsn,
+            remote_consistent_lsn: oldstate.remote_consistent_lsn,
+            peers: oldstate.peers,
+            partial_backup: oldstate.partial_backup,
+            eviction_state: EvictionState::Present,
         });
     }
 
@@ -336,6 +409,25 @@ pub fn upgrade_control_file(buf: &[u8], version: u32) -> Result<TimelinePersiste
     // TODO: think about backward compatibility and rollbacks
 
     bail!("unsupported safekeeper control file version {}", version)
+}
+
+pub fn downgrade_v9_to_v8(state: &TimelinePersistentState) -> SafeKeeperStateV8 {
+    assert!(state.eviction_state == EvictionState::Present);
+    SafeKeeperStateV8 {
+        tenant_id: state.tenant_id,
+        timeline_id: state.timeline_id,
+        acceptor_state: state.acceptor_state.clone(),
+        server: state.server.clone(),
+        proposer_uuid: state.proposer_uuid,
+        timeline_start_lsn: state.timeline_start_lsn,
+        local_start_lsn: state.local_start_lsn,
+        commit_lsn: state.commit_lsn,
+        backup_lsn: state.backup_lsn,
+        peer_horizon_lsn: state.peer_horizon_lsn,
+        remote_consistent_lsn: state.remote_consistent_lsn,
+        peers: state.peers.clone(),
+        partial_backup: state.partial_backup.clone(),
+    }
 }
 
 #[cfg(test)]

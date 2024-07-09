@@ -1,52 +1,25 @@
-//! Thread removing old WAL.
+use utils::lsn::Lsn;
 
-use std::time::Duration;
+use crate::timeline_manager::StateSnapshot;
 
-use tokio::time::sleep;
-use tracing::*;
+/// Get oldest LSN we still need to keep. We hold WAL till it is consumed
+/// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
+/// offloading.
+/// While it is safe to use inmem values for determining horizon,
+/// we use persistent to make possible normal states less surprising.
+/// All segments covering LSNs before horizon_lsn can be removed.
+pub(crate) fn calc_horizon_lsn(state: &StateSnapshot, extra_horizon_lsn: Option<Lsn>) -> Lsn {
+    use std::cmp::min;
 
-use crate::{GlobalTimelines, SafeKeeperConf};
-
-const ALLOW_INACTIVE_TIMELINES: bool = true;
-
-pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
-    let wal_removal_interval = Duration::from_millis(5000);
-    loop {
-        let now = tokio::time::Instant::now();
-        let mut active_timelines = 0;
-
-        let tlis = GlobalTimelines::get_all();
-        for tli in &tlis {
-            let is_active = tli.is_active().await;
-            if is_active {
-                active_timelines += 1;
-            }
-            if !ALLOW_INACTIVE_TIMELINES && !is_active {
-                continue;
-            }
-            let ttid = tli.ttid;
-            async {
-                if let Err(e) = tli.maybe_persist_control_file().await {
-                    warn!("failed to persist control file: {e}");
-                }
-                if let Err(e) = tli.remove_old_wal(conf.wal_backup_enabled).await {
-                    error!("failed to remove WAL: {}", e);
-                }
-            }
-            .instrument(info_span!("WAL removal", ttid = %ttid))
-            .await;
-        }
-
-        let elapsed = now.elapsed();
-        let total_timelines = tlis.len();
-
-        if elapsed > wal_removal_interval {
-            info!(
-                "WAL removal is too long, processed {} active timelines ({} total) in {:?}",
-                active_timelines, total_timelines, elapsed
-            );
-        }
-
-        sleep(wal_removal_interval).await;
+    let mut horizon_lsn = min(
+        state.cfile_remote_consistent_lsn,
+        state.cfile_peer_horizon_lsn,
+    );
+    // we don't want to remove WAL that is not yet offloaded to s3
+    horizon_lsn = min(horizon_lsn, state.cfile_backup_lsn);
+    if let Some(extra_horizon_lsn) = extra_horizon_lsn {
+        horizon_lsn = min(horizon_lsn, extra_horizon_lsn);
     }
+
+    horizon_lsn
 }

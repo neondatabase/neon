@@ -3,13 +3,13 @@ description: 'Delete Neon Project using API'
 
 inputs:
   api_key:
-    desctiption: 'Neon API key'
+    description: 'Neon API key'
     required: true
   project_id:
-    desctiption: 'ID of the Project to delete'
+    description: 'ID of the Project to delete'
     required: true
   api_host:
-    desctiption: 'Neon API host'
+    description: 'Neon API host'
     default: console-stage.neon.build
 
 runs:

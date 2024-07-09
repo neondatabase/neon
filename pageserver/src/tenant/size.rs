@@ -3,7 +3,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use tenant_size_model::svg::SvgBranchKind;
 use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 
-use super::{LogicalSizeCalculationCause, Tenant};
+use super::{GcError, LogicalSizeCalculationCause, Tenant};
 use crate::tenant::Timeline;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
@@ -43,6 +43,40 @@ pub struct SegmentMeta {
     pub kind: LsnKind,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum CalculateSyntheticSizeError {
+    /// Something went wrong internally to the calculation of logical size at a particular branch point
+    #[error("Failed to calculated logical size on timeline {timeline_id} at {lsn}: {error}")]
+    LogicalSize {
+        timeline_id: TimelineId,
+        lsn: Lsn,
+        error: CalculateLogicalSizeError,
+    },
+
+    /// Something went wrong internally when calculating GC parameters at start of size calculation
+    #[error(transparent)]
+    GcInfo(GcError),
+
+    /// Totally unexpected errors, like panics joining a task
+    #[error(transparent)]
+    Fatal(anyhow::Error),
+
+    /// Tenant shut down while calculating size
+    #[error("Cancelled")]
+    Cancelled,
+}
+
+impl From<GcError> for CalculateSyntheticSizeError {
+    fn from(value: GcError) -> Self {
+        match value {
+            GcError::TenantCancelled | GcError::TimelineCancelled => {
+                CalculateSyntheticSizeError::Cancelled
+            }
+            other => CalculateSyntheticSizeError::GcInfo(other),
+        }
+    }
+}
+
 impl SegmentMeta {
     fn size_needed(&self) -> bool {
         match self.kind {
@@ -54,6 +88,9 @@ impl SegmentMeta {
             LsnKind::BranchPoint => true,
             LsnKind::GcCutOff => true,
             LsnKind::BranchEnd => false,
+            LsnKind::LeasePoint => true,
+            LsnKind::LeaseStart => false,
+            LsnKind::LeaseEnd => false,
         }
     }
 }
@@ -70,6 +107,21 @@ pub enum LsnKind {
     GcCutOff,
     /// Last record LSN
     BranchEnd,
+    /// A LSN lease is granted here.
+    LeasePoint,
+    /// A lease starts from here.
+    LeaseStart,
+    /// Last record LSN for the lease (should have the same LSN as the previous [`LsnKind::LeaseStart`]).
+    LeaseEnd,
+}
+
+impl From<LsnKind> for SvgBranchKind {
+    fn from(kind: LsnKind) -> Self {
+        match kind {
+            LsnKind::LeasePoint | LsnKind::LeaseStart | LsnKind::LeaseEnd => SvgBranchKind::Lease,
+            _ => SvgBranchKind::Timeline,
+        }
+    }
 }
 
 /// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
@@ -91,6 +143,9 @@ pub struct TimelineInputs {
 
     /// Cutoff point calculated from the user-supplied 'max_retention_period'
     retention_param_cutoff: Option<Lsn>,
+
+    /// Lease points on the timeline
+    lease_points: Vec<Lsn>,
 }
 
 /// Gathers the inputs for the tenant sizing model.
@@ -116,12 +171,9 @@ pub(super) async fn gather_inputs(
     cause: LogicalSizeCalculationCause,
     cancel: &CancellationToken,
     ctx: &RequestContext,
-) -> anyhow::Result<ModelInputs> {
+) -> Result<ModelInputs, CalculateSyntheticSizeError> {
     // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
-    tenant
-        .refresh_gc_info(cancel, ctx)
-        .await
-        .context("Failed to refresh gc_info before gathering inputs")?;
+    tenant.refresh_gc_info(cancel, ctx).await?;
 
     // Collect information about all the timelines
     let mut timelines = tenant.list_timelines();
@@ -204,6 +256,13 @@ pub(super) async fn gather_inputs(
             None
         };
 
+        let lease_points = gc_info
+            .leases
+            .keys()
+            .filter(|&&lsn| lsn > ancestor_lsn)
+            .copied()
+            .collect::<Vec<_>>();
+
         // next_gc_cutoff in parent branch are not of interest (right now at least), nor do we
         // want to query any logical size before initdb_lsn.
         let branch_start_lsn = cmp::max(ancestor_lsn, timeline.initdb_lsn);
@@ -217,6 +276,8 @@ pub(super) async fn gather_inputs(
             // this assumes there are no other retain_lsns than the branchpoints
             .map(|lsn| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
+
+        lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));
 
         drop(gc_info);
 
@@ -266,6 +327,7 @@ pub(super) async fn gather_inputs(
             if kind == LsnKind::BranchPoint {
                 branchpoint_segments.insert((timeline_id, lsn), segments.len());
             }
+
             segments.push(SegmentMeta {
                 segment: Segment {
                     parent: Some(parent),
@@ -276,7 +338,45 @@ pub(super) async fn gather_inputs(
                 timeline_id: timeline.timeline_id,
                 kind,
             });
-            parent += 1;
+
+            parent = segments.len() - 1;
+
+            if kind == LsnKind::LeasePoint {
+                // Needs `LeaseStart` and `LeaseEnd` as well to model lease as a read-only branch that never writes data
+                // (i.e. it's lsn has not advanced from ancestor_lsn), and therefore the three segments have the same LSN
+                // value. Without the other two segments, the calculation code would not count the leased LSN as a point
+                // to be retained.
+                // Did not use `BranchStart` or `BranchEnd` so we can differentiate branches and leases during debug.
+                //
+                // Alt Design: rewrite the entire calculation code to be independent of timeline id. Both leases and
+                // branch points can be given a synthetic id so we can unite them.
+                let mut lease_parent = parent;
+
+                // Start of a lease.
+                segments.push(SegmentMeta {
+                    segment: Segment {
+                        parent: Some(lease_parent),
+                        lsn: lsn.0,
+                        size: None,                   // Filled in later, if necessary
+                        needed: lsn > next_gc_cutoff, // only needed if the point is within rentention.
+                    },
+                    timeline_id: timeline.timeline_id,
+                    kind: LsnKind::LeaseStart,
+                });
+                lease_parent += 1;
+
+                // End of the lease.
+                segments.push(SegmentMeta {
+                    segment: Segment {
+                        parent: Some(lease_parent),
+                        lsn: lsn.0,
+                        size: None,   // Filled in later, if necessary
+                        needed: true, // everything at the lease LSN must be readable => is needed
+                    },
+                    timeline_id: timeline.timeline_id,
+                    kind: LsnKind::LeaseEnd,
+                });
+            }
         }
 
         // Current end of the timeline
@@ -302,6 +402,7 @@ pub(super) async fn gather_inputs(
             pitr_cutoff,
             next_gc_cutoff,
             retention_param_cutoff,
+            lease_points,
         });
     }
 
@@ -327,6 +428,12 @@ pub(super) async fn gather_inputs(
     )
     .await?;
 
+    if tenant.cancel.is_cancelled() {
+        // If we're shutting down, return an error rather than a sparse result that might include some
+        // timelines from before we started shutting down
+        return Err(CalculateSyntheticSizeError::Cancelled);
+    }
+
     Ok(ModelInputs {
         segments,
         timeline_inputs,
@@ -335,9 +442,8 @@ pub(super) async fn gather_inputs(
 
 /// Augment 'segments' with logical sizes
 ///
-/// this will probably conflict with on-demand downloaded layers, or at least force them all
-/// to be downloaded
-///
+/// This will leave segments' sizes as None if the Timeline associated with the segment is deleted concurrently
+/// (i.e. we cannot read its logical size at a particular LSN).
 async fn fill_logical_sizes(
     timelines: &[Arc<Timeline>],
     segments: &mut [SegmentMeta],
@@ -345,7 +451,7 @@ async fn fill_logical_sizes(
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
     cause: LogicalSizeCalculationCause,
     ctx: &RequestContext,
-) -> anyhow::Result<()> {
+) -> Result<(), CalculateSyntheticSizeError> {
     let timeline_hash: HashMap<TimelineId, Arc<Timeline>> = HashMap::from_iter(
         timelines
             .iter()
@@ -387,7 +493,7 @@ async fn fill_logical_sizes(
     }
 
     // Perform the size lookups
-    let mut have_any_error = false;
+    let mut have_any_error = None;
     while let Some(res) = joinset.join_next().await {
         // each of these come with Result<anyhow::Result<_>, JoinError>
         // because of spawn + spawn_blocking
@@ -398,21 +504,36 @@ async fn fill_logical_sizes(
             Err(join_error) => {
                 // cannot really do anything, as this panic is likely a bug
                 error!("task that calls spawn_ondemand_logical_size_calculation panicked: {join_error:#}");
-                have_any_error = true;
+
+                have_any_error = Some(CalculateSyntheticSizeError::Fatal(
+                    anyhow::anyhow!(join_error)
+                        .context("task that calls spawn_ondemand_logical_size_calculation"),
+                ));
             }
             Ok(Err(recv_result_error)) => {
                 // cannot really do anything, as this panic is likely a bug
                 error!("failed to receive logical size query result: {recv_result_error:#}");
-                have_any_error = true;
+                have_any_error = Some(CalculateSyntheticSizeError::Fatal(
+                    anyhow::anyhow!(recv_result_error)
+                        .context("Receiving logical size query result"),
+                ));
             }
             Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error)))) => {
-                if !matches!(error, CalculateLogicalSizeError::Cancelled) {
+                if matches!(error, CalculateLogicalSizeError::Cancelled) {
+                    // Skip this: it's okay if one timeline among many is shutting down while we
+                    // calculate inputs for the overall tenant.
+                    continue;
+                } else {
                     warn!(
                         timeline_id=%timeline.timeline_id,
                         "failed to calculate logical size at {lsn}: {error:#}"
                     );
+                    have_any_error = Some(CalculateSyntheticSizeError::LogicalSize {
+                        timeline_id: timeline.timeline_id,
+                        lsn,
+                        error,
+                    });
                 }
-                have_any_error = true;
             }
             Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size)))) => {
                 debug!(timeline_id=%timeline.timeline_id, %lsn, size, "size calculated");
@@ -426,10 +547,10 @@ async fn fill_logical_sizes(
     // prune any keys not needed anymore; we record every used key and added key.
     logical_size_cache.retain(|key, _| sizes_needed.contains_key(key));
 
-    if have_any_error {
+    if let Some(error) = have_any_error {
         // we cannot complete this round, because we are missing data.
         // we have however cached all we were able to request calculation on.
-        anyhow::bail!("failed to calculate some logical_sizes");
+        return Err(error);
     }
 
     // Insert the looked up sizes to the Segments
@@ -443,33 +564,28 @@ async fn fill_logical_sizes(
 
         if let Some(Some(size)) = sizes_needed.get(&(timeline_id, lsn)) {
             seg.segment.size = Some(*size);
-        } else {
-            bail!("could not find size at {} in timeline {}", lsn, timeline_id);
         }
     }
     Ok(())
 }
 
 impl ModelInputs {
-    pub fn calculate_model(&self) -> anyhow::Result<tenant_size_model::StorageModel> {
+    pub fn calculate_model(&self) -> tenant_size_model::StorageModel {
         // Convert SegmentMetas into plain Segments
-        let storage = StorageModel {
+        StorageModel {
             segments: self
                 .segments
                 .iter()
                 .map(|seg| seg.segment.clone())
                 .collect(),
-        };
-
-        Ok(storage)
+        }
     }
 
     // calculate total project size
-    pub fn calculate(&self) -> anyhow::Result<u64> {
-        let storage = self.calculate_model()?;
+    pub fn calculate(&self) -> u64 {
+        let storage = self.calculate_model();
         let sizes = storage.calculate();
-
-        Ok(sizes.total_size)
+        sizes.total_size
     }
 }
 
@@ -629,7 +745,8 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/2210CD0",
       "pitr_cutoff": "0/2210CD0",
       "next_gc_cutoff": "0/2210CD0",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     },
     {
       "timeline_id": "454626700469f0a9914949b9d018e876",
@@ -639,7 +756,8 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/1817770",
       "pitr_cutoff": "0/1817770",
       "next_gc_cutoff": "0/1817770",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     },
     {
       "timeline_id": "cb5e3cbe60a4afc00d01880e1a37047f",
@@ -649,14 +767,15 @@ fn verify_size_for_multiple_branches() {
       "horizon_cutoff": "0/18B3D98",
       "pitr_cutoff": "0/18B3D98",
       "next_gc_cutoff": "0/18B3D98",
-      "retention_param_cutoff": null
+      "retention_param_cutoff": null,
+      "lease_points": []
     }
   ]
 }
 "#;
     let inputs: ModelInputs = serde_json::from_str(doc).unwrap();
 
-    assert_eq!(inputs.calculate().unwrap(), 37_851_408);
+    assert_eq!(inputs.calculate(), 37_851_408);
 }
 
 #[test]
@@ -704,14 +823,15 @@ fn verify_size_for_one_branch() {
       "horizon_cutoff": "47/240A5860",
       "pitr_cutoff": "47/240A5860",
       "next_gc_cutoff": "47/240A5860",
-      "retention_param_cutoff": "0/0"
+      "retention_param_cutoff": "0/0",
+      "lease_points": []
     }
   ]
 }"#;
 
     let model: ModelInputs = serde_json::from_str(doc).unwrap();
 
-    let res = model.calculate_model().unwrap().calculate();
+    let res = model.calculate_model().calculate();
 
     println!("calculated synthetic size: {}", res.total_size);
     println!("result: {:?}", serde_json::to_string(&res.segments));

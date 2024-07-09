@@ -10,6 +10,7 @@ use std::{
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
     str::FromStr,
+    sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
 
@@ -25,7 +26,6 @@ use utils::{
     serde_system_time,
 };
 
-use crate::controller_api::PlacementPolicy;
 use crate::{
     reltag::RelTag,
     shard::{ShardCount, ShardStripeSize, TenantShardId},
@@ -161,6 +161,36 @@ impl std::fmt::Debug for TenantState {
     }
 }
 
+/// A temporary lease to a specific lsn inside a timeline.
+/// Access to the lsn is guaranteed by the pageserver until the expiration indicated by `valid_until`.
+#[serde_as]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LsnLease {
+    #[serde_as(as = "SystemTimeAsRfc3339Millis")]
+    pub valid_until: SystemTime,
+}
+
+serde_with::serde_conv!(
+    SystemTimeAsRfc3339Millis,
+    SystemTime,
+    |time: &SystemTime| humantime::format_rfc3339_millis(*time).to_string(),
+    |value: String| -> Result<_, humantime::TimestampError> { humantime::parse_rfc3339(&value) }
+);
+
+impl LsnLease {
+    /// The default length for an explicit LSN lease request (10 minutes).
+    pub const DEFAULT_LENGTH: Duration = Duration::from_secs(10 * 60);
+
+    /// The default length for an implicit LSN lease granted during
+    /// `get_lsn_by_timestamp` request (1 minutes).
+    pub const DEFAULT_LENGTH_FOR_TS: Duration = Duration::from_secs(60);
+
+    /// Checks whether the lease is expired.
+    pub fn is_expired(&self, now: &SystemTime) -> bool {
+        now > &self.valid_until
+    }
+}
+
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
@@ -197,6 +227,11 @@ pub struct TimelineCreateRequest {
     #[serde(default)]
     pub ancestor_start_lsn: Option<Lsn>,
     pub pg_version: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LsnLeaseRequest {
+    pub lsn: Lsn,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -241,44 +276,6 @@ impl Default for ShardParameters {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct TenantCreateRequest {
-    pub new_tenant_id: TenantShardId,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
-
-    // If omitted, create a single shard with TenantShardId::unsharded()
-    #[serde(default)]
-    #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
-    pub shard_parameters: ShardParameters,
-
-    // This parameter is only meaningful in requests sent to the storage controller
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub placement_policy: Option<PlacementPolicy>,
-
-    #[serde(flatten)]
-    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct TenantLoadRequest {
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
-}
-
-impl std::ops::Deref for TenantCreateRequest {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.config
-    }
-}
-
 /// An alternative representation of `pageserver::tenant::TenantConf` with
 /// simpler types.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Eq, PartialEq)]
@@ -289,7 +286,7 @@ pub struct TenantConfig {
     pub compaction_period: Option<String>,
     pub compaction_threshold: Option<usize>,
     // defer parsing compaction_algorithm, like eviction_policy
-    pub compaction_algorithm: Option<CompactionAlgorithm>,
+    pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
     pub gc_horizon: Option<u64>,
     pub gc_period: Option<String>,
     pub image_creation_threshold: Option<usize>,
@@ -306,29 +303,103 @@ pub struct TenantConfig {
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+    pub lsn_lease_length: Option<String>,
+    pub lsn_lease_length_for_ts: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`
+/// tenant config. When the first aux file written, the policy will be persisted in the
+/// `index_part.json` file and has a limited migration path.
+///
+/// Currently, we only allow the following migration path:
+///
+/// Unset -> V1
+///       -> V2
+///       -> CrossValidation -> V2
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
 pub enum AuxFilePolicy {
+    /// V1 aux file policy: store everything in AUX_FILE_KEY
+    #[strum(ascii_case_insensitive)]
     V1,
+    /// V2 aux file policy: store in the AUX_FILE keyspace
+    #[strum(ascii_case_insensitive)]
     V2,
+    /// Cross validation runs both formats on the write path and does validation
+    /// on the read path.
+    #[strum(ascii_case_insensitive)]
     CrossValidation,
 }
 
-impl FromStr for AuxFilePolicy {
-    type Err = anyhow::Error;
+impl AuxFilePolicy {
+    pub fn is_valid_migration_path(from: Option<Self>, to: Self) -> bool {
+        matches!(
+            (from, to),
+            (None, _) | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
+        )
+    }
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.to_lowercase();
-        if s == "v1" {
-            Ok(Self::V1)
-        } else if s == "v2" {
-            Ok(Self::V2)
-        } else if s == "crossvalidation" || s == "cross_validation" {
-            Ok(Self::CrossValidation)
-        } else {
-            anyhow::bail!("cannot parse {} to aux file policy", s)
+    /// If a tenant writes aux files without setting `switch_aux_policy`, this value will be used.
+    pub fn default_tenant_config() -> Self {
+        Self::V1
+    }
+}
+
+/// The aux file policy memory flag. Users can store `Option<AuxFilePolicy>` into this atomic flag. 0 == unspecified.
+pub struct AtomicAuxFilePolicy(AtomicUsize);
+
+impl AtomicAuxFilePolicy {
+    pub fn new(policy: Option<AuxFilePolicy>) -> Self {
+        Self(AtomicUsize::new(
+            policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
+        ))
+    }
+
+    pub fn load(&self) -> Option<AuxFilePolicy> {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            other => Some(AuxFilePolicy::from_usize(other)),
         }
+    }
+
+    pub fn store(&self, policy: Option<AuxFilePolicy>) {
+        self.0.store(
+            policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+}
+
+impl AuxFilePolicy {
+    pub fn to_usize(self) -> usize {
+        match self {
+            Self::V1 => 1,
+            Self::CrossValidation => 2,
+            Self::V2 => 3,
+        }
+    }
+
+    pub fn try_from_usize(this: usize) -> Option<Self> {
+        match this {
+            1 => Some(Self::V1),
+            2 => Some(Self::CrossValidation),
+            3 => Some(Self::V2),
+            _ => None,
+        }
+    }
+
+    pub fn from_usize(this: usize) -> Self {
+        Self::try_from_usize(this).unwrap()
     }
 }
 
@@ -350,11 +421,71 @@ impl EvictionPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[derive(
+    Eq,
+    PartialEq,
+    Debug,
+    Copy,
+    Clone,
+    strum_macros::EnumString,
+    strum_macros::Display,
+    serde_with::DeserializeFromStr,
+    serde_with::SerializeDisplay,
+)]
+#[strum(serialize_all = "kebab-case")]
 pub enum CompactionAlgorithm {
     Legacy,
     Tiered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageCompressionAlgorithm {
+    /// Disabled for writes, and never decompress during reading.
+    /// Never set this after you've enabled compression once!
+    DisabledNoDecompress,
+    // Disabled for writes, support decompressing during read path
+    Disabled,
+    /// Zstandard compression. Level 0 means and None mean the same (default level). Levels can be negative as well.
+    /// For details, see the [manual](http://facebook.github.io/zstd/zstd_manual.html).
+    Zstd {
+        level: Option<i8>,
+    },
+}
+
+impl ImageCompressionAlgorithm {
+    pub fn allow_decompression(&self) -> bool {
+        !matches!(self, ImageCompressionAlgorithm::DisabledNoDecompress)
+    }
+}
+
+impl FromStr for ImageCompressionAlgorithm {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut components = s.split(['(', ')']);
+        let first = components
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("empty string"))?;
+        match first {
+            "disabled-no-decompress" => Ok(ImageCompressionAlgorithm::DisabledNoDecompress),
+            "disabled" => Ok(ImageCompressionAlgorithm::Disabled),
+            "zstd" => {
+                let level = if let Some(v) = components.next() {
+                    let v: i8 = v.parse()?;
+                    Some(v)
+                } else {
+                    None
+                };
+
+                Ok(ImageCompressionAlgorithm::Zstd { level })
+            }
+            _ => anyhow::bail!("invalid specifier '{first}'"),
+        }
+    }
+}
+
+#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionAlgorithmSettings {
+    pub kind: CompactionAlgorithm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,10 +575,6 @@ pub struct LocationConfigListResponse {
     pub tenant_shards: Vec<(TenantShardId, Option<LocationConfig>)>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TenantCreateResponse(pub TenantId);
-
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub id: NodeId,
@@ -504,31 +631,6 @@ impl TenantConfigRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TenantAttachRequest {
-    #[serde(default)]
-    pub config: TenantAttachConfig,
-    #[serde(default)]
-    pub generation: Option<u32>,
-}
-
-/// Newtype to enforce deny_unknown_fields on TenantConfig for
-/// its usage inside `TenantAttachRequest`.
-#[derive(Debug, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct TenantAttachConfig {
-    #[serde(flatten)]
-    allowing_unknown_fields: TenantConfig,
-}
-
-impl std::ops::Deref for TenantAttachConfig {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.allowing_unknown_fields
-    }
-}
-
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "slug", content = "data", rename_all = "snake_case")]
@@ -547,8 +649,7 @@ pub struct TenantInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
+    pub generation: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -593,6 +694,16 @@ pub struct TimelineInfo {
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
 
+    /// How many bytes of WAL are within this branch's pitr_interval.  If the pitr_interval goes
+    /// beyond the branch's branch point, we only count up to the branch point.
+    pub pitr_history_size: u64,
+
+    /// Whether this branch's branch point is within its ancestor's PITR interval (i.e. any
+    /// ancestor data used by this branch would have been retained anyway).  If this is false, then
+    /// this branch may be imposing a cost on the ancestor by causing it to retain layers that it would
+    /// otherwise be able to GC.
+    pub within_ancestor_pitr: bool,
+
     pub timeline_dir_layer_file_size_sum: Option<u64>,
 
     pub wal_source_connstr: Option<String>,
@@ -604,6 +715,9 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 
     pub walreceiver_status: String,
+
+    /// The last aux file policy being used on this timeline
+    pub last_aux_file_policy: Option<AuxFilePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -710,6 +824,8 @@ pub enum HistoricLayerInfo {
         lsn_end: Lsn,
         remote: bool,
         access_stats: LayerAccessStats,
+
+        l0: bool,
     },
     Image {
         layer_file_name: String,
@@ -745,11 +861,31 @@ impl HistoricLayerInfo {
         };
         *field = value;
     }
+    pub fn layer_file_size(&self) -> u64 {
+        match self {
+            HistoricLayerInfo::Delta {
+                layer_file_size, ..
+            } => *layer_file_size,
+            HistoricLayerInfo::Image {
+                layer_file_size, ..
+            } => *layer_file_size,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadRemoteLayersTaskSpawnRequest {
     pub max_concurrent_downloads: NonZeroUsize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IngestAuxFilesRequest {
+    pub aux_files: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListAuxFilesRequest {
+    pub lsn: Lsn,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -776,9 +912,6 @@ pub struct TimelineGcRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRedoManagerProcessStatus {
     pub pid: u32,
-    /// The strum-generated `into::<&'static str>()` for `pageserver::walredo::ProcessKind`.
-    /// `ProcessKind` are a transitory thing, so, they have no enum representation in `pageserver_api`.
-    pub kind: Cow<'static, str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -815,6 +948,55 @@ pub struct TenantScanRemoteStorageShard {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TenantScanRemoteStorageResponse {
     pub shards: Vec<TenantScanRemoteStorageShard>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantSorting {
+    ResidentSize,
+    MaxLogicalSize,
+}
+
+impl Default for TenantSorting {
+    fn default() -> Self {
+        Self::ResidentSize
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TopTenantShardsRequest {
+    // How would you like to sort the tenants?
+    pub order_by: TenantSorting,
+
+    // How many results?
+    pub limit: usize,
+
+    // Omit tenants with more than this many shards (e.g. if this is the max number of shards
+    // that the caller would ever split to)
+    pub where_shards_lt: Option<ShardCount>,
+
+    // Omit tenants where the ordering metric is less than this (this is an optimization to
+    // let us quickly exclude numerous tiny shards)
+    pub where_gt: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct TopTenantShardItem {
+    pub id: TenantShardId,
+
+    /// Total size of layers on local disk for all timelines in this tenant
+    pub resident_size: u64,
+
+    /// Total size of layers in remote storage for all timelines in this tenant
+    pub physical_size: u64,
+
+    /// The largest logical size of a timeline within this tenant
+    pub max_logical_size: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TopTenantShardsResponse {
+    pub shards: Vec<TopTenantShardItem>,
 }
 
 pub mod virtual_file {
@@ -1242,6 +1424,7 @@ impl PagestreamBeMessage {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::str::FromStr;
 
     use super::*;
 
@@ -1303,7 +1486,7 @@ mod tests {
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1313,7 +1496,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         let original_broken = TenantInfo {
@@ -1324,7 +1508,7 @@ mod tests {
             },
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -1338,7 +1522,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         assert_eq!(
@@ -1357,35 +1542,11 @@ mod tests {
     #[test]
     fn test_reject_unknown_field() {
         let id = TenantId::generate();
-        let create_request = json!({
-            "new_tenant_id": id.to_string(),
-            "unknown_field": "unknown_value".to_string(),
-        });
-        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
-        );
-
-        let id = TenantId::generate();
         let config_request = json!({
             "tenant_id": id.to_string(),
             "unknown_field": "unknown_value".to_string(),
         });
         let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
-            "expect unknown field `unknown_field` error, got: {}",
-            err
-        );
-
-        let attach_request = json!({
-            "config": {
-                "unknown_field": "unknown_value".to_string(),
-            },
-        });
-        let err = serde_json::from_value::<TenantAttachRequest>(attach_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
             "expect unknown field `unknown_field` error, got: {}",
@@ -1448,5 +1609,95 @@ mod tests {
             let actual: &'static str = rendered.into();
             assert_eq!(actual, expected, "example on {line}");
         }
+    }
+
+    #[test]
+    fn test_aux_file_migration_path() {
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::V1
+        ));
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::V2
+        ));
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            None,
+            AuxFilePolicy::CrossValidation
+        ));
+        // Self-migration is not a valid migration path, and the caller should handle it by itself.
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::V2
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::CrossValidation
+        ));
+        // Migrations not allowed
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::V2
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::V1
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V2),
+            AuxFilePolicy::CrossValidation
+        ));
+        assert!(!AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::V1),
+            AuxFilePolicy::CrossValidation
+        ));
+        // Migrations allowed
+        assert!(AuxFilePolicy::is_valid_migration_path(
+            Some(AuxFilePolicy::CrossValidation),
+            AuxFilePolicy::V2
+        ));
+    }
+
+    #[test]
+    fn test_aux_parse() {
+        assert_eq!(AuxFilePolicy::from_str("V2").unwrap(), AuxFilePolicy::V2);
+        assert_eq!(AuxFilePolicy::from_str("v2").unwrap(), AuxFilePolicy::V2);
+        assert_eq!(
+            AuxFilePolicy::from_str("cross-validation").unwrap(),
+            AuxFilePolicy::CrossValidation
+        );
+    }
+
+    #[test]
+    fn test_image_compression_algorithm_parsing() {
+        use ImageCompressionAlgorithm::*;
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("disabled").unwrap(),
+            Disabled
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("disabled-no-decompress").unwrap(),
+            DisabledNoDecompress
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd").unwrap(),
+            Zstd { level: None }
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd(18)").unwrap(),
+            Zstd { level: Some(18) }
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd(-3)").unwrap(),
+            Zstd { level: Some(-3) }
+        );
     }
 }

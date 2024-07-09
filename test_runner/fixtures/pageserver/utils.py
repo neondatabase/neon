@@ -198,7 +198,7 @@ def wait_for_last_record_lsn(
     lsn: Lsn,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
-    for i in range(100):
+    for i in range(1000):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
             return current_lsn
@@ -313,7 +313,7 @@ def assert_prefix_empty(
             # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-5322/6207777020/index.html#suites/3556ed71f2d69272a7014df6dcb02317/53b5c368b5a68865
             # this seems like a mock_s3 issue
             log.warning(
-                f"contrading ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
+                f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
             )
             keys = 0
         elif keys != 0 and len(objects) == 0:
@@ -428,52 +428,6 @@ def enable_remote_storage_versioning(
         },
     )
     return response
-
-
-def wait_tenant_status_404(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    iterations: int,
-    interval: float = 0.250,
-):
-    def tenant_is_missing():
-        data = {}
-        try:
-            data = pageserver_http.tenant_status(tenant_id)
-            log.info(f"tenant status {data}")
-        except PageserverApiException as e:
-            log.debug(e)
-            if e.status_code == 404:
-                return
-
-        raise RuntimeError(f"Timeline exists state {data.get('state')}")
-
-    wait_until(iterations, interval=interval, func=tenant_is_missing)
-
-
-def tenant_delete_wait_completed(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    iterations: int,
-    ignore_errors: bool = False,
-):
-    if not ignore_errors:
-        pageserver_http.tenant_delete(tenant_id=tenant_id)
-    else:
-        interval = 0.5
-
-        def delete_request_sent():
-            try:
-                pageserver_http.tenant_delete(tenant_id=tenant_id)
-            except PageserverApiException as e:
-                log.debug(e)
-                if e.status_code == 404:
-                    return
-            except Exception as e:
-                log.debug(e)
-
-        wait_until(iterations, interval=interval, func=delete_request_sent)
-    wait_tenant_status_404(pageserver_http, tenant_id=tenant_id, iterations=iterations)
 
 
 MANY_SMALL_LAYERS_TENANT_CONFIG = {

@@ -1,18 +1,35 @@
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
+from requests.exceptions import ReadTimeout
 
 
-#
-# Test pageserver get_lsn_by_timestamp API
-#
-def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
+def assert_lsn_lease_granted(result, with_lease: bool):
+    """
+    Asserts an LSN lease is granted when `with_lease` flag is turned on.
+    Always asserts no LSN lease is granted when `with_lease` flag is off.
+    """
+    if with_lease:
+        assert result.get("valid_until")
+    else:
+        assert result.get("valid_until") is None
+
+
+@pytest.mark.parametrize("with_lease", [True, False])
+def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
+    """
+    Test pageserver get_lsn_by_timestamp API.
+
+    :param with_lease: Whether to get a lease associated with returned LSN.
+    """
     env = neon_env_builder.init_start()
 
     tenant_id, _ = env.neon_cli.create_tenant(
@@ -64,23 +81,33 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # Check edge cases
         # Timestamp is in the future
         probe_timestamp = tbl[-1][1] + timedelta(hours=1)
-        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
+        result = client.timeline_get_lsn_by_timestamp(
+            tenant_id, timeline_id, probe_timestamp, with_lease=with_lease
+        )
         assert result["kind"] == "future"
+        assert_lsn_lease_granted(result, with_lease)
         # make sure that we return a well advanced lsn here
         assert Lsn(result["lsn"]) > start_lsn
 
         # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
-        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
+        result = client.timeline_get_lsn_by_timestamp(
+            tenant_id, timeline_id, probe_timestamp, with_lease=with_lease
+        )
         assert result["kind"] == "past"
+        assert_lsn_lease_granted(result, with_lease)
+
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) < start_lsn
 
         # Probe a bunch of timestamps in the valid range
         for i in range(1, len(tbl), 100):
             probe_timestamp = tbl[i][1]
-            result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id, probe_timestamp)
+            result = client.timeline_get_lsn_by_timestamp(
+                tenant_id, timeline_id, probe_timestamp, with_lease=with_lease
+            )
             assert result["kind"] not in ["past", "nodata"]
+            assert_lsn_lease_granted(result, with_lease)
             lsn = result["lsn"]
             # Call get_lsn_by_timestamp to get the LSN
             # Launch a new read-only node at that LSN, and check that only the rows
@@ -102,10 +129,59 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
         # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
-        result = client.timeline_get_lsn_by_timestamp(tenant_id, timeline_id_child, probe_timestamp)
+        result = client.timeline_get_lsn_by_timestamp(
+            tenant_id, timeline_id_child, probe_timestamp, with_lease=with_lease
+        )
         assert result["kind"] == "past"
+        assert_lsn_lease_granted(result, with_lease)
         # make sure that we return the minimum lsn here at the start of the range
         assert Lsn(result["lsn"]) >= last_flush_lsn
+
+
+def test_get_lsn_by_timestamp_cancelled(neon_env_builder: NeonEnvBuilder):
+    """
+    Test if cancelled pageserver get_lsn_by_timestamp request is correctly handled.
+    Added as an effort to improve error handling and avoid full anyhow backtrace.
+    """
+
+    env = neon_env_builder.init_start()
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request was dropped before completing.*",
+            ".*Cancelled request finished with an error: Cancelled",
+        ]
+    )
+
+    client = env.pageserver.http_client()
+    failpoint = "find-lsn-for-timestamp-pausable"
+    client.configure_failpoints((failpoint, "pause"))
+
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        # Request get_lsn_by_timestamp, hit the pausable failpoint
+        failing = exec.submit(
+            client.timeline_get_lsn_by_timestamp,
+            env.initial_tenant,
+            env.initial_timeline,
+            datetime.now(),
+            timeout=2,
+        )
+
+        _, offset = wait_until(
+            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        )
+
+        with pytest.raises(ReadTimeout):
+            failing.result()
+
+        client.configure_failpoints((failpoint, "off"))
+
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(
+                "Cancelled request finished with an error: Cancelled$", offset
+            ),
+        )
 
 
 # Test pageserver get_timestamp_of_lsn API

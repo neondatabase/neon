@@ -11,8 +11,8 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    S3Scrubber,
     StorageControllerApiException,
+    StorageScrubber,
     last_flush_lsn_upload,
     tenant_get_shards,
     wait_for_last_flush_lsn,
@@ -128,7 +128,7 @@ def test_sharding_smoke(
 
     # Check the scrubber isn't confused by sharded content, then disable
     # it during teardown because we'll have deleted by then
-    S3Scrubber(neon_env_builder).scan_metadata()
+    StorageScrubber(neon_env_builder).scan_metadata()
     neon_env_builder.scrub_on_exit = False
 
     env.storage_controller.pageserver_api().tenant_delete(tenant_id)
@@ -177,23 +177,38 @@ def test_sharding_split_unsharded(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        None,
+        "compact-shard-ancestors-localonly",
+        "compact-shard-ancestors-enqueued",
+        "compact-shard-ancestors-persistent",
+    ],
+)
+def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: Optional[str]):
     """
     Test that after a split, we clean up parent layer data in the child shards via compaction.
     """
+
     TENANT_CONF = {
         # small checkpointing and compaction targets to ensure we generate many upload operations
-        "checkpoint_distance": f"{128 * 1024}",
-        "compaction_threshold": "1",
-        "compaction_target_size": f"{128 * 1024}",
+        "checkpoint_distance": 128 * 1024,
+        "compaction_threshold": 1,
+        "compaction_target_size": 128 * 1024,
         # no PITR horizon, we specify the horizon when we request on-demand GC
         "pitr_interval": "3600s",
         # disable background compaction and GC. We invoke it manually when we want it to happen.
         "gc_period": "0s",
         "compaction_period": "0s",
         # create image layers eagerly, so that GC can remove some layers
-        "image_creation_threshold": "1",
-        "image_layer_creation_check_threshold": "0",
+        "image_creation_threshold": 1,
+        "image_layer_creation_check_threshold": 0,
+    }
+
+    neon_env_builder.storage_controller_config = {
+        # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
+        "max_unavailable": "300s"
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
@@ -212,6 +227,10 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
 
     # Split one shard into two
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=2)
+
+    # Let all shards move into their stable locations, so that during subsequent steps we
+    # don't have reconciles in progress (simpler to reason about what messages we expect in logs)
+    env.storage_controller.reconcile_until_idle()
 
     # Check we got the shard IDs we expected
     assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 2)) is not None
@@ -233,6 +252,92 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
 
         # Physical size should shrink because some layers have been dropped
         assert detail_after["current_physical_size"] < detail_before["current_physical_size"]
+
+    # Compaction shouldn't make anything unreadable
+    workload.validate()
+
+    # Force a generation increase: layer rewrites are a long-term thing and only happen after
+    # the generation has increased.
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    # Cleanup part 2: once layers are outside the PITR window, they will be rewritten if they are partially redundant
+    updated_conf = TENANT_CONF.copy()
+    updated_conf["pitr_interval"] = "0s"
+    env.storage_controller.pageserver_api().set_tenant_config(tenant_id, updated_conf)
+    env.storage_controller.reconcile_until_idle()
+
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+
+        # Apply failpoints for the layer-rewriting phase: this is the area of code that has sensitive behavior
+        # across restarts, as we will have local layer files that temporarily disagree with the remote metadata
+        # for the same local layer file name.
+        if failpoint is not None:
+            ps.http_client().configure_failpoints((failpoint, "exit"))
+
+        # Do a GC to update gc_info (compaction uses this to decide whether a layer is to be rewritten)
+        # Set gc_horizon=0 to let PITR horizon control GC cutoff exclusively.
+        ps.http_client().timeline_gc(shard, timeline_id, gc_horizon=0)
+
+        # We will compare stats before + after compaction
+        detail_before = ps.http_client().timeline_detail(shard, timeline_id)
+
+        # Invoke compaction: this should rewrite layers that are behind the pitr horizon
+        try:
+            ps.http_client().timeline_compact(shard, timeline_id)
+        except requests.ConnectionError as e:
+            if failpoint is None:
+                raise e
+            else:
+                log.info(f"Compaction failed (failpoint={failpoint}): {e}")
+
+            if failpoint in (
+                "compact-shard-ancestors-localonly",
+                "compact-shard-ancestors-enqueued",
+            ):
+                # If we left local files that don't match remote metadata, we expect warnings on next startup
+                env.pageserver.allowed_errors.append(
+                    ".*removing local file .+ because it has unexpected length.*"
+                )
+
+            # Post-failpoint: we check that the pageserver comes back online happily.
+            env.pageserver.running = False
+            env.pageserver.start()
+        else:
+            assert failpoint is None  # We shouldn't reach success path if a failpoint was set
+
+            detail_after = ps.http_client().timeline_detail(shard, timeline_id)
+
+            # Physical size should shrink because layers are smaller
+            assert detail_after["current_physical_size"] < detail_before["current_physical_size"]
+
+    # Validate size statistics
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        timeline_info = ps.http_client().timeline_detail(shard, timeline_id)
+        reported_size = timeline_info["current_physical_size"]
+        layer_paths = ps.list_layers(shard, timeline_id)
+        measured_size = 0
+        for p in layer_paths:
+            abs_path = ps.timeline_dir(shard, timeline_id) / p
+            measured_size += os.stat(abs_path).st_size
+
+        log.info(
+            f"shard {shard} reported size {reported_size}, measured size {measured_size} ({len(layer_paths)} layers)"
+        )
+
+        if failpoint in (
+            "compact-shard-ancestors-localonly",
+            "compact-shard-ancestors-enqueued",
+        ):
+            # If we injected a failure between local rewrite and remote upload, then after
+            # restart we may end up with neither version of the file on local disk (the new file
+            # is cleaned up because it doesn't matchc remote metadata).  So local size isn't
+            # necessarily going to match remote physical size.
+            continue
+
+        assert measured_size == reported_size
 
     # Compaction shouldn't make anything unreadable
     workload.validate()
@@ -437,6 +542,13 @@ def test_sharding_split_smoke(
             for k, v in non_default_tenant_config.items():
                 assert config.effective_config[k] == v
 
+            # Check that heatmap uploads remain enabled after shard split
+            # (https://github.com/neondatabase/neon/issues/8189)
+            assert (
+                config.effective_config["heatmap_period"]
+                and config.effective_config["heatmap_period"] != "0s"
+            )
+
     # Validate pageserver state: expect every child shard to have an attached and secondary location
     (total, attached) = get_node_shard_counts(env, tenant_ids=[tenant_id])
     assert sum(attached.values()) == split_shard_count
@@ -595,6 +707,9 @@ def test_sharding_ingest_layer_sizes(
         # small checkpointing and compaction targets to ensure we generate many upload operations
         "checkpoint_distance": f"{expect_layer_size}",
         "compaction_target_size": f"{expect_layer_size}",
+        # aim to reduce flakyness, we are not doing explicit checkpointing
+        "compaction_period": "0s",
+        "gc_period": "0s",
     }
     shard_count = 4
     neon_env_builder.num_pageservers = shard_count
@@ -609,6 +724,23 @@ def test_sharding_ingest_layer_sizes(
     )
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
+
+    # ignore the initdb layer(s) for the purposes of the size comparison as a initdb image layer optimization
+    # will produce a lot more smaller layers.
+    initial_layers_per_shard = {}
+    log.info("initdb distribution (not asserted on):")
+    for shard in env.storage_controller.locate(tenant_id):
+        pageserver = env.get_pageserver(shard["node_id"])
+        shard_id = shard["shard_id"]
+        layers = (
+            env.get_pageserver(shard["node_id"]).http_client().layer_map_info(shard_id, timeline_id)
+        )
+        for layer in layers.historic_layers:
+            log.info(
+                f"layer[{pageserver.id}]: {layer.layer_file_name} (size {layer.layer_file_size})"
+            )
+
+        initial_layers_per_shard[shard_id] = set(layers.historic_layers)
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
@@ -631,8 +763,13 @@ def test_sharding_ingest_layer_sizes(
 
         historic_layers = sorted(layer_map.historic_layers, key=lambda layer: layer.lsn_start)
 
+        initial_layers = initial_layers_per_shard[shard_id]
+
         for layer in historic_layers:
-            assert layer.layer_file_size is not None
+            if layer in initial_layers:
+                # ignore the initdb image layers for the size histogram
+                continue
+
             if layer.layer_file_size < expect_layer_size // 2:
                 classification = "Small"
                 small_layer_count += 1
@@ -662,7 +799,8 @@ def test_sharding_ingest_layer_sizes(
         pass
     else:
         # General case:
-        assert float(small_layer_count) / float(ok_layer_count) < 0.25
+        # old limit was 0.25 but pg14 is right at the limit with 7/28
+        assert float(small_layer_count) / float(ok_layer_count) < 0.3
 
     # Each shard may emit up to one huge layer, because initdb ingest doesn't respect checkpoint_distance.
     assert huge_layer_count <= shard_count
@@ -1006,10 +1144,6 @@ def test_sharding_split_failures(
     )
 
     for ps in env.pageservers:
-        # When we do node failures and abandon a shard, it will de-facto have old generation and
-        # thereby be unable to publish remote consistent LSN updates
-        ps.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
-
         # If we're using a failure that will panic the storage controller, all background
         # upcalls from the pageserver can fail
         ps.allowed_errors.append(".*calling control plane generation validation API failed.*")
@@ -1326,3 +1460,45 @@ def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):
 
         # Ensure that post-endpoint-restart modifications are ingested happily by pageserver
         wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
+
+
+def test_top_tenants(neon_env_builder: NeonEnvBuilder):
+    """
+    The top_tenants API is used in shard auto-splitting to find candidates.
+    """
+
+    env = neon_env_builder.init_configs()
+    neon_env_builder.start()
+
+    tenants = []
+    n_tenants = 8
+    for i in range(0, n_tenants):
+        tenant_id = TenantId.generate()
+        timeline_id = TimelineId.generate()
+        env.neon_cli.create_tenant(tenant_id, timeline_id)
+
+        # Write a different amount of data to each tenant
+        w = Workload(env, tenant_id, timeline_id)
+        w.init()
+        w.write_rows(i * 1000)
+        w.stop()
+
+        logical_size = env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)[
+            "current_logical_size"
+        ]
+        tenants.append((tenant_id, timeline_id, logical_size))
+
+        log.info(f"Created {tenant_id}/{timeline_id} with size {logical_size}")
+
+    # Ask for 1 largest tenant
+    top_1 = env.pageserver.http_client().top_tenants("max_logical_size", 1, 8, 0)
+    assert len(top_1["shards"]) == 1
+    assert top_1["shards"][0]["id"] == str(tenants[-1][0])
+    assert top_1["shards"][0]["max_logical_size"] == tenants[-1][2]
+
+    # Apply a lower bound limit
+    top = env.pageserver.http_client().top_tenants(
+        "max_logical_size", 100, 8, where_gt=tenants[3][2]
+    )
+    assert len(top["shards"]) == n_tenants - 4
+    assert set(i["id"] for i in top["shards"]) == set(str(i[0]) for i in tenants[4:])

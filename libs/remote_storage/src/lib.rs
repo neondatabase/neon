@@ -10,24 +10,19 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod azure_blob;
+mod config;
 mod error;
 mod local_fs;
+mod metrics;
 mod s3_bucket;
 mod simulate_failures;
 mod support;
 
 use std::{
-    collections::HashMap,
-    fmt::Debug,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, SystemTime},
+    collections::HashMap, fmt::Debug, num::NonZeroU32, pin::Pin, sync::Arc, time::SystemTime,
 };
 
-use anyhow::{bail, Context};
-use aws_sdk_s3::types::StorageClass;
+use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
@@ -35,7 +30,6 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use toml_edit::Item;
 use tracing::info;
 
 pub use self::{
@@ -43,6 +37,8 @@ pub use self::{
     simulate_failures::UnreliableWrapper,
 };
 use s3_bucket::RequestKind;
+
+pub use crate::config::{AzureConfig, RemoteStorageConfig, RemoteStorageKind, S3Config};
 
 /// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
 pub use azure_core::Etag;
@@ -121,8 +117,8 @@ impl RemotePath {
         self.0.file_name()
     }
 
-    pub fn join(&self, segment: &Utf8Path) -> Self {
-        Self(self.0.join(segment))
+    pub fn join(&self, path: impl AsRef<Utf8Path>) -> Self {
+        Self(self.0.join(path))
     }
 
     pub fn get_path(&self) -> &Utf8PathBuf {
@@ -450,7 +446,7 @@ impl GenericRemoteStorage {
     pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         let timeout = storage_config.timeout;
         Ok(match &storage_config.storage {
-            RemoteStorageKind::LocalFs(path) => {
+            RemoteStorageKind::LocalFs { local_path: path } => {
                 info!("Using fs root '{path}' as a remote storage");
                 Self::LocalFs(LocalFs::new(path.clone(), timeout)?)
             }
@@ -465,7 +461,11 @@ impl GenericRemoteStorage {
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout)?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
-                info!("Using azure container '{}' in region '{}' as a remote storage, prefix in container: '{:?}'",
+                let storage_account = azure_config
+                    .storage_account
+                    .as_deref()
+                    .unwrap_or("<AZURE_STORAGE_ACCOUNT>");
+                info!("Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
                       azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
                 Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config, timeout)?))
             }
@@ -519,253 +519,6 @@ impl<const N: usize> From<[(&str, &str); N]> for StorageMetadata {
             .collect();
         Self(map)
     }
-}
-
-/// External backup storage configuration, enough for creating a client for that storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteStorageConfig {
-    /// The storage connection configuration.
-    pub storage: RemoteStorageKind,
-    /// A common timeout enforced for all requests after concurrency limiter permit has been
-    /// acquired.
-    pub timeout: Duration,
-}
-
-/// A kind of a remote storage to connect to, with its connection configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteStorageKind {
-    /// Storage based on local file system.
-    /// Specify a root folder to place all stored files into.
-    LocalFs(Utf8PathBuf),
-    /// AWS S3 based storage, storing all files in the S3 bucket
-    /// specified by the config
-    AwsS3(S3Config),
-    /// Azure Blob based storage, storing all files in the container
-    /// specified by the config
-    AzureContainer(AzureConfig),
-}
-
-/// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq)]
-pub struct S3Config {
-    /// Name of the bucket to connect to.
-    pub bucket_name: String,
-    /// The region where the bucket is located at.
-    pub bucket_region: String,
-    /// A "subfolder" in the bucket, to use the same bucket separately by multiple remote storage users at once.
-    pub prefix_in_bucket: Option<String>,
-    /// A base URL to send S3 requests to.
-    /// By default, the endpoint is derived from a region name, assuming it's
-    /// an AWS S3 region name, erroring on wrong region name.
-    /// Endpoint provides a way to support other S3 flavors and their regions.
-    ///
-    /// Example: `http://127.0.0.1:5000`
-    pub endpoint: Option<String>,
-    /// AWS S3 has various limits on its API calls, we need not to exceed those.
-    /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
-    pub concurrency_limit: NonZeroUsize,
-    pub max_keys_per_list_response: Option<i32>,
-    pub upload_storage_class: Option<StorageClass>,
-}
-
-impl Debug for S3Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3Config")
-            .field("bucket_name", &self.bucket_name)
-            .field("bucket_region", &self.bucket_region)
-            .field("prefix_in_bucket", &self.prefix_in_bucket)
-            .field("concurrency_limit", &self.concurrency_limit)
-            .field(
-                "max_keys_per_list_response",
-                &self.max_keys_per_list_response,
-            )
-            .finish()
-    }
-}
-
-/// Azure  bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq)]
-pub struct AzureConfig {
-    /// Name of the container to connect to.
-    pub container_name: String,
-    /// The region where the bucket is located at.
-    pub container_region: String,
-    /// A "subfolder" in the container, to use the same container separately by multiple remote storage users at once.
-    pub prefix_in_container: Option<String>,
-    /// Azure has various limits on its API calls, we need not to exceed those.
-    /// See [`DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT`] for more details.
-    pub concurrency_limit: NonZeroUsize,
-    pub max_keys_per_list_response: Option<i32>,
-}
-
-impl Debug for AzureConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AzureConfig")
-            .field("bucket_name", &self.container_name)
-            .field("bucket_region", &self.container_region)
-            .field("prefix_in_bucket", &self.prefix_in_container)
-            .field("concurrency_limit", &self.concurrency_limit)
-            .field(
-                "max_keys_per_list_response",
-                &self.max_keys_per_list_response,
-            )
-            .finish()
-    }
-}
-
-impl RemoteStorageConfig {
-    pub const DEFAULT_TIMEOUT: Duration = std::time::Duration::from_secs(120);
-
-    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
-        let local_path = toml.get("local_path");
-        let bucket_name = toml.get("bucket_name");
-        let bucket_region = toml.get("bucket_region");
-        let container_name = toml.get("container_name");
-        let container_region = toml.get("container_region");
-
-        let use_azure = container_name.is_some() && container_region.is_some();
-
-        let default_concurrency_limit = if use_azure {
-            DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT
-        } else {
-            DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
-        };
-        let concurrency_limit = NonZeroUsize::new(
-            parse_optional_integer("concurrency_limit", toml)?.unwrap_or(default_concurrency_limit),
-        )
-        .context("Failed to parse 'concurrency_limit' as a positive integer")?;
-
-        let max_keys_per_list_response =
-            parse_optional_integer::<i32, _>("max_keys_per_list_response", toml)
-                .context("Failed to parse 'max_keys_per_list_response' as a positive integer")?
-                .or(DEFAULT_MAX_KEYS_PER_LIST_RESPONSE);
-
-        let endpoint = toml
-            .get("endpoint")
-            .map(|endpoint| parse_toml_string("endpoint", endpoint))
-            .transpose()?;
-
-        let timeout = toml
-            .get("timeout")
-            .map(|timeout| {
-                timeout
-                    .as_str()
-                    .ok_or_else(|| anyhow::Error::msg("timeout was not a string"))
-            })
-            .transpose()
-            .and_then(|timeout| {
-                timeout
-                    .map(humantime::parse_duration)
-                    .transpose()
-                    .map_err(anyhow::Error::new)
-            })
-            .context("parse timeout")?
-            .unwrap_or(Self::DEFAULT_TIMEOUT);
-
-        if timeout < Duration::from_secs(1) {
-            bail!("timeout was specified as {timeout:?} which is too low");
-        }
-
-        let storage = match (
-            local_path,
-            bucket_name,
-            bucket_region,
-            container_name,
-            container_region,
-        ) {
-            // no 'local_path' nor 'bucket_name' options are provided, consider this remote storage disabled
-            (None, None, None, None, None) => return Ok(None),
-            (_, Some(_), None, ..) => {
-                bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
-            }
-            (_, None, Some(_), ..) => {
-                bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
-            }
-            (None, Some(bucket_name), Some(bucket_region), ..) => {
-                RemoteStorageKind::AwsS3(S3Config {
-                    bucket_name: parse_toml_string("bucket_name", bucket_name)?,
-                    bucket_region: parse_toml_string("bucket_region", bucket_region)?,
-                    prefix_in_bucket: toml
-                        .get("prefix_in_bucket")
-                        .map(|prefix_in_bucket| {
-                            parse_toml_string("prefix_in_bucket", prefix_in_bucket)
-                        })
-                        .transpose()?,
-                    endpoint,
-                    concurrency_limit,
-                    max_keys_per_list_response,
-                    upload_storage_class: toml
-                        .get("upload_storage_class")
-                        .map(|prefix_in_bucket| -> anyhow::Result<_> {
-                            let s = parse_toml_string("upload_storage_class", prefix_in_bucket)?;
-                            let storage_class = StorageClass::from_str(&s).expect("infallible");
-                            #[allow(deprecated)]
-                            if matches!(storage_class, StorageClass::Unknown(_)) {
-                                bail!("Specified storage class unknown to SDK: '{s}'. Allowed values: {:?}", StorageClass::values());
-                            }
-                            Ok(storage_class)
-                        })
-                        .transpose()?,
-                })
-            }
-            (_, _, _, Some(_), None) => {
-                bail!("'container_name' option is mandatory if 'container_region' is given ")
-            }
-            (_, _, _, None, Some(_)) => {
-                bail!("'container_name' option is mandatory if 'container_region' is given ")
-            }
-            (None, None, None, Some(container_name), Some(container_region)) => {
-                RemoteStorageKind::AzureContainer(AzureConfig {
-                    container_name: parse_toml_string("container_name", container_name)?,
-                    container_region: parse_toml_string("container_region", container_region)?,
-                    prefix_in_container: toml
-                        .get("prefix_in_container")
-                        .map(|prefix_in_container| {
-                            parse_toml_string("prefix_in_container", prefix_in_container)
-                        })
-                        .transpose()?,
-                    concurrency_limit,
-                    max_keys_per_list_response,
-                })
-            }
-            (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs(
-                Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
-            ),
-            (Some(_), Some(_), ..) => {
-                bail!("'local_path' and 'bucket_name' are mutually exclusive")
-            }
-            (Some(_), _, _, Some(_), Some(_)) => {
-                bail!("local_path and 'container_name' are mutually exclusive")
-            }
-        };
-
-        Ok(Some(RemoteStorageConfig { storage, timeout }))
-    }
-}
-
-// Helper functions to parse a toml Item
-fn parse_optional_integer<I, E>(name: &str, item: &toml_edit::Item) -> anyhow::Result<Option<I>>
-where
-    I: TryFrom<i64, Error = E>,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    let toml_integer = match item.get(name) {
-        Some(item) => item
-            .as_integer()
-            .with_context(|| format!("configure option {name} is not an integer"))?,
-        None => return Ok(None),
-    };
-
-    I::try_from(toml_integer)
-        .map(Some)
-        .with_context(|| format!("configure option {name} is too large"))
-}
-
-fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
-    let s = item
-        .as_str()
-        .with_context(|| format!("configure option {name} is not a string"))?;
-    Ok(s.to_string())
 }
 
 struct ConcurrencyLimiter {
@@ -834,25 +587,5 @@ mod tests {
     fn rempte_path_cannot_be_created_from_absolute_ones() {
         let err = RemotePath::new(Utf8Path::new("/")).expect_err("Should fail on absolute paths");
         assert_eq!(err.to_string(), "Path \"/\" is not relative");
-    }
-
-    #[test]
-    fn parse_localfs_config_with_timeout() {
-        let input = "local_path = '.'
-timeout = '5s'";
-
-        let toml = input.parse::<toml_edit::Document>().unwrap();
-
-        let config = RemoteStorageConfig::from_toml(toml.as_item())
-            .unwrap()
-            .expect("it exists");
-
-        assert_eq!(
-            config,
-            RemoteStorageConfig {
-                storage: RemoteStorageKind::LocalFs(Utf8PathBuf::from(".")),
-                timeout: Duration::from_secs(5)
-            }
-        );
     }
 }

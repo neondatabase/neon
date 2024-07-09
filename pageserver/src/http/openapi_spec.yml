@@ -78,27 +78,14 @@ paths:
 
     delete:
       description: |
-        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried until 404 is retrieved.
-        404 means that deletion successfully finished"
+        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried.  Deleting
+        a non-existent tenant is considered successful (returns 200).
       responses:
-        "404":
-          description: Tenant not found. This is the success path.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "409":
-          description: Deletion is already in progress, continue polling
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ConflictError"
-        "412":
-          description: Deletion may not proceed, tenant is not in Active state
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PreconditionFailedError"
+        "200":
+          description: Tenant was successfully deleted, or was already not found.
+        "503":
+          description: Service is unavailable, or tenant is already being modified (perhaps concurrently deleted)
+
 
   /v1/tenant/{tenant_id}/time_travel_remote_storage:
     parameters:
@@ -249,6 +236,13 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
+        - name: with_lease
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Whether to grant a lease to the corresponding LSN. Default to false.
+
       responses:
         "200":
           description: OK
@@ -256,6 +250,41 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LsnByTimestampResponse"
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/lsn_lease:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Obtains a lease for the given LSN.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+               - lsn
+              properties:
+                lsn:
+                  description: A LSN to obtain the lease for.
+                  type: string
+                  format: hex
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LsnLease"
 
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc:
     parameters:
@@ -342,62 +371,11 @@ paths:
                 $ref: "#/components/schemas/TenantLocationConfigResponse"
         "409":
           description: |
-            The tenant is already known to Pageserver in some way,
-            and hence this `/attach` call has been rejected.
-
-            Some examples of how this can happen:
-            - tenant was created on this pageserver
-            - tenant attachment was started by an earlier call to `/attach`.
-
-            Callers should poll the tenant status's `attachment_status` field,
-            like for status 202. See the longer description for `POST /attach`
-            for details.
+            The tenant is already being modified, perhaps by a concurrent call to this API
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-  /v1/tenant/{tenant_id}/ignore:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      description: |
-        Remove tenant data (including all corresponding timelines) from pageserver's memory.
-        Files on local disk and remote storage are not affected.
-
-        Future pageserver restarts won't load the data back until `load` is called on such tenant.
-      responses:
-        "200":
-          description: Tenant ignored
-
-
-  /v1/tenant/{tenant_id}/load:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      description: |
-        Schedules an operation that attempts to load a tenant from the local disk and
-        synchronise it with the remote storage (if enabled), repeating pageserver's restart logic for tenant load.
-        If the tenant was ignored before, removes the ignore mark and continues with load scheduling.
-
-        Errors if the tenant is absent on disk, already present in memory or fails to schedule its load.
-        Scheduling a load does not mean that the tenant would load successfully, check tenant status to ensure load correctness.
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TenantLoadRequest"
-      responses:
-        "202":
-          description: Tenant scheduled to load successfully
 
   /v1/tenant/{tenant_id}/{timeline_id}/preserve_initdb_archive:
     parameters:
@@ -581,6 +559,80 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/detach_ancestor:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        ŕequired: true
+        schema:
+          type: string
+
+    put:
+      description: |
+        Detach a timeline from its ancestor and reparent all ancestors timelines with lower `ancestor_lsn`.
+        Current implementation might not be retryable across failure cases, but will be enhanced in future.
+        Detaching should be expected to be expensive operation. Timeouts should be retried.
+      responses:
+        "200":
+          description: |
+            The timeline has been detached from it's ancestor (now or earlier), and at least the returned timelines have been reparented.
+            If any timelines were deleted after reparenting, they might not be on this list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AncestorDetached"
+
+        "400":
+          description: |
+            Number of early checks meaning the timeline cannot be detached now:
+              - the ancestor of timeline has an ancestor: not supported, see RFC
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        "404":
+          description: Tenant or timeline not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+
+        "409":
+          description: |
+            The timeline can never be detached:
+              - timeline has no ancestor, implying that the timeline has never had an ancestor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+
+        "500":
+          description: |
+            Transient error, for example, pageserver shutdown happened while
+            processing the request but we were unable to distinguish that. Must
+            be retried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        "503":
+          description: |
+            Temporarily unavailable, please retry. Possible reasons:
+              - another timeline detach for the same tenant is underway, please retry later
+              - detected shutdown error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
+
+
   /v1/tenant/:
     get:
       description: Get tenants list
@@ -705,8 +757,6 @@ components:
               For example this can be caused by s3 being unreachable. The retry may be implemented
               with call to detach, though it would be better to not automate it and inspec failed state
               manually before proceeding with a retry.
-
-            See the tenant `/attach` endpoint for more information.
           type: object
           required:
             - slug
@@ -979,6 +1029,19 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
+        valid_until:
+          type: string
+          format: date-time
+          description: The expiration time of the granted lease.
+
+    LsnLease:
+      type: object
+      required:
+        - valid_until
+      properties:
+        valid_until:
+          type: string
+          format: date-time
 
     PageserverUtilization:
       type: object
@@ -1036,6 +1099,19 @@ components:
           type: integer
           format: int64
           description: How many bytes of layer content were in the latest layer heatmap
+
+    AncestorDetached:
+      type: object
+      required:
+        - reparented_timelines
+      properties:
+        reparented_timelines:
+          type: array
+          description: Set of reparented timeline ids
+          properties:
+            type: string
+            format: hex
+            description: TimelineId
 
 
     Error:
