@@ -8,6 +8,12 @@ ARG TAG=pinned
 
 # Build Postgres
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
+
+# Install necessary dependencies
+USER root
+RUN apt-get update && apt-get install -y libcurl4-openssl-dev build-essential
+
+USER nonroot
 WORKDIR /home/nonroot
 
 COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
