@@ -307,6 +307,14 @@ impl FeStartupPacket {
         const NEGOTIATE_SSL_CODE: u32 = 5679;
         const NEGOTIATE_GSS_CODE: u32 = 5680;
 
+        // <https://github.com/postgres/postgres/blob/04bcf9e19a4261fe9c7df37c777592c2e10c32a7/src/backend/tcop/backend_startup.c#L378-L382>
+        // First byte indicates standard SSL handshake message
+        // (It can't be a Postgres startup length because in network byte order
+        // that would be a startup packet hundreds of megabytes long)
+        if buf.first() == Some(&0x16) {
+            return Ok(Some(FeStartupPacket::SslRequest));
+        }
+
         // need at least 4 bytes with packet len
         if buf.len() < 4 {
             let to_read = 4 - buf.len();

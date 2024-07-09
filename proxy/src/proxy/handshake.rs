@@ -1,11 +1,16 @@
-use pq_proto::{BeMessage as Be, CancelKeyData, FeStartupPacket, StartupMessageParams};
+use bytes::Buf;
+use pq_proto::{
+    framed::Framed, BeMessage as Be, CancelKeyData, FeStartupPacket, StartupMessageParams,
+};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
-    config::TlsConfig,
+    auth::endpoint_sni,
+    config::{TlsConfig, PG_ALPN_PROTOCOL},
     error::ReportableError,
+    metrics::Metrics,
     proxy::ERR_INSECURE_CONNECTION,
     stream::{PqStream, Stream, StreamUpgradeError},
 };
@@ -86,29 +91,78 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.
 
-                        let (raw, read_buf) = stream.into_inner();
-                        // TODO: Normally, client doesn't send any data before
-                        // server says TLS handshake is ok and read_buf is empy.
-                        // However, you could imagine pipelining of postgres
-                        // SSLRequest + TLS ClientHello in one hunk similar to
-                        // pipelining in our node js driver. We should probably
-                        // support that by chaining read_buf with the stream.
+                        let Framed {
+                            stream: raw,
+                            read_buf,
+                            write_buf,
+                        } = stream.framed;
+
+                        let Stream::Raw { raw } = raw else {
+                            return Err(HandshakeError::StreamUpgradeError(
+                                StreamUpgradeError::AlreadyTls,
+                            ));
+                        };
+
+                        let mut read_buf = read_buf.reader();
+                        let mut res = Ok(());
+                        let accept = tokio_rustls::TlsAcceptor::from(tls.to_server_config())
+                            .accept_with(raw, |session| {
+                                // push the early data to the tls session
+                                while !read_buf.get_ref().is_empty() {
+                                    match session.read_tls(&mut read_buf) {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            res = Err(e);
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+
+                        res?;
+
+                        let read_buf = read_buf.into_inner();
                         if !read_buf.is_empty() {
                             return Err(HandshakeError::EarlyData);
                         }
-                        let tls_stream = raw
-                            .upgrade(tls.to_server_config(), record_handshake_error)
-                            .await?;
+
+                        let tls_stream = accept.await.inspect_err(|_| {
+                            if record_handshake_error {
+                                Metrics::get().proxy.tls_handshake_failures.inc()
+                            }
+                        })?;
+
+                        let conn_info = tls_stream.get_ref().1;
+
+                        // check the ALPN, if exists, as required.
+                        match conn_info.alpn_protocol() {
+                            None | Some(PG_ALPN_PROTOCOL) => {}
+                            Some(other) => {
+                                // try parse ep for better error
+                                let ep = conn_info.server_name().and_then(|sni| {
+                                    endpoint_sni(sni, &tls.common_names).ok().flatten()
+                                });
+                                let alpn = String::from_utf8_lossy(other);
+                                warn!(?ep, %alpn, "unexpected ALPN");
+                                return Err(HandshakeError::ProtocolViolation);
+                            }
+                        }
 
                         let (_, tls_server_end_point) = tls
                             .cert_resolver
-                            .resolve(tls_stream.get_ref().1.server_name())
+                            .resolve(conn_info.server_name())
                             .ok_or(HandshakeError::MissingCertificate)?;
 
-                        stream = PqStream::new(Stream::Tls {
-                            tls: Box::new(tls_stream),
-                            tls_server_end_point,
-                        });
+                        stream = PqStream {
+                            framed: Framed {
+                                stream: Stream::Tls {
+                                    tls: Box::new(tls_stream),
+                                    tls_server_end_point,
+                                },
+                                read_buf,
+                                write_buf,
+                            },
+                        };
                     }
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
