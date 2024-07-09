@@ -74,7 +74,8 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
 
-    const SUPPORTED_VERSION: ProtocolVersion = ProtocolVersion::new(3, 0);
+    const PG_PROTOCOL_EARLIEST: ProtocolVersion = ProtocolVersion::new(3, 0);
+    const PG_PROTOCOL_LATEST: ProtocolVersion = ProtocolVersion::new(3, 0);
 
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
@@ -179,10 +180,9 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
             },
-            StartupMessage {
-                params,
-                version: version @ SUPPORTED_VERSION,
-            } => {
+            StartupMessage { params, version }
+                if PG_PROTOCOL_EARLIEST <= version && version <= PG_PROTOCOL_LATEST =>
+            {
                 // Check that the config has been consumed during upgrade
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
@@ -194,7 +194,10 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 info!(?version, session_type = "normal", "successful handshake");
                 break Ok(HandshakeData::Startup(stream, params));
             }
-            StartupMessage { params, version } if version.major() == 3 => {
+            // downgrade protocol version
+            StartupMessage { params, version }
+                if version.major() == 3 && version > PG_PROTOCOL_LATEST =>
+            {
                 warn!(?version, "unsupported minor version");
 
                 // no protocol extensions are supported.
@@ -210,7 +213,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                 stream
                     .write_message(&Be::NegotiateProtocolVersion {
-                        version: SUPPORTED_VERSION,
+                        version: PG_PROTOCOL_LATEST,
                         options: &unsupported,
                     })
                     .await?;
@@ -226,7 +229,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 warn!(
                     ?version,
                     session_type = "normal",
-                    "unsuccessful handshake; unsupported major version"
+                    "unsuccessful handshake; unsupported version"
                 );
                 return Err(HandshakeError::ProtocolViolation);
             }

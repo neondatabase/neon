@@ -39,7 +39,7 @@ pub enum FeMessage {
     PasswordMessage(Bytes),
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub struct ProtocolVersion(u32);
 
 impl ProtocolVersion {
