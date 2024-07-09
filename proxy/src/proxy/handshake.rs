@@ -1,6 +1,7 @@
 use bytes::Buf;
 use pq_proto::{
-    framed::Framed, BeMessage as Be, CancelKeyData, FeStartupPacket, StartupMessageParams,
+    framed::Framed, BeMessage as Be, CancelKeyData, FeStartupPacket, ProtocolVersion,
+    StartupMessageParams,
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -72,6 +73,8 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Result<HandshakeData<S>, HandshakeError> {
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
+
+    const SUPPORTED_VERSION: ProtocolVersion = ProtocolVersion::new(3, 0);
 
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
@@ -176,7 +179,10 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
             },
-            StartupMessage { params, .. } => {
+            StartupMessage {
+                params,
+                version: version @ SUPPORTED_VERSION,
+            } => {
                 // Check that the config has been consumed during upgrade
                 // OR we didn't provide it at all (for dev purposes).
                 if tls.is_some() {
@@ -185,8 +191,44 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         .await?;
                 }
 
-                info!(session_type = "normal", "successful handshake");
+                info!(?version, session_type = "normal", "successful handshake");
                 break Ok(HandshakeData::Startup(stream, params));
+            }
+            StartupMessage { params, version } if version.major() == 3 => {
+                warn!(?version, "unsupported minor version");
+
+                // no protocol extensions are supported.
+                // <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/backend/tcop/backend_startup.c#L744-L753>
+                let mut unsupported = vec![];
+                for (k, _) in params.iter() {
+                    if k.starts_with("_pq_.") {
+                        unsupported.push(k);
+                    }
+                }
+
+                // TODO: remove unsupported options so we don't send them to compute.
+
+                stream
+                    .write_message(&Be::NegotiateProtocolVersion {
+                        version: SUPPORTED_VERSION,
+                        options: &unsupported,
+                    })
+                    .await?;
+
+                info!(
+                    ?version,
+                    session_type = "normal",
+                    "successful handshake; unsupported minor version requested"
+                );
+                break Ok(HandshakeData::Startup(stream, params));
+            }
+            StartupMessage { version, .. } => {
+                warn!(
+                    ?version,
+                    session_type = "normal",
+                    "unsuccessful handshake; unsupported major version"
+                );
+                return Err(HandshakeError::ProtocolViolation);
             }
             CancelRequest(cancel_key_data) => {
                 info!(session_type = "cancellation", "successful handshake");
