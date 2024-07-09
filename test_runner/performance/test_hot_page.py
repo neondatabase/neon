@@ -26,7 +26,7 @@ def test_hot_page(env: PgCompare):
             # without depending on the latency between database client and postgres
             # server
             # - however a single staement should not run into a timeout so we increase it
-            cur.execute("SET statement_timeout = '3h';")
+            cur.execute("SET statement_timeout = '4h';")
             with env.record_duration("write"):
                 cur.execute(
                     f"""
