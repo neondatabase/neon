@@ -125,8 +125,8 @@ but *without* querying the pageservers in order to build up the observed state.
 The final start-up step is to update the `leader` database table as described in the [Database Table For Leader Synchronization](database-table-for-leader-synchronization)
 section. If this step fails, the storage controller process exits.
 
-Note that no row will exist in the `leaders` table for the first graceful restart. In that case, update the `leader` table
-and perform with the pre-existing start-up procedure (i.e. build observed state by querying pageservers).
+Note that no row will exist in the `leaders` table for the first graceful restart. In that case, force update the `leader` table
+(without the WHERE clause) and perform with the pre-existing start-up procedure (i.e. build observed state by querying pageservers).
 
 [1] The API call might fail because there's no storage controller running (i.e. [restart](#storage-controller-crash-or-restart)),
 so we don't want to extend the unavailability period by much. We still want to retry since that's not the common case.
@@ -137,7 +137,8 @@ so we don't want to extend the unavailability period by much. We still want to r
 
 The storage controller may crash or be restarted outside of roll-outs. When a new pod is created, its call to
 `/step_down` will fail since the previous leader is no longer reachable. In this case perform the pre-existing
-pre-existing start-up procedure and update the leader table (without a WHERE clause).
+start-up procedure and update the leader table (with the WHERE clause). If the update fails, the storage controller
+exists and consistency is maintained.
 
 #### Previous Leader Crashes Before New Leader Readiness
 
