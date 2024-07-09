@@ -68,7 +68,7 @@ def test_sharding_smoke(
             sizes[node_id] = pageserver.http_client().tenant_status(shard["shard_id"])[
                 "current_physical_size"
             ]
-        log.info(f"sizes = {sizes}")
+        log.info("sizes = %s", sizes)
         return sizes
 
     # The imported initdb for timeline creation should
@@ -290,7 +290,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
             if failpoint is None:
                 raise e
             else:
-                log.info(f"Compaction failed (failpoint={failpoint}): {e}")
+                log.info("Compaction failed (failpoint=%s): %s", failpoint, e)
 
             if failpoint in (
                 "compact-shard-ancestors-localonly",
@@ -324,7 +324,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
             measured_size += os.stat(abs_path).st_size
 
         log.info(
-            f"shard {shard} reported size {reported_size}, measured size {measured_size} ({len(layer_paths)} layers)"
+            "shard %s reported size %s, measured size %s (%s layers)", shard, reported_size, measured_size, len(layer_paths)
         )
 
         if failpoint in (
@@ -409,7 +409,7 @@ def test_sharding_split_smoke(
             ]
         )
 
-        log.info(f"Pageserver {pageserver.id} metrics: {metrics}")
+        log.info("Pageserver %s metrics: %s", pageserver.id, metrics)
 
         # Not everything received was committed
         assert (
@@ -525,7 +525,7 @@ def test_sharding_split_smoke(
         for tid in tenant_ids:
             for shard in env.storage_controller.tenant_describe(tid)["shards"]:
                 log.info(
-                    f"{shard['tenant_shard_id']}: attached={shard['node_attached']}, secondary={shard['node_secondary']} "
+                    "%s: attached=%s, secondary=%s ", shard['tenant_shard_id'], shard['node_attached'], shard['node_secondary']
                 )
                 for node in shard["node_secondary"]:
                     total[int(node)] += 1
@@ -558,7 +558,7 @@ def test_sharding_split_smoke(
     # More specific check: that we are fully balanced.  This is deterministic because
     # the order in which we consider shards for optimization is deterministic, and the
     # order of preference of nodes is also deterministic (lower node IDs win).
-    log.info(f"total: {total}")
+    log.info("total: %s", total)
     assert total == {
         1: 1,
         2: 1,
@@ -577,7 +577,7 @@ def test_sharding_split_smoke(
         15: 1,
         16: 1,
     }
-    log.info(f"attached: {attached}")
+    log.info("attached: %s", attached)
     assert attached == {1: 1, 2: 1, 3: 1, 5: 1, 6: 1, 7: 1, 9: 1, 11: 1}
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
@@ -615,7 +615,7 @@ def test_sharding_split_stripe_size(
     notifications = []
 
     def handler(request: Request):
-        log.info(f"Notify request: {request}")
+        log.info("Notify request: %s", request)
         notifications.append(request.json)
         return Response(status=200)
 
@@ -651,7 +651,7 @@ def test_sharding_split_stripe_size(
             {"node_id": int(env.pageservers[0].id), "shard_number": 1},
         ],
     }
-    log.info(f"Got notification: {notifications[1]}")
+    log.info("Got notification: %s", notifications[1])
     assert notifications[1] == expect_after
 
     # Inspect the stripe size on the pageserver
@@ -737,7 +737,7 @@ def test_sharding_ingest_layer_sizes(
         )
         for layer in layers.historic_layers:
             log.info(
-                f"layer[{pageserver.id}]: {layer.layer_file_name} (size {layer.layer_file_size})"
+                "layer[%s]: %s (size %s)", pageserver.id, layer.layer_file_name, layer.layer_file_size
             )
 
         initial_layers_per_shard[shard_id] = set(layers.historic_layers)
@@ -787,13 +787,13 @@ def test_sharding_ingest_layer_sizes(
                 lsn_size = 0
 
             log.info(
-                f"{classification} layer[{pageserver.id}]: {layer.layer_file_name} (size {layer.layer_file_size}, LSN distance {lsn_size})"
+                "%s layer[%s]: %s (size %s, LSN distance %s)", classification, pageserver.id, layer.layer_file_name, layer.layer_file_size, lsn_size
             )
 
     # Why an inexact check?
     # - Because we roll layers on checkpoint_distance * shard_count, we expect to obey the target
     #   layer size on average, but it is still possible to write some tiny layers.
-    log.info(f"Totals: {small_layer_count} small layers, {ok_layer_count} ok layers")
+    log.info("Totals: %s small layers, %s ok layers", small_layer_count, ok_layer_count)
     if small_layer_count <= shard_count:
         # If each shard has <= 1 small layer
         pass
@@ -862,7 +862,7 @@ def test_sharding_ingest_gaps(
     # Don't leave the endpoint running, we don't want it writing in the background
     workload.stop()
 
-    log.info(f"Waiting for shards' consistent LSNs to reach {expect_lsn}")
+    log.info("Waiting for shards' consistent LSNs to reach %s", expect_lsn)
 
     shards = tenant_get_shards(env, tenant_id, None)
 
@@ -872,7 +872,7 @@ def test_sharding_ingest_gaps(
         """
         for tenant_shard_id, pageserver in shards:
             timeline_detail = pageserver.http_client().timeline_detail(tenant_shard_id, timeline_id)
-            log.info(f"{tenant_shard_id} (ps {pageserver.id}) detail: {timeline_detail}")
+            log.info("%s (ps %s) detail: %s", tenant_shard_id, pageserver.id, timeline_detail)
             assert Lsn(timeline_detail["disk_consistent_lsn"]) >= expect_lsn
 
     # We set a short checkpoint timeout: expect things to get frozen+flushed within that
@@ -884,7 +884,7 @@ def test_sharding_ingest_gaps(
         """
         for tenant_shard_id, pageserver in shards:
             timeline_detail = pageserver.http_client().timeline_detail(tenant_shard_id, timeline_id)
-            log.info(f"{tenant_shard_id} (ps {pageserver.id}) detail: {timeline_detail}")
+            log.info("%s (ps %s) detail: %s", tenant_shard_id, pageserver.id, timeline_detail)
             assert Lsn(timeline_detail["remote_consistent_lsn"]) >= expect_lsn
 
     # We set a short checkpoint timeout: expect things to get frozen+flushed within that
@@ -1182,7 +1182,7 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
+                log.info("Shard %s seen on node %s in mode %s", tenant_shard_id, ps.id, loc[1]['mode'])
                 assert tenant_shard_id.shard_count == initial_shard_count
                 if loc[1]["mode"] == "Secondary":
                     secondary_count += 1
@@ -1208,7 +1208,7 @@ def test_sharding_split_failures(
             locations = ps.http_client().tenant_list_locations()["tenant_shards"]
             for loc in locations:
                 tenant_shard_id = TenantShardId.parse(loc[0])
-                log.info(f"Shard {tenant_shard_id} seen on node {ps.id} in mode {loc[1]['mode']}")
+                log.info("Shard %s seen on node %s in mode %s", tenant_shard_id, ps.id, loc[1]['mode'])
                 assert tenant_shard_id.shard_count == split_shard_count
                 if loc[1]["mode"] == "Secondary":
                     secondary_count += 1
@@ -1330,7 +1330,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             last_record_lsn = shard_info["last_record_lsn"]
             current_physical_size = shard_info["current_physical_size"]
             log.info(
-                f"Shard on pageserver {node_id}: lsn={last_record_lsn}, size={current_physical_size}"
+                "Shard on pageserver %s: lsn=%s, size=%s", node_id, last_record_lsn, current_physical_size
             )
         return infos
 
@@ -1360,7 +1360,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             "SHOW max_replication_apply_lag",
         ]
     )
-    log.info(f"backpressure config: {res}")
+    log.info("backpressure config: %s", res)
 
     last_flush_lsn = None
     last_timestamp = None
@@ -1381,7 +1381,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             dbname="postgres",
         )[0]
         log.info(
-            f"received_lsn_lag = {res[0]}, received_lsn = {res[1]}, flush_lsn = {res[2]}, throttling_time = {res[3]}"
+            "received_lsn_lag = %s, received_lsn = %s, flush_lsn = %s, throttling_time = %s", res[0], res[1], res[2], res[3]
         )
 
         lsn = Lsn(res[2])
@@ -1392,7 +1392,7 @@ def test_sharding_backpressure(neon_env_builder: NeonEnvBuilder):
             delta_bytes = lsn - last_flush_lsn
             avg_speed = delta_bytes / delta / 1024 / 1024
             log.info(
-                f"flush_lsn {lsn}, written {delta_bytes/1024}kb for {delta:.3f}s, avg_speed {avg_speed:.3f} MiB/s"
+                "flush_lsn %s, written %skb for %ss, avg_speed %s MiB/s", lsn, delta_bytes/1024, f"{delta:.3f}", f"{avg_speed:.3f}"
             )
 
         last_flush_lsn = lsn
@@ -1488,7 +1488,7 @@ def test_top_tenants(neon_env_builder: NeonEnvBuilder):
         ]
         tenants.append((tenant_id, timeline_id, logical_size))
 
-        log.info(f"Created {tenant_id}/{timeline_id} with size {logical_size}")
+        log.info("Created %s/%s with size %s", tenant_id, timeline_id, logical_size)
 
     # Ask for 1 largest tenant
     top_1 = env.pageserver.http_client().top_tenants("max_logical_size", 1, 8, 0)

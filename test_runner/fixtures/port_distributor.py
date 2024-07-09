@@ -25,7 +25,7 @@ def can_bind(host: str, port: int) -> bool:
             sock.listen()
             return True
         except socket.error:
-            log.info(f"Port {port} is in use, skipping")
+            log.info("Port %s is in use, skipping", port)
             return False
         finally:
             sock.close()

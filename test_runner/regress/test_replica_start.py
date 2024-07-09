@@ -523,7 +523,7 @@ def test_replica_start_with_prepared_xacts_with_subxacts(neon_simple_env: NeonEn
     # at standby startup. (We had a bug where it didn't at one point during development.)
     while True:
         xid = int(query_scalar(primary_cur, "SELECT txid_current()"))
-        log.info(f"xid now {xid}")
+        log.info("xid now %s", xid)
         # Consume 500 transactions at a time until we get close
         if xid < 65535 - 600:
             primary_cur.execute("select test_consume_xids(500);")

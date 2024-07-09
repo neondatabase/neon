@@ -139,7 +139,7 @@ def wait_for_pageserver_catchup(endpoint_main: Endpoint, polling_interval=1, tim
             """,
             dbname="postgres",
         )[0]
-        log.info(f"pg_cluster_size = {res[0]}, received_lsn_lag = {res[1]}")
+        log.info("pg_cluster_size = %s, received_lsn_lag = %s", res[0], res[1])
         received_lsn_lag = res[1]
 
         time.sleep(polling_interval)
@@ -179,7 +179,7 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
                 raise AssertionError()
 
             except psycopg2.errors.DiskFull as err:
-                log.info(f"Query expectedly failed with: {err}")
+                log.info("Query expectedly failed with: %s", err)
 
     # Restart endpoint that reached the limit to ensure that it doesn't fail on startup
     # i.e. the size limit is not enforced during startup.
@@ -206,7 +206,7 @@ def test_timeline_size_quota_on_startup(neon_env_builder: NeonEnvBuilder):
                 raise AssertionError()
 
             except psycopg2.errors.DiskFull as err:
-                log.info(f"Query expectedly failed with: {err}")
+                log.info("Query expectedly failed with: %s", err)
 
 
 def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
@@ -257,7 +257,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
                 raise AssertionError()
 
             except psycopg2.errors.DiskFull as err:
-                log.info(f"Query expectedly failed with: {err}")
+                log.info("Query expectedly failed with: %s", err)
 
             # drop table to free space
             cur.execute("DROP TABLE foo")
@@ -278,7 +278,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
             cur.execute("SELECT * from pg_size_pretty(neon.pg_cluster_size())")
             pg_cluster_size = cur.fetchone()
-            log.info(f"pg_cluster_size = {pg_cluster_size}")
+            log.info("pg_cluster_size = %s", pg_cluster_size)
 
     new_res = client.timeline_detail(
         env.initial_tenant, new_timeline_id, include_non_incremental_logical_size=True
@@ -330,7 +330,7 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     assert_size_calculation_not_done()
 
     log.info(
-        f"delete the timeline using {deletion_method}, this should cancel size computation tasks and wait for them to finish"
+        "delete the timeline using %s, this should cancel size computation tasks and wait for them to finish", deletion_method
     )
 
     if deletion_method == "tenant_detach":
@@ -730,11 +730,11 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
     def get_tenant_states():
         states = {}
-        log.info(f"Tenant ids: {tenant_ids}")
+        log.info("Tenant ids: %s", tenant_ids)
         for tenant_id in tenant_ids:
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
             states[tenant_id] = tenant["state"]["slug"]
-        log.info(f"Tenant states: {states}")
+        log.info("Tenant states: %s", states)
         return states
 
     def at_least_one_active():
@@ -923,7 +923,7 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     # restart with failpoint inside initial size calculation task
-    log.info(f"Detaching tenant {tenant_id} and stopping pageserver...")
+    log.info("Detaching tenant %s and stopping pageserver...", tenant_id)
 
     endpoint.stop()
     env.pageserver.tenant_detach(tenant_id)
@@ -934,7 +934,7 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
         }
     )
 
-    log.info(f"Re-attaching tenant {tenant_id}...")
+    log.info("Re-attaching tenant %s...", tenant_id)
     env.pageserver.tenant_attach(tenant_id)
 
     # kick off initial size calculation task (the response we get here is the estimated size)
@@ -997,7 +997,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
 
     def one_is_active():
         states = get_tenant_states()
-        log.info(f"{states}")
+        log.info("%s", states)
         assert len(states["Active"]) == 1
 
     wait_until(10, 1, one_is_active)

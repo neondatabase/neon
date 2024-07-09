@@ -12,7 +12,7 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
 
     branchname = "test_explain_with_lfc_stats"
     env.neon_cli.create_branch(branchname, "empty")
-    log.info(f"Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}")
+    log.info("Creating endopint with 1MB shared_buffers and 64 MB LFC for branch %s", branchname)
     endpoint = env.endpoints.create_start(
         branchname,
         config_lines=[
@@ -25,7 +25,7 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
 
     cur = endpoint.connect().cursor()
 
-    log.info(f"preparing some data in {endpoint.connstr()}")
+    log.info("preparing some data in %s", endpoint.connstr())
 
     ddl = """
 CREATE TABLE pgbench_accounts (
@@ -45,7 +45,7 @@ WITH (fillfactor='100');
         "insert into pgbench_accounts(aid,bid,abalance,filler) select aid, (aid - 1) / 100000 + 1, 0, '' from generate_series(1, 100000) as aid;"
     )
 
-    log.info(f"warming up caches with sequential scan in {endpoint.connstr()}")
+    log.info("warming up caches with sequential scan in %s", endpoint.connstr())
     cur.execute("SELECT * FROM pgbench_accounts WHERE abalance > 0")
 
     log.info("running explain analyze without LFC values to verify they do not show up in the plan")

@@ -55,7 +55,7 @@ page_cache_size=10
 
     for i in range(1, churn_rounds + 1):
         if i % 10 == 0:
-            log.info(f"Running churn round {i}/{churn_rounds} ...")
+            log.info("Running churn round %s/%s ...", i, churn_rounds)
 
         workload.churn_rows(row_count, env.pageserver.id)
         ps_http.timeline_compact(tenant_id, timeline_id)
@@ -77,7 +77,7 @@ page_cache_size=10
     metrics = env.pageserver.http_client().get_metrics()
     for name in layer_access_metric_names:
         layer_access_metrics = metrics.query_all(name)
-        log.info(f"Got metrics: {layer_access_metrics}")
+        log.info("Got metrics: %s", layer_access_metrics)
 
     non_vectored_sum = metrics.query_one("pageserver_layers_visited_per_read_global_sum")
     non_vectored_count = metrics.query_one("pageserver_layers_visited_per_read_global_count")
@@ -95,7 +95,7 @@ page_cache_size=10
         assert vectored_sum.value == 0
         vectored_average = 0
 
-    log.info(f"{non_vectored_average=} {vectored_average=}")
+    log.info("%s %s", f"{non_vectored_average=}", f"{vectored_average=}")
 
     # The upper bound for average number of layer visits below (8)
     # was chosen empirically for this workload.
@@ -176,7 +176,7 @@ def test_sharding_compaction(
                 assert layer.layer_file_size > 0
 
         shard_has_image_layers.append(len(image_layer_sizes) > 1)
-        log.info(f"Shard {shard_id} image layer sizes: {json.dumps(image_layer_sizes, indent=2)}")
+        log.info("Shard %s image layer sizes: %s", shard_id, f"{json.dumps(image_layer_sizes, indent=2)}")
 
         if stripe_size == TINY_STRIPES:
             # Checking the average size validates that our keyspace partitioning is  properly respecting sharding: if
@@ -186,7 +186,7 @@ def test_sharding_compaction(
             # We only do this check with tiny stripes, because large stripes may not give all shards enough
             # data to have statistically significant image layers
             avg_size = sum(v for v in image_layer_sizes.values()) / len(image_layer_sizes)
-            log.info(f"Shard {shard_id} average image layer size: {avg_size}")
+            log.info("Shard %s average image layer size: %s", shard_id, avg_size)
             assert avg_size > compaction_target_size / 2
 
     if stripe_size == TINY_STRIPES:
@@ -249,7 +249,7 @@ def test_uploads_and_deletions(
     try:
         generate_uploads_and_deletions(env, pageserver=env.pageserver)
     except PageserverApiException as e:
-        log.info(f"Obtained PageserverApiException: {e}")
+        log.info("Obtained PageserverApiException: %s", e)
 
     # The errors occur flakily and no error is ensured to occur,
     # however at least one of them occurs.

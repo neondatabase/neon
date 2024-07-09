@@ -25,13 +25,13 @@ def neon_env_builder_local(
     pg_version: PgVersion,
 ) -> NeonEnvBuilder:
     test_local_pginstall = test_output_dir / "pg_install"
-    log.info(f"copy {pg_distrib_dir} to {test_local_pginstall}")
+    log.info("copy %s to %s", pg_distrib_dir, test_local_pginstall)
     shutil.copytree(
         pg_distrib_dir / pg_version.v_prefixed, test_local_pginstall / pg_version.v_prefixed
     )
 
     neon_env_builder.pg_distrib_dir = test_local_pginstall
-    log.info(f"local neon_env_builder.pg_distrib_dir: {neon_env_builder.pg_distrib_dir}")
+    log.info("local neon_env_builder.pg_distrib_dir: %s", neon_env_builder.pg_distrib_dir)
 
     return neon_env_builder
 
@@ -55,7 +55,7 @@ def test_remote_extensions(
     archive_path = f"{build_tag}/v{pg_version}/extensions/anon.tar.zst"
 
     def endpoint_handler_build_tag(request: Request) -> Response:
-        log.info(f"request: {request}")
+        log.info("request: %s", request)
 
         file_name = "anon.tar.zst"
         file_path = f"test_runner/regress/data/extension_test/5670669815/v{pg_version}/extensions/anon.tar.zst"

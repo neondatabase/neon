@@ -58,11 +58,11 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
 
         basepath = pg_bin.run_capture(cmd, with_command_header=False)
         results_path = Path(basepath + ".stdout")
-        log.info(f"Benchmark results at: {results_path}")
+        log.info("Benchmark results at: %s", results_path)
 
         with open(results_path, "r") as f:
             results = json.load(f)
-        log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
+        log.info("Results:\n%s", f"{json.dumps(results, sort_keys=True, indent=2)}")
         return int(results["total"]["request_count"])
 
     log.info("warmup / make sure metrics are present")

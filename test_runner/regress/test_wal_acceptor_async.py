@@ -77,20 +77,20 @@ class WorkerStats(object):
         self.counters[worker_id] += 1
 
     def check_progress(self):
-        log.debug(f"Workers progress: {self.counters}")
+        log.debug("Workers progress: %s", self.counters)
 
         # every worker should finish at least one tx
         assert all(cnt > 0 for cnt in self.counters)
 
         progress = sum(self.counters)
-        log.info(f"All workers made {progress} transactions")
+        log.info("All workers made %s transactions", progress)
 
 
 async def run_random_worker(
     stats: WorkerStats, endpoint: Endpoint, worker_id, n_accounts, max_transfer
 ):
     pg_conn = await endpoint.connect_async()
-    log.debug(f"Started worker {worker_id}")
+    log.debug("Started worker %s", worker_id)
 
     while stats.running:
         from_uid = random.randint(0, n_accounts - 1)
@@ -100,9 +100,9 @@ async def run_random_worker(
         await bank_transfer(pg_conn, from_uid, to_uid, amount)
         stats.inc_progress(worker_id)
 
-        log.debug(f"Executed transfer({amount}) {from_uid} => {to_uid}")
+        log.debug("Executed transfer(%s) %s => %s", amount, from_uid, to_uid)
 
-    log.debug(f"Finished worker {worker_id}")
+    log.debug("Finished worker %s", worker_id)
 
     await pg_conn.close()
 
@@ -126,7 +126,7 @@ async def wait_for_lsn(
 
     flush_lsn = client.timeline_status(tenant_id, timeline_id).flush_lsn
     log.info(
-        f"Safekeeper at port {safekeeper.port.pg} has flush_lsn {flush_lsn}, waiting for lsn {wait_lsn}"
+        "Safekeeper at port %s has flush_lsn %s, waiting for lsn %s", safekeeper.port.pg, flush_lsn, wait_lsn
     )
 
     while wait_lsn > flush_lsn:
@@ -138,7 +138,7 @@ async def wait_for_lsn(
 
         await asyncio.sleep(polling_interval)
         flush_lsn = client.timeline_status(tenant_id, timeline_id).flush_lsn
-        log.debug(f"safekeeper port={safekeeper.port.pg} flush_lsn={flush_lsn} wait_lsn={wait_lsn}")
+        log.debug("safekeeper port=%s flush_lsn=%s wait_lsn=%s", safekeeper.port.pg, flush_lsn, wait_lsn)
 
 
 # This test will run several iterations and check progress in each of them.
@@ -182,13 +182,13 @@ async def run_restarts_under_load(
         victim.stop()
 
         flush_lsn = Lsn(await pg_conn.fetchval("SELECT pg_current_wal_flush_lsn()"))
-        log.info(f"Postgres flush_lsn {flush_lsn}")
+        log.info("Postgres flush_lsn %s", flush_lsn)
 
         pageserver_lsn = Lsn(
             env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)["last_record_lsn"]
         )
         sk_ps_lag = flush_lsn - pageserver_lsn
-        log.info(f"Pageserver last_record_lsn={pageserver_lsn} lag={sk_ps_lag / 1024}kb")
+        log.info("Pageserver last_record_lsn=%s lag=%skb", pageserver_lsn, sk_ps_lag / 1024)
 
         # Wait until alive safekeepers catch up with postgres
         for idx, safekeeper in enumerate(acceptors):
@@ -291,7 +291,7 @@ async def exec_compute_query(
         res = await conn.fetch(query)
         await conn.close()
         after_conn = time.time()
-        log.info(f"{query} took {after_conn - before_conn}s")
+        log.info("%s took %ss", query, after_conn - before_conn)
         return res
 
 
@@ -359,14 +359,14 @@ class BackgroundCompute(object):
                     pgdir_name=f"bgcompute{self.index}_key{verify_key}",
                     allow_multiple=True,
                 )
-                log.info(f"result: {res}")
+                log.info("result: %s", res)
                 if len(res) != 1:
                     raise Exception("No result returned")
                 if res[0][0] != verify_key:
                     raise Exception("Wrong result returned")
                 self.successful_queries.append(verify_key)
             except Exception as e:
-                log.info(f"BackgroundCompute {self.index} query failed: {e}")
+                log.info("BackgroundCompute %s query failed: %s", self.index, e)
 
             # With less sleep, there is a very big chance of not committing
             # anything or only 1 xact during test run.
@@ -402,8 +402,9 @@ async def run_concurrent_computes(
         current_queries_by_0 = len(computes[0].successful_queries) - initial_queries_by_0
         if current_queries_by_0 >= 1:
             log.info(
-                f"Found {current_queries_by_0} successful queries "
-                f"by computes[0], completing the test"
+                "Found %s successful queries "
+                "by computes[0], completing the test",
+                current_queries_by_0
             )
             break
         await asyncio.sleep(0.1)
@@ -416,11 +417,12 @@ async def run_concurrent_computes(
     result = await exec_compute_query(env, branch, "SELECT * FROM query_log")
     # we should have inserted something while single compute was running
     log.info(
-        f"Executed {len(result)} queries, {current_queries_by_0} of them "
-        f"by computes[0] after we started stopping the others"
+        "Executed %s queries, %s of them "
+        "by computes[0] after we started stopping the others",
+        len(result), current_queries_by_0
     )
     for row in result:
-        log.info(f"{row[0]} {row[1]} {row[2]}")
+        log.info("%s %s %s", row[0], row[1], row[2])
 
     # ensure everything reported as committed wasn't lost
     for compute in computes:
@@ -642,14 +644,14 @@ async def xmas_garland(safekeepers: List[Safekeeper], data: RaceConditionTest):
             if random.random() >= 0.5:
                 victims.append(sk)
         log.info(
-            f"Iteration {data.iteration}: stopping {list(map(lambda sk: sk.id, victims))} safekeepers"
+            "Iteration %s: stopping %s safekeepers", data.iteration, f"{list(map(lambda sk: sk.id, victims))}"
         )
         for v in victims:
             v.stop()
         await asyncio.sleep(1)
         for v in victims:
             v.start()
-        log.info(f"Iteration {data.iteration} finished")
+        log.info("Iteration %s finished", data.iteration)
         await asyncio.sleep(1)
 
 
@@ -670,7 +672,7 @@ async def run_race_conditions(env: NeonEnv, endpoint: Endpoint):
         expected_sum += i
         i += 1
 
-    log.info(f"Executed {i-1} queries")
+    log.info("Executed %s queries", i-1)
 
     res = await conn.fetchval("SELECT sum(key) FROM t")
     assert res == expected_sum
@@ -727,7 +729,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
             continue
 
         adjust_safekeepers(env, active_sk)
-        log.info(f"Iteration {it}: {active_sk}")
+        log.info("Iteration %s: %s", it, active_sk)
 
         endpoint.start()
         conn = await endpoint.connect_async()
@@ -744,7 +746,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
     endpoint.start()
     conn = await endpoint.connect_async()
 
-    log.info(f"Executed {i-1} queries")
+    log.info("Executed %s queries", i-1)
 
     res = await conn.fetchval("SELECT sum(key) FROM t")
     assert res == expected_sum

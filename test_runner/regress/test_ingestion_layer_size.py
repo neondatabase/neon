@@ -57,7 +57,7 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
         size = cur.fetchone()
         assert size is not None
         assert isinstance(size[0], int)
-        log.info(f"gin index size: {human_bytes(size[0])}")
+        log.info("gin index size: %s", human_bytes(size[0]))
         assert (
             size[0] > checkpoint_distance * 3
         ), f"gin index is not large enough: {human_bytes(size[0])}"
@@ -116,7 +116,7 @@ def histogram_historic_layers(
 ) -> Histogram:
     def log_layer(layer: HistoricLayerInfo) -> HistoricLayerInfo:
         log.info(
-            f"{layer.layer_file_name} {human_bytes(layer.layer_file_size)} ({layer.layer_file_size} bytes)"
+            "%s %s (%s bytes)", layer.layer_file_name, human_bytes(layer.layer_file_size), layer.layer_file_size
         )
         return layer
 
@@ -147,5 +147,5 @@ def histogram(sizes: Iterable[int], minimum_sizes: List[Union[int, float]]) -> H
 def print_layer_size_histogram(h: Histogram):
     for index, min_size in enumerate(h.buckets):
         log.info(
-            f">= {human_bytes(min_size)}: {h.counts[index]} layers total {human_bytes(h.sums[index])}"
+            ">= %s: %s layers total %s", human_bytes(min_size), h.counts[index], human_bytes(h.sums[index])
         )

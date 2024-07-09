@@ -153,7 +153,7 @@ def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
     cur.execute("COMMIT")
     cur.execute("VACUUM (FREEZE, DISABLE_PAGE_SKIPPING true, VERBOSE) vmtest_lock")
     for notice in pg_conn.notices:
-        log.info(f"{notice}")
+        log.info("%s", notice)
 
     # This test has been flaky in the past, because background activity like
     # auto-analyze and compute_ctl's activity monitor queries have prevented the
@@ -266,7 +266,7 @@ def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
     for _ in range(1000):
         cur.execute("select min(datfrozenxid::text::int) from pg_database")
         datfrozenxid = int(cur.fetchall()[0][0])
-        log.info(f"datfrozenxid {datfrozenxid} locking_xid: {locking_xid}")
+        log.info("datfrozenxid %s locking_xid: %s", datfrozenxid, locking_xid)
         if datfrozenxid > locking_xid + 3000000:
             break
         time.sleep(0.5)
@@ -289,5 +289,5 @@ def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
     # ERROR: could not access status of transaction 1027
     cur.execute("select xmin, xmax, * from vmtest_lock where id = 40000 for update")
     tup = cur.fetchall()
-    log.info(f"tuple = {tup}")
+    log.info("tuple = %s", tup)
     cur.execute("commit transaction")

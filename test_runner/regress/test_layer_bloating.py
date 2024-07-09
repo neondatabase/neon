@@ -36,7 +36,7 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.safe_psql("create table t(pk integer primary key)")
 
     connstr = endpoint.connstr().replace("'", "''")
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("ep connstr is %s, subscriber connstr %s", endpoint.connstr(), vanilla_pg.connstr())
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
     cur.execute(
@@ -58,8 +58,8 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
 
     # Check layer file sizes
     timeline_path = f"{env.pageserver.workdir}/tenants/{env.initial_tenant}/timelines/{timeline}/"
-    log.info(f"Check {timeline_path}")
+    log.info("Check %s", timeline_path)
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):
-            log.info(f"layer {filename} size is {os.path.getsize(timeline_path + filename)}")
+            log.info("layer %s size is %s", filename, os.path.getsize(timeline_path + filename))
             assert os.path.getsize(timeline_path + filename) < 512_000_000

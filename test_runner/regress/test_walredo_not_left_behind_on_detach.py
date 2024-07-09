@@ -72,7 +72,7 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
     )
     row = cur.fetchone()
     assert row is not None
-    log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
+    log.info("shared_buffers is %s, table size %s", row[0], row[1])
     assert int(row[0]) < int(row[1])
 
     cur.execute("SELECT count(*) FROM foo")
@@ -92,7 +92,7 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
             pageserver_http.tenant_detach(tenant_id)
         except Exception as e:
             last_error = e
-            log.error(f"try {i} error detaching tenant: {e}")
+            log.error("try %s error detaching tenant: %s", i, e)
             continue
         else:
             break

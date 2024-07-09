@@ -131,7 +131,7 @@ def test_import_at_2bil(
     # Advance nextXid close to 2 billion XIDs
     while True:
         xid = int(query_scalar(cur, "SELECT txid_current()"))
-        log.info(f"xid now {xid}")
+        log.info("xid now %s", xid)
         # Consume 10k transactons at a time until we get to 2^31 - 200k
         if xid < 2 * 1024 * 1024 * 1024 - 100000:
             cur.execute("select test_consume_xids(50000);")
@@ -230,8 +230,8 @@ def advance_multixid_to(
             rec = cur.fetchone()
             assert rec is not None
             (ckpt_oldest_multi_xid, ckpt_next_multi_xid) = rec
-    log.info(f"oldestMultiXid was {ckpt_oldest_multi_xid}, nextMultiXid was {ckpt_next_multi_xid}")
-    log.info(f"Resetting to {next_multi_xid}")
+    log.info("oldestMultiXid was %s, nextMultiXid was %s", ckpt_oldest_multi_xid, ckpt_next_multi_xid)
+    log.info("Resetting to %s", next_multi_xid)
 
     # Use pg_resetwal to reset the next multiXid and multiOffset to given values.
     vanilla_pg.stop()
@@ -253,13 +253,13 @@ def advance_multixid_to(
     # missing segments, but will clean it up by truncating the SLRUs up to the new value,
     # closing the gap.
     segname = "%04X" % MultiXactIdToOffsetSegment(next_multi_xid)
-    log.info(f"Creating dummy segment pg_multixact/offsets/{segname}")
+    log.info("Creating dummy segment pg_multixact/offsets/%s", segname)
     with open(vanilla_pg.pgdatadir / "pg_multixact" / "offsets" / segname, "w") as of:
         of.write("\0" * SLRU_PAGES_PER_SEGMENT * BLCKSZ)
         of.flush()
 
     segname = "%04X" % MXOffsetToMemberSegment(next_multi_offset)
-    log.info(f"Creating dummy segment pg_multixact/members/{segname}")
+    log.info("Creating dummy segment pg_multixact/members/%s", segname)
     with open(vanilla_pg.pgdatadir / "pg_multixact" / "members" / segname, "w") as of:
         of.write("\0" * SLRU_PAGES_PER_SEGMENT * BLCKSZ)
         of.flush()
@@ -273,7 +273,7 @@ def advance_multixid_to(
             datminmxid = int(
                 query_scalar(cur, "select min(datminmxid::text::int8) from pg_database")
             )
-            log.info(f"datminmxid {datminmxid}")
+            log.info("datminmxid %s", datminmxid)
             if next_multi_xid - datminmxid < 1_000_000:  # not wraparound-aware!
                 break
             time.sleep(0.5)
@@ -405,7 +405,7 @@ $$;
         # not be the latest one, but close enough.
         row_xmax = int(query_scalar(cur3, "SELECT xmax FROM tt LIMIT 1"))
         cur3.execute("COMMIT")
-        log.info(f"observed a row with xmax {row_xmax}")
+        log.info("observed a row with xmax %s", row_xmax)
 
         # High value means not wrapped around yet
         if row_xmax >= 0xFFFFFF00:
@@ -424,7 +424,7 @@ $$;
 
         next_multixact_id_before_restart = row_xmax
         log.info(
-            f"next_multixact_id is now at {next_multixact_id_before_restart} or a little higher"
+            "next_multixact_id is now at %s or a little higher", next_multixact_id_before_restart
         )
         break
 
@@ -445,7 +445,7 @@ $$;
     next_multixact_id_after_restart = int(
         query_scalar(cur, "select next_multixact_id from pg_control_checkpoint()")
     )
-    log.info(f"next_multixact_id after restart: {next_multixact_id_after_restart}")
+    log.info("next_multixact_id after restart: %s", next_multixact_id_after_restart)
     assert next_multixact_id_after_restart >= next_multixact_id_before_restart
 
     # The multi-offset should wrap around as well
@@ -453,5 +453,5 @@ $$;
     next_multi_offset_after_restart = int(
         query_scalar(cur, "select next_multi_offset from pg_control_checkpoint()")
     )
-    log.info(f"next_multi_offset after restart: {next_multi_offset_after_restart}")
+    log.info("next_multi_offset after restart: %s", next_multi_offset_after_restart)
     assert next_multi_offset_after_restart < 100000

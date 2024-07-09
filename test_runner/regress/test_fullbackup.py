@@ -38,7 +38,7 @@ def test_fullbackup(
         cur.execute("CHECKPOINT")
 
         lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_insert_lsn()"))
-        log.info(f"start_backup_lsn = {lsn}")
+        log.info("start_backup_lsn = %s", lsn)
 
     # Get and unpack fullbackup from pageserver
     restored_dir_path = env.repo_dir / "restored_datadir"

@@ -190,7 +190,7 @@ def test_import_from_pageserver_multisegment(
     logical_size = env.pageserver.http_client().timeline_detail(env.initial_tenant, timeline)[
         "current_logical_size"
     ]
-    log.info(f"timeline logical size = {logical_size / (1024 ** 2)}MB")
+    log.info("timeline logical size = %sMB", logical_size / (1024 ** 2))
     assert logical_size > 1024**3  # = 1GB
 
     tar_output_file = _import(num_rows, lsn, env, pg_bin, timeline, test_output_dir)
@@ -202,7 +202,7 @@ def test_import_from_pageserver_multisegment(
         for f in tar_f.getnames():
             if segfile_re.search(f) is not None:
                 cnt_seg_files += 1
-                log.info(f"Found a segment file: {f} in the backup archive file")
+                log.info("Found a segment file: %s in the backup archive file", f)
     assert cnt_seg_files > 0
 
 
@@ -243,7 +243,7 @@ def _import(
 
     Returns:
     path to the backup archive file"""
-    log.info(f"start_backup_lsn = {lsn}")
+    log.info("start_backup_lsn = %s", lsn)
 
     # Get a fullbackup from pageserver
     tar_output_file = test_output_dir / "fullbackup.tar"

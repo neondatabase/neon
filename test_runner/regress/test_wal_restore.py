@@ -73,7 +73,7 @@ def decompress_zstd(
     input_file_name: Path,
     output_dir: Path,
 ):
-    log.info(f"decompressing zstd to: {output_dir}")
+    log.info("decompressing zstd to: %s", output_dir)
     output_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
     with tempfile.TemporaryFile(suffix=".tar") as temp:
         decompressor = zstandard.ZstdDecompressor()
@@ -132,7 +132,7 @@ def test_wal_restore_initdb(
         restored_lsn = Lsn(
             restored.safe_psql("SELECT pg_current_wal_flush_lsn()", user="cloud_admin")[0][0]
         )
-        log.info(f"original lsn: {original_lsn}, restored lsn: {restored_lsn}")
+        log.info("original lsn: %s, restored lsn: %s", original_lsn, restored_lsn)
         assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
 
 
@@ -172,7 +172,7 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool)
             obj_key = obj["Key"]
             if "initdb-preserved.tar.zst" in obj_key:
                 continue
-            log.info(f"Deleting key from remote storage: {obj_key}")
+            log.info("Deleting key from remote storage: %s", obj_key)
             remote_storage_delete_key(env.pageserver_remote_storage, obj_key)
             pass
 

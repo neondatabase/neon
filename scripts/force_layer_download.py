@@ -124,7 +124,7 @@ async def do_timeline(client: Client, tenant_id, timeline_id):
 
     while True:
         st = await client.timeline_poll_download_remote_layers_status(tenant_id, timeline_id)
-        logging.info(f"{tenant_id}:{timeline_id} state is: {st}")
+        logging.info("%s:%s state is: %s", tenant_id, timeline_id, st)
 
         if spawned["task_id"] != st["task_id"]:
             raise ClientException("download task ids changed while polling")
@@ -161,7 +161,7 @@ async def taskq_handler(task_q, result_q):
         except asyncio.QueueEmpty:
             logging.debug("taskq_handler observed empty task_q, returning")
             return
-        logging.info(f"starting task {id}")
+        logging.info("starting task %s", id)
         try:
             res = await fut
         except Exception as e:
@@ -172,7 +172,7 @@ async def taskq_handler(task_q, result_q):
 async def print_progress(result_q, tasks):
     while True:
         await asyncio.sleep(10)
-        logging.info(f"{result_q.qsize()} / {len(tasks)} tasks done")
+        logging.info("%s / %s tasks done", result_q.qsize(), len(tasks))
 
 
 async def main_impl(args, report_out, client: Client):
@@ -205,13 +205,13 @@ async def main_impl(args, report_out, client: Client):
 
     logging.info("expanded spec:")
     for tid, tlid in tenant_and_timline_ids:
-        logging.info(f"{tid}:{tlid}")
+        logging.info("%s:%s", tid, tlid)
 
     logging.info("remove duplicates after expanding spec")
     tmp = list(set(tenant_and_timline_ids))
     assert len(tmp) <= len(tenant_and_timline_ids)
     if len(tmp) != len(tenant_and_timline_ids):
-        logging.info(f"spec had {len(tenant_and_timline_ids) - len(tmp)} duplicates")
+        logging.info("spec had %s duplicates", len(tenant_and_timline_ids) - len(tmp))
     tenant_and_timline_ids = tmp
 
     logging.info("create tasks and process them at specified concurrency")
@@ -244,7 +244,7 @@ async def main_impl(args, report_out, client: Client):
 
     report = defaultdict(list)
     for id, result in results:
-        logging.info(f"result for {id}: {result}")
+        logging.info("result for %s: %s", id, result)
         if isinstance(result, Completed):
             if result.status["failed_download_count"] == 0:
                 report["completed_without_errors"].append(id)

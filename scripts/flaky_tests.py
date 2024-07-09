@@ -93,10 +93,10 @@ def main(args: argparse.Namespace):
         res[row["parent_suite"]][row["suite"]][parametrized_test] = True
 
         logging.info(
-            f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{parametrized_test}"
+            "\t%s/%s.py::%s", row['parent_suite'].replace('.', '/'), row['suite'], parametrized_test
         )
 
-    logging.info(f"saving results to {output.name}")
+    logging.info("saving results to %s", output.name)
     json.dump(res, output, indent=2)
 
 

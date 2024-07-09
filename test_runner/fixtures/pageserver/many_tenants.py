@@ -37,13 +37,13 @@ def single_timeline(
     log.info("invoking callback to create template tenant")
     template_tenant, template_timeline, template_config = setup_template(env)
     log.info(
-        f"template tenant is template_tenant={template_tenant} template_timeline={template_timeline}"
+        "template tenant is template_tenant=%s template_timeline=%s", template_tenant, template_timeline
     )
 
     log.info("detach template tenant form pageserver")
     env.pageserver.tenant_detach(template_tenant)
 
-    log.info(f"duplicating template tenant {ncopies} times in S3")
+    log.info("duplicating template tenant %s times in S3", ncopies)
     tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, ncopies)
 
     log.info("attach duplicated tenants to pageserver")

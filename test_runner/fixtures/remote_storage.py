@@ -94,7 +94,7 @@ class LocalFsStorage:
         index_parts = [f for f in timeline_files if f.startswith("index_part")]
 
         def parse_gen(filename):
-            log.info(f"parsing index_part '{filename}'")
+            log.info("parsing index_part '%s'", filename)
             parts = filename.split("-")
             if len(parts) == 2:
                 return int(parts[1], 16)
@@ -260,7 +260,7 @@ class S3Storage:
                 Delete=objects_to_delete,
             )
 
-        log.info(f"deleted {cnt} objects from remote storage")
+        log.info("deleted %s objects from remote storage", cnt)
 
     def tenants_path(self) -> str:
         return f"{self.prefix_in_bucket}/tenants"
@@ -335,7 +335,7 @@ class RemoteStorageKind(str, enum.Enum):
 
             bucket_name = to_bucket_name(user, test_name)
             log.info(
-                f"using mock_s3 bucket name {bucket_name} for user={user}, test_name={test_name}"
+                "using mock_s3 bucket name %s for user=%s, test_name=%s", bucket_name, user, test_name
             )
 
             return S3Storage(

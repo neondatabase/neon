@@ -57,7 +57,7 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
         "CREATE TABLE replication_example(id SERIAL PRIMARY KEY, somedata int, text varchar(120), testcolumn1 int, testcolumn2 int, testcolumn3 int);"
     )
     connstr = endpoint.connstr().replace("'", "''")
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("ep connstr is %s, subscriber connstr %s", endpoint.connstr(), vanilla_pg.connstr())
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
     # Wait logical replication channel to be established
@@ -214,7 +214,7 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.start()
     vanilla_pg.safe_psql("create table t(pk integer primary key, payload integer)")
     connstr = endpoint.connstr().replace("'", "''")
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("ep connstr is %s, subscriber connstr %s", endpoint.connstr(), vanilla_pg.connstr())
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
     wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
@@ -354,7 +354,7 @@ def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.safe_psql("create table t(pk integer primary key, value text)")
     vanilla_pg.safe_psql("CREATE TABLE replication_example(id SERIAL PRIMARY KEY, somedata int);")
 
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("ep connstr is %s, subscriber connstr %s", endpoint.connstr(), vanilla_pg.connstr())
     connstr = endpoint.connstr().replace("'", "''")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
     logical_replication_sync(vanilla_pg, endpoint)
@@ -397,7 +397,7 @@ def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.start()
     vanilla_pg.safe_psql("CREATE TABLE reptbl(id int, largeval text);")
 
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("ep connstr is %s, subscriber connstr %s", endpoint.connstr(), vanilla_pg.connstr())
     connstr = endpoint.connstr().replace("'", "''")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
@@ -504,7 +504,7 @@ def test_replication_shutdown(neon_simple_env: NeonEnv):
 
         pub_conn = f"host=localhost port={pub.pg_port} dbname=neondb user=mr_whiskers password=cat"
         query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub"
-        log.info(f"Creating subscription: {query}")
+        log.info("Creating subscription: %s", query)
         cur.execute(query)
 
         with pub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as pcur:

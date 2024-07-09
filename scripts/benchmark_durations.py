@@ -126,10 +126,10 @@ def main(args: argparse.Namespace):
     for row in rows:
         pytest_name = f"{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{row['name']}"
         duration = row["percentile_ms"] / 1000
-        logging.info(f"\t{pytest_name}: {duration}")
+        logging.info("\t%s: %s", pytest_name, duration)
         res[pytest_name] = duration
 
-    logging.info(f"saving results to {output.name}")
+    logging.info("saving results to %s", output.name)
     json.dump(res, output, indent=2)
 
 

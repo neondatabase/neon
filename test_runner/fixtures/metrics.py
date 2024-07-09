@@ -48,7 +48,7 @@ class MetricsGetter:
         metrics = self.get_metrics()
         results = metrics.query_all(name, filter=filter)
         if not results:
-            log.info(f'could not find metric "{name}"')
+            log.info('could not find metric "%s"', name)
             return None
         assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
         return results[0].value
@@ -81,7 +81,7 @@ class MetricsGetter:
 
         if not absence_ok:
             if len(result) != len(names):
-                log.info(f"Metrics found: {metrics.metrics}")
+                log.info("Metrics found: %s", metrics.metrics)
                 raise RuntimeError(f"could not find all metrics {' '.join(names)}")
 
         return result

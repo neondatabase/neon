@@ -87,7 +87,7 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv, test_output_dir:
         wait_for_last_flush_lsn(env, endpoint, tenant_id, first_branch_timeline_id)
 
     size_after_branching = http_client.tenant_size(tenant_id)
-    log.info(f"size_after_branching: {size_after_branching}")
+    log.info("size_after_branching: %s", size_after_branching)
 
     assert size_after_branching > initial_size
 
@@ -344,7 +344,7 @@ def test_single_branch_get_tenant_size_grows(
             current_lsn = after_lsn
         size_debug_file.write(size_debug)
         assert size > 0
-        log.info(f"size: {size} at lsn {current_lsn}")
+        log.info("size: %s at lsn %s", size, current_lsn)
         return (current_lsn, size)
 
     with env.endpoints.create_start(
@@ -458,7 +458,7 @@ def test_single_branch_get_tenant_size_grows(
     # developing these tests that locally the value is a bit more than what we
     # get in the ci.
     for phase, lsn, size in collected_responses:
-        log.info(f"collected: {phase}, {lsn}, {size}")
+        log.info("collected: %s, %s, %s", phase, lsn, size)
 
     env.pageserver.stop()
     env.pageserver.start()
@@ -756,7 +756,7 @@ def insert_with_action(
     client = env.pageserver.http_client()
     with env.endpoints.create_start("main", tenant_id=tenant) as ep:
         initial_size = client.tenant_size(tenant)
-        log.info(f"initial size: {initial_size}")
+        log.info("initial size: %s", initial_size)
 
         with ep.cursor() as cur:
             cur.execute(
@@ -766,12 +766,12 @@ def insert_with_action(
 
         if action == "lease":
             res = client.timeline_lsn_lease(tenant, timeline, last_flush_lsn)
-            log.info(f"result from lsn_lease api: {res}")
+            log.info("result from lsn_lease api: %s", res)
         elif action == "branch":
             ro_branch = env.neon_cli.create_branch(
                 "ro_branch", tenant_id=tenant, ancestor_start_lsn=last_flush_lsn
             )
-            log.info(f"{ro_branch=} created")
+            log.info("%s created", f"{ro_branch=}")
         else:
             raise AssertionError("Invalid action type, only `lease` and `branch`are accepted")
 
@@ -792,7 +792,7 @@ def insert_with_action(
         flush_ep_to_pageserver(env, ep, tenant, timeline)
 
         size_after_action_and_insert = client.tenant_size(tenant)
-        log.info(f"{size_after_action_and_insert=}")
+        log.info("%s", f"{size_after_action_and_insert=}")
 
         size_debug_file = open(test_output_dir / f"size_debug_{action}.html", "w")
         size_debug = client.tenant_size_debug(tenant)

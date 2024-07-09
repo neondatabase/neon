@@ -77,7 +77,7 @@ class Workload:
         connstring = self._endpoint.safe_psql(
             "SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'"
         )
-        log.info(f"Workload.endpoint: connstr={connstring}")
+        log.info("Workload.endpoint: connstr=%s", connstring)
 
         return self._endpoint
 
@@ -137,7 +137,7 @@ class Workload:
             end = start + n_iter - 1
 
             log.info(
-                f"start,end = {start},{end}, cursor={self.churn_cursor}, expect_rows={self.expect_rows}"
+                "start,end = %s,%s, cursor=%s, expect_rows=%s", start, end, self.churn_cursor, self.expect_rows
             )
 
             assert end < self.expect_rows
@@ -176,9 +176,9 @@ class Workload:
                     # Wait for written data to be uploaded to S3 (force a checkpoint to trigger upload)
                     ps_http.timeline_checkpoint(tenant_shard_id, self.timeline_id)
                     wait_for_upload(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
-                    log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
+                    log.info("Churn: waiting for remote LSN %s", last_flush_lsn)
                 else:
-                    log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
+                    log.info("Churn: not waiting for upload, disk LSN %s", last_flush_lsn)
 
     def validate(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
@@ -191,5 +191,5 @@ class Workload:
             ]
         )
 
-        log.info(f"validate({self.expect_rows}): {result}")
+        log.info("validate(%s): %s", self.expect_rows, result)
         assert result == [[("",)], [(self.expect_rows,)]]

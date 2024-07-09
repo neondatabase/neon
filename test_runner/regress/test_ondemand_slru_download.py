@@ -73,7 +73,7 @@ def test_ondemand_download_pg_xact(neon_env_builder: NeonEnvBuilder, shard_count
     # Test that this can still on-demand download the old pg_xact segments
     cur.execute("select xmin, xmax, * from clogtest")
     tup = cur.fetchall()
-    log.info(f"tuples = {tup}")
+    log.info("tuples = %s", tup)
 
 
 @pytest.mark.parametrize("shard_count", [None, 4])

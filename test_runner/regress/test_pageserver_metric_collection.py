@@ -62,7 +62,7 @@ def test_metric_collection(
         synthetic_size_calculation_interval="3s"
         """
 
-    log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")
+    log.info("test_metric_collection endpoint is %s", metric_collection_endpoint)
 
     # mock http server that returns OK for the metrics
     httpserver.expect_request("/billing/api/v1/usage_events", method="POST").respond_with_handler(
@@ -347,7 +347,7 @@ class MetricsVerifier:
 
     def ingest(self, events, is_last):
         stringified = json.dumps(events, indent=2)
-        log.info(f"ingesting: {stringified}")
+        log.info("ingesting: %s", stringified)
         for event in events:
             id = TenantId(event["tenant_id"])
             if id not in self.tenants:

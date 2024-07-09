@@ -120,9 +120,9 @@ def test_remote_storage_backup_and_restore(
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
         # wait until pageserver successfully uploaded a checkpoint to remote storage
-        log.info(f"waiting for checkpoint {checkpoint_number} upload")
+        log.info("waiting for checkpoint %s upload", checkpoint_number)
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
-        log.info(f"upload of checkpoint {checkpoint_number} is done")
+        log.info("upload of checkpoint %s is done", checkpoint_number)
 
     # Check that we had to retry the uploads
     env.pageserver.assert_log_contains(
@@ -443,7 +443,7 @@ def test_remote_timeline_client_calls_started_metric(
 
     def ensure_calls_started_grew():
         for (file_kind, op_kind), observations in calls_started.items():
-            log.info(f"ensure_calls_started_grew: {file_kind} {op_kind}: {observations}")
+            log.info("ensure_calls_started_grew: %s %s: %s", file_kind, op_kind, observations)
             assert all(
                 x < y for x, y in zip(observations, observations[1:])
             ), f"observations for {file_kind} {op_kind} did not grow monotonically: {observations}"
@@ -863,7 +863,7 @@ def test_compaction_waits_for_upload(
 
     def until_layer_deletes_completed():
         deletes = layer_deletes_completed()
-        log.info(f"layer_deletes: {deletes}")
+        log.info("layer_deletes: %s", deletes)
         # ensure that initdb delta layer AND the previously stuck are now deleted
         assert deletes >= len(upload_stuck_layers) + 1
 

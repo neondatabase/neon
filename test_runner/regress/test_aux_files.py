@@ -40,7 +40,7 @@ def test_aux_v2_config_switch(neon_env_builder: NeonEnvBuilder, vanilla_pg):
         "CREATE TABLE replication_example(id SERIAL PRIMARY KEY, somedata int, text varchar(120), testcolumn1 int, testcolumn2 int, testcolumn3 int);"
     )
     connstr = endpoint.connstr().replace("'", "''")
-    log.info(f"ep connstr is {endpoint.connstr()}, subscriber connstr {vanilla_pg.connstr()}")
+    log.info("ep connstr is %s, subscriber connstr %s", endpoint.connstr(), vanilla_pg.connstr())
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
 
     # Wait logical replication channel to be established

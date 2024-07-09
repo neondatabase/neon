@@ -27,11 +27,11 @@ class NeonBroker:
 
     def try_start(self):
         if self.handle is not None:
-            log.debug(f"storage_broker is already running on port {self.port}")
+            log.debug("storage_broker is already running on port %s", self.port)
             return
 
         listen_addr = self.listen_addr()
-        log.info(f'starting storage_broker to listen incoming connections at "{listen_addr}"')
+        log.info('starting storage_broker to listen incoming connections at "%s"', listen_addr)
         with open(self.logfile, "wb") as logfile:
             args = [
                 str(self.neon_binpath / "storage_broker"),

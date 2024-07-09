@@ -314,7 +314,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
         pageserver_http.timeline_preserve_initdb_archive(tenant_id, timeline_id)
     except PageserverApiException as e:
         # Allow the error as we might be running the old pageserver binary
-        log.info(f"Got allowed error: '{e}'")
+        log.info("Got allowed error: '%s'", e)
 
     # Delete all files from local_fs_remote_storage except initdb-preserved.tar.zst,
     # the file is required for `timeline_create` with `existing_initdb_timeline_id`.

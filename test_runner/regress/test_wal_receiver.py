@@ -78,7 +78,7 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
 
     stopped_safekeeper = env.safekeepers[-1]
     stopped_safekeeper_id = stopped_safekeeper.id
-    log.info(f"Stopping safekeeper {stopped_safekeeper.id}")
+    log.info("Stopping safekeeper %s", stopped_safekeeper.id)
     stopped_safekeeper.stop()
     # sleep until stopped safekeeper is removed from candidates
     time.sleep(2)

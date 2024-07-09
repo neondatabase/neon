@@ -160,37 +160,37 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
 
     # Test metrics per timeline
     for tt in ttids:
-        log.info(f"Checking metrics for {tt}")
+        log.info("Checking metrics for %s", tt)
 
         ps_lsn = Lsn(int(ps_metrics.query_one("pageserver_last_record_lsn", filter=tt).value))
         sk_lsns = [
             Lsn(int(sk.query_one("safekeeper_commit_lsn", filter=tt).value)) for sk in sk_metrics
         ]
 
-        log.info(f"ps_lsn: {ps_lsn}")
-        log.info(f"sk_lsns: {sk_lsns}")
+        log.info("ps_lsn: %s", ps_lsn)
+        log.info("sk_lsns: %s", sk_lsns)
 
         assert ps_lsn <= max(sk_lsns)
         assert ps_lsn > Lsn(0)
 
     # Test common metrics
     for metrics in all_metrics:
-        log.info(f"Checking common metrics for {metrics.name}")
+        log.info("Checking common metrics for %s", metrics.name)
 
         log.info(
-            f"process_cpu_seconds_total: {metrics.query_one('process_cpu_seconds_total').value}"
+            "process_cpu_seconds_total: %s", metrics.query_one('process_cpu_seconds_total').value
         )
-        log.info(f"process_threads: {int(metrics.query_one('process_threads').value)}")
+        log.info("process_threads: %s", int(metrics.query_one('process_threads').value))
         log.info(
-            f"process_resident_memory_bytes (MB): {metrics.query_one('process_resident_memory_bytes').value / 1024 / 1024}"
+            "process_resident_memory_bytes (MB): %s", metrics.query_one('process_resident_memory_bytes').value / 1024 / 1024
         )
         log.info(
-            f"process_virtual_memory_bytes (MB): {metrics.query_one('process_virtual_memory_bytes').value / 1024 / 1024}"
+            "process_virtual_memory_bytes (MB): %s", metrics.query_one('process_virtual_memory_bytes').value / 1024 / 1024
         )
-        log.info(f"process_open_fds: {int(metrics.query_one('process_open_fds').value)}")
-        log.info(f"process_max_fds: {int(metrics.query_one('process_max_fds').value)}")
+        log.info("process_open_fds: %s", int(metrics.query_one('process_open_fds').value))
+        log.info("process_max_fds: %s", int(metrics.query_one('process_max_fds').value))
         log.info(
-            f"process_start_time_seconds (UTC): {datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)}"
+            "process_start_time_seconds (UTC): %s", datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)
         )
 
     for io_direction in ["read", "write"]:
@@ -205,7 +205,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
             },
         )
         total_bytes = sum(int(metric.value) for metric in io_metrics)
-        log.info(f"Pageserver {io_direction} bytes from another AZ: {total_bytes}")
+        log.info("Pageserver %s bytes from another AZ: %s", io_direction, total_bytes)
         # We expect some bytes to be read/written, to make sure metrics are working
         assert total_bytes > 0
 
@@ -236,7 +236,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         assert len(ps_samples) > 0, f"expected at least one sample for {metric}"
         for sample in ps_samples:
             labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
-            log.info(f"{sample.name}{{{labels}}} {sample.value}")
+            log.info("%s{%s} %s", sample.name, labels, sample.value)
 
     # Test that we gather tenant operations metrics
     storage_operation_metrics = [
@@ -400,10 +400,10 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
             )
         except PageserverApiException as e:
             if e.status_code == 409:
-                log.info(f"delay_ms={delay_ms} 409")
+                log.info("delay_ms=%s 409", delay_ms)
                 pass
             elif e.status_code == 429:
-                log.info(f"delay_ms={delay_ms} 429")
+                log.info("delay_ms=%s 429", delay_ms)
                 pass
             elif e.status_code == 400:
                 if "is less than existing" in e.message:
@@ -470,7 +470,7 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
 
     directory_entries_count = only_int(directory_entries_count_metric)
 
-    log.info(f"pageserver_directory_entries_count metric value: {directory_entries_count}")
+    log.info("pageserver_directory_entries_count metric value: %s", directory_entries_count)
 
     assert directory_entries_count > COUNT_AT_LEAST_EXPECTED
 
@@ -478,5 +478,5 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
 
     counts = timeline_detail["directory_entries_counts"]
     assert counts
-    log.info(f"directory counts: {counts}")
+    log.info("directory counts: %s", counts)
     assert counts[2] > COUNT_AT_LEAST_EXPECTED

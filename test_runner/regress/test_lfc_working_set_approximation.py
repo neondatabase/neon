@@ -14,7 +14,7 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
 
     branchname = "test_approximate_working_set_size"
     env.neon_cli.create_branch(branchname, "empty")
-    log.info(f"Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}")
+    log.info("Creating endopint with 1MB shared_buffers and 64 MB LFC for branch %s", branchname)
     endpoint = env.endpoints.create_start(
         branchname,
         config_lines=[
@@ -28,7 +28,7 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     cur = endpoint.connect().cursor()
     cur.execute("create extension neon")
 
-    log.info(f"preparing some data in {endpoint.connstr()}")
+    log.info("preparing some data in %s", endpoint.connstr())
 
     ddl = """
 CREATE TABLE pgbench_accounts (
@@ -55,14 +55,14 @@ WITH (fillfactor='100');
     cur.execute("vacuum ANALYZE pgbench_accounts")
     # determine table size - working set should approximate table size after sequential scan
     pages = query_scalar(cur, "SELECT relpages FROM pg_class WHERE relname = 'pgbench_accounts'")
-    log.info(f"pgbench_accounts has {pages} pages, resetting working set to zero")
+    log.info("pgbench_accounts has %s pages, resetting working set to zero", pages)
     cur.execute("select approximate_working_set_size(true)")
     cur.execute(
         'SELECT count(*) FROM pgbench_accounts WHERE abalance > 0 or jsonb_column_extended @> \'{"tell everyone": [{"Neon": "IsCool"}]}\'::jsonb'
     )
     # verify working set size after sequential scan matches table size and reset working set for next test
     blocks = query_scalar(cur, "select approximate_working_set_size(true)")
-    log.info(f"working set size after sequential scan on pgbench_accounts {blocks}")
+    log.info("working set size after sequential scan on pgbench_accounts %s", blocks)
     assert pages * 0.8 < blocks < pages * 1.2
     # run a few point queries with index lookup
     cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid =   4242")
@@ -71,7 +71,7 @@ WITH (fillfactor='100');
     cur.execute("SELECT abalance FROM pgbench_accounts WHERE aid = 204242")
     # verify working set size after some index access of a few select pages only
     blocks = query_scalar(cur, "select approximate_working_set_size(true)")
-    log.info(f"working set size after some index access of a few select pages only {blocks}")
+    log.info("working set size after some index access of a few select pages only %s", blocks)
     assert blocks < 10
 
 
@@ -104,15 +104,15 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
 
     cur.execute(f"select approximate_working_set_size_seconds({int(after - before_1k + 1)})")
     estimation_1k = cur.fetchall()[0][0]
-    log.info(f"Working set size for selecting 1k records {estimation_1k}")
+    log.info("Working set size for selecting 1k records %s", estimation_1k)
 
     cur.execute(f"select approximate_working_set_size_seconds({int(after - before_10k + 1)})")
     estimation_10k = cur.fetchall()[0][0]
-    log.info(f"Working set size for selecting 10k records {estimation_10k}")
+    log.info("Working set size for selecting 10k records %s", estimation_10k)
 
     cur.execute("select pg_table_size('t')")
     size = cur.fetchall()[0][0] // 8192
-    log.info(f"Table size {size} blocks")
+    log.info("Table size %s blocks", size)
 
     assert estimation_1k >= 20 and estimation_1k <= 40
     assert estimation_10k >= 200 and estimation_10k <= 400

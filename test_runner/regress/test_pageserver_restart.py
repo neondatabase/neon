@@ -50,7 +50,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     )
     row = cur.fetchone()
     assert row is not None
-    log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
+    log.info("shared_buffers is %s, table size %s", row[0], row[1])
     assert int(row[0]) < int(row[1])
 
     # Stop the pageserver gracefully and restart it.
@@ -93,7 +93,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
             "pageserver_startup_duration_seconds"
         ):
             labels = dict(sample.labels)
-            log.info(f"metric {labels['phase']}={sample.value}")
+            log.info("metric %s=%s", labels['phase'], sample.value)
             if labels["phase"] == "complete" and sample.value > 0:
                 return
 
@@ -122,7 +122,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     prev_value = None
     for sample in metrics.query_all("pageserver_startup_duration_seconds"):
         phase = sample.labels["phase"]
-        log.info(f"metric {phase}={sample.value}")
+        log.info("metric %s=%s", phase, sample.value)
         assert phase in [e[0] for e in expectations], f"Unexpected phase {phase}"
         values[phase] = sample
 
@@ -198,7 +198,7 @@ def test_pageserver_chaos(
             )
             row = cur.fetchone()
             assert row is not None
-            log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
+            log.info("shared_buffers is %s, table size %s", row[0], row[1])
             assert int(row[0]) < int(row[1])
 
     # We run "random" kills using a fixed seed, to improve reproducibility if a test

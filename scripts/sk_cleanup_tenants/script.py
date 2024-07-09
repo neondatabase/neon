@@ -26,7 +26,7 @@ endpoint: str = "https://console-stage.neon.build/api"
 
 trash_dir: Path = args.trash_dir
 dry_run: bool = args.dry_run
-logging.info(f"dry_run={dry_run}")
+logging.info("dry_run=%s", dry_run)
 sk_id: int = args.safekeeper_id
 sk_host: str = args.safekeeper_host
 
@@ -94,10 +94,10 @@ def cleanup_tenant(tenant_id):
     assert tenant_dir.exists(), f"{tenant_dir}"
     assert tenant_dir.is_dir(), f"{tenant_dir}"
 
-    logging.info(f"copying {tenant_dir} to {tenant_dir_in_trash}")
+    logging.info("copying %s to %s", tenant_dir, tenant_dir_in_trash)
     shutil.copytree(src=tenant_dir, dst=tenant_dir_in_trash, symlinks=False, dirs_exist_ok=False)
 
-    logging.info(f"deleting {tenant_dir}")
+    logging.info("deleting %s", tenant_dir)
     call_delete_tenant_api(tenant_id)
 
     logging.info("tenant is now deleted, checking that it's gone")
@@ -106,27 +106,27 @@ def cleanup_tenant(tenant_id):
 
 if os.path.exists("script.pid"):
     logging.info(
-        f"script is already running, with pid={Path('script.pid').read_text()}. Terminate it first."
+        "script is already running, with pid=%s. Terminate it first.", Path('script.pid').read_text()
     )
     exit(1)
 
 with open("script.pid", "w", encoding="utf-8") as f:
     f.write(str(os.getpid()))
 
-logging.info(f"started script.py, pid={os.getpid()}")
+logging.info("started script.py, pid=%s", os.getpid())
 
 for line in sys.stdin:
     tenant_id = line.strip()
     try:
-        logging.info(f"start tenant {tenant_id}")
+        logging.info("start tenant %s", tenant_id)
         cleanup_tenant(tenant_id)
-        logging.info(f"done tenant {tenant_id}")
+        logging.info("done tenant %s", tenant_id)
     except KeyboardInterrupt:
         print("KeyboardInterrupt exception is caught")
         break
     except:  # noqa: E722
-        logging.exception(f"failed to clean up tenant {tenant_id}")
+        logging.exception("failed to clean up tenant %s", tenant_id)
 
-logging.info(f"finished script.py, pid={os.getpid()}")
+logging.info("finished script.py, pid=%s", os.getpid())
 
 os.remove("script.pid")

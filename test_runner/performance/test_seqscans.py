@@ -54,7 +54,7 @@ def test_seqscans(env: PgCompare, scale: int, rows: int, iters: int, workers: in
             assert row is not None
             shared_buffers = row[0]
             table_size = row[1]
-            log.info(f"shared_buffers is {shared_buffers}, table size {table_size}")
+            log.info("shared_buffers is %s, table size %s", shared_buffers, table_size)
             assert int(shared_buffers) < int(table_size)
             env.zenbenchmark.record("table_size", table_size, "bytes", MetricReport.TEST_PARAM)
 

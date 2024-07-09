@@ -80,11 +80,11 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
     )
     main_cur.execute("INSERT INTO foo SELECT FROM generate_series(1, 100000)")
     lsn1 = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
-    log.info(f"LSN1: {lsn1}")
+    log.info("LSN1: %s", lsn1)
 
     main_cur.execute("INSERT INTO foo SELECT FROM generate_series(1, 100000)")
     lsn2 = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
-    log.info(f"LSN2: {lsn2}")
+    log.info("LSN2: %s", lsn2)
 
     # Set the GC horizon so that lsn1 is inside the horizon, which means
     # we can create a new branch starting from lsn1.
@@ -181,7 +181,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     with pytest.raises(TimelineCreate406):
         new_timeline_id = TimelineId.generate()
         log.info(
-            f"Expecting failure for branch behind gc'ing LSN, new_timeline_id={new_timeline_id}"
+            "Expecting failure for branch behind gc'ing LSN, new_timeline_id=%s", new_timeline_id
         )
         pageserver_http_client.timeline_create(env.pg_version, tenant, new_timeline_id, b0, lsn)
 

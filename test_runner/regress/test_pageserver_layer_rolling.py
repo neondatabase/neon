@@ -91,7 +91,7 @@ def wait_for_wal_ingest_metric(pageserver_http: PageserverHttpClient) -> float:
 
 def get_dirty_bytes(env):
     v = env.pageserver.http_client().get_metric_value("pageserver_timeline_ephemeral_bytes") or 0
-    log.info(f"dirty_bytes: {v}")
+    log.info("dirty_bytes: %s", v)
     return v
 
 
@@ -155,8 +155,8 @@ def test_pageserver_small_inmemory_layers(
 
     total_wal_ingested_after_restart = wait_for_wal_ingest_metric(ps_http_client)
 
-    log.info(f"WAL ingested before restart: {total_wal_ingested_before_restart}")
-    log.info(f"WAL ingested after restart: {total_wal_ingested_after_restart}")
+    log.info("WAL ingested before restart: %s", total_wal_ingested_before_restart)
+    log.info("WAL ingested after restart: %s", total_wal_ingested_after_restart)
 
     assert total_wal_ingested_after_restart == 0
 
@@ -271,7 +271,7 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
         initdb_lsn = Lsn(http_client.timeline_detail(tenant, timeline)["initdb_lsn"])
         total_bytes_ingested += last_flush_lsn - initdb_lsn
 
-    log.info(f"Ingested {total_bytes_ingested} bytes since initdb (vs max dirty {max_dirty_data})")
+    log.info("Ingested %s bytes since initdb (vs max dirty %s)", total_bytes_ingested, max_dirty_data)
     assert total_bytes_ingested > max_dirty_data
 
     # Expected end state: the total physical size of all the tenants is in excess of the max dirty
@@ -292,7 +292,7 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
             total_ephemeral_layers += len(layer_map.in_memory_layers)
 
         log.info(
-            f"Total historic layer bytes: {total_historic_bytes} ({total_ephemeral_layers} ephemeral layers)"
+            "Total historic layer bytes: %s (%s ephemeral layers)", total_historic_bytes, total_ephemeral_layers
         )
 
         return total_historic_bytes

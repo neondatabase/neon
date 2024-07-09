@@ -54,7 +54,7 @@ def evict_random_layers(
         layer_name = parse_layer_file_name(layer.name)
 
         if rng.choice([True, False]):
-            log.info(f"Evicting layer {tenant_id}/{timeline_id} {layer_name.to_str()}")
+            log.info("Evicting layer %s/%s %s", tenant_id, timeline_id, layer_name.to_str())
             client.evict_layer(
                 tenant_id=tenant_id, timeline_id=timeline_id, layer_name=layer_name.to_str()
             )
@@ -82,7 +82,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
     def ignore_notify(request: Request):
         # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
         # so we send controller notifications to /dev/null to prevent it fighting the test for control of the compute.
-        log.info(f"Ignoring storage controller compute notification: {request.json}")
+        log.info("Ignoring storage controller compute notification: %s", request.json)
         return Response(status=200)
 
     make_httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(
@@ -157,14 +157,14 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
         last_state_ps = last_state[pageserver.id]
         if mode == "_Evictions":
             if last_state_ps[0].startswith("Attached"):
-                log.info(f"Action: evictions on pageserver {pageserver.id}")
+                log.info("Action: evictions on pageserver %s", pageserver.id)
                 evict_random_layers(rng, pageserver, tenant_id, timeline_id)
             else:
                 log.info(
-                    f"Action: skipping evictions on pageserver {pageserver.id}, is not attached"
+                    "Action: skipping evictions on pageserver %s, is not attached", pageserver.id
                 )
         elif mode == "_Restart":
-            log.info(f"Action: restarting pageserver {pageserver.id}")
+            log.info("Action: restarting pageserver %s", pageserver.id)
             pageserver.stop()
             pageserver.start()
             if last_state_ps[0].startswith("Attached") and latest_attached == pageserver.id:
@@ -197,7 +197,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
                 "tenant_conf": {},
             }
 
-            log.info(f"Action: Configuring pageserver {pageserver.id} to {location_conf}")
+            log.info("Action: Configuring pageserver %s to %s", pageserver.id, location_conf)
 
             # Select a generation number
             if mode.startswith("Attached"):
@@ -307,7 +307,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     pageserver_b.http_client().tenant_secondary_download(tenant_id)
 
     migrated_generation = env.storage_controller.attach_hook_issue(tenant_id, pageserver_b.id)
-    log.info(f"Acquired generation {migrated_generation} for destination pageserver")
+    log.info("Acquired generation %s for destination pageserver", migrated_generation)
     assert migrated_generation == initial_generation + 1
 
     # Writes and reads still work in AttachedStale.
@@ -340,7 +340,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
             "last_record_lsn"
         ]
         log.info(
-            f"Waiting for LSN to catch up: origin {origin_lsn} vs destination {destination_lsn}"
+            "Waiting for LSN to catch up: origin %s vs destination %s", origin_lsn, destination_lsn
         )
         assert destination_lsn >= origin_lsn
 
@@ -415,7 +415,7 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
 
     # Download and inspect the heatmap that the pageserver uploaded
     heatmap_first = env.pageserver_remote_storage.heatmap_content(tenant_id)
-    log.info(f"Read back heatmap: {heatmap_first}")
+    log.info("Read back heatmap: %s", heatmap_first)
     validate_heatmap(heatmap_first)
 
     # Do some more I/O to generate more layers
@@ -424,7 +424,7 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
 
     # Ensure that another heatmap upload includes the new layers
     heatmap_second = env.pageserver_remote_storage.heatmap_content(tenant_id)
-    log.info(f"Read back heatmap: {heatmap_second}")
+    log.info("Read back heatmap: %s", heatmap_second)
     assert heatmap_second != heatmap_first
     validate_heatmap(heatmap_second)
 
@@ -470,7 +470,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         },
     )
     readback_conf = ps_secondary.read_tenant_location_conf(tenant_id)
-    log.info(f"Read back conf: {readback_conf}")
+    log.info("Read back conf: %s", readback_conf)
 
     # Explicit upload/download cycle
     # ==============================
@@ -510,7 +510,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         timeline_path = ps_secondary.timeline_dir(tenant_id, timeline_id)
         for path, _dirs, files in os.walk(timeline_path):
             for f in files:
-                log.info(f"Secondary file: {os.path.join(path, f)}")
+                log.info("Secondary file: %s", os.path.join(path, f))
 
         raise
 
@@ -526,7 +526,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         log.info("Evicting a layer...")
         layer_to_evict = ps_attached.list_layers(tenant_id, timeline_id)[0]
         some_other_layer = ps_attached.list_layers(tenant_id, timeline_id)[1]
-        log.info(f"Victim layer: {layer_to_evict.name}")
+        log.info("Victim layer: %s", layer_to_evict.name)
         ps_attached.http_client().evict_layer(
             tenant_id, timeline_id, layer_name=layer_to_evict.name
         )
@@ -549,7 +549,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     except:
         # On assertion failures, log some details to help with debugging
         heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
-        log.warn(f"heatmap contents: {json.dumps(heatmap,indent=2)}")
+        log.warn("heatmap contents: %s", f"{json.dumps(heatmap,indent=2)}")
         raise
 
     # Scrub the remote storage
@@ -632,7 +632,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
             try:
                 wait_until(timeout, 1, lambda: pageserver.assert_log_contains(expression))  # type: ignore
             except:
-                log.error(f"Timed out waiting for '{expression}'")
+                log.error("Timed out waiting for '%s'", expression)
                 raise
 
     t_start = time.time()
@@ -653,7 +653,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         else:
             for timeline_id in timelines:
                 log.info(
-                    f"Waiting for downloads of timeline {timeline_id} on secondary pageserver {ps_secondary.id}"
+                    "Waiting for downloads of timeline %s on secondary pageserver %s", timeline_id, ps_secondary.id
                 )
                 await_log(
                     ps_secondary,
@@ -663,7 +663,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
 
         for timeline_id in timelines:
             log.info(
-                f"Checking for secondary timeline downloads {timeline_id} on node {ps_secondary.id}"
+                "Checking for secondary timeline downloads %s on node %s", timeline_id, ps_secondary.id
             )
             # One or more layers should be present for all timelines
             assert ps_secondary.list_layers(tenant_id, timeline_id)
@@ -682,7 +682,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
 
         expect_del_timeline = timelines[1]
         log.info(
-            f"Waiting for deletion of timeline {expect_del_timeline} on secondary pageserver {ps_secondary.id}"
+            "Waiting for deletion of timeline %s on secondary pageserver %s", expect_del_timeline, ps_secondary.id
         )
         await_log(
             ps_secondary,
@@ -695,7 +695,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
 
         # This one was deleted
         log.info(
-            f"Checking for secondary timeline deletion {tenant_id}/{timeline_id} on node {ps_secondary.id}"
+            "Checking for secondary timeline deletion %s/%s on node %s", tenant_id, timeline_id, ps_secondary.id
         )
         assert not ps_secondary.list_layers(tenant_id, expect_del_timeline)
 
@@ -712,7 +712,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
     download_rate = (total_heatmap_downloads / tenant_count) / (t_end - t_start)
 
     expect_download_rate = 1.0 / upload_period_secs
-    log.info(f"Download rate: {download_rate * 60}/min vs expected {expect_download_rate * 60}/min")
+    log.info("Download rate: %s/min vs expected %s/min", download_rate * 60, expect_download_rate * 60)
 
     assert download_rate < expect_download_rate * 2
 

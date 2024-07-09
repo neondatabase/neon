@@ -29,7 +29,7 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
                 cur.execute(query)
                 return
             except psycopg2.errors.QueryCanceled:
-                log.info(f"Query '{query}' timed out - retrying")
+                log.info("Query '%s' timed out - retrying", query)
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
@@ -53,7 +53,7 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     )
     row = cur.fetchone()
     assert row is not None
-    log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
+    log.info("shared_buffers is %s, table size %s", row[0], row[1])
     assert int(row[0]) < int(row[1])
 
     execute_retry_on_timeout("SELECT count(*) FROM foo")
@@ -68,4 +68,4 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
             execute_retry_on_timeout("SELECT t FROM foo ORDER BY RANDOM() LIMIT 10")
             cur.fetchall()
         times_executed += 1
-    log.info(f"Workload executed {times_executed} times")
+    log.info("Workload executed %s times", times_executed)

@@ -228,7 +228,7 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
             last_pg_flush_lsn = curr_pg_flush_lsn
 
             log.info(
-                f"received_lsn_lag={res[1]}, pg_flush_lsn={res[2]}, received_lsn={res[3]}, lsn_process_speed={lsn_process_speed:.2f}MB/s, lsn_produce_speed={lsn_produce_speed:.2f}MB/s"
+                "received_lsn_lag=%s, pg_flush_lsn=%s, received_lsn=%s, lsn_process_speed=%sMB/s, lsn_produce_speed=%sMB/s", res[1], res[2], res[3], f"{lsn_process_speed:.2f}", f"{lsn_produce_speed:.2f}"
             )
 
             time.sleep(pool_interval)
@@ -266,11 +266,11 @@ def record_read_latency(
                 t2 = timeit.default_timer()
 
                 log.info(
-                    f"Executed read query {read_query}, got {cur.fetchall()}, read time {t2-t1:.2f}s"
+                    "Executed read query %s, got %s, read time %ss", read_query, cur.fetchall(), f"{t2-t1:.2f}"
                 )
                 read_latencies.append(t2 - t1)
             except Exception as err:
-                log.error(f"Got error when executing the read query: {err}")
+                log.error("Got error when executing the read query: %s", err)
 
             time.sleep(read_interval)
 

@@ -61,7 +61,7 @@ def wait_lsn_force_checkpoint(
 ):
     pageserver_conn_options = pageserver_conn_options or {}
     lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
-    log.info(f"pg_current_wal_flush_lsn is {lsn}, waiting for it on pageserver")
+    log.info("pg_current_wal_flush_lsn is %s, waiting for it on pageserver", lsn)
 
     auth_token = None
     if "password" in pageserver_conn_options:
@@ -167,7 +167,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
                 > neon_env_builder.num_safekeepers
             ), f"timeline_id={timeline_id}, timeline_detail={timeline_detail}, sk_metrics={sk_metrics}"
             timeline_metrics.append(m)
-        log.info(f"{message}: {timeline_metrics}")
+        log.info("%s: %s", message, timeline_metrics)
         return timeline_metrics
 
     # TODO: https://github.com/neondatabase/neon/issues/809
@@ -286,13 +286,13 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     # wait until remote_consistent_lsn gets advanced on all safekeepers
     clients = [sk.http_client() for sk in env.safekeepers]
     stat_before = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
-    log.info(f"statuses before insert: {stat_before}")
+    log.info("statuses before insert: %s", stat_before)
 
     endpoint.safe_psql("INSERT INTO t SELECT generate_series(1,100), 'payload'")
 
     # wait for remote_consistent_lsn to reach flush_lsn, forcing it with checkpoint
     new_rcl = last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
-    log.info(f"new_rcl: {new_rcl}")
+    log.info("new_rcl: %s", new_rcl)
     endpoint.stop()
 
     # and wait till remote_consistent_lsn propagates to all safekeepers
@@ -324,7 +324,7 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
         sk.stop()
         sk.start()
     stat_after_restart = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
-    log.info(f"statuses after {stat_after_restart}")
+    log.info("statuses after %s", stat_after_restart)
     assert all([s.remote_consistent_lsn >= new_rcl for s in stat_after_restart])
 
 
@@ -404,7 +404,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         lambda first_segments=first_segments: all(not os.path.exists(p) for p in first_segments),
         "first segment get removed",
         wait_f=lambda http_cli=http_cli, tenant_id=tenant_id, timeline_id=timeline_id: log.info(
-            f"waiting for segments removal, sk info: {http_cli.timeline_status(tenant_id=tenant_id, timeline_id=timeline_id)}"
+            "waiting for segments removal, sk info: %s", f"{http_cli.timeline_status(tenant_id=tenant_id, timeline_id=timeline_id)}"
         ),
     )
 
@@ -418,7 +418,7 @@ def wait(f, desc, timeout=30, wait_f=None):
             if f():
                 break
         except Exception as e:
-            log.info(f"got exception while waiting for {desc}: {e}")
+            log.info("got exception while waiting for %s: %s", desc, e)
             pass
         elapsed = time.time() - started_at
         if elapsed > timeout:
@@ -433,14 +433,14 @@ def is_segment_offloaded(
 ):
     http_cli = sk.http_client()
     tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-    log.info(f"sk status is {tli_status}")
+    log.info("sk status is %s", tli_status)
     return tli_status.backup_lsn >= seg_end
 
 
 def is_flush_lsn_caught_up(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId, lsn: Lsn):
     http_cli = sk.http_client()
     tli_status = http_cli.timeline_status(tenant_id, timeline_id)
-    log.info(f"sk status is {tli_status}")
+    log.info("sk status is %s", tli_status)
     return tli_status.flush_lsn >= lsn
 
 
@@ -449,7 +449,7 @@ def is_wal_trimmed(sk: Safekeeper, tenant_id: TenantId, timeline_id: TimelineId,
     tli_status = http_cli.timeline_status(tenant_id, timeline_id)
     sk_wal_size = get_dir_size(sk.timeline_dir(tenant_id, timeline_id))
     sk_wal_size_mb = sk_wal_size / 1024 / 1024
-    log.info(f"Safekeeper id={sk.id} wal_size={sk_wal_size_mb:.2f}MB status={tli_status}")
+    log.info("Safekeeper id=%s wal_size=%sMB status=%s", sk.id, f"{sk_wal_size_mb:.2f}", tli_status)
     return sk_wal_size_mb <= target_size_mb
 
 
@@ -582,7 +582,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
     pageserver_lsn = Lsn(ps_http.timeline_detail(tenant_id, timeline_id)["last_record_lsn"])
     lag = last_lsn - pageserver_lsn
     log.info(
-        f"Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb"
+        "Pageserver last_record_lsn=%s; flush_lsn=%s; lag before replay is %skb", pageserver_lsn, last_lsn, lag / 1024
     )
 
     endpoint.stop()
@@ -640,7 +640,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
 
         tenant_status = ps_http.tenant_status(tenant_id)
         if tenant_status["state"]["slug"] == "Loading":
-            log.debug(f"Tenant {tenant_id} is still loading, retrying")
+            log.debug("Tenant %s is still loading, retrying", tenant_id)
         else:
             pageserver_lsn = Lsn(
                 env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)[
@@ -651,14 +651,14 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
 
             if time.time() > last_debug_print + 10 or lag <= 0:
                 last_debug_print = time.time()
-                log.info(f"Pageserver last_record_lsn={pageserver_lsn}; lag is {lag / 1024}kb")
+                log.info("Pageserver last_record_lsn=%s; lag is %skb", pageserver_lsn, lag / 1024)
 
                 if lag <= 0:
                     break
 
         time.sleep(1)
 
-    log.info(f"WAL redo took {elapsed} s")
+    log.info("WAL redo took %s s", elapsed)
 
     # verify data
     endpoint.create_start("test_s3_wal_replay")
@@ -726,7 +726,7 @@ class ProposerPostgres(PgProtocol):
 
         basepath = self.pg_bin.run_capture(command, env, with_command_header=False)
 
-        log.info(f"postgres --sync-safekeepers output: {basepath}")
+        log.info("postgres --sync-safekeepers output: %s", basepath)
 
         stdout_filename = basepath + ".stdout"
 
@@ -799,11 +799,11 @@ def test_sync_safekeepers(
         )
         lsn = Lsn(res["inserted_wal"]["end_lsn"])
         lsn_after_append.append(lsn)
-        log.info(f"safekeeper[{i}] lsn after append: {lsn}")
+        log.info("safekeeper[%s] lsn after append: %s", i, lsn)
 
     # run sync safekeepers
     lsn_after_sync = pg.sync_safekeepers()
-    log.info(f"lsn after sync = {lsn_after_sync}")
+    log.info("lsn after sync = %s", lsn_after_sync)
 
     assert all(lsn_after_sync == lsn for lsn in lsn_after_append)
 
@@ -854,7 +854,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # fetch debug_dump endpoint
     debug_dump_0 = wa_http_cli_debug.debug_dump({"dump_all": "true"})
-    log.info(f"debug_dump before reboot {debug_dump_0}")
+    log.info("debug_dump before reboot %s", debug_dump_0)
     assert debug_dump_0["timelines_count"] == 1
     assert debug_dump_0["timelines"][0]["timeline_id"] == str(timeline_id)
 
@@ -873,7 +873,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # fetch debug_dump after reboot
     debug_dump_1 = wa_http_cli_debug.debug_dump({"dump_all": "true"})
-    log.info(f"debug_dump after reboot {debug_dump_1}")
+    log.info("debug_dump after reboot %s", debug_dump_1)
     assert debug_dump_1["timelines_count"] == 1
     assert debug_dump_1["timelines"][0]["timeline_id"] == str(timeline_id)
 
@@ -1030,7 +1030,7 @@ class DurationLogger:
         self.ts_before = time.time()
 
     def __exit__(self, *exc):
-        log.info(f"{self.desc} finished in {time.time() - self.ts_before}s")
+        log.info("%s finished in %ss", self.desc, time.time() - self.ts_before)
 
 
 # Context manager which logs WAL position change on exit.
@@ -1042,12 +1042,12 @@ class WalChangeLogger:
     def __enter__(self):
         self.ts_before = time.time()
         self.lsn_before = Lsn(self.ep.safe_psql_scalar("select pg_current_wal_lsn()"))
-        log.info(f"{self.desc_before}, lsn_before={self.lsn_before}")
+        log.info("%s, lsn_before=%s", self.desc_before, self.lsn_before)
 
     def __exit__(self, *exc):
         lsn_after = Lsn(self.ep.safe_psql_scalar("select pg_current_wal_lsn()"))
         log.info(
-            f"inserted {((lsn_after - self.lsn_before) / 1024 / 1024):.3f} MB of WAL in {(time.time() - self.ts_before):.3f}s"
+            "inserted %s MB of WAL in %ss", f"{((lsn_after - self.lsn_before) / 1024 / 1024):.3f}", f"{(time.time() - self.ts_before):.3f}"
         )
 
 
@@ -1094,7 +1094,7 @@ def is_flush_lsn_aligned(sk_http_clis, tenant_id, timeline_id):
         sk_http_cli.timeline_status(tenant_id, timeline_id).flush_lsn
         for sk_http_cli in sk_http_clis
     ]
-    log.info(f"waiting for flush_lsn alignment, flush_lsns={flush_lsns}")
+    log.info("waiting for flush_lsn alignment, flush_lsns=%s", flush_lsns)
     return all([flush_lsns[0] == flsn for flsn in flush_lsns])
 
 
@@ -1119,7 +1119,7 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
         assert (
             segs[0] == cmp_segs
         ), f"lists of segments on sks {sks[0].id} and {sk.id} are not identic: {segs[0]} and {cmp_segs}"
-    log.info(f"comparing segs {segs[0]}")
+    log.info("comparing segs %s", segs[0])
 
     sk0 = sks[0]
     for sk in sks[1:]:
@@ -1130,7 +1130,7 @@ def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: Timeline
             shallow=False,
         )
         log.info(
-            f"filecmp result mismatch and not regular files:\n\t mismatch={mismatch}\n\t not_regular={not_regular}"
+            "filecmp result mismatch and not regular files:\n\t mismatch=%s\n\t not_regular=%s", mismatch, not_regular
         )
 
         for f in mismatch:
@@ -1314,7 +1314,7 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
     sk1_tli_status = sk1_http_cli.timeline_status(tenant_id, timeline_id)
     sk2_tli_status = sk2_http_cli.timeline_status(tenant_id, timeline_id)
     log.info(
-        f"flush_lsns after insertion: sk1={sk1_tli_status.flush_lsn}, sk2={sk2_tli_status.flush_lsn}"
+        "flush_lsns after insertion: sk1=%s, sk2=%s", sk1_tli_status.flush_lsn, sk2_tli_status.flush_lsn
     )
     assert sk2_tli_status.flush_lsn - sk1_tli_status.flush_lsn >= 16 * 1024 * 1024
 
@@ -1323,7 +1323,7 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
     sk1_tli_status = sk1_http_cli.timeline_status(tenant_id, timeline_id)
     sk2_tli_status = sk2_http_cli.timeline_status(tenant_id, timeline_id)
     log.info(
-        f"flush_lsns after waiting: sk1={sk1_tli_status.flush_lsn}, sk2={sk2_tli_status.flush_lsn}"
+        "flush_lsns after waiting: sk1=%s, sk2=%s", sk1_tli_status.flush_lsn, sk2_tli_status.flush_lsn
     )
     assert sk2_tli_status.flush_lsn - sk1_tli_status.flush_lsn >= 16 * 1024 * 1024
 
@@ -1366,7 +1366,7 @@ def test_wp_graceful_shutdown(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # tests. Persisting it without risking too many cf flushes needs a wp -> sk
     # protocol change. (though in reality shutdown sync-safekeepers does flush
     # of cf, so most of the time persisted value wouldn't lag)
-    log.info(f"sk commit_lsn {commit_lsn}")
+    log.info("sk commit_lsn %s", commit_lsn)
     # note that ckpt_lsn is the *beginning* of checkpoint record, so commit_lsn
     # must be actually higher
     assert commit_lsn > ckpt_lsn, "safekeeper must have checkpoint record"
@@ -1438,7 +1438,7 @@ class SafekeeperEnv:
             "--broker-endpoint",
             self.broker.client_url(),
         ]
-        log.info(f'Running command "{" ".join(cmd)}"')
+        log.info('Running command "%s"', " ".join(cmd))
 
         safekeeper_client = SafekeeperHttpClient(
             port=port.http,
@@ -1479,7 +1479,7 @@ class SafekeeperEnv:
         pid_file = os.path.join(sk_dir, "safekeeper.pid")
         with open(pid_file, "r") as f:
             pid = int(f.read())
-            log.info(f"Killing safekeeper with pid {pid}")
+            log.info("Killing safekeeper with pid %s", pid)
             os.kill(pid, signal.SIGKILL)
 
     def __enter__(self):
@@ -1541,9 +1541,9 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
             http_cli = sk.http_client()
             try:
                 status = http_cli.timeline_status(tenant_id, timeline_id)
-                log.info(f"Safekeeper {sk.id} status: {status}")
+                log.info("Safekeeper %s status: %s", sk.id, status)
             except Exception as e:
-                log.info(f"Safekeeper {sk.id} status error: {e}")
+                log.info("Safekeeper %s status error: %s", sk.id, e)
 
     neon_env_builder.num_safekeepers = 4
     env = neon_env_builder.init_start()
@@ -1751,9 +1751,9 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
             http_cli = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
             try:
                 status = http_cli.timeline_status(tenant_id, timeline_id)
-                log.info(f"Safekeeper {sk.id} status: {status}")
+                log.info("Safekeeper %s status: %s", sk.id, status)
             except Exception as e:
-                log.info(f"Safekeeper {sk.id} status error: {e}")
+                log.info("Safekeeper %s status error: %s", sk.id, e)
 
     neon_env_builder.num_safekeepers = 4
     env = neon_env_builder.init_start()
@@ -1784,7 +1784,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     action = "reconfiguing" if live_sk_change else "restarting"
-    log.info(f"{action} compute with new config to verify that it works")
+    log.info("%s compute with new config to verify that it works", action)
     new_sks = [1, 3, 4]
     if not live_sk_change:
         endpoint.stop_and_destroy().create("main")
@@ -1835,7 +1835,7 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     endpoint.safe_psql("insert into t select generate_series(1, 1000), 'pear'")
 
     src_flush_lsn = src_sk.get_flush_lsn(tenant_id, timeline_id)
-    log.info(f"flush_lsn on src before pull_timeline: {src_flush_lsn}")
+    log.info("flush_lsn on src before pull_timeline: %s", src_flush_lsn)
 
     src_http = src_sk.http_client()
     # run pull_timeline which will halt before downloading files
@@ -1859,7 +1859,7 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
     # Checkpoint timeline beyond lsn.
     src_sk.checkpoint_up_to(tenant_id, timeline_id, lsn, wait_wal_removal=False)
     first_segment_p = src_sk.timeline_dir(tenant_id, timeline_id) / "000000010000000000000001"
-    log.info(f"first segment exist={os.path.exists(first_segment_p)}")
+    log.info("first segment exist=%s", os.path.exists(first_segment_p))
 
     src_http.configure_failpoints(("sk-snapshot-after-list-pausable", "off"))
     pt_handle.join()
@@ -1869,7 +1869,7 @@ def test_pull_timeline_gc(neon_env_builder: NeonEnvBuilder):
 
     timeline_start_lsn = src_sk.get_timeline_start_lsn(tenant_id, timeline_id)
     dst_flush_lsn = dst_sk.get_flush_lsn(tenant_id, timeline_id)
-    log.info(f"flush_lsn on dst after pull_timeline: {dst_flush_lsn}")
+    log.info("flush_lsn on dst after pull_timeline: %s", dst_flush_lsn)
     assert dst_flush_lsn >= src_flush_lsn
     digests = [
         sk.http_client().timeline_digest(tenant_id, timeline_id, timeline_start_lsn, dst_flush_lsn)
@@ -1966,11 +1966,11 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
 
         for sk in sk_metrics:
             queries_received = sk.query_all("safekeeper_pg_queries_received_total")
-            log.info(f"{sk.name} queries received: {queries_received}")
+            log.info("%s queries received: %s", sk.name, queries_received)
             for sample in queries_received:
                 total[sample.labels["query"]] = total.get(sample.labels["query"], 0) + sample.value
 
-        log.info(f"Total queries received: {total}")
+        log.info("Total queries received: %s", total)
 
         # in the perfect world, we should see only one START_REPLICATION query,
         # here we check for 5 to prevent flakiness
@@ -2029,13 +2029,13 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
 
     # remember LSN right after timeline creation
     lsn = remember_lsn()
-    log.info(f"LSN after timeline creation: {lsn}")
+    log.info("LSN after timeline creation: %s", lsn)
 
     endpoint.safe_psql("create table t(key int, value text)")
 
     timeline_status = env.safekeepers[0].http_client().timeline_status(tenant_id, timeline_id)
     timeline_start_lsn = timeline_status.timeline_start_lsn
-    log.info(f"Timeline start LSN: {timeline_start_lsn}")
+    log.info("Timeline start LSN: %s", timeline_start_lsn)
 
     current_percent = 0.0
     for new_percent in target_percents:
@@ -2051,20 +2051,20 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
 
         # remember LSN right after reaching new_percent
         lsn = remember_lsn()
-        log.info(f"LSN after inserting {new_rows} rows: {lsn}")
+        log.info("LSN after inserting %s rows: %s", new_rows, lsn)
 
     # TODO: would be also good to test cases where not all segments are uploaded to S3
 
     for lsn in lsns:
         new_timeline_id = TimelineId.generate()
-        log.info(f"Copying branch for LSN {lsn}, to timeline {new_timeline_id}")
+        log.info("Copying branch for LSN %s, to timeline %s", lsn, new_timeline_id)
 
         orig_digest = (
             env.safekeepers[0]
             .http_client()
             .timeline_digest(tenant_id, timeline_id, timeline_start_lsn, lsn)
         )
-        log.info(f"Original digest: {orig_digest}")
+        log.info("Original digest: %s", orig_digest)
 
         for sk in env.safekeepers:
             sk.http_client().copy_timeline(
@@ -2079,7 +2079,7 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
             new_digest = sk.http_client().timeline_digest(
                 tenant_id, new_timeline_id, timeline_start_lsn, lsn
             )
-            log.info(f"Digest after timeline copy on safekeeper {sk.id}: {new_digest}")
+            log.info("Digest after timeline copy on safekeeper %s: %s", sk.id, new_digest)
 
             assert orig_digest == new_digest
 
@@ -2113,9 +2113,9 @@ def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
     timeline_start_lsn_before = res["old_control_file"]["timeline_start_lsn"]
     timeline_start_lsn_after = res["new_control_file"]["timeline_start_lsn"]
 
-    log.info(f"patch_control_file response: {res}")
+    log.info("patch_control_file response: %s", res)
     log.info(
-        f"updated control file timeline_start_lsn, before {timeline_start_lsn_before}, after {timeline_start_lsn_after}"
+        "updated control file timeline_start_lsn, before %s, after %s", timeline_start_lsn_before, timeline_start_lsn_after
     )
 
     assert timeline_start_lsn_after == "0/1"
@@ -2130,7 +2130,7 @@ def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
         .http_client()
         .debug_dump({"dump_control_file": "true", "timeline_id": str(timeline_id)})
     )
-    log.info(f"dump_control_file response: {res}")
+    log.info("dump_control_file response: %s", res)
     assert res["timelines"][0]["control_file"]["timeline_start_lsn"] == "0/1"
 
 
@@ -2229,7 +2229,7 @@ def test_s3_eviction(
         endpoints[-1].safe_psql("INSERT INTO t VALUES (0)")
 
         lsn = endpoints[-1].safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
-        log.info(f"{branch_name}: LSN={lsn}")
+        log.info("%s: LSN=%s", branch_name, lsn)
 
         endpoints[-1].stop()
 
@@ -2244,18 +2244,18 @@ def test_s3_eviction(
             for j in range(n_timelines):
                 detail = ps_client.timeline_detail(env.initial_tenant, timelines[j])
                 log.debug(
-                    f'{branch_names[j]}: RCL={detail["remote_consistent_lsn"]}, LRL={detail["last_record_lsn"]}'
+                    '%s: RCL=%s, LRL=%s', branch_names[j], detail["remote_consistent_lsn"], detail["last_record_lsn"]
                 )
 
         i = random.randint(0, n_timelines - 1)
-        log.info(f"Starting endpoint {i}")
+        log.info("Starting endpoint %s", i)
         endpoints[i].start()
         check_values[i] += 1
         res = endpoints[i].safe_psql("UPDATE t SET i = i + 1 RETURNING i")
         assert res[0][0] == check_values[i]
 
         lsn = endpoints[i].safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0]
-        log.info(f"{branch_names[i]}: LSN={lsn}")
+        log.info("%s: LSN=%s", branch_names[i], lsn)
 
         endpoints[i].stop()
 
