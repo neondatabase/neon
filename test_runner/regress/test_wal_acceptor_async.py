@@ -395,8 +395,9 @@ async def run_concurrent_computes(
     TIMEOUT_SECONDS = computes[0].MAX_QUERY_GAP_SECONDS + 3
     initial_queries_by_0 = len(computes[0].successful_queries)
     log.info(
-        f"Waiting for another query by computes[0], "
-        f"it already had {initial_queries_by_0}, timeout is {TIMEOUT_SECONDS}s"
+        "Waiting for another query by computes[0], "
+        "it already had %s, timeout is %ss",
+        initial_queries_by_0, TIMEOUT_SECONDS
     )
     for _ in range(10 * TIMEOUT_SECONDS):
         current_queries_by_0 = len(computes[0].successful_queries) - initial_queries_by_0
