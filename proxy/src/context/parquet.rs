@@ -14,17 +14,14 @@ use parquet::{
     record::RecordWriter,
 };
 use pq_proto::StartupMessageParams;
-use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
+use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
 use serde::ser::SerializeMap;
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
 use utils::backoff;
 
-use crate::{
-    config::{remote_storage_from_toml, OptRemoteStorageConfig},
-    context::LOG_CHAN_DISCONNECT,
-};
+use crate::{config::remote_storage_from_toml, context::LOG_CHAN_DISCONNECT};
 
 use super::{RequestMonitoring, LOG_CHAN};
 
@@ -33,11 +30,11 @@ pub struct ParquetUploadArgs {
     /// Storage location to upload the parquet files to.
     /// Encoded as toml (same format as pageservers), eg
     /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
-    #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
-    parquet_upload_remote_storage: OptRemoteStorageConfig,
+    #[clap(long, value_parser = remote_storage_from_toml)]
+    parquet_upload_remote_storage: Option<RemoteStorageConfig>,
 
-    #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
-    parquet_upload_disconnect_events_remote_storage: OptRemoteStorageConfig,
+    #[clap(long, value_parser = remote_storage_from_toml)]
+    parquet_upload_disconnect_events_remote_storage: Option<RemoteStorageConfig>,
 
     /// How many rows to include in a row group
     #[clap(long, default_value_t = 8192)]

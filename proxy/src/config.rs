@@ -75,6 +75,9 @@ impl TlsConfig {
     }
 }
 
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L159>
+pub const PG_ALPN_PROTOCOL: &[u8] = b"postgresql";
+
 /// Configure TLS for the main endpoint.
 pub fn configure_tls(
     key_path: &str,
@@ -111,16 +114,17 @@ pub fn configure_tls(
     let cert_resolver = Arc::new(cert_resolver);
 
     // allow TLS 1.2 to be compatible with older client libraries
-    let config = rustls::ServerConfig::builder_with_protocol_versions(&[
+    let mut config = rustls::ServerConfig::builder_with_protocol_versions(&[
         &rustls::version::TLS13,
         &rustls::version::TLS12,
     ])
     .with_no_client_auth()
-    .with_cert_resolver(cert_resolver.clone())
-    .into();
+    .with_cert_resolver(cert_resolver.clone());
+
+    config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];
 
     Ok(TlsConfig {
-        config,
+        config: Arc::new(config),
         common_names,
         cert_resolver,
     })
@@ -399,15 +403,11 @@ impl FromStr for EndpointCacheConfig {
 #[derive(Debug)]
 pub struct MetricBackupCollectionConfig {
     pub interval: Duration,
-    pub remote_storage_config: OptRemoteStorageConfig,
+    pub remote_storage_config: Option<RemoteStorageConfig>,
     pub chunk_size: usize,
 }
 
-/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
-/// runtime type errors from the value parser we use.
-pub type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
-
-pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
+pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<RemoteStorageConfig> {
     RemoteStorageConfig::from_toml(&s.parse()?)
 }
 
