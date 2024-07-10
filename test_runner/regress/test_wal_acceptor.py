@@ -147,8 +147,8 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
                 last_record_lsn=Lsn(timeline_detail["last_record_lsn"]),
             )
             for sk_m in sk_metrics:
-                m.flush_lsns.append(Lsn(sk_m.flush_lsn_inexact[(tenant_id, timeline_id)]))
-                m.commit_lsns.append(Lsn(sk_m.commit_lsn_inexact[(tenant_id, timeline_id)]))
+                m.flush_lsns.append(Lsn(int(sk_m.flush_lsn_inexact(tenant_id, timeline_id))))
+                m.commit_lsns.append(Lsn(int(sk_m.commit_lsn_inexact(tenant_id, timeline_id))))
 
             for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
                 # Invariant. May be < when transaction is in progress.
