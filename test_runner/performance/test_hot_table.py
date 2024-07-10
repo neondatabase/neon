@@ -29,6 +29,8 @@ def test_hot_table(env: PgCompare):
                 cur.execute("create table t (i integer primary key);")
                 cur.execute(f"insert into t values (generate_series(1,{num_rows}));")
                 # PL/pgSQL block to perform updates (and avoid latency between client and server)
+                 # - however a single staement should not run into a timeout so we increase it
+                cur.execute("SET statement_timeout = '4h';")
                 cur.execute(
                     f"""
                 DO $$
