@@ -15,7 +15,8 @@ use tracing_subscriber::{
 pub async fn init() -> anyhow::Result<LoggingGuard> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
+        .from_env_lossy()
+        .add_directive("azure_core::policies::transport=off".parse().unwrap());
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
