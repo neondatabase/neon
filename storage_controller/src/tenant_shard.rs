@@ -383,9 +383,9 @@ impl ReconcilerWaiter {
     }
 
     pub(crate) fn get_status(&self) -> ReconcilerStatus {
-        if self.seq_wait.would_wait_for(self.seq).is_err() {
+        if self.seq_wait.would_wait_for(self.seq).is_ok() {
             ReconcilerStatus::Done
-        } else if self.error_seq_wait.would_wait_for(self.seq).is_err() {
+        } else if self.error_seq_wait.would_wait_for(self.seq).is_ok() {
             ReconcilerStatus::Failed
         } else {
             ReconcilerStatus::InProgress
