@@ -31,7 +31,7 @@ pub(crate) struct LayerManager {
 
     /// Each [`InMemoryLayer`] in [`LayerMap`] will hold this gate open.
     ///
-    /// Compare to [`Timeline::gate`].
+    /// Compare to [`super::Timeline::gate`].
     pub(super) ephemeral_files: utils::sync::gate::Gate,
 }
 
