@@ -44,9 +44,9 @@ impl ConnectionError {
 /// Wraps async io `stream`, providing messages to write/flush + read Postgres
 /// messages.
 pub struct Framed<S> {
-    stream: S,
-    read_buf: BytesMut,
-    write_buf: BytesMut,
+    pub stream: S,
+    pub read_buf: BytesMut,
+    pub write_buf: BytesMut,
 }
 
 impl<S> Framed<S> {
