@@ -210,7 +210,7 @@ def test_replica_start_wait_subxids_finish(neon_simple_env: NeonEnv):
     # Start it in a separate thread, so that we can do other stuff while it's
     # blocked waiting for the startup to finish.
     wait_for_last_flush_lsn(env, primary, env.initial_tenant, env.initial_timeline)
-    secondary = env.endpoints.new_replica(origin=primary, endpoint_id="secondary")
+    secondary = env.endpoints.new_replica(origin=primary, endpoint_id="secondary", config_lines=["neon.running_xacts_overflow_policy='wait'"])
     start_secondary_thread = threading.Thread(target=secondary.start)
     start_secondary_thread.start()
 
