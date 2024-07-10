@@ -43,7 +43,7 @@ def main(args: argparse.Namespace):
                 logging.info("fetching flaky tests...")
                 cur.execute(FLAKY_TESTS_QUERY, (interval_days,))
                 rows = cur.fetchall()
-    except psycopg2.OperationalError as exc:
+    except psycopg2.OperationalError:
         logging.error("cannot fetch flaky tests from the DB due to an error")
         rows = []
 
