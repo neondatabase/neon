@@ -838,8 +838,9 @@ async fn query_to_json<T: GenericClient>(
         "finished reading rows"
     );
 
-    let mut fields = vec![];
-    let mut columns = vec![];
+    let columns_len = row_stream.columns().len();
+    let mut fields = Vec::with_capacity(columns_len);
+    let mut columns = Vec::with_capacity(columns_len);
 
     for c in row_stream.columns() {
         fields.push(json!({

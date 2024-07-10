@@ -160,7 +160,7 @@ pub async fn pageserver_physical_gc(
     min_age: Duration,
     mode: GcMode,
 ) -> anyhow::Result<GcSummary> {
-    let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver)?;
+    let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
 
     let tenants = if tenant_ids.is_empty() {
         futures::future::Either::Left(stream_tenants(&s3_client, &target))
