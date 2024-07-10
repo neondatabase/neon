@@ -28,6 +28,11 @@ use super::TimelineWriterState;
 pub(crate) struct LayerManager {
     layer_map: LayerMap,
     layer_fmgr: LayerFileManager<Layer>,
+
+    /// Each [`InMemoryLayer`] in [`LayerMap`] will hold this gate open.
+    ///
+    /// Compare to [`Timeline::gate`].
+    pub(super) ephemeral_files: utils::sync::gate::Gate,
 }
 
 impl LayerManager {
@@ -72,7 +77,6 @@ impl LayerManager {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        gate_guard: utils::sync::gate::GateGuard,
         ctx: &RequestContext,
     ) -> Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
@@ -107,7 +111,9 @@ impl LayerManager {
                 timeline_id,
                 tenant_shard_id,
                 start_lsn,
-                gate_guard,
+                self.ephemeral_files
+                    .enter()
+                    .context("enter gate for in-memory layer")?,
                 ctx,
             )
             .await?;

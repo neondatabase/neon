@@ -393,7 +393,10 @@ pub struct Timeline {
     /// happened. Used for consumption metrics.
     pub(crate) loaded_at: (Lsn, SystemTime),
 
-    /// Gate to prevent shutdown completing while I/O is still happening to this timeline's data
+    /// Gate to prevent shutdown completing while I/O is still happening to this timeline's data.
+    ///
+    /// Timelines ephemeral files are treated as a special case: they keep the
+    /// [`LayerManager::ephemeral_files`] open until they complete their cleanup during shutdown.
     pub(crate) gate: Gate,
 
     /// Cancellation token scoped to this timeline: anything doing long-running work relating
@@ -1928,8 +1931,15 @@ impl Timeline {
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
+        // Finally wait until any gate-holders are complete.
+        //
+        // TODO: once above shutdown_tasks is a no-op, we can close the gate before calling shutdown_tasks
+        // and use a TBD variant of shutdown_tasks that asserts that there were no tasks left.
+        self.gate.close().await;
+
         {
-            // Allow any remaining in-memory layers to do cleanup.
+            // Allow any remaining in-memory layers to do cleanup once all of the operations have
+            // stopped (self.gate).
             let mut write_guard = self.write_lock.lock().await;
             self.layers
                 .write()
@@ -1937,11 +1947,8 @@ impl Timeline {
                 .drop_inmemory_layers(&mut write_guard);
         }
 
-        // Finally wait until any gate-holders are complete.
-        //
-        // TODO: once above shutdown_tasks is a no-op, we can close the gate before calling shutdown_tasks
-        // and use a TBD variant of shutdown_tasks that asserts that there were no tasks left.
-        self.gate.close().await;
+        // Wait for ephemeral files to drop and finish their cleanup
+        self.layers.read().await.ephemeral_files.close().await;
 
         self.metrics.shutdown();
     }
@@ -3715,7 +3722,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
-        let gate_guard = self.gate.enter().context("enter gate for inmem layer")?;
 
         let last_record_lsn = self.get_last_record_lsn();
         ensure!(
@@ -3726,14 +3732,7 @@ impl Timeline {
         );
 
         let layer = guard
-            .get_layer_for_write(
-                lsn,
-                self.conf,
-                self.timeline_id,
-                self.tenant_shard_id,
-                gate_guard,
-                ctx,
-            )
+            .get_layer_for_write(lsn, self.conf, self.timeline_id, self.tenant_shard_id, ctx)
             .await?;
         Ok(layer)
     }
