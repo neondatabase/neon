@@ -41,7 +41,9 @@ impl TimelineAnalysis {
     }
 }
 
-pub(crate) fn branch_cleanup_and_check_errors(
+pub(crate) async fn branch_cleanup_and_check_errors(
+    s3_client: &Client,
+    root_target: &RootTarget,
     id: &TenantShardTimelineId,
     tenant_objects: &mut TenantObjectListing,
     s3_active_branch: Option<&BranchData>,
@@ -85,15 +87,17 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     }
 
                     if &index_part.version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
-                        result.warnings.push(format!(
+                        info!(
                             "index_part.json version is not latest: {}",
                             index_part.version()
-                        ))
+                        );
                     }
 
                     if index_part.metadata.disk_consistent_lsn()
                         != index_part.duplicated_disk_consistent_lsn()
                     {
+                        // Tech debt: let's get rid of one of these, they are redundant
+                        // https://github.com/neondatabase/neon/issues/8343
                         result.errors.push(format!(
                             "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
                             index_part.metadata.disk_consistent_lsn(),
@@ -102,8 +106,15 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     }
 
                     if index_part.layer_metadata.is_empty() {
-                        // not an error, can happen for branches with zero writes, but notice that
-                        info!("index_part.json has no layers");
+                        if index_part.metadata.ancestor_timeline().is_none() {
+                            // The initial timeline with no ancestor should ALWAYS have layers.
+                            result.errors.push(format!(
+                                "index_part.json has no layers (ancestor_timeline=None)"
+                            ))
+                        } else {
+                            // Not an error, can happen for branches with zero writes, but notice that
+                            info!("index_part.json has no layers (ancestor_timeline exists)");
+                        }
                     }
 
                     for (layer, metadata) in index_part.layer_metadata {
@@ -114,16 +125,31 @@ pub(crate) fn branch_cleanup_and_check_errors(
                         }
 
                         if !tenant_objects.check_ref(id.timeline_id, &layer, &metadata) {
-                            // FIXME: this will emit false positives if an index was
-                            // uploaded concurrently with our scan.  To make this check
-                            // correct, we need to try sending a HEAD request for the
-                            // layer we think is missing.
-                            result.errors.push(format!(
-                                "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage",
+                            let timeline_root = root_target.timeline_root(&id);
+                            let remote_layer_path = format!(
+                                "{}{}{}",
+                                timeline_root.prefix_in_bucket,
                                 layer,
-                                metadata.generation.get_suffix(),
-                                metadata.shard
-                            ))
+                                metadata.generation.get_suffix()
+                            );
+
+                            // HEAD request used here to address a race condition  when an index was uploaded concurrently
+                            // with our scan. We check if the object is uploaded to S3 after taking the listing snapshot.
+                            let response = s3_client
+                                .head_object()
+                                .bucket(timeline_root.bucket_name)
+                                .key(remote_layer_path)
+                                .send()
+                                .await;
+
+                            if response.is_err() {
+                                result.errors.push(format!(
+                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage",
+                                    layer,
+                                    metadata.generation.get_suffix(),
+                                    metadata.shard
+                                ))
+                            }
                         }
                     }
                 }

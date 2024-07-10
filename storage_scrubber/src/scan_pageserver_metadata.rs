@@ -222,7 +222,7 @@ pub async fn scan_metadata(
         target: &RootTarget,
         ttid: TenantShardTimelineId,
     ) -> anyhow::Result<(TenantShardTimelineId, S3TimelineBlobData)> {
-        let data = list_timeline_blobs(s3_client, ttid, target).await?;
+        let data: S3TimelineBlobData = list_timeline_blobs(s3_client, ttid, target).await?;
         Ok((ttid, data))
     }
     let timelines = timelines.map_ok(|ttid| report_on_timeline(&s3_client, &target, ttid));
@@ -235,7 +235,9 @@ pub async fn scan_metadata(
     let mut tenant_objects = TenantObjectListing::default();
     let mut tenant_timeline_results = Vec::new();
 
-    fn analyze_tenant(
+    async fn analyze_tenant(
+        s3_client: &Client,
+        target: &RootTarget,
         tenant_id: TenantId,
         summary: &mut MetadataSummary,
         mut tenant_objects: TenantObjectListing,
@@ -259,8 +261,16 @@ pub async fn scan_metadata(
 
             // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
             // reference counts for layers across the tenant.
-            let analysis =
-                branch_cleanup_and_check_errors(&ttid, &mut tenant_objects, None, None, Some(data));
+            let analysis = branch_cleanup_and_check_errors(
+                &s3_client,
+                &target,
+                &ttid,
+                &mut tenant_objects,
+                None,
+                None,
+                Some(data),
+            )
+            .await;
             summary.update_analysis(&ttid, &analysis);
         }
 
@@ -317,9 +327,18 @@ pub async fn scan_metadata(
             None => tenant_id = Some(ttid.tenant_shard_id.tenant_id),
             Some(prev_tenant_id) => {
                 if prev_tenant_id != ttid.tenant_shard_id.tenant_id {
+                    // New tenant: analyze this tenant's timelines, clear accumulated tenant_timeline_results
                     let tenant_objects = std::mem::take(&mut tenant_objects);
                     let timelines = std::mem::take(&mut tenant_timeline_results);
-                    analyze_tenant(prev_tenant_id, &mut summary, tenant_objects, timelines);
+                    analyze_tenant(
+                        &s3_client,
+                        &target,
+                        prev_tenant_id,
+                        &mut summary,
+                        tenant_objects,
+                        timelines,
+                    )
+                    .await;
                     tenant_id = Some(ttid.tenant_shard_id.tenant_id);
                 }
             }
@@ -338,11 +357,14 @@ pub async fn scan_metadata(
 
     if !tenant_timeline_results.is_empty() {
         analyze_tenant(
+            &s3_client,
+            &target,
             tenant_id.expect("Must be set if results are present"),
             &mut summary,
             tenant_objects,
             tenant_timeline_results,
-        );
+        )
+        .await;
     }
 
     Ok(summary)
