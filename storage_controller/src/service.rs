@@ -117,6 +117,7 @@ enum TenantOperations {
     TimelineCreate,
     TimelineDelete,
     AttachHook,
+    TimelineDetachAncestor,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -2376,18 +2377,18 @@ impl Service {
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
 
                 client
-                        .tenant_time_travel_remote_storage(
-                            tenant_shard_id,
-                            &timestamp,
-                            &done_if_after,
-                        )
-                        .await
-                        .map_err(|e| {
-                            ApiError::InternalServerError(anyhow::anyhow!(
-                                "Error doing time travel recovery for shard {tenant_shard_id} on node {}: {e}",
-                                node
-                            ))
-                        })?;
+                    .tenant_time_travel_remote_storage(
+                        tenant_shard_id,
+                        &timestamp,
+                        &done_if_after,
+                    )
+                    .await
+                    .map_err(|e| {
+                        ApiError::InternalServerError(anyhow::anyhow!(
+                            "Error doing time travel recovery for shard {tenant_shard_id} on node {}: {e}",
+                            node
+                        ))
+                    })?;
             }
         }
         Ok(())
@@ -2766,6 +2767,107 @@ impl Service {
         }
 
         Ok(timeline_info)
+    }
+
+    pub(crate) async fn tenant_timeline_detach_ancestor(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<models::detach_ancestor::AncestorDetached, ApiError> {
+        tracing::info!("Detaching timeline {tenant_id}/{timeline_id}",);
+
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineDetachAncestor,
+        )
+        .await;
+
+        self.ensure_attached_wait(tenant_id).await?;
+
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            for (tenant_shard_id, shard) in
+                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+            {
+                let node_id = shard.intent.get_attached().ok_or_else(|| {
+                    ApiError::InternalServerError(anyhow::anyhow!("Shard not scheduled"))
+                })?;
+                let node = locked
+                    .nodes
+                    .get(&node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                targets.push((*tenant_shard_id, node.clone()));
+            }
+            targets
+        };
+
+        if targets.is_empty() {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant not found").into(),
+            ));
+        }
+
+        async fn detach_one(
+            tenant_shard_id: TenantShardId,
+            timeline_id: TimelineId,
+            node: Node,
+            jwt: Option<String>,
+        ) -> Result<(ShardNumber, models::detach_ancestor::AncestorDetached), ApiError> {
+            tracing::info!(
+                "Detaching timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
+            );
+
+            let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+            client
+                .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                .await
+                .map_err(|e| {
+                    ApiError::InternalServerError(anyhow::anyhow!(
+                        "Error detaching timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
+                    ))
+                })
+                .map(|res| (tenant_shard_id.shard_number, res))
+        }
+
+        // TODO: it would be great to ensure that all shards return the same error
+        let mut results = self
+            .tenant_for_shards(targets, |tenant_shard_id, node| {
+                futures::FutureExt::boxed(detach_one(
+                    tenant_shard_id,
+                    timeline_id,
+                    node,
+                    self.config.jwt_token.clone(),
+                ))
+            })
+            .await?;
+
+        // TEST: 1. tad which partially succeeds, questionmark above, returns 500
+        //       2. create branch below timeline? or delete timeline below
+        //       3. all should report the same reparented timelines
+
+        let any = results.pop().expect("we must have at least one response");
+
+        // FIXME: the ordering is not stable yet on pageserver, should be (ancestor_lsn,
+        // TimelineId)
+        let mismatching = results
+            .iter()
+            .filter(|(_, res)| res != &any.1)
+            .collect::<Vec<_>>();
+        if !mismatching.is_empty() {
+            let matching = mismatching.len() - (results.len() + 1);
+            tracing::error!(
+                matching,
+                compared_against=?any,
+                ?mismatching,
+                "shards returned different results"
+            );
+        }
+
+        Ok(any.1)
     }
 
     /// Helper for concurrently calling a pageserver API on a number of shards, such as timeline creation.
