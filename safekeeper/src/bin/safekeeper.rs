@@ -194,10 +194,11 @@ struct Args {
     /// Number of allowed concurrent uploads of partial segments to remote storage.
     #[arg(long, default_value = DEFAULT_PARTIAL_BACKUP_CONCURRENCY)]
     partial_backup_concurrency: usize,
-    /// How long a timeline must be resident before it is eligible for eviction
-    /// This prevents flapping if a timeline goes inactive immediately after being restored, and to
-    /// delay evictions during safekeeper startup to avoid a thundering herd.
-    #[arg(long, value_parser = humantime::parse_duration, default_value = format!("{}", humantime::format_duration(DEFAULT_EVICTION_MIN_RESIDENT)))]
+    /// How long a timeline must be resident before it is eligible for eviction.
+    /// Usually, timeline eviction has to wait for `partial_backup_timeout` before being eligible for eviction,
+    /// but if a timeline is un-evicted and then _not_ written to, it would immediately flap to evicting again,
+    /// if it weren't for `eviction_min_resident` preventing that.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_EVICTION_MIN_RESIDENT)]
     eviction_min_resident: Duration,
 }
 

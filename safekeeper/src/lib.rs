@@ -43,8 +43,6 @@ pub use timelines_global_map::GlobalTimelines;
 use utils::auth::JwtAuth;
 
 pub mod defaults {
-    use std::time::Duration;
-
     pub use safekeeper_api::{
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_PG_LISTEN_PORT,
@@ -55,7 +53,11 @@ pub mod defaults {
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
     pub const DEFAULT_PARTIAL_BACKUP_CONCURRENCY: &str = "5";
-    pub const DEFAULT_EVICTION_MIN_RESIDENT: Duration = Duration::from_secs(600);
+
+    // By default, our required residency before eviction is the same as the period that passes
+    // before uploading a partial segment, so that in normal operation the eviction can happen
+    // as soon as we have done the partial segment upload.
+    pub const DEFAULT_EVICTION_MIN_RESIDENT: &str = DEFAULT_PARTIAL_BACKUP_TIMEOUT;
 }
 
 #[derive(Debug, Clone)]
