@@ -2274,3 +2274,23 @@ def test_s3_eviction(
         and sk.log_contains("successfully restored evicted timeline")
         for sk in env.safekeepers
     )
+
+    assert any(
+        sk.http_client().get_metric_value(
+            "safekeeper_eviction_events_started_total", {"kind": "evict"}
+        )
+        or 0 > 0
+        and sk.http_client().get_metric_value(
+            "safekeeper_eviction_events_completed_total", {"kind": "evict"}
+        )
+        or 0 > 0
+        and sk.http_client().get_metric_value(
+            "safekeeper_eviction_events_started_total", {"kind": "restore"}
+        )
+        or 0 > 0
+        and sk.http_client().get_metric_value(
+            "safekeeper_eviction_events_completed_total", {"kind": "restore"}
+        )
+        or 0 > 0
+        for sk in env.safekeepers
+    )
