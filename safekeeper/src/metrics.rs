@@ -205,6 +205,32 @@ pub static WAL_BACKUP_TASKS: Lazy<IntCounterPair> = Lazy::new(|| {
     .expect("Failed to register safekeeper_wal_backup_tasks_finished_total counter")
 });
 
+// Metrics collected on operations on the storage repository.
+#[derive(strum_macros::EnumString, strum_macros::Display, strum_macros::IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum EvictionEvent {
+    Evict,
+    Restore,
+}
+
+pub(crate) static EVICTION_EVENTS_STARTED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_eviction_events_started_total",
+        "Number of eviction state changes, incremented when they start",
+        &["kind"]
+    )
+    .expect("Failed to register metric")
+});
+
+pub(crate) static EVICTION_EVENTS_COMPLETED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_eviction_events_completed_total",
+        "Number of eviction state changes, incremented when they complete",
+        &["kind"]
+    )
+    .expect("Failed to register metric")
+});
+
 pub const LABEL_UNKNOWN: &str = "unknown";
 
 /// Labels for traffic metrics.
