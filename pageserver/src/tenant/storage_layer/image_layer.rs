@@ -165,7 +165,6 @@ pub struct ImageLayerInner {
     file_id: FileId,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
-    compressed_reads: bool,
 }
 
 impl std::fmt::Debug for ImageLayerInner {
@@ -179,8 +178,7 @@ impl std::fmt::Debug for ImageLayerInner {
 
 impl ImageLayerInner {
     pub(super) async fn dump(&self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let block_reader =
-            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader = DiskBtreeReader::<_, KEY_SIZE>::new(
             self.index_start_blk,
             self.index_root_blk,
@@ -268,10 +266,9 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded =
-            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, false, ctx)
-                .await
-                .and_then(|res| res)?;
+        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
+            .await
+            .and_then(|res| res)?;
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
@@ -380,7 +377,6 @@ impl ImageLayerInner {
         lsn: Lsn,
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
-        support_compressed_reads: bool,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
         let file = match VirtualFile::open(path, ctx).await {
@@ -424,7 +420,6 @@ impl ImageLayerInner {
             file,
             file_id,
             max_vectored_read_bytes,
-            compressed_reads: support_compressed_reads,
             key_range: actual_summary.key_range,
         }))
     }
@@ -435,8 +430,7 @@ impl ImageLayerInner {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
-        let block_reader =
-            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
 
@@ -496,14 +490,12 @@ impl ImageLayerInner {
         &self,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
-        let block_reader =
-            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
         let mut result = Vec::new();
         let mut stream = Box::pin(tree_reader.into_stream(&[0; KEY_SIZE], ctx));
-        let block_reader =
-            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let cursor = block_reader.block_cursor();
         while let Some(item) = stream.next().await {
             // TODO: dedup code with get_reconstruct_value
@@ -538,8 +530,7 @@ impl ImageLayerInner {
                 .into(),
         );
 
-        let block_reader =
-            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
 
@@ -700,8 +691,7 @@ impl ImageLayerInner {
 
     #[cfg(test)]
     pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
-        let block_reader =
-            FileBlockReader::new_with_compression(&self.file, self.file_id, self.compressed_reads);
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
         ImageLayerIterator {

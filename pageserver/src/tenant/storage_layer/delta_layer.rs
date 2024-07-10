@@ -453,7 +453,7 @@ impl DeltaLayerWriterInner {
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
         // We don't want to use compression in delta layer creation
-        let compression = ImageCompressionAlgorithm::DisabledNoDecompress;
+        let compression = ImageCompressionAlgorithm::Disabled;
         let (val, res) = self
             .blob_writer
             .write_blob_maybe_compressed(val, ctx, compression)

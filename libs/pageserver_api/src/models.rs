@@ -440,9 +440,6 @@ pub enum CompactionAlgorithm {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageCompressionAlgorithm {
-    /// Disabled for writes, and never decompress during reading.
-    /// Never set this after you've enabled compression once!
-    DisabledNoDecompress,
     // Disabled for writes, support decompressing during read path
     Disabled,
     /// Zstandard compression. Level 0 means and None mean the same (default level). Levels can be negative as well.
@@ -450,12 +447,6 @@ pub enum ImageCompressionAlgorithm {
     Zstd {
         level: Option<i8>,
     },
-}
-
-impl ImageCompressionAlgorithm {
-    pub fn allow_decompression(&self) -> bool {
-        !matches!(self, ImageCompressionAlgorithm::DisabledNoDecompress)
-    }
 }
 
 impl FromStr for ImageCompressionAlgorithm {
@@ -466,7 +457,6 @@ impl FromStr for ImageCompressionAlgorithm {
             .next()
             .ok_or_else(|| anyhow::anyhow!("empty string"))?;
         match first {
-            "disabled-no-decompress" => Ok(ImageCompressionAlgorithm::DisabledNoDecompress),
             "disabled" => Ok(ImageCompressionAlgorithm::Disabled),
             "zstd" => {
                 let level = if let Some(v) = components.next() {
@@ -1682,10 +1672,6 @@ mod tests {
         assert_eq!(
             ImageCompressionAlgorithm::from_str("disabled").unwrap(),
             Disabled
-        );
-        assert_eq!(
-            ImageCompressionAlgorithm::from_str("disabled-no-decompress").unwrap(),
-            DisabledNoDecompress
         );
         assert_eq!(
             ImageCompressionAlgorithm::from_str("zstd").unwrap(),
