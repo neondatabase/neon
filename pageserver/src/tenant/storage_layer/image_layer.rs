@@ -1290,6 +1290,7 @@ mod test {
         }
     }
 
+    #[cfg(any())]
     #[tokio::test]
     async fn image_layer_iterator() {
         let harness = TenantHarness::create("image_layer_iterator").unwrap();

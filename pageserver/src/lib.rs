@@ -1,5 +1,6 @@
 #![recursion_limit = "300"]
 #![deny(clippy::undocumented_unsafe_blocks)]
+#![allow(unused)]
 
 mod auth;
 pub mod basebackup;

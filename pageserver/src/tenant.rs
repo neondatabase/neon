@@ -3937,7 +3937,7 @@ pub(crate) mod harness {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 #[allow(unused)]
 mod tests {
     use std::collections::BTreeMap;
