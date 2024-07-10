@@ -346,7 +346,6 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 {
 	TransactionId from;
 	TransactionId till;
-	TransactionId xid;
 	int			max_xcnt;
 	TransactionId *prepared_xids = NULL;
 	int			n_prepared_xids;
@@ -431,21 +430,18 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 	restored_xids = (TransactionId *) palloc(max_xcnt * sizeof(TransactionId));
 	n_restored_xids = 0;
 	next_prepared_idx = 0;
-	xid = till;
 
-	do
+	for (TransactionId xid = from; xid != till;)
 	{
 		XLogRecPtr	xidlsn;
 		XidStatus	xidstatus;
-
-		TransactionIdRetreat(xid);
 
 		xidstatus = TransactionIdGetStatus(xid, &xidlsn);
 
 		/*
 		 * "Merge" the prepared transactions into the restored_xids array as
 		 * we go.  The prepared transactions array is sorted. This is mostly
-		 * a sanity check to ensure that all the prpeared transactions are
+		 * a sanity check to ensure that all the prepared transactions are
 		 * seen as in-progress. (There is a check after the loop that we didn't
 		 * miss any.)
 		 */
@@ -471,12 +467,12 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		else if (xidstatus == TRANSACTION_STATUS_COMMITTED)
 		{
 			elog(DEBUG1, "XID %u: was committed", xid);
-			continue;
+			goto skip;
 		}
 		else if (xidstatus == TRANSACTION_STATUS_ABORTED)
 		{
 			elog(DEBUG1, "XID %u: was aborted", xid);
-			continue;
+			goto skip;
 		}
 		else if (xidstatus == TRANSACTION_STATUS_IN_PROGRESS)
 		{
@@ -515,7 +511,7 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 						goto fail;
 					}
 					elog(DEBUG1, "XID %u: was a subtransaction of prepared xid %u", xid, parent);
-					continue;
+					goto skip;
 				}
 			}
 
@@ -558,7 +554,10 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		}
 
 		restored_xids[n_restored_xids++] = xid;
-	} while (xid != from);
+
+	skip:
+		TransactionIdAdvance(xid);
+	}
 
 	/* sanity check */
 	if (next_prepared_idx != n_prepared_xids)
@@ -576,6 +575,8 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		 n_restored_xids, checkpoint->oldestXid, checkpoint->oldestActiveXid, XidFromFullTransactionId(checkpoint->nextXid));
 	*nxids = n_restored_xids;
 	*xids = restored_xids;
+	if (prepared_xids)
+		pfree(prepared_xids);
 	return true;
 
  fail:
