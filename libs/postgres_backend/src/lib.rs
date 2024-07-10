@@ -663,11 +663,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         assert!(self.state < ProtoState::Authentication);
         let have_tls = self.tls_config.is_some();
         match msg {
-            FeStartupPacket::SslRequest => {
+            FeStartupPacket::SslRequest { direct } => {
                 debug!("SSL requested");
 
-                self.write_message(&BeMessage::EncryptionResponse(have_tls))
-                    .await?;
+                if !direct {
+                    self.write_message(&BeMessage::EncryptionResponse(have_tls))
+                        .await?;
+                } else if !have_tls {
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "direct SSL negotiation but no TLS support"
+                    )));
+                }
 
                 if have_tls {
                     self.start_tls().await?;
