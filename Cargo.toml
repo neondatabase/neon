@@ -185,7 +185,7 @@ tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.21.0"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 twox-hash = { version = "1.6.3", default-features = false }
 url = "2.2"
 urlencoding = "2.1"
