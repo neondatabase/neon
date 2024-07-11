@@ -23,7 +23,6 @@ clap = { workspace = true, features = ["derive"] }
 const_format.workspace = true
 crc32c.workspace = true
 fail.workspace = true
-fs2.workspace = true
 git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
