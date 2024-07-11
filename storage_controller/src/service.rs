@@ -2848,6 +2848,10 @@ impl Service {
         // TEST: 1. tad which partially succeeds, questionmark above, returns 500
         //       2. create branch below timeline? or delete timeline below
         //       3. all should report the same reparented timelines
+        //
+        // TEST: 1. tad is started, one node stalls, other restarts
+        //       2. client timeout before stall over
+        //       3. retry with stalled and other being able to proceed
 
         let any = results.pop().expect("we must have at least one response");
 
