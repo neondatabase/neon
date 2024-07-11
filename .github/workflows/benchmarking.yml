@@ -56,15 +56,26 @@ concurrency:
 jobs:
   bench:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    strategy:
+      matrix:
+        include:
+          - DEFAULT_PG_VERSION: 14
+            PLATFORM: "neon-staging"
+            region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+            provisioner: 'k8s-pod' 
+          - DEFAULT_PG_VERSION: 16
+            PLATFORM: "azure-staging"
+            region_id: 'azure-eastus2'
+            provisioner: 'k8s-neonvm'
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: ${{ matrix.DEFAULT_PG_VERSION }}
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: "neon-staging"
+      PLATFORM: ${{ matrix.PLATFORM }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
@@ -85,9 +96,10 @@ jobs:
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+        region_id: ${{ matrix.region_id }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        provisioner: ${{ matrix.provisioner }}
 
     - name: Run benchmark
       uses: ./.github/actions/run-python-test-set
@@ -96,13 +108,14 @@ jobs:
         test_selection: performance
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
         # Set --sparse-ordering option of pytest-order plugin
         # to ensure tests are running in order of appears in the file.
         # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
         extra_params:
           -m remote_cluster
           --sparse-ordering
-          --timeout 5400
+          --timeout 14400
           --ignore test_runner/performance/test_perf_olap.py
           --ignore test_runner/performance/test_perf_pgvector_queries.py
           --ignore test_runner/performance/test_logical_replication.py
