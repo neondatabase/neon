@@ -1258,6 +1258,7 @@ where
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
+        cancel: &CancellationToken,
     ) -> Result<(), QueryError> {
         fail::fail_point!("simulated-bad-compute-connection", |_| {
             info!("Hit failpoint for bad connection");
