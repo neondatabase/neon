@@ -2830,9 +2830,10 @@ impl Service {
 
                     match e {
                         // no ancestor (ever)
-                        Error::ApiError(StatusCode::CONFLICT, msg) => {
-                            ApiError::Conflict(format!("{node}: {msg}"))
-                        }
+                        Error::ApiError(StatusCode::CONFLICT, msg) => ApiError::Conflict(format!(
+                            "{node}: {}",
+                            msg.strip_prefix("Conflict: ").unwrap_or(&msg)
+                        )),
                         // too many ancestors
                         Error::ApiError(StatusCode::BAD_REQUEST, msg) => {
                             ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
