@@ -3000,8 +3000,8 @@ impl Service {
                 .await
                 .map_err(|e| {
                     ApiError::InternalServerError(anyhow::anyhow!(
-                    "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
-                ))
+                        "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
+                    ))
                 })
         }
 
