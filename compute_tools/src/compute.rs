@@ -1116,7 +1116,7 @@ impl ComputeNode {
     // EKS worker nodes have following core dump settings:
     //   /proc/sys/kernel/core_pattern -> core
     //   /proc/sys/kernel/core_uses_pid -> 1
-    //   ulimint -c -> unlimited
+    //   ulimit -c -> unlimited
     // which results in core dumps being written to postgres data directory as core.<pid>.
     //
     // Use that as a default location and pattern, except macos where core dumps are written
