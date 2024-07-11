@@ -1234,10 +1234,6 @@ class NeonEnv:
                     )
                 )
 
-        # Wait for nodes to register with storage controller, then restart it: this is a workaround
-        # for the way the compat tests don't carry the controller database in their snapshots, so
-        # the storage controller initially started with no nodes & therefore no place to schedule tenants.
-
         for f in futs:
             f.result()
 
