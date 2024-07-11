@@ -16,7 +16,10 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy()
-        .add_directive("azure_core::policies::transport=off".parse().unwrap());
+        // azure debug logs the request payload - with secrets in the headers
+        .add_directive("azure_core=info".parse().unwrap())
+        // aws trace logs the request payload - with secrets in the headers
+        .add_directive("aws_smithy_runtime=info".parse().unwrap());
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)

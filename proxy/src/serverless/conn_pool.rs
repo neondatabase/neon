@@ -255,6 +255,39 @@ pub struct GlobalConnPool<C: ClientInnerExt> {
     config: &'static crate::config::HttpConfig,
 }
 
+pub struct LocalConnPool<C: ClientInnerExt> {
+    local_pool: RwLock<EndpointConnPool<C>>,
+
+    idle_timeout: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LocalConnPoolOptions {
+    // Maximum number of connections per one endpoint.
+    // Can mix different (dbname, username) connections.
+    // When running out of free slots for a particular endpoint,
+    // falls back to opening a new connection for each request.
+    pub max_conns_per_endpoint: usize,
+
+    pub idle_timeout: Duration,
+}
+
+impl<C: ClientInnerExt> LocalConnPool<C> {
+    pub fn new(config: LocalConnPoolOptions) -> Arc<Self> {
+        Arc::new(Self {
+            local_pool: RwLock::new(EndpointConnPool {
+                pools: HashMap::new(),
+                total_conns: 0,
+                max_conns: config.max_conns_per_endpoint,
+                _guard: Metrics::get().proxy.http_endpoint_pools.guard(),
+                global_connections_count: Arc::new(AtomicUsize::new(0)),
+                global_pool_size_max_conns: config.max_conns_per_endpoint,
+            }),
+            idle_timeout: config.idle_timeout,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct GlobalConnPoolOptions {
     // Maximum number of connections per one endpoint.

@@ -13,6 +13,7 @@ mod websocket;
 use atomic_take::AtomicTake;
 use bytes::Bytes;
 pub use conn_pool::GlobalConnPoolOptions;
+pub use conn_pool::{LocalConnPoolOptions, LocalConnPool};
 
 use anyhow::Context;
 use futures::future::{select, Either};
