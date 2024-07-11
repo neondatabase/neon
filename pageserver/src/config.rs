@@ -92,7 +92,7 @@ pub mod defaults {
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
-        ImageCompressionAlgorithm::DisabledNoDecompress;
+        ImageCompressionAlgorithm::Disabled;
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
