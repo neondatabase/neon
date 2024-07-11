@@ -2758,7 +2758,7 @@ impl Service {
         // Create timeline on remaining shards with number >0
         if !targets.is_empty() {
             // If we had multiple shards, issue requests for the remainder now.
-            let jwt = self.config.jwt_token.clone();
+            let jwt = &self.config.jwt_token;
             self.tenant_for_shards(targets, |tenant_shard_id: TenantShardId, node: Node| {
                 let create_req = create_req.clone();
                 Box::pin(create_one(tenant_shard_id, node, jwt.clone(), create_req))
