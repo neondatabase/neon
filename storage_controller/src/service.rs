@@ -2860,8 +2860,6 @@ impl Service {
 
         let any = results.pop().expect("we must have at least one response");
 
-        // FIXME: the ordering is not stable yet on pageserver, should be (ancestor_lsn,
-        // TimelineId)
         let mismatching = results
             .iter()
             .filter(|(_, res)| res != &any.1)
