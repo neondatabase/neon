@@ -1236,6 +1236,7 @@ dependencies = [
  "regex",
  "remote_storage",
  "reqwest 0.12.4",
+ "rlimit",
  "rust-ini",
  "serde",
  "serde_json",
@@ -4899,6 +4900,15 @@ dependencies = [
  "spin 0.9.8",
  "untrusted 0.9.0",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3560f70f30a0f16d11d01ed078a07740fe6b489667abc7c7b029155d9f21c3d8"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
