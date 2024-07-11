@@ -5206,6 +5206,8 @@ dependencies = [
  "sha2",
  "signal-hook",
  "storage_broker",
+ "strum",
+ "strum_macros",
  "thiserror",
  "tokio",
  "tokio-io-timeout",
