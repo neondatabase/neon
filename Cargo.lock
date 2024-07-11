@@ -5821,6 +5821,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "storage_controller_client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "futures",
+ "pageserver_api",
+ "pageserver_client",
+ "postgres",
+ "reqwest 0.12.4",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "tokio-stream",
+ "tokio-util",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "storage_scrubber"
 version = "0.1.0"
 dependencies = [
@@ -5884,6 +5906,7 @@ dependencies = [
  "reqwest 0.12.4",
  "serde",
  "serde_json",
+ "storage_controller_client",
  "thiserror",
  "tokio",
  "tracing",
