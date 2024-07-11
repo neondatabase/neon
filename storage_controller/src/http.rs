@@ -456,6 +456,14 @@ async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
 }
 
+async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
+}
+
 async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -877,6 +885,9 @@ pub fn make_router(
         // Node operations
         .post("/control/v1/node", |r| {
             named_request_span(r, handle_node_register, RequestName("control_v1_node"))
+        })
+        .delete("/control/v1/node/:node_id", |r| {
+            named_request_span(r, handle_node_delete, RequestName("control_v1_node_delete"))
         })
         .get("/control/v1/node", |r| {
             named_request_span(r, handle_node_list, RequestName("control_v1_node"))

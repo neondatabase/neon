@@ -1611,3 +1611,91 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.cancel_node_drain(ps_id_to_drain)
 
     env.storage_controller.poll_node_status(ps_id_to_drain, "Active", max_attempts=6, backoff=2)
+
+
+@pytest.mark.parametrize("while_offline", [True, False])
+def test_storage_controller_node_deletion(
+    neon_env_builder: NeonEnvBuilder,
+    compute_reconfigure_listener: ComputeReconfigure,
+    while_offline: bool,
+):
+    """
+    Test that deleting a node works & properly reschedules everything that was on the node.
+    """
+    neon_env_builder.num_pageservers = 3
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_count = 10
+    shard_count_per_tenant = 8
+    tenant_ids = []
+    for _ in range(0, tenant_count):
+        tid = TenantId.generate()
+        tenant_ids.append(tid)
+        env.neon_cli.create_tenant(
+            tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
+        )
+
+    victim = env.pageservers[-1]
+
+    # The procedure a human would follow is:
+    # 1. Mark pageserver scheduling=pause
+    # 2. Mark pageserver availability=offline to trigger migrations away from it
+    # 3. Wait for attachments to all move elsewhere
+    # 4. Call deletion API
+    # 5. Stop the node.
+
+    env.storage_controller.node_configure(victim.id, {"scheduling": "Pause"})
+
+    if while_offline:
+        victim.stop(immediate=True)
+        env.storage_controller.node_configure(victim.id, {"availability": "Offline"})
+
+        def assert_shards_migrated():
+            counts = get_node_shard_counts(env, tenant_ids)
+            elsewhere = sum(v for (k, v) in counts.items() if k != victim.id)
+            log.info(f"Shards on nodes other than on victim: {elsewhere}")
+            assert elsewhere == tenant_count * shard_count_per_tenant
+
+        wait_until(30, 1, assert_shards_migrated)
+
+    log.info(f"Deleting pageserver {victim.id}")
+    env.storage_controller.node_delete(victim.id)
+
+    if not while_offline:
+
+        def assert_victim_evacuated():
+            counts = get_node_shard_counts(env, tenant_ids)
+            count = counts[victim.id]
+            log.info(f"Shards on node {victim.id}: {count}")
+            assert count == 0
+
+        wait_until(30, 1, assert_victim_evacuated)
+
+    # The node should be gone from the list API
+    assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+
+    # No tenants should refer to the node in their intent
+    for tenant_id in tenant_ids:
+        describe = env.storage_controller.tenant_describe(tenant_id)
+        for shard in describe["shards"]:
+            assert shard["node_attached"] != victim.id
+            assert victim.id not in shard["node_secondary"]
+
+    # Reconciles running during deletion should all complete
+    # FIXME: this currently doesn't work because the deletion schedules shards without a proper ScheduleContext, resulting
+    # in states that background_reconcile wants to optimize, but can't proceed with migrations yet because this is a short3
+    # test that hasn't uploaded any heatmaps for secondaries.
+    # In the interim, just do a reconcile_all to enable the consistency check.
+    # env.storage_controller.reconcile_until_idle()
+    env.storage_controller.reconcile_all()
+
+    # Controller should pass its own consistency checks
+    env.storage_controller.consistency_check()
+
+    # The node should stay gone across a restart
+    env.storage_controller.stop()
+    env.storage_controller.start()
+    assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+    env.storage_controller.reconcile_all()  # FIXME: workaround for optimizations happening on startup, see FIXME above.
+    env.storage_controller.consistency_check()
