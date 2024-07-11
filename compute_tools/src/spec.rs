@@ -790,6 +790,9 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
             "./migrations/0007-grant_all_on_sequences_to_neon_superuser_with_grant_option.sql"
         ),
         include_str!("./migrations/0008-revoke_replication_for_previously_allowed_roles.sql"),
+        include_str!(
+            "./migrations/0009-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
+        ),
     ];
 
     MigrationRunner::new(client, &migrations).run_migrations()?;
