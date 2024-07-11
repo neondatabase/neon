@@ -561,7 +561,7 @@ def test_compaction_induced_by_detaches_in_history(
 
 
 @pytest.mark.parametrize("sharded", [True, False])
-def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder, sharded: bool):
+def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, sharded: bool):
     shards = 2 if sharded else 1
 
     neon_env_builder.num_pageservers = shards
@@ -587,6 +587,17 @@ def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder, sharded: boo
     with pytest.raises(PageserverApiException, match="too many ancestors") as info:
         client.detach_ancestor(env.initial_tenant, second_branch)
     assert info.value.status_code == 400
+
+    client.detach_ancestor(env.initial_tenant, first_branch)
+
+    # FIXME: this should be done by the http req handler
+    for ps in pageservers.values():
+        ps.quiesce_tenants()
+
+    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, first_branch)
+    # FIXME: this should be 200 OK because we've already completed it
+    assert info.value.status_code == 409
 
     client.tenant_delete(env.initial_tenant)
 
