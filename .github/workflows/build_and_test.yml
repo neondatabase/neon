@@ -1336,6 +1336,7 @@ jobs:
         env:
           BUCKET: neon-github-public-dev
           PREFIX: artifacts/latest
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           # Update compatibility snapshot for the release
           for pg_version in v14 v15 v16; do
@@ -1349,7 +1350,7 @@ jobs:
 
           # Update Neon artifact for the release (reuse already uploaded artifact)
           for build_type in debug release; do
-            OLD_PREFIX=artifacts/${GITHUB_RUN_ID}
+            OLD_PREFIX=artifacts/${COMMIT_SHA}/${GITHUB_RUN_ID}
             FILENAME=neon-${{ runner.os }}-${{ runner.arch }}-${build_type}-artifact.tar.zst
 
             S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)

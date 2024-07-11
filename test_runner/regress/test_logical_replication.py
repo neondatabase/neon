@@ -247,6 +247,12 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
         cur.execute(
             "SELECT * FROM pg_logical_slot_peek_binary_changes('slotty_mcslotface', NULL, NULL, 'include-xids', '0')"
         )
+        # do the peek second time: we've had a bug using wrong memory context
+        # for NeonWALReader leading to the crash in this case.
+        log.info("peek_changes again")
+        cur.execute(
+            "SELECT * FROM pg_logical_slot_peek_binary_changes('slotty_mcslotface', NULL, NULL, 'include-xids', '0')"
+        )
 
 
 # Tests that walsender correctly blocks until WAL is downloaded from safekeepers

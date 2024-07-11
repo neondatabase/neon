@@ -47,6 +47,9 @@ use utils::{
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const PID_FILE_NAME: &str = "pageserver.pid";
 
 const FEATURES: &[&str] = &[
@@ -657,7 +660,6 @@ fn start_pageserver(
                 async move {
                     page_service::libpq_listener_main(
                         tenant_manager,
-                        broker_client,
                         pg_auth,
                         pageserver_listener,
                         conf.pg_auth_type,

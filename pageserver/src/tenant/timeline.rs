@@ -66,12 +66,12 @@ use std::{
     ops::{Deref, Range},
 };
 
-use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
+        storage_layer::PersistentLayerDesc,
     },
 };
 use crate::{
@@ -98,6 +98,7 @@ use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
@@ -728,6 +729,9 @@ impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
             CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            CreateImageLayersError::Other(e) => {
+                CompactionError::Other(e.context("create image layers"))
+            }
             _ => CompactionError::Other(e.into()),
         }
     }
@@ -4567,6 +4571,22 @@ impl Timeline {
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
                 if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
                     start = img_range.end;
+                    continue;
+                }
+            } else if let ImageLayerCreationMode::Force = mode {
+                // When forced to create image layers, we might try and create them where they already
+                // exist.  This mode is only used in tests/debug.
+                let layers = self.layers.read().await;
+                if layers.contains_key(&PersistentLayerKey {
+                    key_range: img_range.clone(),
+                    lsn_range: PersistentLayerDesc::image_layer_lsn_range(lsn),
+                    is_delta: false,
+                }) {
+                    tracing::info!(
+                        "Skipping image layer at {lsn} {}..{}, already exists",
+                        img_range.start,
+                        img_range.end
+                    );
                     continue;
                 }
             }

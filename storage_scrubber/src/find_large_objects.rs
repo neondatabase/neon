@@ -47,7 +47,7 @@ pub async fn find_large_objects(
     ignore_deltas: bool,
     concurrency: usize,
 ) -> anyhow::Result<LargeObjectListing> {
-    let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver)?;
+    let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
     let tenants = std::pin::pin!(stream_tenants(&s3_client, &target));
 
     let objects_stream = tenants.map_ok(|tenant_shard_id| {

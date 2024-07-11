@@ -9,6 +9,8 @@ use utils::{
     lsn::Lsn,
 };
 
+pub use reqwest::Body as ReqwestBody;
+
 pub mod util;
 
 #[derive(Debug, Clone)]
@@ -20,6 +22,9 @@ pub struct Client {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("send request: {0}")]
+    SendRequest(reqwest::Error),
+
     #[error("receive body: {0}")]
     ReceiveBody(reqwest::Error),
 
@@ -173,19 +178,30 @@ impl Client {
         self.request(Method::GET, uri, ()).await
     }
 
+    fn start_request<U: reqwest::IntoUrl>(
+        &self,
+        method: Method,
+        uri: U,
+    ) -> reqwest::RequestBuilder {
+        let req = self.client.request(method, uri);
+        if let Some(value) = &self.authorization_header {
+            req.header(reqwest::header::AUTHORIZATION, value)
+        } else {
+            req
+        }
+    }
+
     async fn request_noerror<B: serde::Serialize, U: reqwest::IntoUrl>(
         &self,
         method: Method,
         uri: U,
         body: B,
     ) -> Result<reqwest::Response> {
-        let req = self.client.request(method, uri);
-        let req = if let Some(value) = &self.authorization_header {
-            req.header(reqwest::header::AUTHORIZATION, value)
-        } else {
-            req
-        };
-        req.json(&body).send().await.map_err(Error::ReceiveBody)
+        self.start_request(method, uri)
+            .json(&body)
+            .send()
+            .await
+            .map_err(Error::ReceiveBody)
     }
 
     async fn request<B: serde::Serialize, U: reqwest::IntoUrl>(
@@ -608,5 +624,54 @@ impl Client {
                 }
             }),
         }
+    }
+
+    pub async fn import_basebackup(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        base_lsn: Lsn,
+        end_lsn: Lsn,
+        pg_version: u32,
+        basebackup_tarball: ReqwestBody,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_basebackup?base_lsn={base_lsn}&end_lsn={end_lsn}&pg_version={pg_version}",
+            self.mgmt_api_endpoint,
+        );
+        self.start_request(Method::PUT, uri)
+            .body(basebackup_tarball)
+            .send()
+            .await
+            .map_err(Error::SendRequest)?
+            .error_from_body()
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn import_wal(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        start_lsn: Lsn,
+        end_lsn: Lsn,
+        wal_tarball: ReqwestBody,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_wal?start_lsn={start_lsn}&end_lsn={end_lsn}",
+            self.mgmt_api_endpoint,
+        );
+        self.start_request(Method::PUT, uri)
+            .body(wal_tarball)
+            .send()
+            .await
+            .map_err(Error::SendRequest)?
+            .error_from_body()
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
     }
 }
