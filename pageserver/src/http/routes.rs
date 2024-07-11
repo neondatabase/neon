@@ -1721,7 +1721,9 @@ async fn timeline_detach_ancestor_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    use crate::tenant::timeline::detach_ancestor::Options;
+    use crate::tenant::timeline::detach_ancestor;
+    use pageserver_api::models::detach_ancestor::AncestorDetached;
+
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1729,7 +1731,7 @@ async fn timeline_detach_ancestor_handler(
     let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
 
     async move {
-        let mut options = Options::default();
+        let mut options = detach_ancestor::Options::default();
 
         let rewrite_concurrency =
             parse_query_param::<_, std::num::NonZeroUsize>(&request, "rewrite_concurrency")?;
@@ -1757,27 +1759,36 @@ async fn timeline_detach_ancestor_handler(
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
-        let (_guard, prepared) = timeline
+        let progress = timeline
             .prepare_to_detach_from_ancestor(&tenant, options, ctx)
             .await?;
 
-        let res = state
-            .tenant_manager
-            .complete_detaching_timeline_ancestor(tenant_shard_id, timeline_id, prepared, ctx)
-            .await;
+        // uncomment to allow early as possible Tenant::drop
+        // drop(tenant);
 
-        match res {
-            Ok(reparented_timelines) => {
-                let resp = pageserver_api::models::detach_ancestor::AncestorDetached {
+        let resp = match progress {
+            detach_ancestor::Progress::Prepared(_guard, prepared) => {
+                // it would be great to tag the guard on to the tenant activation future
+                let reparented_timelines = state
+                    .tenant_manager
+                    .complete_detaching_timeline_ancestor(
+                        tenant_shard_id,
+                        timeline_id,
+                        prepared,
+                        ctx,
+                    )
+                    .await
+                    .context("timeline detach ancestor completion")
+                    .map_err(ApiError::InternalServerError)?;
+
+                AncestorDetached {
                     reparented_timelines,
-                };
-
-                json_response(StatusCode::OK, resp)
+                }
             }
-            Err(e) => Err(ApiError::InternalServerError(
-                e.context("timeline detach completion"),
-            )),
-        }
+            detach_ancestor::Progress::Done(resp) => resp,
+        };
+
+        json_response(StatusCode::OK, resp)
     }
     .instrument(span)
     .await

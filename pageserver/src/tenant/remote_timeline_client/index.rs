@@ -214,8 +214,18 @@ impl Lineage {
     ///
     /// Returns true if the Lsn was previously our branch point.
     pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
+        // FIXME: this is insufficient even for path of two timelines for future wal recovery
+        // purposes
         self.original_ancestor
             .is_some_and(|(_, ancestor_lsn, _)| ancestor_lsn == lsn)
+    }
+
+    pub(crate) fn is_detached_from_original_ancestor(&self) -> bool {
+        self.original_ancestor.is_some()
+    }
+
+    pub(crate) fn is_reparented(&self) -> bool {
+        !self.reparenting_history.is_empty()
     }
 }
 

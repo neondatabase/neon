@@ -10,6 +10,7 @@ use crate::{
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use pageserver_api::models::detach_ancestor::AncestorDetached;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
@@ -62,6 +63,19 @@ impl From<Error> for ApiError {
     }
 }
 
+impl From<crate::tenant::upload_queue::NotInitialized> for Error {
+    fn from(_: crate::tenant::upload_queue::NotInitialized) -> Self {
+        // treat all as shutting down signals, even though that is not entirely correct
+        // (uninitialized state)
+        Error::ShuttingDown
+    }
+}
+
+pub(crate) enum Progress {
+    Prepared(completion::Completion, PreparedTimelineDetach),
+    Done(AncestorDetached),
+}
+
 pub(crate) struct PreparedTimelineDetach {
     layers: Vec<Layer>,
 }
@@ -88,7 +102,7 @@ pub(super) async fn prepare(
     tenant: &Tenant,
     options: Options,
     ctx: &RequestContext,
-) -> Result<(completion::Completion, PreparedTimelineDetach), Error> {
+) -> Result<Progress, Error> {
     use Error::*;
 
     let Some((ancestor, ancestor_lsn)) = detached
@@ -101,10 +115,65 @@ pub(super) async fn prepare(
         // a projection of the commited data.
         //
         // the error is wrong per openapi
-        return Err(NoAncestor);
+
+        {
+            let accessor = detached.remote_client.initialized_upload_queue()?;
+
+            // we are safe to inspect the latest uploaded, because either we'll see this uploaded near
+            // the shutdown, or we'll witness this after restart is complete.
+            let latest = accessor.latest_uploaded_index_part();
+            if !latest.lineage.is_detached_from_original_ancestor() {
+                return Err(NoAncestor);
+            }
+        }
+
+        // detached has previously been detached; let's inspect each of the current timelines and
+        // report back the timelines which have been reparented by our detach
+
+        let mut all_direct_children = tenant
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|tl| matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(&ancestor, detached)))
+            .map(|tl| (tl.ancestor_lsn, tl.clone()))
+            .collect::<Vec<_>>();
+
+        let mut any_shutdown = false;
+
+        all_direct_children.retain(
+            |(_, tl)| match tl.remote_client.initialized_upload_queue() {
+                Ok(accessor) => accessor
+                    .latest_uploaded_index_part()
+                    .lineage
+                    .is_reparented(),
+                Err(_shutdownalike) => {
+                    // not 100% a shutdown, but let's bail early not to give inconsistent results in
+                    // sharded enviroment.
+                    any_shutdown = true;
+                    true
+                }
+            },
+        );
+
+        if any_shutdown {
+            // it could be one or many being deleted; have client retry
+            return Err(Error::ShuttingDown);
+        }
+
+        let mut reparented = all_direct_children;
+        reparented.sort_unstable_by_key(|(lsn, tl)| (*lsn, tl.timeline_id));
+
+        return Ok(Progress::Done(AncestorDetached {
+            reparented_timelines: reparented
+                .into_iter()
+                .map(|(_, tl)| tl.timeline_id)
+                .collect(),
+        }));
     };
 
     if !ancestor_lsn.is_valid() {
+        // FIXME: this should be distinct error, permanent until manual fix
         return Err(NoAncestor);
     }
 
@@ -159,7 +228,7 @@ pub(super) async fn prepare(
                 elapsed_ms = started_at.elapsed().as_millis(),
                 "froze and flushed the ancestor"
             );
-            Ok(())
+            Ok::<_, Error>(())
         }
         .instrument(span)
         .await?;
@@ -283,7 +352,7 @@ pub(super) async fn prepare(
 
     let prepared = PreparedTimelineDetach { layers: new_layers };
 
-    Ok((guard, prepared))
+    Ok(Progress::Prepared(guard, prepared))
 }
 
 fn partition_work(
@@ -529,7 +598,7 @@ pub(super) async fn complete(
         match res {
             Ok(Some(timeline)) => {
                 tracing::info!(reparented=%timeline.timeline_id, "reparenting done");
-                reparented.push(timeline.timeline_id);
+                reparented.push((timeline.ancestor_lsn, timeline.timeline_id));
             }
             Ok(None) => {
                 // lets just ignore this for now. one or all reparented timelines could had
@@ -550,6 +619,13 @@ pub(super) async fn complete(
     if reparenting_candidates != reparented.len() {
         tracing::info!("failed to reparent some candidates");
     }
+
+    reparented.sort_unstable();
+
+    let reparented = reparented
+        .into_iter()
+        .map(|(_, timeline_id)| timeline_id)
+        .collect();
 
     Ok(reparented)
 }
