@@ -161,7 +161,7 @@ def test_ancestor_detach_branched_from(
     )
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-    assert all_reparented == set()
+    assert all_reparented == []
 
     if restart_after:
         env.pageserver.stop()
@@ -270,7 +270,7 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     after = env.neon_cli.create_branch("after", "main", env.initial_tenant, ancestor_start_lsn=None)
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-    assert all_reparented == {reparented, same_branchpoint}
+    assert set(all_reparented) == {reparented, same_branchpoint}
 
     env.pageserver.quiesce_tenants()
 
@@ -530,7 +530,7 @@ def test_compaction_induced_by_detaches_in_history(
 
     for _, timeline_id in skip_main:
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-        assert reparented == set(), "we have no earlier branches at any level"
+        assert reparented == [], "we have no earlier branches at any level"
 
     post_detach_l0s = list(filter(lambda x: x.l0, delta_layers(branch_timeline_id)))
     assert len(post_detach_l0s) == 5, "should had inherited 4 L0s, have 5 in total"
@@ -584,23 +584,32 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
     assert info.value.status_code == 409
 
     first_branch = env.neon_cli.create_branch("first_branch")
+
     second_branch = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
+
+    # these two will be reparented, and they should be returned in stable order
+    # from pageservers OR otherwise there will be an `error!` logging from
+    # storage controller
+    reparented1 = env.neon_cli.create_branch("first_reparented", ancestor_branch_name="main")
+    reparented2 = env.neon_cli.create_branch("second_reparented", ancestor_branch_name="main")
 
     # funnily enough this does not have a prefix
     with pytest.raises(PageserverApiException, match="too many ancestors") as info:
         client.detach_ancestor(env.initial_tenant, second_branch)
     assert info.value.status_code == 400
 
-    client.detach_ancestor(env.initial_tenant, first_branch)
+    first_reparenting_response = client.detach_ancestor(env.initial_tenant, first_branch)
+    assert set(first_reparenting_response) == {reparented1, reparented2}
 
     # FIXME: this should be done by the http req handler
     for ps in pageservers.values():
         ps.quiesce_tenants()
 
-    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
-        client.detach_ancestor(env.initial_tenant, first_branch)
-    # FIXME: this should be 200 OK because we've already completed it
-    assert info.value.status_code == 409
+    for _ in range(5):
+        # once completed, we can retry this how many times
+        assert (
+            client.detach_ancestor(env.initial_tenant, first_branch) == first_reparenting_response
+        )
 
     client.tenant_delete(env.initial_tenant)
 
