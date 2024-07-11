@@ -1096,7 +1096,7 @@ impl Timeline {
                 );
             }
         }
-        // Step 1: split history into len(retain_lsn) + 2 buckets, where the last bucket is for all deltas above the horizon,
+        // Step 1: split history into len(retain_lsn_below_horizon) + 2 buckets, where the last bucket is for all deltas above the horizon,
         // and the second-to-last bucket is for the horizon. Each bucket contains lsn_last_bucket < deltas <= lsn_this_bucket.
         let (mut split_history, lsn_split_points) = {
             let mut split_history = Vec::new();
