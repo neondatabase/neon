@@ -561,7 +561,9 @@ def test_compaction_induced_by_detaches_in_history(
 
 
 @pytest.mark.parametrize("sharded", [True, False])
-def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, sharded: bool):
+def test_timeline_ancestor_detach_idempotent_success(
+    neon_env_builder: NeonEnvBuilder, sharded: bool
+):
     shards = 2 if sharded else 1
 
     neon_env_builder.num_pageservers = shards
@@ -579,24 +581,15 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
     else:
         client = env.pageserver.http_client()
 
-    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
-        client.detach_ancestor(env.initial_tenant, env.initial_timeline)
-    assert info.value.status_code == 409
-
     first_branch = env.neon_cli.create_branch("first_branch")
 
-    second_branch = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
+    _ = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
 
     # these two will be reparented, and they should be returned in stable order
     # from pageservers OR otherwise there will be an `error!` logging from
     # storage controller
     reparented1 = env.neon_cli.create_branch("first_reparented", ancestor_branch_name="main")
     reparented2 = env.neon_cli.create_branch("second_reparented", ancestor_branch_name="main")
-
-    # funnily enough this does not have a prefix
-    with pytest.raises(PageserverApiException, match="too many ancestors") as info:
-        client.detach_ancestor(env.initial_tenant, second_branch)
-    assert info.value.status_code == 400
 
     first_reparenting_response = client.detach_ancestor(env.initial_tenant, first_branch)
     assert set(first_reparenting_response) == {reparented1, reparented2}
@@ -616,6 +609,41 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
     with pytest.raises(PageserverApiException) as e:
         client.detach_ancestor(env.initial_tenant, first_branch)
     assert e.value.status_code == 404
+
+
+@pytest.mark.parametrize("sharded", [True, False])
+def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, sharded: bool):
+    # the test is split from test_timeline_ancestor_detach_idempotent_success as only these error cases should create "request was dropped before completing",
+    # given the current first error handling
+    shards = 2 if sharded else 1
+
+    neon_env_builder.num_pageservers = shards
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shards if sharded else None)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    for ps in pageservers.values():
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+        ps.allowed_errors.append(
+            ".* WARN .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: request was dropped before completing"
+        )
+
+    client = (
+        env.pageserver.http_client() if not sharded else env.storage_controller.pageserver_api()
+    )
+
+    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, env.initial_timeline)
+    assert info.value.status_code == 409
+
+    _ = env.neon_cli.create_branch("first_branch")
+
+    second_branch = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
+
+    # funnily enough this does not have a prefix
+    with pytest.raises(PageserverApiException, match="too many ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, second_branch)
+    assert info.value.status_code == 400
 
 
 def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
