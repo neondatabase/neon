@@ -2826,14 +2826,26 @@ impl Service {
                 .timeline_detach_ancestor(tenant_shard_id, timeline_id)
                 .await
                 .map_err(|e| {
-                    ApiError::InternalServerError(anyhow::anyhow!(
-                        "Error detaching timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
-                    ))
+                    use mgmt_api::Error;
+
+                    match e {
+                        // no ancestor (ever)
+                        Error::ApiError(StatusCode::CONFLICT, msg) => {
+                            ApiError::Conflict(format!("{node}: {msg}"))
+                        }
+                        // too many ancestors
+                        Error::ApiError(StatusCode::BAD_REQUEST, msg) => {
+                            ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
+                        }
+                        // rest can be mapped
+                        other => passthrough_api_error(&node, other),
+                    }
                 })
                 .map(|res| (tenant_shard_id.shard_number, res))
         }
 
         // TODO: it would be great to ensure that all shards return the same error
+        // FIXME: this logs whole
         let mut results = self
             .tenant_for_shards(targets, |tenant_shard_id, node| {
                 futures::FutureExt::boxed(detach_one(

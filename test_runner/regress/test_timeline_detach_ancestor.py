@@ -560,11 +560,21 @@ def test_compaction_induced_by_detaches_in_history(
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
 
 
-def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
-    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+@pytest.mark.parametrize("sharded", [True, False])
+def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder, sharded: bool):
+    shards = 2 if sharded else 1
 
-    client = env.pageserver.http_client()
+    neon_env_builder.num_pageservers = shards
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shards if sharded else None)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    for ps in pageservers.values():
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    client = (
+        env.pageserver.http_client() if not sharded else env.storage_controller.pageserver_api()
+    )
 
     with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
         client.detach_ancestor(env.initial_tenant, env.initial_timeline)
