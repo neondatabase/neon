@@ -237,6 +237,14 @@ impl BucketConfig {
     }
 }
 
+pub struct ControllerClientConfig {
+    /// URL to storage controller.  e.g. http://127.0.0.1:1234 when using `neon_local`
+    pub controller_api: Url,
+
+    /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
+    pub controller_jwt: String,
+}
+
 pub struct ConsoleConfig {
     pub token: String,
     pub base_url: Url,

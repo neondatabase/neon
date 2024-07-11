@@ -4,15 +4,20 @@ use std::time::{Duration, SystemTime};
 
 use crate::checks::{list_timeline_blobs, BlobDataParseResult};
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
+use crate::{
+    init_remote, BucketConfig, ControllerClientConfig, NodeKind, RootTarget, TenantShardTimelineId,
+};
 use aws_sdk_s3::Client;
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
+use pageserver_api::controller_api::TenantDescribeResponse;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use remote_storage::RemotePath;
+use reqwest::Method;
 use serde::Serialize;
+use storage_controller_client::control_api;
 use tracing::{info_span, Instrument};
 use utils::generation::Generation;
 use utils::id::{TenantId, TenantTimelineId};
@@ -21,6 +26,7 @@ use utils::id::{TenantId, TenantTimelineId};
 pub struct GcSummary {
     indices_deleted: usize,
     remote_storage_errors: usize,
+    controller_api_errors: usize,
     ancestor_layers_deleted: usize,
 }
 
@@ -30,11 +36,13 @@ impl GcSummary {
             indices_deleted,
             remote_storage_errors,
             ancestor_layers_deleted,
+            controller_api_errors,
         } = other;
 
         self.indices_deleted += indices_deleted;
         self.remote_storage_errors += remote_storage_errors;
         self.ancestor_layers_deleted += ancestor_layers_deleted;
+        self.controller_api_errors += controller_api_errors;
     }
 }
 
@@ -110,7 +118,11 @@ impl TenantRefAccumulator {
     }
 
     /// Consume Self and return a vector of ancestor tenant shards that should be GC'd, and map of referenced ancestor layers to preserve
-    fn into_gc_ancestors(self) -> (Vec<TenantShardId>, AncestorRefs) {
+    async fn into_gc_ancestors(
+        self,
+        controller_client: &control_api::Client,
+        summary: &mut GcSummary,
+    ) -> (Vec<TenantShardId>, AncestorRefs) {
         let mut ancestors_to_gc = Vec::new();
         for (tenant_id, mut shard_indices) in self.shards_seen {
             // Find the highest shard count
@@ -138,6 +150,44 @@ impl TenantRefAccumulator {
             if ancestor_shards.is_empty() {
                 tracing::debug!(%tenant_id, "No ancestor shards to clean up");
                 continue;
+            }
+
+            // Based on S3 view, this tenant looks like it might have some ancestor shard work to do.  We
+            // must only do this work if the tenant is not currently being split: otherwise, it is not safe
+            // to GC ancestors, because if the split fails then the controller will try to attach ancestor
+            // shards again.
+            match controller_client
+                .dispatch::<(), TenantDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/tenant/{tenant_id}"),
+                    None,
+                )
+                .await
+            {
+                Err(e) => {
+                    // We were not able to learn the latest shard split state from the controller, so we will not
+                    // do ancestor GC on this tenant.
+                    tracing::warn!(%tenant_id, "Failed to query storage controller, will not do ancestor GC: {e}");
+                    summary.controller_api_errors += 1;
+                    continue;
+                }
+                Ok(desc) => {
+                    // We expect to see that the latest shard count matches the one we saw in S3, and that none
+                    // of the shards indicate splitting in progress.
+                    if desc.shards.len() != latest_count.0 as usize {
+                        tracing::info!(%tenant_id, "Shard count seen in S3 ({latest_count:?}) doesn't match controller state ({})",
+                        desc.shards.len());
+                        continue;
+                    }
+
+                    if desc.shards.iter().any(|s| s.is_splitting) {
+                        tracing::info!(%tenant_id, "One or more shards is currently splitting");
+                        continue;
+                    }
+
+                    // This shouldn't be too noisy, because we only log this for tenants that have some ancestral refs.
+                    tracing::info!(%tenant_id, "Validated state with controller: {desc:?}");
+                }
             }
 
             // GC ancestor shards
@@ -383,6 +433,7 @@ async fn gc_ancestor(
 /// make sure that object listings don't get slowed down by large numbers of garbage objects.
 pub async fn pageserver_physical_gc(
     bucket_config: BucketConfig,
+    controller_client_conf: Option<ControllerClientConfig>,
     tenant_shard_ids: Vec<TenantShardId>,
     min_age: Duration,
     mode: GcMode,
@@ -479,11 +530,24 @@ pub async fn pageserver_physical_gc(
     }
 
     // Execute cross-shard GC, using the accumulator's full view of all the shards built in the per-shard GC
+    let Some(controller_client) = controller_client_conf.as_ref().map(|c| {
+        let ControllerClientConfig {
+            controller_api,
+            controller_jwt,
+        } = c;
+        control_api::Client::new(controller_api.clone(), Some(controller_jwt.clone()))
+    }) else {
+        tracing::info!("Skipping ancestor layer GC, because no `--controller-api` was specified");
+        return Ok(summary);
+    };
+
     let (ancestor_shards, ancestor_refs) = Arc::into_inner(accumulator)
         .unwrap()
         .into_inner()
         .unwrap()
-        .into_gc_ancestors();
+        .into_gc_ancestors(&controller_client, &mut summary)
+        .await;
+
     for ancestor_shard in ancestor_shards {
         gc_ancestor(
             &s3_client,

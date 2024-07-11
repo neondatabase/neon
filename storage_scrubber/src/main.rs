@@ -2,11 +2,11 @@ use anyhow::{anyhow, bail};
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
 use reqwest::Url;
-use storage_scrubber::find_large_objects;
 use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use storage_scrubber::pageserver_physical_gc::GcMode;
 use storage_scrubber::scan_pageserver_metadata::scan_metadata;
 use storage_scrubber::tenant_snapshot::SnapshotDownloader;
+use storage_scrubber::{find_large_objects, ControllerClientConfig};
 use storage_scrubber::{
     init_logging, pageserver_physical_gc::pageserver_physical_gc,
     scan_safekeeper_metadata::scan_safekeeper_metadata, BucketConfig, ConsoleConfig, NodeKind,
@@ -33,14 +33,6 @@ struct Cli {
     #[arg(long)]
     /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
     controller_jwt: Option<String>,
-}
-
-pub struct ControllerClientConf {
-    /// URL to storage controller.  e.g. http://127.0.0.1:1234 when using `neon_local`
-    controller_api: Url,
-
-    /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
-    controller_jwt: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -222,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
             mode,
         } => {
             let controller_client_conf = cli.controller_api.map(|controller_api| {
-                ControllerClientConf {
+                ControllerClientConfig {
                     controller_api,
                     // Default to no key: this is a convenience when working in a development environment
                     controller_jwt: cli.controller_jwt.unwrap_or("".to_owned()),
@@ -244,8 +236,14 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            let summary =
-                pageserver_physical_gc(bucket_config, tenant_ids, min_age.into(), mode).await?;
+            let summary = pageserver_physical_gc(
+                bucket_config,
+                controller_client_conf,
+                tenant_ids,
+                min_age.into(),
+                mode,
+            )
+            .await?;
             println!("{}", serde_json::to_string(&summary).unwrap());
             Ok(())
         }
