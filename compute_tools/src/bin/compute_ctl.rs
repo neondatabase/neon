@@ -64,6 +64,7 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
+use rlimit::{setrlimit, Resource};
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
@@ -71,6 +72,9 @@ const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
     let (build_tag, clap_args) = init()?;
+
+    // enable core dumping for all child processes
+    setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
 
     let (pg_handle, start_pg_result) = {
         // Enter startup tracing context

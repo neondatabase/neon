@@ -265,15 +265,19 @@ paths:
           type: string
           format: hex
     post:
-      description: Obtain lease for the given LSN
-      parameters:
-        - name: lsn
-          in: query
-          required: true
-          schema:
-            type: string
-            format: hex
-          description: A LSN to obtain the lease for
+      description: Obtains a lease for the given LSN.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+               - lsn
+              properties:
+                lsn:
+                  description: A LSN to obtain the lease for.
+                  type: string
+                  format: hex
       responses:
         "200":
           description: OK
@@ -869,8 +873,6 @@ components:
           type: string
         max_lsn_wal_lag:
           type: integer
-        trace_read_requests:
-          type: boolean
         heatmap_period:
           type: string
     TenantConfigResponse:

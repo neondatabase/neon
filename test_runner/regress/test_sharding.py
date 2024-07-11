@@ -225,6 +225,12 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
     workload.validate()
     workload.stop()
 
+    # Do a full image layer generation before splitting, so that when we compact after splitting
+    # we should only see sizes decrease (from post-split drops/rewrites), not increase (from image layer generation)
+    env.get_tenant_pageserver(tenant_id).http_client().timeline_compact(
+        tenant_id, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
+    )
+
     # Split one shard into two
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=2)
 
@@ -1144,10 +1150,6 @@ def test_sharding_split_failures(
     )
 
     for ps in env.pageservers:
-        # When we do node failures and abandon a shard, it will de-facto have old generation and
-        # thereby be unable to publish remote consistent LSN updates
-        ps.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
-
         # If we're using a failure that will panic the storage controller, all background
         # upcalls from the pageserver can fail
         ps.allowed_errors.append(".*calling control plane generation validation API failed.*")

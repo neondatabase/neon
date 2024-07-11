@@ -13,11 +13,7 @@ use std::{
 
 use measured::{
     label::{LabelGroupVisitor, LabelName, LabelValue, LabelVisitor},
-    metric::{
-        group::{Encoding, MetricValue},
-        name::MetricNameEncoder,
-        Metric, MetricType, MetricVec,
-    },
+    metric::{counter::CounterState, name::MetricNameEncoder, Metric, MetricType, MetricVec},
     text::TextEncoder,
     LabelGroup,
 };
@@ -144,6 +140,7 @@ impl<const N: usize> HyperLogLogState<N> {
         })
     }
 }
+
 impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEncoder<W>>
     for HyperLogLogState<N>
 {
@@ -182,12 +179,13 @@ impl<W: std::io::Write, const N: usize> measured::metric::MetricEncoding<TextEnc
             .into_iter()
             .enumerate()
             .try_for_each(|(hll_shard, val)| {
-                enc.write_metric_value(
-                    name.by_ref(),
+                CounterState::new(val as u64).collect_into(
+                    &(),
                     labels.by_ref().compose_with(HllShardLabel {
                         hll_shard: hll_shard as i64,
                     }),
-                    MetricValue::Int(val as i64),
+                    name.by_ref(),
+                    enc,
                 )
             })
     }

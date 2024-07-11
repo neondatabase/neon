@@ -9,7 +9,7 @@ use super::{
 use crate::{
     auth::backend::ComputeUserInfo,
     compute,
-    console::messages::ColdStartInfo,
+    console::messages::{ColdStartInfo, Reason},
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::EndpointRateLimiter,
@@ -17,10 +17,10 @@ use crate::{
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 pub struct Api {
     endpoint: http::Endpoint,
@@ -273,26 +273,34 @@ impl super::Api for Api {
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key = user_info.endpoint_cache_key();
 
+        macro_rules! check_cache {
+            () => {
+                if let Some(cached) = self.caches.node_info.get(&key) {
+                    let (cached, info) = cached.take_value();
+                    let info = info.map_err(|c| {
+                        info!(key = &*key, "found cached wake_compute error");
+                        WakeComputeError::ApiError(ApiError::Console(*c))
+                    })?;
+
+                    debug!(key = &*key, "found cached compute node info");
+                    ctx.set_project(info.aux.clone());
+                    return Ok(cached.map(|()| info));
+                }
+            };
+        }
+
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(&key) {
-            info!(key = &*key, "found cached compute node info");
-            ctx.set_project(cached.aux.clone());
-            return Ok(cached);
-        }
+        check_cache!();
 
         let permit = self.locks.get_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
-            if let Some(cached) = self.caches.node_info.get(&key) {
-                info!(key = &*key, "found cached compute node info");
-                ctx.set_project(cached.aux.clone());
-                return Ok(cached);
-            }
+            check_cache!();
         }
 
         // check rate limit
@@ -300,23 +308,56 @@ impl super::Api for Api {
             .wake_compute_endpoint_rate_limiter
             .check(user_info.endpoint.normalize_intern(), 1)
         {
-            info!(key = &*key, "found cached compute node info");
             return Err(WakeComputeError::TooManyConnections);
         }
 
-        let mut node = permit.release_result(self.do_wake_compute(ctx, user_info).await)?;
-        ctx.set_project(node.aux.clone());
-        let cold_start_info = node.aux.cold_start_info;
-        info!("woken up a compute node");
+        let node = permit.release_result(self.do_wake_compute(ctx, user_info).await);
+        match node {
+            Ok(node) => {
+                ctx.set_project(node.aux.clone());
+                debug!(key = &*key, "created a cache entry for woken compute node");
 
-        // store the cached node as 'warm'
-        node.aux.cold_start_info = ColdStartInfo::WarmCached;
-        let (_, mut cached) = self.caches.node_info.insert(key.clone(), node);
-        cached.aux.cold_start_info = cold_start_info;
+                let mut stored_node = node.clone();
+                // store the cached node as 'warm_cached'
+                stored_node.aux.cold_start_info = ColdStartInfo::WarmCached;
 
-        info!(key = &*key, "created a cache entry for compute node info");
+                let (_, cached) = self.caches.node_info.insert_unit(key, Ok(stored_node));
 
-        Ok(cached)
+                Ok(cached.map(|()| node))
+            }
+            Err(err) => match err {
+                WakeComputeError::ApiError(ApiError::Console(err)) => {
+                    let Some(status) = &err.status else {
+                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                    };
+
+                    let reason = status
+                        .details
+                        .error_info
+                        .map_or(Reason::Unknown, |x| x.reason);
+
+                    // if we can retry this error, do not cache it.
+                    if reason.can_retry() {
+                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                    }
+
+                    // at this point, we should only have quota errors.
+                    debug!(
+                        key = &*key,
+                        "created a cache entry for the wake compute error"
+                    );
+
+                    self.caches.node_info.insert_ttl(
+                        key,
+                        Err(Box::new(err.clone())),
+                        Duration::from_secs(30),
+                    );
+
+                    Err(WakeComputeError::ApiError(ApiError::Console(err)))
+                }
+                err => return Err(err),
+            },
+        }
     }
 }
 

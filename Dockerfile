@@ -57,6 +57,7 @@ RUN set -e \
       --bin storage_controller  \
       --bin proxy  \
       --bin neon_local \
+      --bin storage_scrubber \
       --locked --release \
     && cachepot -s
 
@@ -83,6 +84,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker 
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_scrubber    /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/

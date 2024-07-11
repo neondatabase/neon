@@ -14,6 +14,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use camino::Utf8Path;
+use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
@@ -65,12 +66,12 @@ use std::{
     ops::{Deref, Range},
 };
 
-use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
+        storage_layer::PersistentLayerDesc,
     },
 };
 use crate::{
@@ -97,6 +98,7 @@ use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
@@ -364,6 +366,7 @@ pub struct Timeline {
     repartition_threshold: u64,
 
     last_image_layer_creation_check_at: AtomicLsn,
+    last_image_layer_creation_check_instant: std::sync::Mutex<Option<Instant>>,
 
     /// Current logical size of the "datadir", at the last LSN.
     current_logical_size: LogicalSize,
@@ -463,6 +466,9 @@ pub(crate) struct GcInfo {
 
     /// Leases granted to particular LSNs.
     pub(crate) leases: BTreeMap<Lsn, LsnLease>,
+
+    /// Whether our branch point is within our ancestor's PITR interval (for cost estimation)
+    pub(crate) within_ancestor_pitr: bool,
 }
 
 impl GcInfo {
@@ -723,6 +729,9 @@ impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
             CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            CreateImageLayersError::Other(e) => {
+                CompactionError::Other(e.context("create image layers"))
+            }
             _ => CompactionError::Other(e.into()),
         }
     }
@@ -849,6 +858,18 @@ impl Timeline {
         self.ancestor_timeline
             .as_ref()
             .map(|ancestor| ancestor.timeline_id)
+    }
+
+    /// Get the bytes written since the PITR cutoff on this branch, and
+    /// whether this branch's ancestor_lsn is within its parent's PITR.
+    pub(crate) fn get_pitr_history_stats(&self) -> (u64, bool) {
+        let gc_info = self.gc_info.read().unwrap();
+        let history = self
+            .get_last_record_lsn()
+            .checked_sub(gc_info.cutoffs.pitr)
+            .unwrap_or(Lsn(0))
+            .0;
+        (history, gc_info.within_ancestor_pitr)
     }
 
     /// Lock and get timeline's GC cutoff
@@ -1269,15 +1290,14 @@ impl Timeline {
             if avg >= Self::VEC_GET_LAYERS_VISITED_WARN_THRESH {
                 use utils::rate_limit::RateLimit;
                 static LOGGED: Lazy<Mutex<RateLimit>> =
-                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(60))));
                 let mut rate_limit = LOGGED.lock().unwrap();
                 rate_limit.call(|| {
                     tracing::info!(
-                    tenant_id = %self.tenant_shard_id.tenant_id,
-                    shard_id = %self.tenant_shard_id.shard_slug(),
-                    timeline_id = %self.timeline_id,
-                    "Vectored read for {} visited {} layers on average per key and {} in total. {}/{} pages were returned",
-                    keyspace, avg, layers_visited, results.len(), keyspace.total_raw_size());
+                      shard_id = %self.tenant_shard_id.shard_slug(),
+                      lsn = %lsn,
+                      "Vectored read for {} visited {} layers on average per key and {} in total. {}/{} pages were returned",
+                      keyspace, avg, layers_visited, results.len(), keyspace.total_raw_size());
                 });
             }
 
@@ -1576,7 +1596,13 @@ impl Timeline {
                     let existing_lease = occupied.get_mut();
                     if valid_until > existing_lease.valid_until {
                         existing_lease.valid_until = valid_until;
+                        let dt: DateTime<Utc> = valid_until.into();
+                        info!("lease extended to {}", dt);
+                    } else {
+                        let dt: DateTime<Utc> = existing_lease.valid_until.into();
+                        info!("existing lease covers greater length, valid until {}", dt);
                     }
+
                     existing_lease.clone()
                 } else {
                     // Reject already GC-ed LSN (lsn < latest_gc_cutoff)
@@ -1585,6 +1611,8 @@ impl Timeline {
                         bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
                     }
 
+                    let dt: DateTime<Utc> = valid_until.into();
+                    info!("lease created, valid until {}", dt);
                     entry.or_insert(LsnLease { valid_until }).clone()
                 }
             };
@@ -2361,6 +2389,7 @@ impl Timeline {
                 )),
                 repartition_threshold: 0,
                 last_image_layer_creation_check_at: AtomicLsn::new(0),
+                last_image_layer_creation_check_instant: Mutex::new(None),
 
                 last_received_wal: Mutex::new(None),
                 rel_size_cache: RwLock::new(RelSizeCache {
@@ -4441,6 +4470,58 @@ impl Timeline {
         }
     }
 
+    /// Predicate function which indicates whether we should check if new image layers
+    /// are required. Since checking if new image layers are required is expensive in
+    /// terms of CPU, we only do it in the following cases:
+    /// 1. If the timeline has ingested sufficient WAL to justify the cost
+    /// 2. If enough time has passed since the last check
+    /// 2.1. For large tenants, we wish to perform the check more often since they
+    /// suffer from the lack of image layers
+    /// 2.2. For small tenants (that can mostly fit in RAM), we use a much longer interval
+    fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
+        const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
+
+        let last_checks_at = self.last_image_layer_creation_check_at.load();
+        let distance = lsn
+            .checked_sub(last_checks_at)
+            .expect("Attempt to compact with LSN going backwards");
+        let min_distance =
+            self.get_image_layer_creation_check_threshold() as u64 * self.get_checkpoint_distance();
+
+        let distance_based_decision = distance.0 >= min_distance;
+
+        let mut time_based_decision = false;
+        let mut last_check_instant = self.last_image_layer_creation_check_instant.lock().unwrap();
+        if let CurrentLogicalSize::Exact(logical_size) = self.current_logical_size.current_size() {
+            let check_required_after = if Into::<u64>::into(&logical_size) >= LARGE_TENANT_THRESHOLD
+            {
+                self.get_checkpoint_timeout()
+            } else {
+                Duration::from_secs(3600 * 48)
+            };
+
+            time_based_decision = match *last_check_instant {
+                Some(last_check) => {
+                    let elapsed = last_check.elapsed();
+                    elapsed >= check_required_after
+                }
+                None => true,
+            };
+        }
+
+        // Do the expensive delta layer counting only if this timeline has ingested sufficient
+        // WAL since the last check or a checkpoint timeout interval has elapsed since the last
+        // check.
+        let decision = distance_based_decision || time_based_decision;
+
+        if decision {
+            self.last_image_layer_creation_check_at.store(lsn);
+            *last_check_instant = Some(Instant::now());
+        }
+
+        decision
+    }
+
     #[tracing::instrument(skip_all, fields(%lsn, %mode))]
     async fn create_image_layers(
         self: &Arc<Timeline>,
@@ -4463,22 +4544,7 @@ impl Timeline {
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
         let mut start = Key::MIN;
 
-        let check_for_image_layers = {
-            let last_checks_at = self.last_image_layer_creation_check_at.load();
-            let distance = lsn
-                .checked_sub(last_checks_at)
-                .expect("Attempt to compact with LSN going backwards");
-            let min_distance = self.get_image_layer_creation_check_threshold() as u64
-                * self.get_checkpoint_distance();
-
-            // Skip the expensive delta layer counting if this timeline has not ingested sufficient
-            // WAL since the last check.
-            distance.0 >= min_distance
-        };
-
-        if check_for_image_layers {
-            self.last_image_layer_creation_check_at.store(lsn);
-        }
+        let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
 
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
@@ -4505,6 +4571,22 @@ impl Timeline {
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
                 if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
                     start = img_range.end;
+                    continue;
+                }
+            } else if let ImageLayerCreationMode::Force = mode {
+                // When forced to create image layers, we might try and create them where they already
+                // exist.  This mode is only used in tests/debug.
+                let layers = self.layers.read().await;
+                if layers.contains_key(&PersistentLayerKey {
+                    key_range: img_range.clone(),
+                    lsn_range: PersistentLayerDesc::image_layer_lsn_range(lsn),
+                    is_delta: false,
+                }) {
+                    tracing::info!(
+                        "Skipping image layer at {lsn} {}..{}, already exists",
+                        img_range.start,
+                        img_range.end
+                    );
                     continue;
                 }
             }
@@ -4731,6 +4813,42 @@ impl DurationRecorder {
         match self {
             DurationRecorder::NotStarted => None,
             DurationRecorder::Recorded(recorded, _) => Some(recorded),
+        }
+    }
+}
+
+/// Descriptor for a delta layer used in testing infra. The start/end key/lsn range of the
+/// delta layer might be different from the min/max key/lsn in the delta layer. Therefore,
+/// the layer descriptor requires the user to provide the ranges, which should cover all
+/// keys specified in the `data` field.
+#[cfg(test)]
+pub struct DeltaLayerTestDesc {
+    pub lsn_range: Range<Lsn>,
+    pub key_range: Range<Key>,
+    pub data: Vec<(Key, Lsn, Value)>,
+}
+
+#[cfg(test)]
+impl DeltaLayerTestDesc {
+    #[allow(dead_code)]
+    pub fn new(lsn_range: Range<Lsn>, key_range: Range<Key>, data: Vec<(Key, Lsn, Value)>) -> Self {
+        Self {
+            lsn_range,
+            key_range,
+            data,
+        }
+    }
+
+    pub fn new_with_inferred_key_range(
+        lsn_range: Range<Lsn>,
+        data: Vec<(Key, Lsn, Value)>,
+    ) -> Self {
+        let key_min = data.iter().map(|(key, _, _)| key).min().unwrap();
+        let key_max = data.iter().map(|(key, _, _)| key).max().unwrap();
+        Self {
+            key_range: (*key_min)..(key_max.next()),
+            lsn_range,
+            data,
         }
     }
 }
@@ -5535,37 +5653,65 @@ impl Timeline {
     #[cfg(test)]
     pub(super) async fn force_create_delta_layer(
         self: &Arc<Timeline>,
-        mut deltas: Vec<(Key, Lsn, Value)>,
+        mut deltas: DeltaLayerTestDesc,
         check_start_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let last_record_lsn = self.get_last_record_lsn();
-        deltas.sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
-        let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
-        let end_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
-        let min_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
-        let max_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
+        deltas
+            .data
+            .sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
+        assert!(deltas.data.first().unwrap().0 >= deltas.key_range.start);
+        assert!(deltas.data.last().unwrap().0 < deltas.key_range.end);
+        for (_, lsn, _) in &deltas.data {
+            assert!(deltas.lsn_range.start <= *lsn && *lsn < deltas.lsn_range.end);
+        }
         assert!(
-            max_lsn <= last_record_lsn,
-            "advance last record lsn before inserting a layer, max_lsn={max_lsn}, last_record_lsn={last_record_lsn}"
+            deltas.lsn_range.end <= last_record_lsn,
+            "advance last record lsn before inserting a layer, end_lsn={}, last_record_lsn={}",
+            deltas.lsn_range.end,
+            last_record_lsn
         );
-        let end_lsn = Lsn(max_lsn.0 + 1);
         if let Some(check_start_lsn) = check_start_lsn {
-            assert!(min_lsn >= check_start_lsn);
+            assert!(deltas.lsn_range.start >= check_start_lsn);
+        }
+        // check if the delta layer does not violate the LSN invariant, the legacy compaction should always produce a batch of
+        // layers of the same start/end LSN, and so should the force inserted layer
+        {
+            /// Checks if a overlaps with b, assume a/b = [start, end).
+            pub fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
+                !(a.end <= b.start || b.end <= a.start)
+            }
+
+            let guard = self.layers.read().await;
+            for layer in guard.layer_map().iter_historic_layers() {
+                if layer.is_delta()
+                    && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
+                    && layer.lsn_range != deltas.lsn_range
+                {
+                    // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
+                    panic!(
+                        "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",
+                        deltas.lsn_range.start, deltas.lsn_range.end, layer.lsn_range.start, layer.lsn_range.end
+                    );
+                }
+            }
         }
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timeline_id,
             self.tenant_shard_id,
-            min_key,
-            min_lsn..end_lsn,
+            deltas.key_range.start,
+            deltas.lsn_range,
             ctx,
         )
         .await?;
-        for (key, lsn, val) in deltas {
+        for (key, lsn, val) in deltas.data {
             delta_layer_writer.put_value(key, lsn, val, ctx).await?;
         }
-        let delta_layer = delta_layer_writer.finish(end_key, self, ctx).await?;
+        let delta_layer = delta_layer_writer
+            .finish(deltas.key_range.end, self, ctx)
+            .await?;
 
         {
             let mut guard = self.layers.write().await;

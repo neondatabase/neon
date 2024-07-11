@@ -30,7 +30,7 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     uses: ./.github/workflows/check-permissions.yml
     with:
-      github-event-name: ${{ github.event_name}}
+      github-event-name: ${{ github.event_name }}
 
   cancel-previous-e2e-tests:
     needs: [ check-permissions ]
@@ -751,14 +751,16 @@ jobs:
         run: |
           mkdir -p .docker-custom
           echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v2
+      - uses: docker/setup-buildx-action@v3
+        with:
+          cache-binary: false
 
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -829,11 +831,12 @@ jobs:
         run: |
           mkdir -p .docker-custom
           echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-      - uses: docker/setup-buildx-action@v2
+      - uses: docker/setup-buildx-action@v3
         with:
+          cache-binary: false
           # Disable parallelism for docker buildkit.
           # As we already build everything with `make -j$(nproc)`, running it in additional level of parallelisam blows up the Runner.
-          config-inline: |
+          buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 1
 
@@ -849,7 +852,7 @@ jobs:
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
       - name: Build compute-node image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -868,7 +871,7 @@ jobs:
 
       - name: Build neon extensions test image
         if: matrix.version == 'v16'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
@@ -889,7 +892,7 @@ jobs:
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
         if: matrix.version == 'v16'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           target: compute-tools-image
           context: .
@@ -1333,6 +1336,7 @@ jobs:
         env:
           BUCKET: neon-github-public-dev
           PREFIX: artifacts/latest
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           # Update compatibility snapshot for the release
           for pg_version in v14 v15 v16; do
@@ -1346,7 +1350,7 @@ jobs:
 
           # Update Neon artifact for the release (reuse already uploaded artifact)
           for build_type in debug release; do
-            OLD_PREFIX=artifacts/${GITHUB_RUN_ID}
+            OLD_PREFIX=artifacts/${COMMIT_SHA}/${GITHUB_RUN_ID}
             FILENAME=neon-${{ runner.os }}-${{ runner.arch }}-${build_type}-artifact.tar.zst
 
             S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
@@ -1365,3 +1369,31 @@ jobs:
     with:
       from-tag: ${{ needs.build-build-tools-image.outputs.image-tag }}
     secrets: inherit
+
+  # This job simplifies setting branch protection rules (in GitHub UI)
+  # by allowing to set only this job instead of listing many others.
+  # It also makes it easier to rename or parametrise jobs (using matrix)
+  # which requires changes in branch protection rules
+  #
+  # Note, that we can't add external check (like `neon-cloud-e2e`) we still need to use GitHub UI for that.
+  #
+  # https://github.com/neondatabase/neon/settings/branch_protection_rules
+  conclusion:
+    if: always()
+    # Format `needs` differently to make the list more readable.
+    # Usually we do `needs: [...]`
+    needs:
+      - check-codestyle-python
+      - check-codestyle-rust
+      - regress-tests
+      - test-images
+    runs-on: ubuntu-22.04
+    steps:
+      # The list of possible results:
+      # https://docs.github.com/en/actions/learn-github-actions/contexts#needs-context
+      - name: Fail the job if any of the dependencies do not succeed
+        run: exit 1
+        if: |
+          contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
+          || contains(needs.*.result, 'skipped')

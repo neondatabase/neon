@@ -19,6 +19,7 @@ use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
+use tracing::warn;
 
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
@@ -72,14 +73,22 @@ impl<'a> BlockCursor<'a> {
                 len_buf.copy_from_slice(&buf[off..off + 4]);
                 off += 4;
             }
-            len_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
+            let bit_mask = if self.read_compressed {
+                !LEN_COMPRESSION_BIT_MASK
+            } else {
+                0x7f
+            };
+            len_buf[0] &= bit_mask;
             u32::from_be_bytes(len_buf) as usize
         };
         let compression_bits = first_len_byte & LEN_COMPRESSION_BIT_MASK;
 
         let mut tmp_buf = Vec::new();
         let buf_to_write;
-        let compression = if compression_bits <= BYTE_UNCOMPRESSED {
+        let compression = if compression_bits <= BYTE_UNCOMPRESSED || !self.read_compressed {
+            if compression_bits > BYTE_UNCOMPRESSED {
+                warn!("reading key above future limit ({len} bytes)");
+            }
             buf_to_write = dstbuf;
             None
         } else if compression_bits == BYTE_ZSTD {
@@ -264,7 +273,8 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
-        self.write_blob_maybe_compressed(srcbuf, ctx, None).await
+        self.write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
+            .await
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
@@ -273,7 +283,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         &mut self,
         srcbuf: B,
         ctx: &RequestContext,
-        algorithm: Option<ImageCompressionAlgorithm>,
+        algorithm: ImageCompressionAlgorithm,
     ) -> (B::Buf, Result<u64, Error>) {
         let offset = self.offset;
 
@@ -305,7 +315,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                     );
                 }
                 let (high_bit_mask, len_written, srcbuf) = match algorithm {
-                    Some(ImageCompressionAlgorithm::Zstd { level }) => {
+                    ImageCompressionAlgorithm::Zstd { level } => {
                         let mut encoder = if let Some(level) = level {
                             async_compression::tokio::write::ZstdEncoder::with_quality(
                                 Vec::new(),
@@ -326,7 +336,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                             (BYTE_UNCOMPRESSED, len, slice.into_inner())
                         }
                     }
-                    None => (BYTE_UNCOMPRESSED, len, srcbuf.slice_full().into_inner()),
+                    ImageCompressionAlgorithm::Disabled => {
+                        (BYTE_UNCOMPRESSED, len, srcbuf.slice_full().into_inner())
+                    }
                 };
                 let mut len_buf = (len_written as u32).to_be_bytes();
                 assert_eq!(len_buf[0] & 0xf0, 0);
@@ -384,11 +396,12 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
-        round_trip_test_compressed::<BUFFERED, 0>(blobs).await
+        round_trip_test_compressed::<BUFFERED>(blobs, false).await
     }
 
-    async fn round_trip_test_compressed<const BUFFERED: bool, const COMPRESSION: u8>(
+    async fn round_trip_test_compressed<const BUFFERED: bool>(
         blobs: &[Vec<u8>],
+        compression: bool,
     ) -> Result<(), Error> {
         let temp_dir = camino_tempfile::tempdir()?;
         let pathbuf = temp_dir.path().join("file");
@@ -400,17 +413,15 @@ mod tests {
             let file = VirtualFile::create(pathbuf.as_path(), &ctx).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
-                let (_, res) = match COMPRESSION {
-                    0 => wtr.write_blob(blob.clone(), &ctx).await,
-                    1 => {
-                        wtr.write_blob_maybe_compressed(
-                            blob.clone(),
-                            &ctx,
-                            Some(ImageCompressionAlgorithm::Zstd { level: Some(1) }),
-                        )
-                        .await
-                    }
-                    _ => unreachable!("Invalid compression {COMPRESSION}"),
+                let (_, res) = if compression {
+                    wtr.write_blob_maybe_compressed(
+                        blob.clone(),
+                        &ctx,
+                        ImageCompressionAlgorithm::Zstd { level: Some(1) },
+                    )
+                    .await
+                } else {
+                    wtr.write_blob(blob.clone(), &ctx).await
                 };
                 let offs = res?;
                 offsets.push(offs);
@@ -425,7 +436,7 @@ mod tests {
 
         let file = VirtualFile::open(pathbuf.as_path(), &ctx).await?;
         let rdr = BlockReaderRef::VirtualFile(&file);
-        let rdr = BlockCursor::new(rdr);
+        let rdr = BlockCursor::new_with_compression(rdr, compression);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
             let blob_read = rdr.read_blob(*offset, &ctx).await?;
             assert_eq!(
@@ -459,6 +470,8 @@ mod tests {
         ];
         round_trip_test::<false>(blobs).await?;
         round_trip_test::<true>(blobs).await?;
+        round_trip_test_compressed::<false>(blobs, true).await?;
+        round_trip_test_compressed::<true>(blobs, true).await?;
         Ok(())
     }
 
@@ -474,8 +487,8 @@ mod tests {
         ];
         round_trip_test::<false>(blobs).await?;
         round_trip_test::<true>(blobs).await?;
-        round_trip_test_compressed::<false, 1>(blobs).await?;
-        round_trip_test_compressed::<true, 1>(blobs).await?;
+        round_trip_test_compressed::<false>(blobs, true).await?;
+        round_trip_test_compressed::<true>(blobs, true).await?;
         Ok(())
     }
 

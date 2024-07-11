@@ -55,10 +55,6 @@ def setup_env(
         }
         template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
         env.pageserver.tenant_detach(template_tenant)
-        env.pageserver.allowed_errors.append(
-            # tenant detach causes this because the underlying attach-hook removes the tenant from storage controller entirely
-            ".*Dropped remote consistent LSN updates.*",
-        )
         env.pageserver.tenant_attach(template_tenant, config)
         ep = env.endpoints.create_start("main", tenant_id=template_tenant)
         ep.safe_psql("create table foo(b text)")

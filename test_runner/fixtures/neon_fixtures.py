@@ -87,6 +87,8 @@ from fixtures.utils import (
 )
 from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
+from .neon_api import NeonAPI
+
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
 summoned by placing its name in the test's arguments.
@@ -182,6 +184,25 @@ def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Ite
 
     log.info(f"versioned_pg_distrib_dir is {versioned_dir}")
     yield versioned_dir
+
+
+@pytest.fixture(scope="session")
+def neon_api_key() -> str:
+    api_key = os.getenv("NEON_API_KEY")
+    if not api_key:
+        raise AssertionError("Set the NEON_API_KEY environment variable")
+
+    return api_key
+
+
+@pytest.fixture(scope="session")
+def neon_api_base_url() -> str:
+    return os.getenv("NEON_API_BASE_URL", "https://console-stage.neon.build/api/v2")
+
+
+@pytest.fixture(scope="session")
+def neon_api(neon_api_key: str, neon_api_base_url: str) -> NeonAPI:
+    return NeonAPI(neon_api_key, neon_api_base_url)
 
 
 def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "function"]:
@@ -471,6 +492,7 @@ class NeonEnvBuilder:
         pageserver_virtual_file_io_engine: Optional[str] = None,
         pageserver_aux_file_policy: Optional[AuxFileStore] = None,
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
+        safekeeper_extra_opts: Optional[list[str]] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -535,6 +557,8 @@ class NeonEnvBuilder:
             log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
 
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
+
+        self.safekeeper_extra_opts = safekeeper_extra_opts
 
         assert test_name.startswith(
             "test_"
@@ -943,6 +967,8 @@ class NeonEnvBuilder:
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
                 ps_assert_metric_no_errors=(exc_type is None),
+                # do not fail on endpoint errors to allow the rest of cleanup to proceed
+                fail_on_endpoint_errors=False,
             )
             cleanup_error = None
 
@@ -1170,7 +1196,9 @@ class NeonEnv:
                 sk_cfg[
                     "remote_storage"
                 ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
-            self.safekeepers.append(Safekeeper(env=self, id=id, port=port))
+            self.safekeepers.append(
+                Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
+            )
             cfg["safekeepers"].append(sk_cfg)
 
         log.info(f"Config: {cfg}")
@@ -1214,11 +1242,11 @@ class NeonEnv:
         for f in futs:
             f.result()
 
-    def stop(self, immediate=False, ps_assert_metric_no_errors=False):
+    def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.
         """
-        self.endpoints.stop_all()
+        self.endpoints.stop_all(fail_on_endpoint_errors)
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
@@ -2114,6 +2142,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return self
 
     @staticmethod
+    def retryable_node_operation(op, ps_id, max_attempts, backoff):
+        while max_attempts > 0:
+            try:
+                op(ps_id)
+                return
+            except StorageControllerApiException as e:
+                max_attempts -= 1
+                log.info(f"Operation failed ({max_attempts} attempts left): {e}")
+
+                if max_attempts == 0:
+                    raise e
+
+                time.sleep(backoff)
+
+    @staticmethod
     def raise_api_exception(res: requests.Response):
         try:
             res.raise_for_status()
@@ -2452,6 +2495,38 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info("storage controller passed consistency check")
+
+    def poll_node_status(
+        self, node_id: int, desired_scheduling_policy: str, max_attempts: int, backoff: int
+    ):
+        """
+        Poll the node status until it reaches 'desired_scheduling_policy' or 'max_attempts' have been exhausted
+        """
+        log.info(f"Polling {node_id} for {desired_scheduling_policy} scheduling policy")
+        while max_attempts > 0:
+            try:
+                status = self.node_status(node_id)
+                policy = status["scheduling"]
+                if policy == desired_scheduling_policy:
+                    return
+                else:
+                    max_attempts -= 1
+                    log.info(f"Status call returned {policy=} ({max_attempts} attempts left)")
+
+                    if max_attempts == 0:
+                        raise AssertionError(
+                            f"Status for {node_id=} did not reach {desired_scheduling_policy=}"
+                        )
+
+                    time.sleep(backoff)
+            except StorageControllerApiException as e:
+                max_attempts -= 1
+                log.info(f"Status call failed ({max_attempts} retries left): {e}")
+
+                if max_attempts == 0:
+                    raise e
+
+                time.sleep(backoff)
 
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):
@@ -2813,14 +2888,21 @@ class PgBin:
         env.update(env_add)
         return env
 
-    def run(
+    def _log_env(self, env: dict[str, str]) -> None:
+        env_s = {}
+        for k, v in env.items():
+            if k.startswith("PG") and k != "PGPASSWORD":
+                env_s[k] = v
+        log.debug(f"Environment: {env_s}")
+
+    def run_nonblocking(
         self,
         command: List[str],
         env: Optional[Env] = None,
         cwd: Optional[Union[str, Path]] = None,
-    ):
+    ) -> subprocess.Popen[Any]:
         """
-        Run one of the postgres binaries.
+        Run one of the postgres binaries, not waiting for it to finish
 
         The command should be in list form, e.g. ['pgbench', '-p', '55432']
 
@@ -2831,11 +2913,34 @@ class PgBin:
 
         If you want stdout/stderr captured to files, use `run_capture` instead.
         """
-
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
-        subprocess.run(command, env=env, cwd=cwd, check=True)
+        self._log_env(env)
+        return subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE, text=True)
+
+    def run(
+        self,
+        command: List[str],
+        env: Optional[Env] = None,
+        cwd: Optional[Union[str, Path]] = None,
+    ) -> None:
+        """
+        Run one of the postgres binaries, waiting for it to finish
+
+        The command should be in list form, e.g. ['pgbench', '-p', '55432']
+
+        All the necessary environment variables will be set.
+
+        If the first argument (the command name) doesn't include a path (no '/'
+        characters present), then it will be edited to include the correct path.
+
+        If you want stdout/stderr captured to files, use `run_capture` instead.
+        """
+        proc = self.run_nonblocking(command, env, cwd)
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args)
 
     def run_capture(
         self,
@@ -2855,6 +2960,7 @@ class PgBin:
         self._fixpath(command)
         log.info(f"Running command '{' '.join(command)}'")
         env = self._build_env(env)
+        self._log_env(env)
         base_path, _, _ = subprocess_capture(
             self.log_dir,
             command,
@@ -3852,9 +3958,17 @@ class EndpointFactory:
             pageserver_id=pageserver_id,
         )
 
-    def stop_all(self) -> "EndpointFactory":
+    def stop_all(self, fail_on_error=True) -> "EndpointFactory":
+        exception = None
         for ep in self.endpoints:
-            ep.stop()
+            try:
+                ep.stop()
+            except Exception as e:
+                log.error(f"Failed to stop endpoint {ep.endpoint_id}: {e}")
+                exception = e
+
+        if fail_on_error and exception is not None:
+            raise exception
 
         return self
 
@@ -3907,16 +4021,28 @@ class Safekeeper(LogUtils):
     id: int
     running: bool = False
 
-    def __init__(self, env: NeonEnv, port: SafekeeperPort, id: int, running: bool = False):
+    def __init__(
+        self,
+        env: NeonEnv,
+        port: SafekeeperPort,
+        id: int,
+        running: bool = False,
+        extra_opts: Optional[List[str]] = None,
+    ):
         self.env = env
         self.port = port
         self.id = id
         self.running = running
         self.logfile = Path(self.data_dir) / f"safekeeper-{id}.log"
+        self.extra_opts = extra_opts
 
     def start(
         self, extra_opts: Optional[List[str]] = None, timeout_in_seconds: Optional[int] = None
     ) -> "Safekeeper":
+        if extra_opts is None:
+            # Apply either the extra_opts passed in, or the ones from our constructor: we do not merge the two.
+            extra_opts = self.extra_opts
+
         assert self.running is False
         self.env.neon_cli.safekeeper_start(
             self.id, extra_opts=extra_opts, timeout_in_seconds=timeout_in_seconds

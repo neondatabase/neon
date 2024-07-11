@@ -715,16 +715,22 @@ impl InMemoryLayer {
                         res?;
                     }
                 }
-
-                // Hold the permit until the IO is done; if we didn't, one could drop this future,
-                // thereby releasing the permit, but the Vec<u8> remains allocated until the IO completes.
-                // => we'd have more concurrenct Vec<u8> than allowed as per the semaphore.
-                drop(_concurrency_permit);
             }
         }
 
         // MAX is used here because we identify L0 layers by full key range
         let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, ctx).await?;
+
+        // Hold the permit until all the IO is done, including the fsync in `delta_layer_writer.finish()``.
+        //
+        // If we didn't and our caller drops this future, tokio-epoll-uring would extend the lifetime of
+        // the `file_contents: Vec<u8>` until the IO is done, but not the permit's lifetime.
+        // Thus, we'd have more concurrenct `Vec<u8>` in existence than the semaphore allows.
+        //
+        // We hold across the fsync so that on ext4 mounted with data=ordered, all the kernel page cache pages
+        // we dirtied when writing to the filesystem have been flushed and marked !dirty.
+        drop(_concurrency_permit);
+
         Ok(Some(delta_layer))
     }
 }

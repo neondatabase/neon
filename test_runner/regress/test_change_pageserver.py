@@ -14,11 +14,6 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     )
     env = neon_env_builder.init_start()
 
-    for pageserver in env.pageservers:
-        # This test dual-attaches a tenant, one of the pageservers will therefore
-        # be running with a stale generation.
-        pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
-
     env.neon_cli.create_branch("test_change_pageserver")
     endpoint = env.endpoints.create_start("test_change_pageserver")
 

@@ -60,11 +60,6 @@ def test_storage_controller_smoke(
     neon_env_builder.num_pageservers = 3
     env = neon_env_builder.init_configs()
 
-    for pageserver in env.pageservers:
-        # This test detaches tenants during migration, which can race with deletion queue operations,
-        # during detach we only do an advisory flush, we don't wait for it.
-        pageserver.allowed_errors.extend([".*Dropped remote consistent LSN updates.*"])
-
     # Start services by hand so that we can skip a pageserver (this will start + register later)
     env.broker.try_start()
     env.storage_controller.start()
@@ -483,9 +478,6 @@ def test_storage_controller_compute_hook(
 
     # Start running
     env = neon_env_builder.init_start()
-
-    # We will to an unclean migration, which will result in deletion queue warnings
-    env.pageservers[0].allowed_errors.append(".*Dropped remote consistent LSN updates for tenant.*")
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
@@ -1054,13 +1046,6 @@ def test_storage_controller_heartbeats(
     online_node_ids = set(range(1, len(env.pageservers) + 1)) - offline_node_ids
 
     for node_id in offline_node_ids:
-        env.get_pageserver(node_id).allowed_errors.append(
-            # In the case of the failpoint failure, the impacted pageserver
-            # still believes it has the tenant attached since location
-            # config calls into it will fail due to being marked offline.
-            ".*Dropped remote consistent LSN updates.*",
-        )
-
         if len(offline_node_ids) > 1:
             env.get_pageserver(node_id).allowed_errors.append(
                 ".*Scheduling error when marking pageserver.*offline.*",
@@ -1518,49 +1503,6 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
         workload.validate()
 
 
-def retryable_node_operation(op, ps_id, max_attempts, backoff):
-    while max_attempts > 0:
-        try:
-            op(ps_id)
-            return
-        except StorageControllerApiException as e:
-            max_attempts -= 1
-            log.info(f"Operation failed ({max_attempts} attempts left): {e}")
-
-            if max_attempts == 0:
-                raise e
-
-            time.sleep(backoff)
-
-
-def poll_node_status(env, node_id, desired_scheduling_policy, max_attempts, backoff):
-    log.info(f"Polling {node_id} for {desired_scheduling_policy} scheduling policy")
-    while max_attempts > 0:
-        try:
-            status = env.storage_controller.node_status(node_id)
-            policy = status["scheduling"]
-            if policy == desired_scheduling_policy:
-                return
-            else:
-                max_attempts -= 1
-                log.info(f"Status call returned {policy=} ({max_attempts} attempts left)")
-
-                if max_attempts == 0:
-                    raise AssertionError(
-                        f"Status for {node_id=} did not reach {desired_scheduling_policy=}"
-                    )
-
-                time.sleep(backoff)
-        except StorageControllerApiException as e:
-            max_attempts -= 1
-            log.info(f"Status call failed ({max_attempts} retries left): {e}")
-
-            if max_attempts == 0:
-                raise e
-
-            time.sleep(backoff)
-
-
 def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
     """
     Graceful reststart of storage controller clusters use the drain and
@@ -1601,10 +1543,10 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
 
     # Perform a graceful rolling restart
     for ps in env.pageservers:
-        retryable_node_operation(
+        env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        poll_node_status(env, ps.id, "PauseForRestart", max_attempts=6, backoff=5)
+        env.storage_controller.poll_node_status(ps.id, "PauseForRestart", max_attempts=6, backoff=5)
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
@@ -1614,12 +1556,12 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         assert sum(shard_counts.values()) == total_shards
 
         ps.restart()
-        poll_node_status(env, ps.id, "Active", max_attempts=10, backoff=1)
+        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=10, backoff=1)
 
-        retryable_node_operation(
+        env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        poll_node_status(env, ps.id, "Active", max_attempts=6, backoff=5)
+        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=6, backoff=5)
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
@@ -1657,15 +1599,15 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
 
     ps_id_to_drain = env.pageservers[0].id
 
-    retryable_node_operation(
+    env.storage_controller.retryable_node_operation(
         lambda ps_id: env.storage_controller.node_drain(ps_id),
         ps_id_to_drain,
         max_attempts=3,
         backoff=2,
     )
 
-    poll_node_status(env, ps_id_to_drain, "Draining", max_attempts=6, backoff=2)
+    env.storage_controller.poll_node_status(ps_id_to_drain, "Draining", max_attempts=6, backoff=2)
 
     env.storage_controller.cancel_node_drain(ps_id_to_drain)
 
-    poll_node_status(env, ps_id_to_drain, "Active", max_attempts=6, backoff=2)
+    env.storage_controller.poll_node_status(ps_id_to_drain, "Active", max_attempts=6, backoff=2)

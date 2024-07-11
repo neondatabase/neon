@@ -199,7 +199,7 @@ pub async fn scan_metadata(
     bucket_config: BucketConfig,
     tenant_ids: Vec<TenantShardId>,
 ) -> anyhow::Result<MetadataSummary> {
-    let (s3_client, target) = init_remote(bucket_config, NodeKind::Pageserver)?;
+    let (s3_client, target) = init_remote(bucket_config, NodeKind::Pageserver).await?;
 
     let tenants = if tenant_ids.is_empty() {
         futures::future::Either::Left(stream_tenants(&s3_client, &target))

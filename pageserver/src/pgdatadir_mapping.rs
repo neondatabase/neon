@@ -854,13 +854,14 @@ impl Timeline {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = self.list_dbdirs(lsn, ctx).await?;
+        let mut dbs: Vec<((Oid, Oid), bool)> = dbdir.into_iter().collect();
 
-        let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
-        dbs.sort_unstable();
-        for (spcnode, dbnode) in dbs {
-            result.add_key(relmap_file_key(spcnode, dbnode));
+        dbs.sort_unstable_by(|(k_a, _), (k_b, _)| k_a.cmp(k_b));
+        for ((spcnode, dbnode), has_relmap_file) in dbs {
+            if has_relmap_file {
+                result.add_key(relmap_file_key(spcnode, dbnode));
+            }
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
@@ -919,6 +920,9 @@ impl Timeline {
             result.add_key(AUX_FILES_KEY);
         }
 
+        // Add extra keyspaces in the test cases. Some test cases write keys into the storage without
+        // creating directory keys. These test cases will add such keyspaces into `extra_test_dense_keyspace`
+        // and the keys will not be garbage-colllected.
         #[cfg(test)]
         {
             let guard = self.extra_test_dense_keyspace.load();
@@ -927,13 +931,48 @@ impl Timeline {
             }
         }
 
-        Ok((
-            result.to_keyspace(),
-            /* AUX sparse key space */
-            SparseKeySpace(KeySpace {
-                ranges: vec![repl_origin_key_range(), Key::metadata_aux_key_range()],
-            }),
-        ))
+        let dense_keyspace = result.to_keyspace();
+        let sparse_keyspace = SparseKeySpace(KeySpace {
+            ranges: vec![Key::metadata_aux_key_range(), repl_origin_key_range()],
+        });
+
+        if cfg!(debug_assertions) {
+            // Verify if the sparse keyspaces are ordered and non-overlapping.
+
+            // We do not use KeySpaceAccum for sparse_keyspace because we want to ensure each
+            // category of sparse keys are split into their own image/delta files. If there
+            // are overlapping keyspaces, they will be automatically merged by keyspace accum,
+            // and we want the developer to keep the keyspaces separated.
+
+            let ranges = &sparse_keyspace.0.ranges;
+
+            // TODO: use a single overlaps_with across the codebase
+            fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
+                !(a.end <= b.start || b.end <= a.start)
+            }
+            for i in 0..ranges.len() {
+                for j in 0..i {
+                    if overlaps_with(&ranges[i], &ranges[j]) {
+                        panic!(
+                            "overlapping sparse keyspace: {}..{} and {}..{}",
+                            ranges[i].start, ranges[i].end, ranges[j].start, ranges[j].end
+                        );
+                    }
+                }
+            }
+            for i in 1..ranges.len() {
+                assert!(
+                    ranges[i - 1].end <= ranges[i].start,
+                    "unordered sparse keyspace: {}..{} and {}..{}",
+                    ranges[i - 1].start,
+                    ranges[i - 1].end,
+                    ranges[i].start,
+                    ranges[i].end
+                );
+            }
+        }
+
+        Ok((dense_keyspace, sparse_keyspace))
     }
 
     /// Get cached size of relation if it not updated after specified LSN

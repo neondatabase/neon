@@ -26,6 +26,8 @@ pub mod auth;
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod id;
 
+pub mod shard;
+
 mod hex;
 pub use hex::Hex;
 

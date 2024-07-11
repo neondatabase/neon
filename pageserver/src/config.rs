@@ -12,7 +12,6 @@ use serde::de::IntoDeserializer;
 use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
-use utils::id::ConnectionId;
 use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
@@ -91,7 +90,8 @@ pub mod defaults {
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
-    pub const DEFAULT_IMAGE_COMPRESSION: Option<ImageCompressionAlgorithm> = None;
+    pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
+        ImageCompressionAlgorithm::Disabled;
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
@@ -288,7 +288,7 @@ pub struct PageServerConf {
 
     pub validate_vectored_get: bool,
 
-    pub image_compression: Option<ImageCompressionAlgorithm>,
+    pub image_compression: ImageCompressionAlgorithm,
 
     /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
     /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
@@ -402,7 +402,7 @@ struct PageServerConfigBuilder {
 
     validate_vectored_get: BuilderValue<bool>,
 
-    image_compression: BuilderValue<Option<ImageCompressionAlgorithm>>,
+    image_compression: BuilderValue<ImageCompressionAlgorithm>,
 
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
 
@@ -680,7 +680,7 @@ impl PageServerConfigBuilder {
         self.validate_vectored_get = BuilderValue::Set(value);
     }
 
-    pub fn get_image_compression(&mut self, value: Option<ImageCompressionAlgorithm>) {
+    pub fn get_image_compression(&mut self, value: ImageCompressionAlgorithm) {
         self.image_compression = BuilderValue::Set(value);
     }
 
@@ -869,22 +869,6 @@ impl PageServerConf {
         )
     }
 
-    pub fn traces_path(&self) -> Utf8PathBuf {
-        self.workdir.join("traces")
-    }
-
-    pub fn trace_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-        connection_id: &ConnectionId,
-    ) -> Utf8PathBuf {
-        self.traces_path()
-            .join(tenant_shard_id.to_string())
-            .join(timeline_id.to_string())
-            .join(connection_id.to_string())
-    }
-
     /// Turns storage remote path of a file into its local path.
     pub fn local_path(&self, remote_path: &RemotePath) -> Utf8PathBuf {
         remote_path.with_base(&self.workdir)
@@ -1028,7 +1012,7 @@ impl PageServerConf {
                     builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
                 }
                 "image_compression" => {
-                    builder.get_image_compression(Some(parse_toml_from_str("image_compression", item)?))
+                    builder.get_image_compression(parse_toml_from_str("image_compression", item)?)
                 }
                 "ephemeral_bytes_per_memory_kb" => {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
@@ -1556,34 +1540,6 @@ broker_endpoint = '{broker_endpoint}'
                 "Remote storage config should correctly parse the S3 config"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_tenant_config() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-
-        let broker_endpoint = "http://127.0.0.1:7777";
-        let trace_read_requests = true;
-
-        let config_string = format!(
-            r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{pg_distrib_dir}'
-broker_endpoint = '{broker_endpoint}'
-
-[tenant_config]
-trace_read_requests = {trace_read_requests}"#,
-        );
-
-        let toml = config_string.parse()?;
-
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
-        assert_eq!(
-            conf.default_tenant_conf.trace_read_requests, trace_read_requests,
-            "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
-        );
-
         Ok(())
     }
 

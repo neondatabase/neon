@@ -2191,24 +2191,25 @@ def test_s3_eviction(
 ):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "checkpoint_timeout": "100ms",
-        }
-    )
 
-    extra_opts = [
+    neon_env_builder.safekeeper_extra_opts = [
         "--enable-offload",
         "--partial-backup-timeout",
         "50ms",
         "--control-file-save-interval",
         "1s",
+        # Safekeepers usually wait a while before evicting something: for this test we want them to
+        # evict things as soon as they are inactive.
+        "--eviction-min-resident=100ms",
     ]
     if delete_offloaded_wal:
-        extra_opts.append("--delete-offloaded-wal")
+        neon_env_builder.safekeeper_extra_opts.append("--delete-offloaded-wal")
 
-    for sk in env.safekeepers:
-        sk.stop().start(extra_opts=extra_opts)
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "checkpoint_timeout": "100ms",
+        }
+    )
 
     n_timelines = 5
 
@@ -2263,7 +2264,7 @@ def test_s3_eviction(
         # restarting random safekeepers
         for sk in env.safekeepers:
             if random.random() < restart_chance:
-                sk.stop().start(extra_opts=extra_opts)
+                sk.stop().start()
         time.sleep(0.5)
 
     # require at least one successful eviction in at least one safekeeper

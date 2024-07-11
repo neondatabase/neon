@@ -49,7 +49,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::LayerAccessKind;
+use pageserver_api::models::{ImageCompressionAlgorithm, LayerAccessKind};
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -222,6 +222,11 @@ pub struct DeltaLayerInner {
 
     file: VirtualFile,
     file_id: FileId,
+
+    #[allow(dead_code)]
+    layer_key_range: Range<Key>,
+    #[allow(dead_code)]
+    layer_lsn_range: Range<Lsn>,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
 }
@@ -453,7 +458,7 @@ impl DeltaLayerWriterInner {
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
         // We don't want to use compression in delta layer creation
-        let compression = None;
+        let compression = ImageCompressionAlgorithm::Disabled;
         let (val, res) = self
             .blob_writer
             .write_blob_maybe_compressed(val, ctx, compression)
@@ -742,6 +747,16 @@ impl DeltaLayer {
 }
 
 impl DeltaLayerInner {
+    #[cfg(test)]
+    pub(crate) fn key_range(&self) -> &Range<Key> {
+        &self.layer_key_range
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lsn_range(&self) -> &Range<Lsn> {
+        &self.layer_lsn_range
+    }
+
     /// Returns nested result following Result<Result<_, OpErr>, Critical>:
     /// - inner has the success or transient failure
     /// - outer has the permanent failure
@@ -790,6 +805,8 @@ impl DeltaLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
             max_vectored_read_bytes,
+            layer_key_range: actual_summary.key_range,
+            layer_lsn_range: actual_summary.lsn_range,
         }))
     }
 
@@ -1643,7 +1660,7 @@ impl<'a> DeltaLayerIterator<'a> {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use std::collections::BTreeMap;
 
     use itertools::MinMaxResult;
@@ -2221,13 +2238,20 @@ mod test {
         }
     }
 
-    async fn produce_delta_layer(
+    pub(crate) fn sort_delta(
+        (k1, l1, _): &(Key, Lsn, Value),
+        (k2, l2, _): &(Key, Lsn, Value),
+    ) -> std::cmp::Ordering {
+        (k1, l1).cmp(&(k2, l2))
+    }
+
+    pub(crate) async fn produce_delta_layer(
         tenant: &Tenant,
         tline: &Arc<Timeline>,
         mut deltas: Vec<(Key, Lsn, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
-        deltas.sort_by(|(k1, l1, _), (k2, l2, _)| (k1, l1).cmp(&(k2, l2)));
+        deltas.sort_by(sort_delta);
         let (key_start, _, _) = deltas.first().unwrap();
         let (key_max, _, _) = deltas.first().unwrap();
         let lsn_min = deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();

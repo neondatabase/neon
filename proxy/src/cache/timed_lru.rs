@@ -65,6 +65,8 @@ impl<K: Hash + Eq, V> Cache for TimedLru<K, V> {
 struct Entry<T> {
     created_at: Instant,
     expires_at: Instant,
+    ttl: Duration,
+    update_ttl_on_retrieval: bool,
     value: T,
 }
 
@@ -122,7 +124,6 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         let now = Instant::now();
-        let deadline = now.checked_add(self.ttl).expect("time overflow");
 
         // Do costly things before taking the lock.
         let mut cache = self.cache.lock();
@@ -142,7 +143,8 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
         let (created_at, expires_at) = (entry.created_at, entry.expires_at);
 
         // Update the deadline and the entry's position in the LRU list.
-        if self.update_ttl_on_retrieval {
+        let deadline = now.checked_add(raw_entry.get().ttl).expect("time overflow");
+        if raw_entry.get().update_ttl_on_retrieval {
             raw_entry.get_mut().expires_at = deadline;
         }
         raw_entry.to_back();
@@ -162,12 +164,27 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
     /// existed, return the previous value and its creation timestamp.
     #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
     fn insert_raw(&self, key: K, value: V) -> (Instant, Option<V>) {
+        self.insert_raw_ttl(key, value, self.ttl, self.update_ttl_on_retrieval)
+    }
+
+    /// Insert an entry to the cache. If an entry with the same key already
+    /// existed, return the previous value and its creation timestamp.
+    #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
+    fn insert_raw_ttl(
+        &self,
+        key: K,
+        value: V,
+        ttl: Duration,
+        update: bool,
+    ) -> (Instant, Option<V>) {
         let created_at = Instant::now();
-        let expires_at = created_at.checked_add(self.ttl).expect("time overflow");
+        let expires_at = created_at.checked_add(ttl).expect("time overflow");
 
         let entry = Entry {
             created_at,
             expires_at,
+            ttl,
+            update_ttl_on_retrieval: update,
             value,
         };
 
@@ -190,6 +207,21 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
+    pub fn insert_ttl(&self, key: K, value: V, ttl: Duration) {
+        self.insert_raw_ttl(key, value, ttl, false);
+    }
+
+    pub fn insert_unit(&self, key: K, value: V) -> (Option<V>, Cached<&Self, ()>) {
+        let (created_at, old) = self.insert_raw(key.clone(), value);
+
+        let cached = Cached {
+            token: Some((self, LookupInfo { created_at, key })),
+            value: (),
+        };
+
+        (old, cached)
+    }
+
     pub fn insert(&self, key: K, value: V) -> (Option<V>, Cached<&Self>) {
         let (created_at, old) = self.insert_raw(key.clone(), value.clone());
 
