@@ -32,10 +32,10 @@ use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        ShardSchedulingPolicy, TenantCreateResponse, TenantCreateResponseShard,
-        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
-        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
-        UtilizationScore,
+        ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
+        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+        TenantShardMigrateResponse, UtilizationScore,
     },
     models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
@@ -46,10 +46,9 @@ use crate::pageserver_client::PageserverClient;
 use pageserver_api::{
     models::{
         self, LocationConfig, LocationConfigListResponse, LocationConfigMode,
-        PageserverUtilization, ShardParameters, TenantConfig, TenantCreateRequest,
-        TenantLocationConfigRequest, TenantLocationConfigResponse, TenantShardLocation,
-        TenantShardSplitRequest, TenantShardSplitResponse, TenantTimeTravelRequest,
-        TimelineCreateRequest, TimelineInfo,
+        PageserverUtilization, ShardParameters, TenantConfig, TenantLocationConfigRequest,
+        TenantLocationConfigResponse, TenantShardLocation, TenantShardSplitRequest,
+        TenantShardSplitResponse, TenantTimeTravelRequest, TimelineCreateRequest, TimelineInfo,
     },
     shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize, TenantShardId},
     upcall_api::{
@@ -152,6 +151,10 @@ struct ServiceState {
 /// controller API.
 fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
     match e {
+        mgmt_api::Error::SendRequest(e) => {
+            // Presume errors sending requests are connectivity/availability issues
+            ApiError::ResourceUnavailable(format!("{node} error sending request: {e}").into())
+        }
         mgmt_api::Error::ReceiveErrorBody(str) => {
             // Presume errors receiving body are connectivity/availability issues
             ApiError::ResourceUnavailable(
@@ -1391,7 +1394,7 @@ impl Service {
                             tenant_shard.generation.unwrap(),
                             &tenant_shard.shard,
                             &tenant_shard.config,
-                            false,
+                            &PlacementPolicy::Attached(0),
                         )),
                     },
                 )]);
@@ -3322,7 +3325,7 @@ impl Service {
                                 generation,
                                 &child_shard,
                                 &config,
-                                matches!(policy, PlacementPolicy::Attached(n) if n > 0),
+                                &policy,
                             )),
                         },
                     );
@@ -4063,7 +4066,14 @@ impl Service {
                 placement_policy: Some(PlacementPolicy::Attached(0)), // No secondaries, for convenient debug/hacking
 
                 // There is no way to know what the tenant's config was: revert to defaults
-                config: TenantConfig::default(),
+                //
+                // TODO: remove `switch_aux_file_policy` once we finish auxv2 migration
+                //
+                // we write to both v1+v2 storage, so that the test case can use either storage format for testing
+                config: TenantConfig {
+                    switch_aux_file_policy: Some(models::AuxFilePolicy::CrossValidation),
+                    ..TenantConfig::default()
+                },
             })
             .await?;
 
@@ -5564,9 +5574,12 @@ impl Service {
                 break;
             }
 
-            let mut can_take = attached - expected_attached;
+            let can_take = attached - expected_attached;
+            let needed = fill_requirement - plan.len();
+            let mut take = std::cmp::min(can_take, needed);
+
             let mut remove_node = false;
-            while can_take > 0 {
+            while take > 0 {
                 match tids_by_node.get_mut(&node_id) {
                     Some(tids) => match tids.pop() {
                         Some(tid) => {
@@ -5578,7 +5591,7 @@ impl Service {
                             if *promoted < max_promote_for_tenant {
                                 plan.push(tid);
                                 *promoted += 1;
-                                can_take -= 1;
+                                take -= 1;
                             }
                         }
                         None => {

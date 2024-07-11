@@ -216,10 +216,11 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     use pq_proto::FeStartupPacket::*;
 
     match msg {
-        SslRequest => {
+        SslRequest { direct: false } => {
             stream
                 .write_message(&pq_proto::BeMessage::EncryptionResponse(true))
                 .await?;
+
             // Upgrade raw stream into a secure TLS-backed stream.
             // NOTE: We've consumed `tls`; this fact will be used later.
 

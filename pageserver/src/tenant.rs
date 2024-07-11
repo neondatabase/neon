@@ -73,6 +73,7 @@ use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
 use crate::import_datadir;
 use crate::is_uninit_mark;
+use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::TENANT;
 use crate::metrics::{
     remove_tenant_metrics, BROKEN_TENANTS_SET, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
@@ -88,6 +89,7 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
+use crate::walredo;
 use crate::InitializationOrder;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
@@ -165,6 +167,7 @@ pub struct TenantSharedResources {
     pub broker_client: storage_broker::BrokerClientChannel,
     pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
+    pub l0_flush_global_state: L0FlushGlobalState,
 }
 
 /// A [`Tenant`] is really an _attached_ tenant.  The configuration
@@ -212,8 +215,6 @@ pub(crate) enum SpawnMode {
     Eager,
     /// Lazy activation in the background, with the option to skip the queue if the need comes up
     Lazy,
-    /// Tenant has been created during the lifetime of this process
-    Create,
 }
 
 ///
@@ -295,6 +296,8 @@ pub struct Tenant {
 
     /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
     ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
+
+    l0_flush_global_state: L0FlushGlobalState,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -323,6 +326,16 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+    pub(crate) async fn shutdown(&self) {
+        match self {
+            Self::Prod(mgr) => mgr.shutdown().await,
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
             Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
@@ -343,7 +356,7 @@ impl WalRedoManager {
         base_img: Option<(Lsn, bytes::Bytes)>,
         records: Vec<(Lsn, crate::walrecord::NeonWalRecord)>,
         pg_version: u32,
-    ) -> anyhow::Result<bytes::Bytes> {
+    ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
             Self::Prod(mgr) => {
                 mgr.request_redo(key, lsn, base_img, records, pg_version)
@@ -520,6 +533,15 @@ impl From<PageReconstructError> for GcError {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum LoadConfigError {
+    #[error("TOML deserialization error: '{0}'")]
+    DeserializeToml(#[from] toml_edit::de::Error),
+
+    #[error("Config not found at {0}")]
+    NotFound(Utf8PathBuf),
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     ///
@@ -658,6 +680,7 @@ impl Tenant {
             broker_client,
             remote_storage,
             deletion_queue_client,
+            l0_flush_global_state,
         } = resources;
 
         let attach_mode = attached_conf.location.attach_mode;
@@ -672,6 +695,7 @@ impl Tenant {
             tenant_shard_id,
             remote_storage.clone(),
             deletion_queue_client,
+            l0_flush_global_state,
         ));
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
@@ -797,9 +821,6 @@ impl Tenant {
                 };
 
                 let preload = match &mode {
-                    SpawnMode::Create => {
-                        None
-                    },
                     SpawnMode::Eager | SpawnMode::Lazy => {
                         let _preload_timer = TENANT.preload.start_timer();
                         let res = tenant_clone
@@ -821,11 +842,8 @@ impl Tenant {
 
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
                 let attached = {
-                    let _attach_timer = match mode {
-                        SpawnMode::Create => None,
-                        SpawnMode::Eager | SpawnMode::Lazy => Some(TENANT.attach.start_timer()),
-                    };
-                    tenant_clone.attach(preload, mode, &ctx).await
+                    let _attach_timer = Some(TENANT.attach.start_timer());
+                    tenant_clone.attach(preload, &ctx).await
                 };
 
                 match attached {
@@ -901,21 +919,14 @@ impl Tenant {
     async fn attach(
         self: &Arc<Tenant>,
         preload: Option<TenantPreload>,
-        mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
-        let preload = match (preload, mode) {
-            (Some(p), _) => p,
-            (None, SpawnMode::Create) => TenantPreload {
-                timelines: HashMap::new(),
-            },
-            (None, _) => {
-                anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
-            }
+        let Some(preload) = preload else {
+            anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
         };
 
         let mut timelines_to_resume_deletions = vec![];
@@ -984,6 +995,7 @@ impl Tenant {
                 TimelineResources {
                     remote_client,
                     timeline_get_throttle: self.timeline_get_throttle.clone(),
+                    l0_flush_global_state: self.l0_flush_global_state.clone(),
                 },
                 ctx,
             )
@@ -1353,7 +1365,7 @@ impl Tenant {
         initdb_lsn: Lsn,
         pg_version: u32,
         ctx: &RequestContext,
-        delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
+        delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -1804,9 +1816,15 @@ impl Tenant {
         // If we're still attaching, fire the cancellation token early to drop out: this
         // will prevent us flushing, but ensures timely shutdown if some I/O during attach
         // is very slow.
-        if matches!(self.current_state(), TenantState::Attaching) {
+        let shutdown_mode = if matches!(self.current_state(), TenantState::Attaching) {
             self.cancel.cancel();
-        }
+
+            // Having fired our cancellation token, do not try and flush timelines: their cancellation tokens
+            // are children of ours, so their flush loops will have shut down already
+            timeline::ShutdownMode::Hard
+        } else {
+            shutdown_mode
+        };
 
         match self.set_stopping(shutdown_progress, false, false).await {
             Ok(()) => {}
@@ -1852,6 +1870,10 @@ impl Tenant {
         // this will additionally shutdown and await all timeline tasks.
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), None).await;
+
+        if let Some(walredo_mgr) = self.walredo_mgr.as_ref() {
+            walredo_mgr.shutdown().await;
+        }
 
         // Wait for any in-flight operations to complete
         self.gate.close().await;
@@ -2469,6 +2491,7 @@ impl Tenant {
         tenant_shard_id: TenantShardId,
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
+        l0_flush_global_state: L0FlushGlobalState,
     ) -> Tenant {
         debug_assert!(
             !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
@@ -2556,6 +2579,7 @@ impl Tenant {
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
+            l0_flush_global_state,
         }
     }
 
@@ -2563,36 +2587,35 @@ impl Tenant {
     pub(super) fn load_tenant_config(
         conf: &'static PageServerConf,
         tenant_shard_id: &TenantShardId,
-    ) -> anyhow::Result<LocationConf> {
+    ) -> Result<LocationConf, LoadConfigError> {
         let config_path = conf.tenant_location_config_path(tenant_shard_id);
 
-        if config_path.exists() {
-            // New-style config takes precedence
-            let deserialized = Self::read_config(&config_path)?;
-            Ok(toml_edit::de::from_document::<LocationConf>(deserialized)?)
-        } else {
-            // The config should almost always exist for a tenant directory:
-            //  - When attaching a tenant, the config is the first thing we write
-            //  - When detaching a tenant, we atomically move the directory to a tmp location
-            //    before deleting contents.
-            //
-            // The very rare edge case that can result in a missing config is if we crash during attach
-            // between creating directory and writing config.  Callers should handle that as if the
-            // directory didn't exist.
-            anyhow::bail!("tenant config not found in {}", config_path);
-        }
-    }
-
-    fn read_config(path: &Utf8Path) -> anyhow::Result<toml_edit::Document> {
-        info!("loading tenant configuration from {path}");
+        info!("loading tenant configuration from {config_path}");
 
         // load and parse file
-        let config = fs::read_to_string(path)
-            .with_context(|| format!("Failed to load config from path '{path}'"))?;
+        let config = fs::read_to_string(&config_path).map_err(|e| {
+            match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    // The config should almost always exist for a tenant directory:
+                    //  - When attaching a tenant, the config is the first thing we write
+                    //  - When detaching a tenant, we atomically move the directory to a tmp location
+                    //    before deleting contents.
+                    //
+                    // The very rare edge case that can result in a missing config is if we crash during attach
+                    // between creating directory and writing config.  Callers should handle that as if the
+                    // directory didn't exist.
 
-        config
-            .parse::<toml_edit::Document>()
-            .with_context(|| format!("Failed to parse config from file '{path}' as toml file"))
+                    LoadConfigError::NotFound(config_path)
+                }
+                _ => {
+                    // No IO errors except NotFound are acceptable here: other kinds of error indicate local storage or permissions issues
+                    // that we cannot cleanly recover
+                    crate::virtual_file::on_fatal_io_error(&e, "Reading tenant config file")
+                }
+            }
+        })?;
+
+        Ok(toml_edit::de::from_str::<LocationConf>(&config)?)
     }
 
     #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
@@ -2600,7 +2623,7 @@ impl Tenant {
         conf: &'static PageServerConf,
         tenant_shard_id: &TenantShardId,
         location_conf: &LocationConf,
-    ) -> anyhow::Result<()> {
+    ) -> std::io::Result<()> {
         let config_path = conf.tenant_location_config_path(tenant_shard_id);
 
         Self::persist_tenant_config_at(tenant_shard_id, &config_path, location_conf).await
@@ -2611,7 +2634,7 @@ impl Tenant {
         tenant_shard_id: &TenantShardId,
         config_path: &Utf8Path,
         location_conf: &LocationConf,
-    ) -> anyhow::Result<()> {
+    ) -> std::io::Result<()> {
         debug!("persisting tenantconf to {config_path}");
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
@@ -2620,22 +2643,20 @@ impl Tenant {
         .to_string();
 
         fail::fail_point!("tenant-config-before-write", |_| {
-            anyhow::bail!("tenant-config-before-write");
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "tenant-config-before-write",
+            ))
         });
 
         // Convert the config to a toml file.
-        conf_content += &toml_edit::ser::to_string_pretty(&location_conf)?;
+        conf_content +=
+            &toml_edit::ser::to_string_pretty(&location_conf).expect("Config serialization failed");
 
         let temp_path = path_with_suffix_extension(config_path, TEMP_FILE_SUFFIX);
 
-        let tenant_shard_id = *tenant_shard_id;
-        let config_path = config_path.to_owned();
         let conf_content = conf_content.into_bytes();
-        VirtualFile::crashsafe_overwrite(config_path.clone(), temp_path, conf_content)
-            .await
-            .with_context(|| format!("write tenant {tenant_shard_id} config to {config_path}"))?;
-
-        Ok(())
+        VirtualFile::crashsafe_overwrite(config_path.to_owned(), temp_path, conf_content).await
     }
 
     //
@@ -2853,6 +2874,7 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
+                // Cull any expired leases
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
 
@@ -2860,6 +2882,31 @@ impl Tenant {
                     .metrics
                     .valid_lsn_lease_count_gauge
                     .set(target.leases.len() as u64);
+
+                // Look up parent's PITR cutoff to update the child's knowledge of whether it is within parent's PITR
+                if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
+                    if let Some(ancestor_gc_cutoffs) = gc_cutoffs.get(&ancestor_id) {
+                        target.within_ancestor_pitr =
+                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.pitr;
+                    }
+                }
+
+                // Update metrics that depend on GC state
+                timeline
+                    .metrics
+                    .archival_size
+                    .set(if target.within_ancestor_pitr {
+                        timeline.metrics.current_logical_size_gauge.get()
+                    } else {
+                        0
+                    });
+                timeline.metrics.pitr_history_size.set(
+                    timeline
+                        .get_last_record_lsn()
+                        .checked_sub(target.cutoffs.pitr)
+                        .unwrap_or(Lsn(0))
+                        .0,
+                );
 
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
@@ -2912,7 +2959,7 @@ impl Tenant {
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
-        delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
+        delta_layer_desc: Vec<timeline::DeltaLayerTestDesc>,
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -3296,6 +3343,7 @@ impl Tenant {
         TimelineResources {
             remote_client,
             timeline_get_throttle: self.timeline_get_throttle.clone(),
+            l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
     }
 
@@ -3632,6 +3680,7 @@ pub(crate) mod harness {
     use utils::logging;
 
     use crate::deletion_queue::mock::MockDeletionQueue;
+    use crate::l0_flush::L0FlushConfig;
     use crate::walredo::apply_neon;
     use crate::{repository::Key, walrecord::NeonWalRecord};
 
@@ -3821,12 +3870,14 @@ pub(crate) mod harness {
                 self.tenant_shard_id,
                 self.remote_storage.clone(),
                 self.deletion_queue.new_client(),
+                // TODO: ideally we should run all unit tests with both configs
+                L0FlushGlobalState::new(L0FlushConfig::default()),
             ));
 
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())
                 .await?;
-            tenant.attach(Some(preload), SpawnMode::Eager, ctx).await?;
+            tenant.attach(Some(preload), ctx).await?;
 
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
@@ -3854,7 +3905,7 @@ pub(crate) mod harness {
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
-        ) -> anyhow::Result<Bytes> {
+        ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
             if records_neon {
                 // For Neon wal records, we can decode without spawning postgres, so do so.
@@ -3908,7 +3959,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
-    use timeline::GcInfo;
+    use timeline::{DeltaLayerTestDesc, GcInfo};
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
@@ -6204,27 +6255,6 @@ mod tests {
             .await
             .unwrap();
 
-        async fn get_vectored_impl_wrapper(
-            tline: &Arc<Timeline>,
-            key: Key,
-            lsn: Lsn,
-            ctx: &RequestContext,
-        ) -> Result<Option<Bytes>, GetVectoredError> {
-            let mut reconstruct_state = ValuesReconstructState::new();
-            let mut res = tline
-                .get_vectored_impl(
-                    KeySpace::single(key..key.next()),
-                    lsn,
-                    &mut reconstruct_state,
-                    ctx,
-                )
-                .await?;
-            Ok(res.pop_last().map(|(k, v)| {
-                assert_eq!(k, key);
-                v.unwrap()
-            }))
-        }
-
         let lsn = Lsn(0x30);
 
         // test vectored get on parent timeline
@@ -6264,7 +6294,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
+        let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads")?;
         let (tenant, ctx) = harness.load().await;
 
         let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
@@ -6299,27 +6329,6 @@ mod tests {
             )
             .await
             .unwrap();
-
-        async fn get_vectored_impl_wrapper(
-            tline: &Arc<Timeline>,
-            key: Key,
-            lsn: Lsn,
-            ctx: &RequestContext,
-        ) -> Result<Option<Bytes>, GetVectoredError> {
-            let mut reconstruct_state = ValuesReconstructState::new();
-            let mut res = tline
-                .get_vectored_impl(
-                    KeySpace::single(key..key.next()),
-                    lsn,
-                    &mut reconstruct_state,
-                    ctx,
-                )
-                .await?;
-            Ok(res.pop_last().map(|(k, v)| {
-                assert_eq!(k, key);
-                v.unwrap()
-            }))
-        }
 
         let lsn = Lsn(0x30);
 
@@ -6396,9 +6405,18 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
-                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
-                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
+                        vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
                 ],
                 // image layers
                 vec![
@@ -6464,17 +6482,29 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
-                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
-                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
-                    vec![
-                        (key0, Lsn(0x30), Value::Image(test_img("metadata key 0"))),
-                        (key3, Lsn(0x30), Value::Image(test_img("metadata key 3"))),
-                    ],
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
+                        vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x30)..Lsn(0x40),
+                        vec![
+                            (key0, Lsn(0x30), Value::Image(test_img("metadata key 0"))),
+                            (key3, Lsn(0x30), Value::Image(test_img("metadata key 3"))),
+                        ],
+                    ),
                 ],
                 // image layers
                 vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
-                Lsn(0x30),
+                Lsn(0x40),
             )
             .await
             .unwrap();
@@ -6497,7 +6527,7 @@ mod tests {
 
         // Image layers are created at last_record_lsn
         let images = tline
-            .inspect_image_layers(Lsn(0x30), &ctx)
+            .inspect_image_layers(Lsn(0x40), &ctx)
             .await
             .unwrap()
             .into_iter()
@@ -6523,9 +6553,18 @@ mod tests {
                 &ctx,
                 // delta layers
                 vec![
-                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
-                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
-                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x10)..Lsn(0x20),
+                        vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(
+                        Lsn(0x20)..Lsn(0x30),
+                        vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    ),
                 ],
                 // image layers
                 vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
@@ -6573,15 +6612,21 @@ mod tests {
             key
         }
 
-        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        // We create
+        // - one bottom-most image layer,
+        // - a delta layer D1 crossing the GC horizon with data below and above the horizon,
+        // - a delta layer D2 crossing the GC horizon with data only below the horizon,
+        // - a delta layer D3 above the horizon.
         //
-        //  | D1 |                       | D3 |
+        //                             | D3 |
+        //  | D1 |
         // -|    |-- gc horizon -----------------
         //  |    |                | D2 |
         // --------- img layer ------------------
         //
         // What we should expact from this compaction is:
-        //  | Part of D1 |               | D3 |
+        //                             | D3 |
+        //  | Part of D1 |
         // --------- img layer with D1+D2 at GC horizon------------------
 
         // img layer at 0x10
@@ -6621,13 +6666,13 @@ mod tests {
         let delta3 = vec![
             (
                 get_key(8),
-                Lsn(0x40),
-                Value::Image(Bytes::from("value 8@0x40")),
+                Lsn(0x48),
+                Value::Image(Bytes::from("value 8@0x48")),
             ),
             (
                 get_key(9),
-                Lsn(0x40),
-                Value::Image(Bytes::from("value 9@0x40")),
+                Lsn(0x48),
+                Value::Image(Bytes::from("value 9@0x48")),
             ),
         ];
 
@@ -6637,7 +6682,11 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
-                vec![delta1, delta2, delta3], // delta layers
+                vec![
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
+                ], // delta layers
                 vec![(Lsn(0x10), img_layer)], // image layers
                 Lsn(0x50),
             )
@@ -6658,8 +6707,8 @@ mod tests {
             Bytes::from_static(b"value 5@0x20"),
             Bytes::from_static(b"value 6@0x20"),
             Bytes::from_static(b"value 7@0x10"),
-            Bytes::from_static(b"value 8@0x40"),
-            Bytes::from_static(b"value 9@0x40"),
+            Bytes::from_static(b"value 8@0x48"),
+            Bytes::from_static(b"value 9@0x48"),
         ];
 
         for (idx, expected) in expected_result.iter().enumerate() {
@@ -6747,10 +6796,10 @@ mod tests {
                     lsn_range: Lsn(0x30)..Lsn(0x41),
                     is_delta: true
                 },
-                // The delta layer we created and should not be picked for the compaction
+                // The delta3 layer that should not be picked for the compaction
                 PersistentLayerKey {
                     key_range: get_key(8)..get_key(10),
-                    lsn_range: Lsn(0x40)..Lsn(0x41),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
                     is_delta: true
                 }
             ]
@@ -6814,7 +6863,10 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
-                vec![delta1],              // delta layers
+                vec![DeltaLayerTestDesc::new_with_inferred_key_range(
+                    Lsn(0x10)..Lsn(0x40),
+                    delta1,
+                )], // delta layers
                 vec![(Lsn(0x10), image1)], // image layers
                 Lsn(0x50),
             )
@@ -6938,15 +6990,21 @@ mod tests {
             key
         }
 
-        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        // We create
+        // - one bottom-most image layer,
+        // - a delta layer D1 crossing the GC horizon with data below and above the horizon,
+        // - a delta layer D2 crossing the GC horizon with data only below the horizon,
+        // - a delta layer D3 above the horizon.
         //
-        //  | D1 |                       | D3 |
+        //                             | D3 |
+        //  | D1 |
         // -|    |-- gc horizon -----------------
         //  |    |                | D2 |
         // --------- img layer ------------------
         //
         // What we should expact from this compaction is:
-        //  | Part of D1 |               | D3 |
+        //                             | D3 |
+        //  | Part of D1 |
         // --------- img layer with D1+D2 at GC horizon------------------
 
         // img layer at 0x10
@@ -6996,13 +7054,13 @@ mod tests {
         let delta3 = vec![
             (
                 get_key(8),
-                Lsn(0x40),
-                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+                Lsn(0x48),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x48")),
             ),
             (
                 get_key(9),
-                Lsn(0x40),
-                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+                Lsn(0x48),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x48")),
             ),
         ];
 
@@ -7012,7 +7070,11 @@ mod tests {
                 Lsn(0x10),
                 DEFAULT_PG_VERSION,
                 &ctx,
-                vec![delta1, delta2, delta3], // delta layers
+                vec![
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
+                ], // delta layers
                 vec![(Lsn(0x10), img_layer)], // image layers
                 Lsn(0x50),
             )
@@ -7027,6 +7089,7 @@ mod tests {
                     horizon: Lsn(0x30),
                 },
                 leases: Default::default(),
+                within_ancestor_pitr: false,
             };
         }
 
@@ -7039,8 +7102,8 @@ mod tests {
             Bytes::from_static(b"value 5@0x10@0x20"),
             Bytes::from_static(b"value 6@0x10@0x20"),
             Bytes::from_static(b"value 7@0x10"),
-            Bytes::from_static(b"value 8@0x10@0x40"),
-            Bytes::from_static(b"value 9@0x10@0x40"),
+            Bytes::from_static(b"value 8@0x10@0x48"),
+            Bytes::from_static(b"value 9@0x10@0x48"),
         ];
 
         let expected_result_at_gc_horizon = [

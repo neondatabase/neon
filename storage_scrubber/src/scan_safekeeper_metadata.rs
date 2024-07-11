@@ -106,7 +106,7 @@ pub async fn scan_safekeeper_metadata(
     let timelines = client.query(&query, &[]).await?;
     info!("loaded {} timelines", timelines.len());
 
-    let (s3_client, target) = init_remote(bucket_config, NodeKind::Safekeeper)?;
+    let (s3_client, target) = init_remote(bucket_config, NodeKind::Safekeeper).await?;
     let console_config = ConsoleConfig::from_env()?;
     let cloud_admin_api_client = CloudAdminApiClient::new(console_config);
 

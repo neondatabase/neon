@@ -41,7 +41,25 @@ RETURNS bytea
 AS 'MODULE_PATHNAME', 'get_raw_page_at_lsn_ex'
 LANGUAGE C PARALLEL UNSAFE;
 
-CREATE FUNCTION neon_xlogflush(lsn pg_lsn)
+CREATE FUNCTION neon_xlogflush(lsn pg_lsn DEFAULT NULL)
 RETURNS VOID
 AS 'MODULE_PATHNAME', 'neon_xlogflush'
 LANGUAGE C PARALLEL UNSAFE;
+
+CREATE FUNCTION trigger_panic()
+RETURNS VOID
+AS 'MODULE_PATHNAME', 'trigger_panic'
+LANGUAGE C PARALLEL UNSAFE;
+
+CREATE FUNCTION trigger_segfault()
+RETURNS VOID
+AS 'MODULE_PATHNAME', 'trigger_segfault'
+LANGUAGE C PARALLEL UNSAFE;
+
+-- Alias for `trigger_segfault`, just because `SELECT 💣()` looks fun
+CREATE OR REPLACE FUNCTION 💣() RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM trigger_segfault();
+END;
+$$;

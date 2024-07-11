@@ -47,6 +47,9 @@ use utils::{
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const PID_FILE_NAME: &str = "pageserver.pid";
 
 const FEATURES: &[&str] = &[
@@ -421,6 +424,10 @@ fn start_pageserver(
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
+    info!(config=?conf.l0_flush, "using l0_flush config");
+    let l0_flush_global_state =
+        pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
+
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
@@ -429,6 +436,7 @@ fn start_pageserver(
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
+            l0_flush_global_state,
         },
         order,
         shutdown_pageserver.clone(),
@@ -652,7 +660,6 @@ fn start_pageserver(
                 async move {
                     page_service::libpq_listener_main(
                         tenant_manager,
-                        broker_client,
                         pg_auth,
                         pageserver_listener,
                         conf.pg_auth_type,

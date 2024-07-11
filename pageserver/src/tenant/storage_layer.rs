@@ -7,6 +7,9 @@ pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
 
+#[cfg(test)]
+pub mod merge_iterator;
+
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Value;
 use crate::task_mgr::TaskKind;

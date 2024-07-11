@@ -220,34 +220,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(
-        self,
-        new_tenant_id: Union[TenantId, TenantShardId],
-        conf: Optional[Dict[str, Any]] = None,
-        generation: Optional[int] = None,
-    ) -> TenantId:
-        if conf is not None:
-            assert "new_tenant_id" not in conf.keys()
-
-        body: Dict[str, Any] = {
-            "new_tenant_id": str(new_tenant_id),
-            **(conf or {}),
-        }
-
-        if generation is not None:
-            body.update({"generation": generation})
-
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant",
-            json=body,
-        )
-        self.verbose_error(res)
-        if res.status_code == 409:
-            raise Exception(f"could not create tenant: already exists for id {new_tenant_id}")
-        new_tenant_id = res.json()
-        assert isinstance(new_tenant_id, str)
-        return TenantId(new_tenant_id)
-
     def tenant_attach(
         self,
         tenant_id: Union[TenantId, TenantShardId],
@@ -622,6 +594,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp.isoformat()}Z&{with_lease_query}",
             **kwargs,
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
+    def timeline_lsn_lease(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
+    ):
+        data = {
+            "lsn": str(lsn),
+        }
+
+        log.info(f"Requesting lsn lease for {lsn=}, {tenant_id=}, {timeline_id=}")
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/lsn_lease",
+            json=data,
         )
         self.verbose_error(res)
         res_json = res.json()

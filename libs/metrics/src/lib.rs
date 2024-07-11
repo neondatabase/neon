@@ -9,7 +9,7 @@ use measured::{
     metric::{
         counter::CounterState,
         gauge::GaugeState,
-        group::{Encoding, MetricValue},
+        group::Encoding,
         name::{MetricName, MetricNameEncoder},
         MetricEncoding, MetricFamilyEncoding,
     },
@@ -103,9 +103,10 @@ static MAXRSS_KB: Lazy<IntGauge> = Lazy::new(|| {
     .expect("Failed to register maxrss_kb int gauge")
 });
 
-pub const DISK_WRITE_SECONDS_BUCKETS: &[f64] = &[
-    0.000_050, 0.000_100, 0.000_500, 0.001, 0.003, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5,
-];
+/// Most common fsync latency is 50 µs - 100 µs, but it can be much higher,
+/// especially during many concurrent disk operations.
+pub const DISK_FSYNC_SECONDS_BUCKETS: &[f64] =
+    &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0];
 
 pub struct BuildInfo {
     pub revision: &'static str,
@@ -170,8 +171,11 @@ fn write_gauge<Enc: Encoding>(
     labels: impl LabelGroup,
     name: impl MetricNameEncoder,
     enc: &mut Enc,
-) -> Result<(), Enc::Err> {
-    enc.write_metric_value(name, labels, MetricValue::Int(x))
+) -> Result<(), Enc::Err>
+where
+    GaugeState: MetricEncoding<Enc>,
+{
+    GaugeState::new(x).collect_into(&(), labels, name, enc)
 }
 
 #[derive(Default)]
@@ -543,15 +547,6 @@ impl<T: Encoding> Encoding for Inc<T> {
     fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
         self.0.write_help(name, help)
     }
-
-    fn write_metric_value(
-        &mut self,
-        name: impl MetricNameEncoder,
-        labels: impl LabelGroup,
-        value: MetricValue,
-    ) -> Result<(), Self::Err> {
-        self.0.write_metric_value(name, labels, value)
-    }
 }
 
 impl<T: Encoding> MetricEncoding<Inc<T>> for MeasuredCounterPairState
@@ -577,15 +572,6 @@ impl<T: Encoding> Encoding for Dec<T> {
 
     fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
         self.0.write_help(name, help)
-    }
-
-    fn write_metric_value(
-        &mut self,
-        name: impl MetricNameEncoder,
-        labels: impl LabelGroup,
-        value: MetricValue,
-    ) -> Result<(), Self::Err> {
-        self.0.write_metric_value(name, labels, value)
     }
 }
 

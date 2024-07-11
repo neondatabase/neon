@@ -52,6 +52,12 @@ pub mod defaults {
     pub const DEFAULT_MAX_OFFLOADER_LAG_BYTES: u64 = 128 * (1 << 20);
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
+    pub const DEFAULT_PARTIAL_BACKUP_CONCURRENCY: &str = "5";
+
+    // By default, our required residency before eviction is the same as the period that passes
+    // before uploading a partial segment, so that in normal operation the eviction can happen
+    // as soon as we have done the partial segment upload.
+    pub const DEFAULT_EVICTION_MIN_RESIDENT: &str = DEFAULT_PARTIAL_BACKUP_TIMEOUT;
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +97,8 @@ pub struct SafeKeeperConf {
     pub enable_offload: bool,
     pub delete_offloaded_wal: bool,
     pub control_file_save_interval: Duration,
+    pub partial_backup_concurrency: usize,
+    pub eviction_min_resident: Duration,
 }
 
 impl SafeKeeperConf {
@@ -133,6 +141,8 @@ impl SafeKeeperConf {
             enable_offload: false,
             delete_offloaded_wal: false,
             control_file_save_interval: Duration::from_secs(1),
+            partial_backup_concurrency: 1,
+            eviction_min_resident: Duration::ZERO,
         }
     }
 }

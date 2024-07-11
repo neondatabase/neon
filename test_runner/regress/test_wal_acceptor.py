@@ -1725,7 +1725,10 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
 
 # Basic pull_timeline test.
-def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
+# When live_sk_change is False, compute is restarted to change set of
+# safekeepers; otherwise it is live reload.
+@pytest.mark.parametrize("live_sk_change", [False, True])
+def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
     neon_env_builder.auth_enabled = True
 
     def execute_payload(endpoint: Endpoint):
@@ -1758,8 +1761,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
     endpoint = env.endpoints.create("main")
-    endpoint.active_safekeepers = [1, 2, 3]
-    endpoint.start()
+    endpoint.start(safekeepers=[1, 2, 3])
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
@@ -1771,29 +1773,22 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
     log.info("Initialize new safekeeper 4, pull data from 1 & 3")
     env.safekeepers[3].start()
 
-    res = (
-        env.safekeepers[3]
-        .http_client(auth_token=env.auth_keys.generate_safekeeper_token())
-        .pull_timeline(
-            {
-                "tenant_id": str(tenant_id),
-                "timeline_id": str(timeline_id),
-                "http_hosts": [
-                    f"http://localhost:{env.safekeepers[0].port.http}",
-                    f"http://localhost:{env.safekeepers[2].port.http}",
-                ],
-            }
-        )
+    res = env.safekeepers[3].pull_timeline(
+        [env.safekeepers[0], env.safekeepers[2]], tenant_id, timeline_id
     )
     log.info("Finished pulling timeline")
     log.info(res)
 
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
-    log.info("Restarting compute with new config to verify that it works")
-    endpoint.stop_and_destroy().create("main")
-    endpoint.active_safekeepers = [1, 3, 4]
-    endpoint.start()
+    action = "reconfiguing" if live_sk_change else "restarting"
+    log.info(f"{action} compute with new config to verify that it works")
+    new_sks = [1, 3, 4]
+    if not live_sk_change:
+        endpoint.stop_and_destroy().create("main")
+        endpoint.start(safekeepers=new_sks)
+    else:
+        endpoint.reconfigure(safekeepers=new_sks)
 
     execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
@@ -2196,24 +2191,25 @@ def test_s3_eviction(
 ):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "checkpoint_timeout": "100ms",
-        }
-    )
 
-    extra_opts = [
+    neon_env_builder.safekeeper_extra_opts = [
         "--enable-offload",
         "--partial-backup-timeout",
         "50ms",
         "--control-file-save-interval",
         "1s",
+        # Safekeepers usually wait a while before evicting something: for this test we want them to
+        # evict things as soon as they are inactive.
+        "--eviction-min-resident=100ms",
     ]
     if delete_offloaded_wal:
-        extra_opts.append("--delete-offloaded-wal")
+        neon_env_builder.safekeeper_extra_opts.append("--delete-offloaded-wal")
 
-    for sk in env.safekeepers:
-        sk.stop().start(extra_opts=extra_opts)
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "checkpoint_timeout": "100ms",
+        }
+    )
 
     n_timelines = 5
 
@@ -2268,7 +2264,7 @@ def test_s3_eviction(
         # restarting random safekeepers
         for sk in env.safekeepers:
             if random.random() < restart_chance:
-                sk.stop().start(extra_opts=extra_opts)
+                sk.stop().start()
         time.sleep(0.5)
 
     # require at least one successful eviction in at least one safekeeper

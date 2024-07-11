@@ -10,6 +10,7 @@ use tracing::{error, info, info_span, instrument, span_enabled, warn, Level};
 
 use crate::config;
 use crate::logger::inlinify;
+use crate::migration::MigrationRunner;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
@@ -791,69 +792,7 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
         include_str!("./migrations/0008-revoke_replication_for_previously_allowed_roles.sql"),
     ];
 
-    let mut func = || {
-        let query = "CREATE SCHEMA IF NOT EXISTS neon_migration";
-        client.simple_query(query)?;
-
-        let query = "CREATE TABLE IF NOT EXISTS neon_migration.migration_id (key INT NOT NULL PRIMARY KEY, id bigint NOT NULL DEFAULT 0)";
-        client.simple_query(query)?;
-
-        let query = "INSERT INTO neon_migration.migration_id VALUES (0, 0) ON CONFLICT DO NOTHING";
-        client.simple_query(query)?;
-
-        let query = "ALTER SCHEMA neon_migration OWNER TO cloud_admin";
-        client.simple_query(query)?;
-
-        let query = "REVOKE ALL ON SCHEMA neon_migration FROM PUBLIC";
-        client.simple_query(query)?;
-        Ok::<_, anyhow::Error>(())
-    };
-    func().context("handle_migrations prepare")?;
-
-    let query = "SELECT id FROM neon_migration.migration_id";
-    let row = client
-        .query_one(query, &[])
-        .context("handle_migrations get migration_id")?;
-    let mut current_migration: usize = row.get::<&str, i64>("id") as usize;
-    let starting_migration_id = current_migration;
-
-    let query = "BEGIN";
-    client
-        .simple_query(query)
-        .context("handle_migrations begin")?;
-
-    while current_migration < migrations.len() {
-        let migration = &migrations[current_migration];
-        if migration.starts_with("-- SKIP") {
-            info!("Skipping migration id={}", current_migration);
-        } else {
-            info!(
-                "Running migration id={}:\n{}\n",
-                current_migration, migration
-            );
-            client.simple_query(migration).with_context(|| {
-                format!("handle_migrations current_migration={}", current_migration)
-            })?;
-        }
-        current_migration += 1;
-    }
-    let setval = format!(
-        "UPDATE neon_migration.migration_id SET id={}",
-        migrations.len()
-    );
-    client
-        .simple_query(&setval)
-        .context("handle_migrations update id")?;
-
-    let query = "COMMIT";
-    client
-        .simple_query(query)
-        .context("handle_migrations commit")?;
-
-    info!(
-        "Ran {} migrations",
-        (migrations.len() - starting_migration_id)
-    );
+    MigrationRunner::new(client, &migrations).run_migrations()?;
 
     Ok(())
 }
