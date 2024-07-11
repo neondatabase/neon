@@ -4054,6 +4054,22 @@ class Safekeeper(LogUtils):
         self.id = id
         self.running = running
         self.logfile = Path(self.data_dir) / f"safekeeper-{id}.log"
+
+        if extra_opts is None:
+            # Testing defaults: enable everything, and set short timeouts so that background
+            # work will happen during short tests.
+            # **Note**: Any test that explicitly sets extra_opts will not get these defaults.
+            extra_opts = [
+                "--enable-offload",
+                "--delete-offloaded-wal",
+                "--partial-backup-timeout",
+                "10s",
+                "--control-file-save-interval",
+                "1s",
+                "--eviction-min-resident",
+                "10s",
+            ]
+
         self.extra_opts = extra_opts
 
     def start(
