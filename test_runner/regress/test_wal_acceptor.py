@@ -2065,6 +2065,11 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
         log.info(f"Original digest: {orig_digest}")
 
         for sk in env.safekeepers:
+            wait(
+                partial(is_flush_lsn_caught_up, sk, tenant_id, timeline_id, lsn),
+                f"sk_id={sk.id} to flush {lsn}",
+            )
+
             sk.http_client().copy_timeline(
                 tenant_id,
                 timeline_id,
