@@ -274,12 +274,8 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
-        self.write_blob_maybe_compressed(
-            srcbuf,
-            ctx,
-            ImageCompressionAlgorithm::DisabledNoDecompress,
-        )
-        .await
+        self.write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
+            .await
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
@@ -341,8 +337,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                             (BYTE_UNCOMPRESSED, len, slice.into_inner())
                         }
                     }
-                    ImageCompressionAlgorithm::Disabled
-                    | ImageCompressionAlgorithm::DisabledNoDecompress => {
+                    ImageCompressionAlgorithm::Disabled => {
                         (BYTE_UNCOMPRESSED, len, srcbuf.slice_full().into_inner())
                     }
                 };

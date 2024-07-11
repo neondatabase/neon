@@ -202,18 +202,10 @@ pub struct FileBlockReader<'a> {
 
 impl<'a> FileBlockReader<'a> {
     pub fn new(file: &'a VirtualFile, file_id: FileId) -> Self {
-        Self::new_with_compression(file, file_id, false)
-    }
-
-    pub fn new_with_compression(
-        file: &'a VirtualFile,
-        file_id: FileId,
-        compressed_reads: bool,
-    ) -> Self {
         FileBlockReader {
             file_id,
             file,
-            compressed_reads,
+            compressed_reads: true,
         }
     }
 

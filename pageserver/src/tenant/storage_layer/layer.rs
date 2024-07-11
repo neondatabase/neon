@@ -1685,7 +1685,6 @@ impl DownloadedLayer {
                     lsn,
                     summary,
                     Some(owner.conf.max_vectored_read_bytes),
-                    owner.conf.image_compression.allow_decompression(),
                     ctx,
                 )
                 .await
