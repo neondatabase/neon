@@ -8,7 +8,6 @@ from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    StorageScrubber,
 )
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.workload import Workload
@@ -62,8 +61,7 @@ def test_scrubber_tenant_snapshot(neon_env_builder: NeonEnvBuilder, shard_count:
     output_path = neon_env_builder.test_output_dir / "snapshot"
     os.makedirs(output_path)
 
-    scrubber = StorageScrubber(neon_env_builder)
-    scrubber.tenant_snapshot(tenant_id, output_path)
+    env.storage_scrubber.tenant_snapshot(tenant_id, output_path)
 
     assert len(os.listdir(output_path)) > 0
 
@@ -149,19 +147,19 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
         workload.write_rows(1)
 
     # With a high min_age, the scrubber should decline to delete anything
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=3600)
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=3600)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == 0
 
     # If targeting a different tenant, the scrubber shouldn't do anything
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(
         min_age_secs=1, tenant_ids=[TenantId.generate()]
     )
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == 0
 
     #  With a low min_age, the scrubber should go ahead and clean up all but the latest 2 generations
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=1)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == (expect_indices_per_shard - 2) * shard_count
 
@@ -218,9 +216,7 @@ def test_scrubber_physical_gc_ancestors(
 
     # Before compacting, all the layers in the ancestor should still be referenced by the children: the scrubber
     # should not erase any ancestor layers
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(
-        min_age_secs=1, mode="full"
-    )
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=1, mode="full")
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == 0
     assert gc_summary["ancestor_layers_deleted"] == 0
@@ -239,17 +235,13 @@ def test_scrubber_physical_gc_ancestors(
     time.sleep(2)
 
     # Our time threshold should be respected: check that with a high threshold we delete nothing
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(
-        min_age_secs=3600, mode="full"
-    )
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=3600, mode="full")
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == 0
     assert gc_summary["ancestor_layers_deleted"] == 0
 
     # Now run with a low time threshold: deletions of ancestor layers should be executed
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(
-        min_age_secs=1, mode="full"
-    )
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=1, mode="full")
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == 0
     assert gc_summary["ancestor_layers_deleted"] > 0
