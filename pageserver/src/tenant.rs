@@ -3983,6 +3983,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
+    use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{DeltaLayerTestDesc, GcInfo};
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
@@ -7180,6 +7181,110 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_generate_key_retention() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_generate_key_retention")?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        tline.force_advance_lsn(Lsn(0x70));
+        let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let history = vec![
+            (
+                key,
+                Lsn(0x10),
+                Value::Image(Bytes::copy_from_slice(b"0x10")),
+            ),
+            (
+                key,
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x20")),
+            ),
+            (
+                key,
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x30")),
+            ),
+            (
+                key,
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x40")),
+            ),
+            (
+                key,
+                Lsn(0x50),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x50")),
+            ),
+            (
+                key,
+                Lsn(0x60),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x60")),
+            ),
+            (
+                key,
+                Lsn(0x70),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+            ),
+        ];
+        let history_ref = history.iter().collect_vec();
+        let res = tline
+            .generate_key_retention(
+                key,
+                &history_ref,
+                Lsn(0x60),
+                &[Lsn(0x20), Lsn(0x40), Lsn(0x50)],
+                3,
+            )
+            .await
+            .unwrap();
+        let expected_res = KeyHistoryRetention {
+            below_horizon: vec![
+                (
+                    Lsn(0x20),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x20),
+                        Value::Image(Bytes::copy_from_slice(b"0x10;0x20")),
+                    )]),
+                ),
+                (
+                    Lsn(0x40),
+                    KeyLogAtLsn(vec![
+                        (
+                            Lsn(0x30),
+                            Value::WalRecord(NeonWalRecord::wal_append(";0x30")),
+                        ),
+                        (
+                            Lsn(0x40),
+                            Value::WalRecord(NeonWalRecord::wal_append(";0x40")),
+                        ),
+                    ]),
+                ),
+                (
+                    Lsn(0x50),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x50),
+                        Value::Image(Bytes::copy_from_slice(b"0x10;0x20;0x30;0x40;0x50")),
+                    )]),
+                ),
+                (
+                    Lsn(0x60),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x60),
+                        Value::WalRecord(NeonWalRecord::wal_append(";0x60")),
+                    )]),
+                ),
+            ],
+            above_horizon: KeyLogAtLsn(vec![(
+                Lsn(0x70),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+            )]),
+        };
+        assert_eq!(res, expected_res);
+        // TODO: more tests with mixed image + delta, adding with k-merge test cases; e2e compaction test
         Ok(())
     }
 }

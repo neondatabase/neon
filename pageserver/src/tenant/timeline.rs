@@ -1,5 +1,5 @@
 pub(crate) mod analysis;
-mod compaction;
+pub(crate) mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;

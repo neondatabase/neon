@@ -45,15 +45,22 @@ use pageserver_compaction::interface::*;
 
 use super::CompactionError;
 
+/// Maximum number of deltas before generating an image layer in bottom-most compaction.
+const COMPACTION_DELTA_THRESHOLD: usize = 5;
+
 /// The result of bottom-most compaction for a single key at each LSN.
-struct KeyLogAtLsn(Vec<(Lsn, Value)>);
+#[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct KeyLogAtLsn(pub Vec<(Lsn, Value)>);
 
 /// The result of bottom-most compaction.
-struct KeyHistoryRetention {
+#[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub(crate) struct KeyHistoryRetention {
     /// Stores logs to reconstruct the value at the given LSN, that is to say, logs <= LSN or image == LSN.
-    below_horizon: Vec<(Lsn, KeyLogAtLsn)>,
+    pub(crate) below_horizon: Vec<(Lsn, KeyLogAtLsn)>,
     /// Stores logs to reconstruct the value at any LSN above the horizon, that is to say, log > LSN.
-    above_horizon: KeyLogAtLsn,
+    pub(crate) above_horizon: KeyLogAtLsn,
 }
 
 impl KeyHistoryRetention {
@@ -1054,7 +1061,7 @@ impl Timeline {
     /// above_horizon    -> deltas=[+F@0x60]             full history above the horizon
     ///
     /// Note that `accumulated_values` must be sorted by LSN and should belong to a single key.
-    async fn generate_key_retention(
+    pub(crate) async fn generate_key_retention(
         self: &Arc<Timeline>,
         key: Key,
         history: &[&(Key, Lsn, Value)],
@@ -1430,7 +1437,7 @@ impl Timeline {
                         &accumulated_values,
                         gc_cutoff,
                         &retain_lsns_below_horizon,
-                        5,
+                        COMPACTION_DELTA_THRESHOLD,
                     )
                     .await?;
                 // Put the image into the image layer. Currently we have a single big layer for the compaction.
@@ -1463,7 +1470,7 @@ impl Timeline {
                 &accumulated_values,
                 gc_cutoff,
                 &retain_lsns_below_horizon,
-                5,
+                COMPACTION_DELTA_THRESHOLD,
             )
             .await?;
         // Put the image into the image layer. Currently we have a single big layer for the compaction.
