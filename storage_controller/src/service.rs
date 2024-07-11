@@ -2844,8 +2844,8 @@ impl Service {
                 .map(|res| (tenant_shard_id.shard_number, res))
         }
 
+        // no shard needs to go first/last; the operation should be idempotent
         // TODO: it would be great to ensure that all shards return the same error
-        // FIXME: this logs whole
         let mut results = self
             .tenant_for_shards(targets, |tenant_shard_id, node| {
                 futures::FutureExt::boxed(detach_one(
@@ -2856,14 +2856,6 @@ impl Service {
                 ))
             })
             .await?;
-
-        // TEST: 1. tad which partially succeeds, questionmark above, returns 500
-        //       2. create branch below timeline? or delete timeline below
-        //       3. all should report the same reparented timelines
-        //
-        // TEST: 1. tad is started, one node stalls, other restarts
-        //       2. client timeout before stall over
-        //       3. retry with stalled and other being able to proceed
 
         let any = results.pop().expect("we must have at least one response");
 

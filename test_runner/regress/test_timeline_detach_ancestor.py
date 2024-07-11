@@ -663,3 +663,11 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
 # - deletion of reparented while reparenting should fail once, then succeed (?)
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
+#
+# TEST: 1. tad which partially succeeds, one returns 500
+#       2. create branch below timeline? or delete timeline below
+#       3. on retry all should report the same reparented timelines
+#
+# TEST: 1. tad is started, one node stalls, other restarts
+#       2. client timeout before stall over
+#       3. on retry with stalled and other being able to proceed
