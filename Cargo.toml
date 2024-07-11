@@ -15,7 +15,6 @@ members = [
     "storage_controller",
     "storage_scrubber",
     "workspace_hack",
-    "trace",
     "libs/compute_api",
     "libs/pageserver_api",
     "libs/postgres_ffi",
