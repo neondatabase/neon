@@ -135,7 +135,7 @@ pub(super) async fn prepare(
             .lock()
             .unwrap()
             .values()
-            .filter(|tl| matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(&ancestor, detached)))
+            .filter(|tl| matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached)))
             .map(|tl| (tl.ancestor_lsn, tl.clone()))
             .collect::<Vec<_>>();
 
