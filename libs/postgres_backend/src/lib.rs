@@ -89,7 +89,6 @@ pub trait Handler<IO> {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
-        cancel: &CancellationToken,
     ) -> Result<(), QueryError>;
 
     /// Called on startup packet receival, allows to process params.
@@ -474,9 +473,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         )? {
             trace!("got message {:?}", msg);
 
-            let result = self
-                .process_message(handler, msg, &mut query_string, cancel)
-                .await;
+            let result = self.process_message(handler, msg, &mut query_string).await;
             tokio::select!(
                 biased;
                 _ = cancel.cancelled() => {
@@ -733,7 +730,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         handler: &mut impl Handler<IO>,
         msg: FeMessage,
         unnamed_query_string: &mut Bytes,
-        cancel: &CancellationToken,
     ) -> Result<ProcessMsgResult, QueryError> {
         // Allow only startup and password messages during auth. Otherwise client would be able to bypass auth
         // TODO: change that to proper top-level match of protocol state with separate message handling for each state
@@ -745,7 +741,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 let query_string = cstr_to_str(&body)?;
 
                 trace!("got query {query_string:?}");
-                if let Err(e) = handler.process_query(self, query_string, cancel).await {
+                if let Err(e) = handler.process_query(self, query_string).await {
                     match e {
                         QueryError::Shutdown => return Ok(ProcessMsgResult::Break),
                         QueryError::SimulatedConnectionError => {
@@ -785,7 +781,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             FeMessage::Execute(_) => {
                 let query_string = cstr_to_str(unnamed_query_string)?;
                 trace!("got execute {query_string:?}");
-                if let Err(e) = handler.process_query(self, query_string, cancel).await {
+                if let Err(e) = handler.process_query(self, query_string).await {
                     log_query_error(query_string, &e);
                     self.write_message_noflush(&BeMessage::ErrorResponse(
                         &e.to_string(),

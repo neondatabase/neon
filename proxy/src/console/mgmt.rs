@@ -84,7 +84,6 @@ impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
         &mut self,
         pgb: &mut PostgresBackendTCP,
         query: &str,
-        _cancel: &CancellationToken, /* try_process_query isn't doing anything long-running */
     ) -> Result<(), QueryError> {
         try_process_query(pgb, query).map_err(|e| {
             error!("failed to process response: {e:?}");

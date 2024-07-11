@@ -30,7 +30,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> Handler<IO> for TestHandler {
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         _query_string: &str,
-        _cancel: &CancellationToken,
     ) -> Result<(), QueryError> {
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
             b"hey",

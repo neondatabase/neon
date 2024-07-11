@@ -5,7 +5,6 @@ use anyhow::Context;
 use std::str::{self, FromStr};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, Instrument};
 
 use crate::auth::check_permission;
@@ -197,8 +196,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
-        /* the only way to shut down a handler is the fn main()'s call to std::process::exit() after it receives unix signal */
-        _cancel: &CancellationToken,
     ) -> Result<(), QueryError> {
         if query_string
             .to_ascii_lowercase()
