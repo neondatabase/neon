@@ -809,7 +809,11 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
+        let compression = self.conf.image_compression;
+        let (_img, res) = self
+            .blob_writer
+            .write_blob_maybe_compressed(img, ctx, compression)
+            .await;
         // TODO: re-use the buffer for `img` further upstack
         let off = res?;
 
