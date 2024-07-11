@@ -417,28 +417,28 @@ pub(crate) mod tests {
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = VirtualFile::create(pathbuf.as_path(), &ctx).await?;
+            let file = VirtualFile::create(pathbuf.as_path(), ctx).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
                     wtr.write_blob_maybe_compressed(
                         blob.clone(),
-                        &ctx,
+                        ctx,
                         ImageCompressionAlgorithm::Zstd { level: Some(1) },
                     )
                     .await
                 } else {
-                    wtr.write_blob(blob.clone(), &ctx).await
+                    wtr.write_blob(blob.clone(), ctx).await
                 };
                 let offs = res?;
                 offsets.push(offs);
             }
             // Write out one page worth of zeros so that we can
             // read again with read_blk
-            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ], &ctx).await;
+            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ], ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
-            wtr.flush_buffer(&ctx).await?;
+            wtr.flush_buffer(ctx).await?;
         }
         Ok((temp_dir, pathbuf, offsets))
     }

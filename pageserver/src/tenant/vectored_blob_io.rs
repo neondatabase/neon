@@ -607,7 +607,7 @@ mod tests {
         };
 
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
-            let end = offsets.get(idx + 1).unwrap_or_else(|| &file_len);
+            let end = offsets.get(idx + 1).unwrap_or(&file_len);
             if idx + 1 == offsets.len() {
                 continue;
             }
