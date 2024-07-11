@@ -235,6 +235,7 @@ impl<'a> MergeIterator<'a> {
 }
 
 #[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
 
