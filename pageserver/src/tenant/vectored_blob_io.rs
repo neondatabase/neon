@@ -750,7 +750,7 @@ mod tests {
             if idx + 1 == offsets.len() {
                 continue;
             }
-            let read_builder = VectoredReadBuilder::new(*offset, *end, meta, None);
+            let read_builder = VectoredReadBuilder::new(*offset, *end, meta, 16 * 4096);
             let read = read_builder.build();
             let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
             assert_eq!(result.blobs.len(), 1);
