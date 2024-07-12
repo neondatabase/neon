@@ -377,7 +377,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConflictError"
 
-  /v1/tenant/{tenant_id}/{timeline_id}/preserve_initdb_archive:
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/preserve_initdb_archive:
     parameters:
       - name: tenant_id
         in: path
