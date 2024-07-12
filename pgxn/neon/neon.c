@@ -546,10 +546,10 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 				case OP_WAIT:
 					goto fail;
 				case OP_IGNORE:
-					break;
+					goto success;
 				case OP_SKIP:
 					n_restored_xids = 0;
-					break;
+					goto success;
 			}
 		}
 
@@ -570,7 +570,7 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 			goto fail;
 		}
 	}
-
+   success:
 	elog(LOG, "restored %d running xacts by scanning the CLOG; oldestXid=%u oldestActiveXid=%u nextXid %u",
 		 n_restored_xids, checkpoint->oldestXid, checkpoint->oldestActiveXid, XidFromFullTransactionId(checkpoint->nextXid));
 	*nxids = n_restored_xids;
