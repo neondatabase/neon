@@ -238,7 +238,6 @@ fn spawn_background_purge(tmp_path: Utf8PathBuf) {
         task_tenant_id,
         None,
         "tenant_files_delete",
-        false,
         async move {
             fs::remove_dir_all(tmp_path.as_path())
                 .await

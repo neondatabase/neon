@@ -2477,7 +2477,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "layer flush task",
-            false,
             async move {
                 let _guard = guard;
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
@@ -2822,7 +2821,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "initial size calculation",
-            false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
                 let cancel = task_mgr::shutdown_token();
@@ -2991,7 +2989,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
-            false,
             async move {
                 let res = self_clone
                     .logical_size_calculation_task(lsn, cause, &ctx)
@@ -5435,7 +5432,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "download all remote layers task",
-            false,
             async move {
                 self_clone.download_all_remote_layers(request).await;
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
