@@ -4979,7 +4979,7 @@ impl Timeline {
             // Unit tests which specify zero PITR interval expect to avoid doing any I/O for timestamp lookup
             if pitr == Duration::ZERO {
                 return Ok(GcCutoffs {
-                    pitr: *self.get_latest_gc_cutoff_lsn(),
+                    pitr: self.get_last_record_lsn(),
                     horizon: cutoff_horizon,
                 });
             }
