@@ -19,7 +19,7 @@ use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use pageserver::tenant::{secondary, TenantSharedResources};
 use pageserver::{
-    CancellableTask, ConsumptionMetricsWorker, HttpEndpointListener, LibpqEndpointListener,
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, LibpqEndpointListener,
 };
 use remote_storage::GenericRemoteStorage;
 use tokio::signal::unix::SignalKind;
@@ -585,56 +585,27 @@ fn start_pageserver(
         HttpEndpointListener(CancellableTask { task, cancel })
     };
 
-    let consumption_metrics_worker =
-        conf.metric_collection_endpoint
-            .as_ref()
-            .map(|metric_collection_endpoint| {
-                let cancel = CancellationToken::new();
-                let metrics_ctx = RequestContext::todo_child(
-                    TaskKind::MetricsCollection,
-                    // This task itself shouldn't download anything.
-                    // The actual size calculation does need downloads, and
-                    // creates a child context with the right DownloadBehavior.
-                    DownloadBehavior::Error,
-                );
+    let consumption_metrics_tasks = {
+        let cancel = shutdown_pageserver.child_token();
+        let task = crate::BACKGROUND_RUNTIME.spawn({
+            let tenant_manager = tenant_manager.clone();
+            let cancel = cancel.clone();
+            async move {
+                // first wait until background jobs are cleared to launch.
+                //
+                // this is because we only process active tenants and timelines, and the
+                // Timeline::get_current_logical_size will spawn the logical size calculation,
+                // which will not be rate-limited.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return; },
+                    _ = background_jobs_barrier.wait() => {}
+                };
 
-                let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
-
-                let task = crate::BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-                    "consumption metrics collection",
-                    {
-                        let tenant_manager = tenant_manager.clone();
-                        let cancel = cancel.clone();
-                        async move {
-                            // first wait until background jobs are cleared to launch.
-                            //
-                            // this is because we only process active tenants and timelines, and the
-                            // Timeline::get_current_logical_size will spawn the logical size calculation,
-                            // which will not be rate-limited.
-                            tokio::select! {
-                                _ = cancel.cancelled() => { return anyhow::Ok(()); },
-                                _ = background_jobs_barrier.wait() => {}
-                            };
-
-                            pageserver::consumption_metrics::collect_metrics(
-                                tenant_manager,
-                                metric_collection_endpoint,
-                                &conf.metric_collection_bucket,
-                                conf.metric_collection_interval,
-                                conf.synthetic_size_calculation_interval,
-                                conf.id,
-                                local_disk_storage,
-                                cancel,
-                                metrics_ctx,
-                            )
-                            .instrument(info_span!("metrics_collection"))
-                            .await?;
-                            Ok(())
-                        }
-                    },
-                ));
-                ConsumptionMetricsWorker(CancellableTask { task, cancel })
-            });
+                pageserver::consumption_metrics::run(conf, tenant_manager, cancel).await;
+            }
+        });
+        ConsumptionMetricsTasks(CancellableTask { task, cancel })
+    };
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
@@ -690,7 +661,7 @@ fn start_pageserver(
             pageserver::shutdown_pageserver(
                 http_endpoint_listener,
                 libpq_listener,
-                consumption_metrics_worker,
+                consumption_metrics_tasks,
                 &tenant_manager,
                 deletion_queue.clone(),
                 0,

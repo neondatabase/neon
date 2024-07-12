@@ -61,7 +61,7 @@ pub struct CancellableTask {
 }
 pub struct HttpEndpointListener(pub CancellableTask);
 pub struct LibpqEndpointListener(pub CancellableTask);
-pub struct ConsumptionMetricsWorker(pub CancellableTask);
+pub struct ConsumptionMetricsTasks(pub CancellableTask);
 impl CancellableTask {
     pub async fn shutdown(self) {
         self.cancel.cancel();
@@ -73,7 +73,7 @@ impl CancellableTask {
 pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
     libpq_listener: LibpqEndpointListener,
-    consumption_metrics_worker: Option<ConsumptionMetricsWorker>,
+    consumption_metrics_worker: ConsumptionMetricsTasks,
     tenant_manager: &TenantManager,
     mut deletion_queue: DeletionQueue,
     exit_code: i32,
@@ -109,6 +109,13 @@ pub async fn shutdown_pageserver(
     // Best effort to persist any outstanding deletions, to avoid leaking objects
     deletion_queue.shutdown(Duration::from_secs(5)).await;
 
+    timed(
+        consumption_metrics_worker.0.shutdown(),
+        "shutdown consumption metrics",
+        Duration::from_secs(1),
+    )
+    .await;
+
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
     // FIXME: We should probably stop accepting commands like attach/detach earlier.
@@ -118,15 +125,6 @@ pub async fn shutdown_pageserver(
         Duration::from_secs(1),
     )
     .await;
-
-    if let Some(consumption_metrics_worker) = consumption_metrics_worker {
-        timed(
-            consumption_metrics_worker.0.shutdown(),
-            "shutdown consumption metrics",
-            Duration::from_secs(1),
-        )
-        .await;
-    }
 
     // There should be nothing left, but let's be sure
     timed(
