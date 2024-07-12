@@ -46,19 +46,12 @@ pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
     metric_collection_bucket: &Option<RemoteStorageConfig>,
     metric_collection_interval: Duration,
-    _cached_metric_collection_interval: Duration,
     synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
     local_disk_storage: Utf8PathBuf,
     cancel: CancellationToken,
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
-    if _cached_metric_collection_interval != Duration::ZERO {
-        tracing::warn!(
-            "cached_metric_collection_interval is no longer used, please set it to zero."
-        )
-    }
-
     // spin up background worker that caclulates tenant sizes
     let worker_ctx =
         ctx.detached_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);

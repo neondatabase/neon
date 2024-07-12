@@ -69,7 +69,6 @@ pub mod defaults {
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
@@ -124,7 +123,6 @@ pub mod defaults {
 #concurrent_tenant_warmup = '{DEFAULT_CONCURRENT_TENANT_WARMUP}'
 
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
-#cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
 #synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
 
 #disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
@@ -239,7 +237,6 @@ pub struct PageServerConf {
     // How often to collect metrics and send them to the metrics endpoint.
     pub metric_collection_interval: Duration,
     // How often to send unchanged cached metrics to the metrics endpoint.
-    pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
@@ -371,7 +368,6 @@ struct PageServerConfigBuilder {
     concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
 
     metric_collection_interval: BuilderValue<Duration>,
-    cached_metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
     metric_collection_bucket: BuilderValue<Option<RemoteStorageConfig>>,
@@ -455,10 +451,6 @@ impl PageServerConfigBuilder {
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
             .expect("cannot parse default metric collection interval")),
-            cached_metric_collection_interval: Set(humantime::parse_duration(
-                DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL,
-            )
-            .expect("cannot parse default cached_metric_collection_interval")),
             synthetic_size_calculation_interval: Set(humantime::parse_duration(
                 DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL,
             )
@@ -588,14 +580,6 @@ impl PageServerConfigBuilder {
 
     pub fn metric_collection_interval(&mut self, metric_collection_interval: Duration) {
         self.metric_collection_interval = BuilderValue::Set(metric_collection_interval)
-    }
-
-    pub fn cached_metric_collection_interval(
-        &mut self,
-        cached_metric_collection_interval: Duration,
-    ) {
-        self.cached_metric_collection_interval =
-            BuilderValue::Set(cached_metric_collection_interval)
     }
 
     pub fn metric_collection_endpoint(&mut self, metric_collection_endpoint: Option<Url>) {
@@ -731,7 +715,6 @@ impl PageServerConfigBuilder {
                 broker_keepalive_interval,
                 log_format,
                 metric_collection_interval,
-                cached_metric_collection_interval,
                 metric_collection_endpoint,
                 metric_collection_bucket,
                 synthetic_size_calculation_interval,
@@ -964,7 +947,6 @@ impl PageServerConf {
                     NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
                 }),
                 "metric_collection_interval" => builder.metric_collection_interval(parse_toml_duration(key, item)?),
-                "cached_metric_collection_interval" => builder.cached_metric_collection_interval(parse_toml_duration(key, item)?),
                 "metric_collection_endpoint" => {
                     let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
                     builder.metric_collection_endpoint(Some(endpoint));
@@ -1097,7 +1079,6 @@ impl PageServerConf {
             eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
             ),
             metric_collection_interval: Duration::from_secs(60),
-            cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
             metric_collection_bucket: None,
             synthetic_size_calculation_interval: Duration::from_secs(60),
@@ -1276,7 +1257,6 @@ initial_superuser_name = 'zzzz'
 id = 10
 
 metric_collection_interval = '222 s'
-cached_metric_collection_interval = '22200 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
 
@@ -1331,9 +1311,6 @@ background_task_maximum_delay = '334 s'
                     ConfigurableSemaphore::default(),
                 metric_collection_interval: humantime::parse_duration(
                     defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
-                )?,
-                cached_metric_collection_interval: humantime::parse_duration(
-                    defaults::DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL
                 )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
                 metric_collection_bucket: None,
@@ -1413,7 +1390,6 @@ background_task_maximum_delay = '334 s'
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
                 metric_collection_interval: Duration::from_secs(222),
-                cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 metric_collection_bucket: None,
                 synthetic_size_calculation_interval: Duration::from_secs(333),
