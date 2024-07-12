@@ -124,7 +124,6 @@ pub async fn libpq_listener_main(
                     None,
                     None,
                     "serving compute connection task",
-                    false,
                     page_service_conn_main(
                         tenant_manager.clone(),
                         local_auth,

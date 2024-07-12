@@ -206,7 +206,7 @@ pub fn launch_disk_usage_global_eviction_task(
         None,
         None,
         "disk usage based eviction",
-        false,
+        // TODO: should this be using task_mgr::exit_on_panic_or_error
         async move {
             let cancel = task_mgr::shutdown_token();
 

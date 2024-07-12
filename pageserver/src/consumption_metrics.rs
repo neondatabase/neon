@@ -68,7 +68,7 @@ pub async fn collect_metrics(
         None,
         None,
         "synthetic size calculation",
-        false,
+        // TODO: should this use the task_mgr::exit_on_panic_or_error ?
         {
             let tenant_manager = tenant_manager.clone();
             async move {

@@ -319,7 +319,7 @@ pub fn spawn_tasks(
         None,
         None,
         "secondary tenant downloads",
-        false,
+        // TODO: should this be using task_mgr::exit_on_panic_or_error
         async move {
             downloader_task(
                 mgr_clone,
@@ -341,7 +341,7 @@ pub fn spawn_tasks(
         None,
         None,
         "heatmap uploads",
-        false,
+        // TODO: should this be using task_mgr::exit_on_panic_or_error
         async move {
             heatmap_uploader_task(
                 tenant_manager,

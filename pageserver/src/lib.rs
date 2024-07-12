@@ -13,6 +13,7 @@ pub mod http;
 pub mod import_datadir;
 pub mod l0_flush;
 pub use pageserver_api::keyspace;
+use tokio_util::sync::CancellationToken;
 pub mod aux_file;
 pub mod metrics;
 pub mod page_cache;
@@ -54,8 +55,25 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
 
+pub struct CancellableTask {
+    pub task: tokio::task::JoinHandle<()>,
+    pub cancel: CancellationToken,
+}
+pub struct HttpEndpointListener(pub CancellableTask);
+pub struct LibpqEndpointListener(pub CancellableTask);
+pub struct ConsumptionMetricsWorker(pub CancellableTask);
+impl CancellableTask {
+    pub async fn shutdown(self) {
+        self.cancel.cancel();
+        self.task.await.unwrap();
+    }
+}
+
 #[tracing::instrument(skip_all, fields(%exit_code))]
 pub async fn shutdown_pageserver(
+    http_listener: HttpEndpointListener,
+    libpq_listener: LibpqEndpointListener,
+    consumption_metrics_worker: Option<ConsumptionMetricsWorker>,
     tenant_manager: &TenantManager,
     mut deletion_queue: DeletionQueue,
     exit_code: i32,
@@ -64,7 +82,7 @@ pub async fn shutdown_pageserver(
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
     timed(
-        task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None),
+        libpq_listener.0.shutdown(),
         "shutdown LibpqEndpointListener",
         Duration::from_secs(1),
     )
@@ -95,11 +113,20 @@ pub async fn shutdown_pageserver(
     // status while it's shutting down.
     // FIXME: We should probably stop accepting commands like attach/detach earlier.
     timed(
-        task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None),
+        http_listener.0.shutdown(),
         "shutdown http",
         Duration::from_secs(1),
     )
     .await;
+
+    if let Some(consumption_metrics_worker) = consumption_metrics_worker {
+        timed(
+            consumption_metrics_worker.0.shutdown(),
+            "shutdown consumption metrics",
+            Duration::from_secs(1),
+        )
+        .await;
+    }
 
     // There should be nothing left, but let's be sure
     timed(
