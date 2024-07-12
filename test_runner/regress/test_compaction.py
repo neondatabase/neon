@@ -12,12 +12,12 @@ from fixtures.neon_fixtures import (
     generate_uploads_and_deletions,
 )
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.utils import wait_until
-from fixtures.workload import Workload
 from fixtures.pageserver.utils import (
     wait_for_upload,
     wait_for_upload_queue_empty,
 )
+from fixtures.utils import wait_until
+from fixtures.workload import Workload
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
