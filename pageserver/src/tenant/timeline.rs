@@ -69,6 +69,7 @@ use std::{
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
+        config::defaults::DEFAULT_PITR_INTERVAL,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::PersistentLayerDesc,
@@ -4974,58 +4975,71 @@ impl Timeline {
 
         pausable_failpoint!("Timeline::find_gc_cutoffs-pausable");
 
-        // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
-        //
-        // Some unit tests depend on garbage-collection working even when
-        // CLOG data is missing, so that find_lsn_for_timestamp() doesn't
-        // work, so avoid calling it altogether if time-based retention is not
-        // configured. It would be pointless anyway.
-        let pitr_cutoff = if pitr != Duration::ZERO {
+        // Calculate a time-based limit on how much to retain:
+        // - if PITR interval is configured, then this is our cutoff.
+        // - if PITR interval is not configured, then we do a lookup
+        //   based on DEFAULT_PITR_INTERVAL, so that size-based retention (horizon)
+        //   does not result in keeping history around permanently on idle databases.
+        let time_cutoff = {
             let now = SystemTime::now();
-            if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
-                let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
-
-                match self
-                    .find_lsn_for_timestamp(pitr_timestamp, cancel, ctx)
-                    .await?
-                {
-                    LsnForTimestamp::Present(lsn) => lsn,
-                    LsnForTimestamp::Future(lsn) => {
-                        // The timestamp is in the future. That sounds impossible,
-                        // but what it really means is that there hasn't been
-                        // any commits since the cutoff timestamp.
-                        //
-                        // In this case we should use the LSN of the most recent commit,
-                        // which is implicitly the last LSN in the log.
-                        debug!("future({})", lsn);
-                        self.get_last_record_lsn()
-                    }
-                    LsnForTimestamp::Past(lsn) => {
-                        debug!("past({})", lsn);
-                        // conservative, safe default is to remove nothing, when we
-                        // have no commit timestamp data available
-                        *self.get_latest_gc_cutoff_lsn()
-                    }
-                    LsnForTimestamp::NoData(lsn) => {
-                        debug!("nodata({})", lsn);
-                        // conservative, safe default is to remove nothing, when we
-                        // have no commit timestamp data available
-                        *self.get_latest_gc_cutoff_lsn()
-                    }
-                }
+            let time_range = if pitr == Duration::ZERO {
+                humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
             } else {
-                // If we don't have enough data to convert to LSN,
-                // play safe and don't remove any layers.
-                *self.get_latest_gc_cutoff_lsn()
+                pitr
+            };
+
+            // If PITR is so large or `now` is so small that this overflows, we will retain no history (highly unexpected case)
+            let time_cutoff = now.checked_sub(time_range).unwrap_or(now);
+            let timestamp = to_pg_timestamp(time_cutoff);
+
+            match self.find_lsn_for_timestamp(timestamp, cancel, ctx).await? {
+                LsnForTimestamp::Present(lsn) => Some(lsn),
+                LsnForTimestamp::Future(lsn) => {
+                    // The timestamp is in the future. That sounds impossible,
+                    // but what it really means is that there hasn't been
+                    // any commits since the cutoff timestamp.
+                    //
+                    // In this case we should use the LSN of the most recent commit,
+                    // which is implicitly the last LSN in the log.
+                    debug!("future({})", lsn);
+                    Some(self.get_last_record_lsn())
+                }
+                LsnForTimestamp::Past(lsn) => {
+                    debug!("past({})", lsn);
+                    None
+                }
+                LsnForTimestamp::NoData(lsn) => {
+                    debug!("nodata({})", lsn);
+                    None
+                }
             }
-        } else {
-            // No time-based retention was configured. Interpret this as "keep no history".
-            self.get_last_record_lsn()
         };
 
-        Ok(GcCutoffs {
-            horizon: cutoff_horizon,
-            pitr: pitr_cutoff,
+        Ok(match (pitr, time_cutoff) {
+            (_, None) => {
+                // We didn't look up a timestamp successfully.  Conservatively assume PITR
+                // cannot advance beyond what was already GC'd, and respect space-based retention
+                GcCutoffs {
+                    pitr: *self.get_latest_gc_cutoff_lsn(),
+                    horizon: cutoff_horizon,
+                }
+            }
+            (Duration::ZERO, Some(time_cutoff)) => {
+                // PITR is not configured. Retain the size-based limit, or the default time retention,
+                // whichever requires less data.
+                GcCutoffs {
+                    pitr: std::cmp::max(time_cutoff, cutoff_horizon),
+                    horizon: std::cmp::max(time_cutoff, cutoff_horizon),
+                }
+            }
+            (_, Some(time_cutoff)) => {
+                // PITR is configured and we looked up timestamp successfully.  Ignore configured
+                // size based retention and make time cutoff authoritative
+                GcCutoffs {
+                    pitr: time_cutoff,
+                    horizon: time_cutoff,
+                }
+            }
         })
     }
 
