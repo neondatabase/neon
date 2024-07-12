@@ -6,10 +6,18 @@ from typing import Optional
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, generate_uploads_and_deletions
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    flush_ep_to_pageserver,
+    generate_uploads_and_deletions,
+)
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
+from fixtures.pageserver.utils import (
+    wait_for_upload,
+    wait_for_upload_queue_empty,
+)
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
@@ -320,3 +328,69 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
         or 0
     ) == 0
     assert not env.pageserver.log_contains(".*Circuit breaker failure ended.*")
+
+
+def test_image_layer_compression(
+    neon_env_builder: NeonEnvBuilder,
+):
+    tenant_conf = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{128 * 1024}",
+        "compaction_threshold": "1",
+        "compaction_target_size": f"{128 * 1024}",
+        # no PITR horizon, we specify the horizon when we request on-demand GC
+        "pitr_interval": "0s",
+        # disable background compaction and GC. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # create image layers as eagerly as possible
+        "image_creation_threshold": "1",
+        "image_layer_creation_check_threshold": "0",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    pageserver = env.pageserver
+    ps_http = env.pageserver.http_client()
+    with env.endpoints.create_start(
+        "main", tenant_id=tenant_id, pageserver_id=pageserver.id
+    ) as endpoint:
+        endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+        # Generate around 800k worth of easily compressible data to store
+        for v in range(100):
+            endpoint.safe_psql(
+                f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))"
+            )
+        # run compaction to create image layers
+        ps_http.timeline_gc(tenant_id, timeline_id, 0)
+        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id)
+        # Finish uploads
+        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
+        # Finish all remote writes (including deletions)
+        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
+
+        layer_map = ps_http.layer_map_info(tenant_id, timeline_id)
+        image_layer_count = 0
+        delta_layer_count = 0
+        for layer in layer_map.historic_layers:
+            if layer.kind == "Image":
+                image_layer_count += 1
+            elif layer.kind == "Delta":
+                delta_layer_count += 1
+        assert image_layer_count > 0
+        assert delta_layer_count > 0
+
+        log.info(f"images: {image_layer_count}, deltas: {delta_layer_count}")
+
+    # Destroy the endpoint and create a new one to resetthe caches
+    with env.endpoints.create_start(
+        "main", tenant_id=tenant_id, pageserver_id=pageserver.id
+    ) as endpoint:
+        for v in range(100):
+            res = endpoint.safe_psql(
+                f"SELECT count(*) FROM foo WHERE id={v} and val=repeat('abcde{v:0>3}', 500)"
+            )
+            assert res[0][0] == 1
