@@ -778,15 +778,13 @@ components:
     TenantCreateRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
+        - $ref: '#/components/schemas/TenantLoadRequest'
         - type: object
           required:
             - new_tenant_id
           properties:
             new_tenant_id:
               type: string
-            generation:
-              type: integer
-              description: Attachment generation number.
     TenantLoadRequest:
       type: object
       properties:
