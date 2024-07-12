@@ -30,7 +30,6 @@ pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
 
-use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
 use tenant::mgr::TenantManager;
@@ -73,7 +72,7 @@ impl CancellableTask {
 #[tracing::instrument(skip_all, fields(%exit_code))]
 pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
-    libpq_listener: LibpqEndpointListener,
+    page_service: page_service::Listener,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
     tenant_manager: &TenantManager,
@@ -83,8 +82,8 @@ pub async fn shutdown_pageserver(
     use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
-    timed(
-        libpq_listener.0.shutdown(),
+    let remaining_connections = timed(
+        page_service.stop_accepting(),
         "shutdown LibpqEndpointListener",
         Duration::from_secs(1),
     )
@@ -102,7 +101,7 @@ pub async fn shutdown_pageserver(
     // Shut down any page service tasks: any in-progress work for particular timelines or tenants
     // should already have been canclled via mgr::shutdown_all_tenants
     timed(
-        task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None),
+        remaining_connections.shutdown(),
         "shutdown PageRequestHandlers",
         Duration::from_secs(1),
     )

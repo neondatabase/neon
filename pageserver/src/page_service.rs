@@ -5,7 +5,7 @@ use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use pageserver_api::key::Key;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
@@ -25,7 +25,6 @@ use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
-use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -34,6 +33,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::sync::gate::GateGuard;
@@ -47,14 +47,15 @@ use utils::{
 use crate::auth::check_permission;
 use crate::basebackup;
 use crate::basebackup::BasebackupError;
+use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics;
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
-use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME};
 use crate::tenant::mgr::GetActiveTenantError;
 use crate::tenant::mgr::GetTenantError;
 use crate::tenant::mgr::ShardResolveResult;
@@ -76,32 +77,101 @@ const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 ///////////////////////////////////////////////////////////////////////////////
 
+pub struct Listener {
+    cancel: CancellationToken,
+    /// Cancel the listener task through `listen_cancel` to shut down the listener
+    /// and get a handle on the existing connections.
+    task: JoinHandle<Connections>,
+}
+
+pub struct Connections {
+    cancel: CancellationToken,
+    tasks: tokio::task::JoinSet<ConnectionHandlerResult>,
+}
+
+pub fn spawn(
+    conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
+    pg_auth: Option<Arc<SwappableJwtAuth>>,
+    tcp_listener: tokio::net::TcpListener,
+) -> Listener {
+    let cancel = CancellationToken::new();
+    let libpq_ctx = RequestContext::todo_child(
+        TaskKind::LibpqEndpointListener,
+        // listener task shouldn't need to download anything. (We will
+        // create a separate sub-contexts for each connection, with their
+        // own download behavior. This context is used only to listen and
+        // accept connections.)
+        DownloadBehavior::Error,
+    );
+    let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+        "libpq listener",
+        libpq_listener_main(
+            tenant_manager,
+            pg_auth,
+            tcp_listener,
+            conf.pg_auth_type,
+            libpq_ctx,
+            cancel.clone(),
+        )
+        .map(anyhow::Ok),
+    ));
+
+    Listener { cancel, task }
+}
+
+impl Listener {
+    pub async fn stop_accepting(self) -> Connections {
+        self.cancel.cancel();
+        self.task
+            .await
+            .expect("unreachable: we wrap the listener task in task_mgr::exit_on_panic_or_error")
+    }
+}
+impl Connections {
+    pub async fn shutdown(self) {
+        let Self { cancel, mut tasks } = self;
+        cancel.cancel();
+        while let Some(res) = tasks.join_next().await {
+            // the logging done here mimics what was formerly done by task_mgr
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("error in page_service connection task: {:?}", e),
+                Err(e) => error!("page_service connection task panicked: {:?}", e),
+            }
+        }
+    }
+}
+
 ///
 /// Main loop of the page service.
 ///
 /// Listens for connections, and launches a new handler task for each.
 ///
+/// Returns Ok(()) upon cancellation via `cancel`, returning the set of
+/// open connections.
+///
 pub async fn libpq_listener_main(
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
-    listener: TcpListener,
+    listener: tokio::net::TcpListener,
     auth_type: AuthType,
     listener_ctx: RequestContext,
-    cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    listener.set_nonblocking(true)?;
-    let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
+    listener_cancel: CancellationToken,
+) -> Connections {
+    let connections_cancel = CancellationToken::new();
+    let mut connection_handler_tasks = tokio::task::JoinSet::default();
 
     // Wait for a new connection to arrive, or for server shutdown.
     while let Some(res) = tokio::select! {
         biased;
 
-        _ = cancel.cancelled() => {
+        _ = listener_cancel.cancelled() => {
             // We were requested to shut down.
             None
         }
 
-        res = tokio_listener.accept() => {
+        res = listener.accept() => {
             Some(res)
         }
     } {
@@ -110,28 +180,16 @@ pub async fn libpq_listener_main(
                 // Connection established. Spawn a new task to handle it.
                 debug!("accepted connection from {}", peer_addr);
                 let local_auth = auth.clone();
-
                 let connection_ctx = listener_ctx
                     .detached_child(TaskKind::PageRequestHandler, DownloadBehavior::Download);
-
-                // PageRequestHandler tasks are not associated with any particular
-                // timeline in the task manager. In practice most connections will
-                // only deal with a particular timeline, but we don't know which one
-                // yet.
-                task_mgr::spawn(
-                    &tokio::runtime::Handle::current(),
-                    TaskKind::PageRequestHandler,
-                    None,
-                    None,
-                    "serving compute connection task",
-                    page_service_conn_main(
-                        tenant_manager.clone(),
-                        local_auth,
-                        socket,
-                        auth_type,
-                        connection_ctx,
-                    ),
-                );
+                connection_handler_tasks.spawn(page_service_conn_main(
+                    tenant_manager.clone(),
+                    local_auth,
+                    socket,
+                    auth_type,
+                    connection_ctx,
+                    connections_cancel.child_token(),
+                ));
             }
             Err(err) => {
                 // accept() failed. Log the error, and loop back to retry on next connection.
@@ -140,10 +198,15 @@ pub async fn libpq_listener_main(
         }
     }
 
-    debug!("page_service loop terminated");
+    debug!("page_service listener loop terminated");
 
-    Ok(())
+    Connections {
+        cancel: connections_cancel,
+        tasks: connection_handler_tasks,
+    }
 }
+
+type ConnectionHandlerResult = anyhow::Result<()>;
 
 #[instrument(skip_all, fields(peer_addr))]
 async fn page_service_conn_main(
@@ -152,7 +215,8 @@ async fn page_service_conn_main(
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
     connection_ctx: RequestContext,
-) -> anyhow::Result<()> {
+    cancel: CancellationToken,
+) -> ConnectionHandlerResult {
     let _guard = LIVE_CONNECTIONS
         .with_label_values(&["page_service"])
         .guard();
@@ -200,13 +264,11 @@ async fn page_service_conn_main(
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler = PageServerHandler::new(tenant_manager, auth, connection_ctx);
+    let mut conn_handler =
+        PageServerHandler::new(tenant_manager, auth, connection_ctx, cancel.clone());
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
-    match pgbackend
-        .run(&mut conn_handler, &task_mgr::shutdown_token())
-        .await
-    {
+    match pgbackend.run(&mut conn_handler, &cancel).await {
         Ok(()) => {
             // we've been requested to shut down
             Ok(())
@@ -249,6 +311,8 @@ struct PageServerHandler {
     /// or the ratio used when splitting shards (i.e. how many children created from one)
     /// parent shard, where a "large" number might be ~8.
     shard_timelines: HashMap<ShardIndex, HandlerTimeline>,
+
+    cancel: CancellationToken,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -324,6 +388,7 @@ impl PageServerHandler {
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
         connection_ctx: RequestContext,
+        cancel: CancellationToken,
     ) -> Self {
         PageServerHandler {
             tenant_manager,
@@ -331,6 +396,7 @@ impl PageServerHandler {
             claims: None,
             connection_ctx,
             shard_timelines: HashMap::new(),
+            cancel,
         }
     }
 
@@ -338,7 +404,7 @@ impl PageServerHandler {
     ///
     /// We currently need to shut down when any of the following happens:
     /// 1. any of the timelines we hold GateGuards for in `shard_timelines` is cancelled
-    /// 2. task_mgr requests shutdown of the connection
+    /// 2. connection shutdown is requested via `Self::cancel`
     ///
     /// NB on (1): the connection's lifecycle is not actually tied to any of the
     /// `shard_timelines`s' lifecycles. But it's _necessary_ in the current
@@ -362,7 +428,7 @@ impl PageServerHandler {
 
         let mut cancellation_sources = Vec::with_capacity(1 + self.shard_timelines.len());
         use futures::future::Either;
-        cancellation_sources.push(Either::Left(task_mgr::shutdown_watcher()));
+        cancellation_sources.push(Either::Left(self.cancel.cancelled()));
         cancellation_sources.extend(
             self.shard_timelines
                 .values()
@@ -407,7 +473,7 @@ impl PageServerHandler {
     /// # Coding Discipline
     ///
     /// Coding discipline within this function: all interaction with the `pgb` connection
-    /// needs to be sensitive to page_service shutdown, currently signalled via [`task_mgr::shutdown_token`].
+    /// needs to be sensitive to connection shutdown, currently signalled via [`Self::cancel`].
     /// This is so that we can shutdown page_service quickly.
     #[instrument(skip_all)]
     async fn handle_pagerequests<IO>(
@@ -423,13 +489,11 @@ impl PageServerHandler {
     {
         debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
-        let cancel = task_mgr::shutdown_token();
-
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => {
+            _ = self.cancel.cancelled() => {
                 return Err(QueryError::Shutdown)
             }
             res = pgb.flush() => {
@@ -441,7 +505,7 @@ impl PageServerHandler {
             // read request bytes (it's exactly 1 PagestreamFeMessage per CopyData)
             let msg = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => {
+                _ = self.cancel.cancelled() => {
                     return Err(QueryError::Shutdown)
                 }
                 msg = pgb.read_message() => { msg }
@@ -558,7 +622,7 @@ impl PageServerHandler {
             pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
             tokio::select! {
                 biased;
-                _ = cancel.cancelled() => {
+                _ = self.cancel.cancelled() => {
                     // We were requested to shut down.
                     info!("shutdown request received in page handler");
                     return Err(QueryError::Shutdown)
