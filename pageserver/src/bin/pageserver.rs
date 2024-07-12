@@ -540,13 +540,13 @@ fn start_pageserver(
     // been configured.
     let disk_usage_eviction_state: Arc<disk_usage_eviction_task::State> = Arc::default();
 
-    launch_disk_usage_global_eviction_task(
+    let disk_usage_eviction_task = launch_disk_usage_global_eviction_task(
         conf,
         remote_storage.clone(),
         disk_usage_eviction_state.clone(),
         tenant_manager.clone(),
         background_jobs_barrier.clone(),
-    )?;
+    );
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
@@ -662,6 +662,7 @@ fn start_pageserver(
                 http_endpoint_listener,
                 libpq_listener,
                 consumption_metrics_tasks,
+                disk_usage_eviction_task,
                 &tenant_manager,
                 deletion_queue.clone(),
                 0,
