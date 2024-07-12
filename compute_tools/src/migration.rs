@@ -66,17 +66,28 @@ impl<'m> MigrationRunner<'m> {
             .context("run_migrations begin")?;
 
         while current_migration < self.migrations.len() {
+            macro_rules! migration_id {
+                ($cm:expr) => {
+                    ($cm + 1) as i64
+                };
+            }
+
             let migration = self.migrations[current_migration];
 
             if migration.starts_with("-- SKIP") {
-                info!("Skipping migration id={}", current_migration);
+                info!("Skipping migration id={}", migration_id!(current_migration));
             } else {
                 info!(
                     "Running migration id={}:\n{}\n",
-                    current_migration, migration
+                    migration_id!(current_migration),
+                    migration
                 );
+
                 self.client.simple_query(migration).with_context(|| {
-                    format!("run_migration current_migration={}", current_migration)
+                    format!(
+                        "run_migration migration id={}",
+                        migration_id!(current_migration)
+                    )
                 })?;
             }
 
