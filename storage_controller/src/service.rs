@@ -2866,7 +2866,7 @@ impl Service {
             .filter(|(_, res)| res != &any.1)
             .collect::<Vec<_>>();
         if !mismatching.is_empty() {
-            let matching = mismatching.len() - (results.len() + 1);
+            let matching = results.len() - mismatching.len();
             tracing::error!(
                 matching,
                 compared_against=?any,
