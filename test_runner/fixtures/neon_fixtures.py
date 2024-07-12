@@ -3798,13 +3798,13 @@ class Endpoint(PgProtocol, LogUtils):
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Please note: Migrations only run if pg_skip_catalog_updates is false
-    def wait_for_migrations(self):
+    def wait_for_migrations(self, num_migrations: int = 10):
         with self.cursor() as cur:
 
             def check_migrations_done():
                 cur.execute("SELECT id FROM neon_migration.migration_id")
-                migration_id = cur.fetchall()[0][0]
-                assert migration_id != 0
+                migration_id: int = cur.fetchall()[0][0]
+                assert migration_id >= num_migrations
 
             wait_until(20, 0.5, check_migrations_done)
 
