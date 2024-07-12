@@ -9,6 +9,7 @@ use crate::{
 };
 use aws_sdk_s3::Client;
 use futures_util::{StreamExt, TryStreamExt};
+use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
@@ -68,10 +69,48 @@ impl std::fmt::Display for GcMode {
     }
 }
 
-// Map of cross-shard layer references, giving a refcount for each layer in each shard that is referenced by some other
-// shard in the same tenant.  This is sparse!  The vast majority of timelines will have no cross-shard refs, and those that
-// do have cross shard refs should eventually drop most of them via compaction.
-type AncestorRefs = BTreeMap<TenantTimelineId, HashMap<(ShardIndex, LayerName), usize>>;
+mod refs {
+    use super::*;
+    // Map of cross-shard layer references, giving a refcount for each layer in each shard that is referenced by some other
+    // shard in the same tenant.  This is sparse!  The vast majority of timelines will have no cross-shard refs, and those that
+    // do have cross shard refs should eventually drop most of them via compaction.
+    //
+    // In our inner map type, the TTID in the key is shard-agnostic, and the ShardIndex in the value refers to the _ancestor
+    // which is is referenced_.
+    #[derive(Default)]
+    pub(super) struct AncestorRefs(
+        BTreeMap<TenantTimelineId, HashMap<(ShardIndex, LayerName), usize>>,
+    );
+
+    impl AncestorRefs {
+        /// Insert references for layers discovered in a particular shard-timeline that refer to an ancestral shard-timeline.
+        pub(super) fn update(
+            &mut self,
+            ttid: TenantShardTimelineId,
+            layers: Vec<(LayerName, LayerFileMetadata)>,
+        ) {
+            let ttid_refs = self.0.entry(ttid.as_tenant_timeline_id()).or_default();
+            for (layer_name, layer_metadata) in layers {
+                // Increment refcount of this layer in the ancestor shard
+                *(ttid_refs
+                    .entry((layer_metadata.shard, layer_name))
+                    .or_default()) += 1;
+            }
+        }
+
+        /// For a particular TTID, return the map of all ancestor layers referenced by a descendent to their refcount
+        ///
+        /// The `ShardIndex` in the result's key is the index of the _ancestor_, not the descendent.
+        pub(super) fn get_ttid_refcounts(
+            &self,
+            ttid: &TenantTimelineId,
+        ) -> Option<&HashMap<(ShardIndex, LayerName), usize>> {
+            self.0.get(&ttid)
+        }
+    }
+}
+
+use refs::AncestorRefs;
 
 // As we see shards for a tenant, acccumulate knowledge needed for cross-shard GC:
 // - Are there any ancestor shards?
@@ -104,16 +143,7 @@ impl TenantRefAccumulator {
 
         if !ancestor_refs.is_empty() {
             tracing::info!(%ttid, "Found {} ancestor refs", ancestor_refs.len());
-            let ttid_refs = self
-                .ancestor_ref_shards
-                .entry(ttid.as_tenant_timeline_id())
-                .or_default();
-            for (layer_name, layer_metadata) in ancestor_refs {
-                // Increment refcount of this layer in the ancestor shard
-                *(ttid_refs
-                    .entry((layer_metadata.shard, layer_name))
-                    .or_default()) += 1;
-            }
+            self.ancestor_ref_shards.update(ttid, ancestor_refs);
         }
     }
 
@@ -361,7 +391,7 @@ async fn gc_ancestor(
             }
         };
 
-        let ttid_refs = refs.get(&ttid.as_tenant_timeline_id());
+        let ttid_refs = refs.get_ttid_refcounts(&ttid.as_tenant_timeline_id());
         let ancestor_shard_index = ttid.tenant_shard_id.to_index();
 
         for (layer_name, layer_gen) in s3_layers {
