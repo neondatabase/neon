@@ -4975,6 +4975,16 @@ impl Timeline {
 
         pausable_failpoint!("Timeline::find_gc_cutoffs-pausable");
 
+        if cfg!(test) {
+            // Unit tests which specify zero PITR interval expect to avoid doing any I/O for timestamp lookup
+            if pitr == Duration::ZERO {
+                return Ok(GcCutoffs {
+                    pitr: *self.get_latest_gc_cutoff_lsn(),
+                    horizon: cutoff_horizon,
+                });
+            }
+        }
+
         // Calculate a time-based limit on how much to retain:
         // - if PITR interval is configured, then this is our cutoff.
         // - if PITR interval is not configured, then we do a lookup
