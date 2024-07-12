@@ -62,6 +62,7 @@ pub struct CancellableTask {
 pub struct HttpEndpointListener(pub CancellableTask);
 pub struct LibpqEndpointListener(pub CancellableTask);
 pub struct ConsumptionMetricsTasks(pub CancellableTask);
+pub struct DiskUsageEvictionTask(pub CancellableTask);
 impl CancellableTask {
     pub async fn shutdown(self) {
         self.cancel.cancel();
@@ -74,6 +75,7 @@ pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
     libpq_listener: LibpqEndpointListener,
     consumption_metrics_worker: ConsumptionMetricsTasks,
+    disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
     tenant_manager: &TenantManager,
     mut deletion_queue: DeletionQueue,
     exit_code: i32,
@@ -112,6 +114,13 @@ pub async fn shutdown_pageserver(
     timed(
         consumption_metrics_worker.0.shutdown(),
         "shutdown consumption metrics",
+        Duration::from_secs(1),
+    )
+    .await;
+
+    timed(
+        futures::future::OptionFuture::from(disk_usage_eviction_task.map(|t| t.0.shutdown())),
+        "shutdown disk usage eviction",
         Duration::from_secs(1),
     )
     .await;
