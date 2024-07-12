@@ -352,7 +352,6 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 	TransactionId *restored_xids = NULL;
 	int			n_restored_xids;
 	int			next_prepared_idx;
-	bool		overflow = false;
 
 	Assert(*xids == NULL);
 
@@ -540,7 +539,6 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 				 checkpoint->oldestXid, checkpoint->oldestActiveXid,
 				 XidFromFullTransactionId(checkpoint->nextXid));
 
-			overflow = true;
 			switch (running_xacts_overflow_policy)
 			{
 				case OP_WAIT:
@@ -564,11 +562,8 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 	{
 		elog(LOG, "prepared transaction ID %u was not visited in the CLOG scan, cannot restore running-xacts from CLOG",
 			 prepared_xids[next_prepared_idx]);
-		if (!overflow)
-		{
-			Assert(false);
-			goto fail;
-		}
+		Assert(false);
+		goto fail;
 	}
    success:
 	elog(LOG, "restored %d running xacts by scanning the CLOG; oldestXid=%u oldestActiveXid=%u nextXid %u",
