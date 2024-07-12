@@ -4998,7 +4998,7 @@ impl Timeline {
                 pitr
             };
 
-            // If PITR is so large or `now` is so small that this overflows, we will retain no history (highly unexpected case)
+            // If PITR is so large or `now` is so small that this underflows, we will retain no history (highly unexpected case)
             let time_cutoff = now.checked_sub(time_range).unwrap_or(now);
             let timestamp = to_pg_timestamp(time_cutoff);
 
