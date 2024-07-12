@@ -794,6 +794,16 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
 
     wait_until(2, 2, less_than_max_usage_pct)
 
+    # Disk usage candidate collection only takes into account active tenants.
+    # However, the statvfs call takes into account the entire tenants directory,
+    # which includes tenants which haven't become active yet.
+    #
+    # After re-starting the pageserver, disk usage eviction may kick in *before*
+    # both tenants have become active. Hence, the logic will try to satisfy the
+    # disk usage requirements by evicting everything belonging to the active tenant,
+    # and hence violating the tenant minimum resident size.
+    env.neon_env.pageserver.allowed_errors.append(".*" + GLOBAL_LRU_LOG_LINE)
+
 
 def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
     """
