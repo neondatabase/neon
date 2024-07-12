@@ -674,7 +674,7 @@ def test_replica_start_with_too_many_unused_xids(neon_simple_env: NeonEnv):
     wait_for_last_flush_lsn(env, primary, env.initial_tenant, env.initial_timeline)
 
     # stop primary to check that we can start replica without it
-    primary.stop(mode="fast")
+    primary.stop(mode="immediate")
 
     # Create a replica. It should start up normally, because of ignore policy
     # mechanism.
