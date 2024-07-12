@@ -341,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::TenantCreate { tenant_id } => {
             storcon_client
-                .dispatch(
+                .dispatch::<_, ()>(
                     Method::POST,
                     "v1/tenant".to_string(),
                     Some(TenantCreateRequest {
