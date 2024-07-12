@@ -127,7 +127,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
             Cancel(cancel_session) => {
                 tracing::Span::current().record(
                     "session_id",
-                    &tracing::field::display(cancel_session.session_id),
+                    tracing::field::display(cancel_session.session_id),
                 );
                 Metrics::get()
                     .proxy

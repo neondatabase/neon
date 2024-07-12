@@ -319,7 +319,7 @@ impl ConnCfg {
         let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
         let (client, connection) = self.0.connect_raw(stream, tls).await?;
         drop(pause);
-        tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
+        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 
         info!(
