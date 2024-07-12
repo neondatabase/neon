@@ -572,9 +572,12 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
     for ps in pageservers.values():
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
-    client = (
-        env.pageserver.http_client() if not sharded else env.storage_controller.pageserver_api()
-    )
+    if sharded:
+        # FIXME: should this be in the neon_env_builder.init_start?
+        env.storage_controller.reconcile_until_idle()
+        client = env.storage_controller.pageserver_api()
+    else:
+        client = env.pageserver.http_client()
 
     with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
         client.detach_ancestor(env.initial_tenant, env.initial_timeline)
@@ -616,6 +619,8 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
     for ps in env.pageservers:
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
+    # FIXME: should this be in the neon_env_builder.init_start?
+    env.storage_controller.reconcile_until_idle()
     shards = env.storage_controller.locate(env.initial_tenant)
 
     branch_timeline_id = env.neon_cli.create_branch(branch_name, tenant_id=env.initial_tenant)
