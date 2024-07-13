@@ -245,7 +245,7 @@ impl ConnectMechanism for TokioMechanism {
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
-        tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
+        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
         Ok(poll_client(
             self.pool.clone(),
             ctx,

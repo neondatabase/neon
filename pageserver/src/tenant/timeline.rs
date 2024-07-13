@@ -66,12 +66,12 @@ use std::{
     ops::{Deref, Range},
 };
 
-use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
+        storage_layer::PersistentLayerDesc,
     },
 };
 use crate::{
@@ -98,6 +98,7 @@ use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
@@ -728,6 +729,9 @@ impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
             CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
+            CreateImageLayersError::Other(e) => {
+                CompactionError::Other(e.context("create image layers"))
+            }
             _ => CompactionError::Other(e.into()),
         }
     }
@@ -3404,6 +3408,7 @@ impl Timeline {
         }
     }
 
+    #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
     /// The algorithm is as follows:
@@ -4470,10 +4475,10 @@ impl Timeline {
     /// are required. Since checking if new image layers are required is expensive in
     /// terms of CPU, we only do it in the following cases:
     /// 1. If the timeline has ingested sufficient WAL to justify the cost
-    /// 2. If enough time has passed since the last check
-    /// 2.1. For large tenants, we wish to perform the check more often since they
-    /// suffer from the lack of image layers
-    /// 2.2. For small tenants (that can mostly fit in RAM), we use a much longer interval
+    /// 2. If enough time has passed since the last check:
+    ///     1. For large tenants, we wish to perform the check more often since they
+    ///        suffer from the lack of image layers
+    ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
         const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -4567,6 +4572,22 @@ impl Timeline {
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
                 if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
                     start = img_range.end;
+                    continue;
+                }
+            } else if let ImageLayerCreationMode::Force = mode {
+                // When forced to create image layers, we might try and create them where they already
+                // exist.  This mode is only used in tests/debug.
+                let layers = self.layers.read().await;
+                if layers.contains_key(&PersistentLayerKey {
+                    key_range: img_range.clone(),
+                    lsn_range: PersistentLayerDesc::image_layer_lsn_range(lsn),
+                    is_delta: false,
+                }) {
+                    tracing::info!(
+                        "Skipping image layer at {lsn} {}..{}, already exists",
+                        img_range.start,
+                        img_range.end
+                    );
                     continue;
                 }
             }
@@ -4699,7 +4720,7 @@ impl Timeline {
     /// Requires a timeline that:
     /// - has an ancestor to detach from
     /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
-    /// a technical requirement
+    ///   a technical requirement
     ///
     /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
     /// polled again until completion.

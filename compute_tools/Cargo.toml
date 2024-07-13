@@ -44,3 +44,4 @@ vm_monitor = { version = "0.1", path = "../libs/vm_monitor/" }
 zstd = "0.13"
 bytes = "1.0"
 rust-ini = "0.20.0"
+rlimit = "0.10.1"

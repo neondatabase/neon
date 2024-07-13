@@ -26,6 +26,8 @@ pub mod auth;
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod id;
 
+pub mod shard;
+
 mod hex;
 pub use hex::Hex;
 
@@ -95,6 +97,8 @@ pub mod env;
 pub mod poison;
 
 pub mod toml_edit_ext;
+
+pub mod circuit_breaker;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///

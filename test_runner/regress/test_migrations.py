@@ -13,7 +13,7 @@ def test_migrations(neon_simple_env: NeonEnv):
 
     endpoint.wait_for_migrations()
 
-    num_migrations = 9
+    num_migrations = 10
 
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")

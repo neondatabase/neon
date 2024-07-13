@@ -569,6 +569,22 @@ static VALID_LSN_LEASE_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static CIRCUIT_BREAKERS_BROKEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_circuit_breaker_broken",
+        "How many times a circuit breaker has broken"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static CIRCUIT_BREAKERS_UNBROKEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_circuit_breaker_unbroken",
+        "How many times a circuit breaker has been un-broken (recovered)"
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) mod initial_logical_size {
     use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
     use once_cell::sync::Lazy;
@@ -1456,10 +1472,12 @@ impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
     }
 }
 
-pub(crate) static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "pageserver_live_connections",
-        "Number of live network connections",
+pub(crate) static LIVE_CONNECTIONS: Lazy<IntCounterPairVec> = Lazy::new(|| {
+    register_int_counter_pair_vec!(
+        "pageserver_live_connections_started",
+        "Number of network connections that we started handling",
+        "pageserver_live_connections_finished",
+        "Number of network connections that we finished handling",
         &["pageserver_connection_kind"]
     )
     .expect("failed to define a metric")
@@ -1471,8 +1489,6 @@ pub(crate) enum ComputeCommandKind {
     PageStream,
     Basebackup,
     Fullbackup,
-    ImportBasebackup,
-    ImportWal,
     LeaseLsn,
     Show,
 }
