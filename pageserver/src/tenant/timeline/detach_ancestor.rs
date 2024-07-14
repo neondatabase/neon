@@ -10,6 +10,7 @@ use crate::{
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use fail::fail_point;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -40,6 +41,9 @@ pub(crate) enum Error {
 
     #[error("unexpected error")]
     Unexpected(#[source] anyhow::Error),
+
+    #[error("failpoint: {}", .0)]
+    Failpoint(&'static str),
 }
 
 impl From<Error> for ApiError {
@@ -58,7 +62,8 @@ impl From<Error> for ApiError {
             | e @ Error::CopyDeltaPrefix(_)
             | e @ Error::UploadRewritten(_)
             | e @ Error::CopyFailed(_)
-            | e @ Error::Unexpected(_) => ApiError::InternalServerError(e.into()),
+            | e @ Error::Unexpected(_)
+            | e @ Error::Failpoint(_) => ApiError::InternalServerError(e.into()),
         }
     }
 }
