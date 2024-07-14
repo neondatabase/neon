@@ -172,6 +172,11 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
 
+    def with_retry(self, retries: Optional[Retry]) -> PageserverHttpClient:
+        return PageserverHttpClient(
+            self.port, self.is_testing_enabled_or_skip, self.auth_token, retries
+        )
+
     @property
     def base_url(self) -> str:
         return f"http://localhost:{self.port}"
