@@ -110,17 +110,11 @@ pub(super) async fn prepare(
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
-        // TODO: check if we have already been detached; for this we need to read the stored data
-        // on remote client, for that we need a follow-up which makes uploads cheaper and maintains
-        // a projection of the commited data.
-        //
-        // the error is wrong per openapi
-
         {
             let accessor = detached.remote_client.initialized_upload_queue()?;
 
-            // we are safe to inspect the latest uploaded, because either we'll see this uploaded near
-            // the shutdown, or we'll witness this after restart is complete.
+            // we are safe to inspect the latest uploaded, because we can only witness this after
+            // restart is complete and ancestor is no more.
             let latest = accessor.latest_uploaded_index_part();
             if !latest.lineage.is_detached_from_original_ancestor() {
                 return Err(NoAncestor);
@@ -129,7 +123,6 @@ pub(super) async fn prepare(
 
         // detached has previously been detached; let's inspect each of the current timelines and
         // report back the timelines which have been reparented by our detach
-
         let mut all_direct_children = tenant
             .timelines
             .lock()
@@ -162,6 +155,9 @@ pub(super) async fn prepare(
         }
 
         let mut reparented = all_direct_children;
+        // why this instead of hashset? there is a reason, but I've forgotten it many times.
+        //
+        // maybe if this was a hashset we would not be able to distinguish some race condition.
         reparented.sort_unstable_by_key(|(lsn, tl)| (*lsn, tl.timeline_id));
 
         return Ok(Progress::Done(AncestorDetached {
