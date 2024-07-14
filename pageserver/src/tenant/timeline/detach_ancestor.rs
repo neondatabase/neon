@@ -76,6 +76,22 @@ impl From<crate::tenant::upload_queue::NotInitialized> for Error {
     }
 }
 
+impl From<FlushLayerError> for Error {
+    fn from(value: FlushLayerError) -> Self {
+        match value {
+            FlushLayerError::Cancelled => Error::ShuttingDown,
+            FlushLayerError::NotRunning(_) => {
+                // FIXME(#6424): technically statically unreachable right now, given how we never
+                // drop the sender
+                Error::ShuttingDown
+            }
+            FlushLayerError::CreateImageLayersError(_) | FlushLayerError::Other(_) => {
+                Error::FlushAncestor(value)
+            }
+        }
+    }
+}
+
 pub(crate) enum Progress {
     Prepared(completion::Completion, PreparedTimelineDetach),
     Done(AncestorDetached),
@@ -223,7 +239,7 @@ pub(super) async fn prepare(
                 }
             };
 
-            res.map_err(FlushAncestor)?;
+            res?;
 
             // we do not need to wait for uploads to complete but we do need `struct Layer`,
             // copying delta prefix is unsupported currently for `InMemoryLayer`.
