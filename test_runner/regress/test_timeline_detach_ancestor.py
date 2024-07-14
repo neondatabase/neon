@@ -893,6 +893,135 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
             raise
 
 
+@pytest.mark.parametrize("mode", ["delete-reparentable-timeline"])
+def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnvBuilder, mode: str):
+    """
+    Technically storage controller concurrent interleaving timeline deletion with timeline detach.
+
+    Deletion is fine, as any sharded pageservers reach the same end state, but creating reparentable timeline would create an issue as the two nodes would never agree.
+    There is a solution though: the created reparentable timeline must be detached.
+    """
+    shard_count = 2
+    neon_env_builder.num_pageservers = shard_count
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    env.storage_controller.reconcile_until_idle()
+    shards = env.storage_controller.locate(env.initial_tenant)
+    assert len(set(x["node_id"] for x in shards)) == shard_count
+
+    with env.endpoints.create_start("main") as ep:
+        ep.safe_psql("create table foo as select i::bigint from generate_series(1, 1000) t(i)")
+
+        # as the interleaved operation, we will delete this timeline, which was reparenting candidate
+        first_branch_lsn = wait_for_last_flush_lsn(
+            env, ep, env.initial_tenant, env.initial_timeline
+        )
+        for ps, shard_id in [(pageservers[int(x["node_id"])], x["shard_id"]) for x in shards]:
+            ps.http_client().timeline_checkpoint(shard_id, env.initial_timeline)
+
+        ep.safe_psql("create table bar as select i::bigint from generate_series(1, 2000) t(i)")
+        detached_branch_lsn = flush_ep_to_pageserver(
+            env, ep, env.initial_tenant, env.initial_timeline
+        )
+
+    for ps, shard_id in [(pageservers[int(x["node_id"])], x["shard_id"]) for x in shards]:
+        ps.http_client().timeline_checkpoint(shard_id, env.initial_timeline)
+
+    first_branch = env.neon_cli.create_branch(
+        "first_branch", ancestor_branch_name="main", ancestor_start_lsn=first_branch_lsn
+    )
+    detached_branch = env.neon_cli.create_branch(
+        "detached_branch", ancestor_branch_name="main", ancestor_start_lsn=detached_branch_lsn
+    )
+
+    pausepoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
+
+    stuck = pageservers[int(shards[0]["node_id"])]
+    stuck_http = stuck.http_client().without_status_retrying()
+    stuck_http.configure_failpoints((pausepoint, "pause"))
+
+    victim = pageservers[int(shards[-1]["node_id"])]
+    victim_http = victim.http_client().without_status_retrying()
+    victim_http.configure_failpoints(
+        (pausepoint, "pause"),
+    )
+    # victim_http.configure_failpoints([
+    #     (pausepoint, "pause"),
+    #     ("timeline-detach-ancestor::before_starting_after_locking", "return"),
+    # ])
+
+    # interleaving a create_timeline which could be reparented will produce two
+    # permanently different reparentings: one node has reparented, other has
+    # not
+    #
+    # with deletion there is no such problem
+    def detach_timeline():
+        env.storage_controller.pageserver_api().detach_ancestor(env.initial_tenant, detached_branch)
+
+    def paused_at_failpoint():
+        stuck.assert_log_contains(f"at failpoint {pausepoint}")
+        victim.assert_log_contains(f"at failpoint {pausepoint}")
+
+    def first_completed():
+        detail = stuck_http.timeline_detail(shards[0]["shard_id"], detached_branch)
+        log.info(detail)
+        assert detail.get("ancestor_lsn") is None
+
+    def first_branch_gone():
+        try:
+            env.storage_controller.pageserver_api().timeline_detail(
+                env.initial_tenant, first_branch
+            )
+        except PageserverApiException as e:
+            log.info(f"error {e}")
+            assert e.status_code == 404
+        else:
+            log.info("still ok")
+            raise RuntimeError("not done yet")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            fut = pool.submit(detach_timeline)
+            wait_until(10, 1.0, paused_at_failpoint)
+
+            # let stuck complete
+            stuck_http.configure_failpoints((pausepoint, "off"))
+            wait_until(10, 1.0, first_completed)
+
+            # let victim fail
+            # victim_http.configure_failpoints((pausepoint, "off"))
+            # with pytest.raises(PageserverApiException, match=".* 500 Internal Server Error failpoint: timeline-detach-ancestor::before_starting_after_locking") as exc:
+            #     fut.result()
+            # # FIXME: why does this happen? should be 500, or even 503
+            # assert exc.value.status_code == 409
+
+            env.storage_controller.pageserver_api().timeline_delete(
+                env.initial_tenant, first_branch
+            )
+            victim_http.configure_failpoints((pausepoint, "off"))
+            wait_until(10, 1.0, first_branch_gone)
+
+            # it now passes, and we should get an error messages about mixed reparenting as the stuck still had something to reparent
+            fut.result()
+
+            msg, _ = env.storage_controller.assert_log_contains(
+                ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*"
+            )
+            log.info(f"expected error message: {msg}")
+            env.storage_controller.allowed_errors.append(
+                ".*: shards returned different results matching=0 .*"
+            )
+        except:
+            stuck_http.configure_failpoints((pausepoint, "off"))
+            victim_http.configure_failpoints((pausepoint, "off"))
+            raise
+
+
 # TODO:
 # - after starting the operation, pageserver is shutdown, restarted
 # - after starting the operation, bottom-most timeline is deleted, pageserver is restarted, gc is inhibited
@@ -901,5 +1030,5 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
 #
 # TEST: 1. tad which partially succeeds, one returns 500
-#       2. create branch below timeline? or delete reparented timeline
+#       2. create branch below timeline? ~or delete reparented timeline~ (done)
 #       3. on retry all should report the same reparented timelines

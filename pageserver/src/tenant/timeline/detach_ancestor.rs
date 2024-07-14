@@ -10,7 +10,6 @@ use crate::{
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
-use fail::fail_point;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -218,6 +217,13 @@ pub(super) async fn prepare(
     let _gate_entered = detached.gate.enter().map_err(|_| ShuttingDown)?;
 
     utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable");
+
+    fail::fail_point!(
+        "timeline-detach-ancestor::before_starting_after_locking",
+        |_| Err(Error::Failpoint(
+            "timeline-detach-ancestor::before_starting_after_locking"
+        ))
+    );
 
     if ancestor_lsn >= ancestor.get_disk_consistent_lsn() {
         let span =
