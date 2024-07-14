@@ -11,6 +11,7 @@ import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    LogCursor,
     NeonEnvBuilder,
     PgBin,
     flush_ep_to_pageserver,
@@ -19,7 +20,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.utils import assert_pageserver_backups_equal
+from fixtures.utils import assert_pageserver_backups_equal, wait_until
 from requests import ReadTimeout
 
 
@@ -743,8 +744,8 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
 
         restarted.start()
 
-    with ThreadPoolExecutor(max_workers=1) as exec:
-        fut = exec.submit(restart_restarted)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(restart_restarted)
         barrier.wait()
         # we have 10s, lets use 1/2 of that to help the shutdown start
         time.sleep(5)
@@ -789,8 +790,85 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         assert count == 10000
 
 
+@pytest.mark.parametrize("mode", ["delete-timeline", "delete-tenant"])
+def test_timeline_detach_ancestor_interrupted_by_deletion(
+    neon_env_builder: NeonEnvBuilder, mode: str
+):
+    """
+    Timeline ancestor detach interrupted by deleting either:
+    - the detached timeline
+    - the whole tenant
+
+    after starting the detach.
+
+    What remains not tested by this:
+    - shutdown winning over complete
+    """
+
+    env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    detached_timeline = env.neon_cli.create_branch("detached soon", "main")
+
+    failpoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
+
+    target = env.pageserver.http_client()
+    target = target.without_status_retrying()
+    target.configure_failpoints((failpoint, "pause"))
+
+    def detach_ancestor():
+        target.detach_ancestor(env.initial_tenant, detached_timeline)
+
+    def at_failpoint() -> Tuple[str, LogCursor]:
+        return env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+
+    def start_delete():
+        if mode == "delete-timeline":
+            target.timeline_delete(env.initial_tenant, detached_timeline)
+        elif mode == "delete-tenant":
+            target.tenant_delete(env.initial_tenant)
+        else:
+            raise RuntimeError(f"unimplemented mode {mode}")
+
+    def at_waiting_on_gate_close(start_offset: LogCursor):
+        env.pageserver.assert_log_contains(
+            "closing is taking longer than expected", offset=start_offset
+        )
+
+    def is_deleted():
+        with pytest.raises(PageserverApiException) as exc:
+            if mode == "delete-timeline":
+                target.timeline_detail(env.initial_tenant, detached_timeline)
+            elif mode == "delete-tenant":
+                target.tenant_status(env.initial_tenant)
+            else:
+                return False
+        assert exc.value.status_code == 404
+        return True
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut = pool.submit(detach_ancestor)
+        _, offset = wait_until(10, 1.0, at_failpoint)
+
+        log.info("it is at failpoint")
+
+        delete = pool.submit(start_delete)
+
+        wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
+
+        target.configure_failpoints((failpoint, "off"))
+
+        delete.result()
+
+        assert wait_until(10, 1.0, is_deleted), f"unimplemented mode {mode}"
+
+        with pytest.raises(PageserverApiException) as exc:
+            fut.result()
+        assert exc.value.status_code == 503
+
+
 # TODO:
-# - after starting the operation, tenant is deleted
 # - after starting the operation, pageserver is shutdown, restarted
 # - after starting the operation, bottom-most timeline is deleted, pageserver is restarted, gc is inhibited
 # - deletion of reparented while reparenting should fail once, then succeed (?)
@@ -798,5 +876,5 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
 #
 # TEST: 1. tad which partially succeeds, one returns 500
-#       2. create branch below timeline? or delete timeline below
+#       2. create branch below timeline? or delete reparented timeline
 #       3. on retry all should report the same reparented timelines
