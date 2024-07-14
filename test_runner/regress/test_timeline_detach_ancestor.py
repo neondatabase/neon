@@ -1,5 +1,6 @@
 import datetime
 import enum
+import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from threading import Barrier
@@ -18,6 +19,7 @@ from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import assert_pageserver_backups_equal
+from requests import ReadTimeout
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
@@ -660,6 +662,9 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.reconcile_until_idle()
     shards = env.storage_controller.locate(env.initial_tenant)
 
+    utilized_pageservers = {x["node_id"] for x in shards}
+    assert len(utilized_pageservers) > 1, "all shards got placed on single pageserver?"
+
     branch_timeline_id = env.neon_cli.create_branch(branch_name, tenant_id=env.initial_tenant)
 
     with env.endpoints.create_start(branch_name, tenant_id=env.initial_tenant) as ep:
@@ -679,7 +684,39 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         assert Lsn(detail["initdb_lsn"]) < lsn
         assert TimelineId(detail["ancestor_timeline_id"]) == env.initial_timeline
 
-    env.storage_controller.pageserver_api().detach_ancestor(env.initial_tenant, branch_timeline_id)
+    victim = pageservers[int(shards[0]["node_id"])]
+    victim.allowed_errors.append(".*: request was dropped before completing")
+    env.storage_controller.allowed_errors.append(".*: request was dropped before completing")
+    victim_http = victim.http_client()
+    victim_http.configure_failpoints(
+        ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause")
+    )
+
+    target = env.storage_controller.pageserver_api()
+
+    with pytest.raises(ReadTimeout):
+        target.detach_ancestor(env.initial_tenant, branch_timeline_id, timeout=1)
+
+    victim_http.configure_failpoints(
+        ("timeline-detach-ancestor::before_starting_after_locking_pausable", "off")
+    )
+
+    # detach ancestor request handling is not sensitive to http cancellation.
+    # now it can either be complete on all nodes, or still in progress with
+    # one.
+    without_retrying = target.with_retry(None)
+
+    reparented = None
+    for _ in range(10):
+        try:
+            reparented = without_retrying.detach_ancestor(env.initial_tenant, branch_timeline_id)
+        except PageserverApiException as info:
+            assert info.status_code == 503
+            time.sleep(2)
+        else:
+            break
+
+    assert reparented == [], "too many retries (None) or unexpected reparentings"
 
     for shard_info in shards:
         node_id = int(shard_info["node_id"])
