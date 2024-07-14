@@ -1,5 +1,6 @@
 import datetime
 import enum
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
@@ -731,11 +732,26 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         ("timeline-detach-ancestor::before_starting_after_locking_pausable", "off")
     )
 
-    # graceful shutdown should just work
-    restarted.stop()
-    # make sure the allowed error keeps getting hit
-    restarted.assert_log_contains("Cancelled request finished with an error: ShuttingDown")
-    restarted.start()
+    barrier = threading.Barrier(2)
+
+    def restart_restarted():
+        barrier.wait()
+        # graceful shutdown should just work, because simultaneously unpaused
+        restarted.stop()
+        # this does not happen always, depends how fast we exit after unpausing
+        # restarted.assert_log_contains("Cancelled request finished with an error: ShuttingDown")
+
+        restarted.start()
+
+    with ThreadPoolExecutor(max_workers=1) as exec:
+        fut = exec.submit(restart_restarted)
+        barrier.wait()
+        # we have 10s, lets use 1/2 of that to help the shutdown start
+        time.sleep(5)
+        restarted_http.configure_failpoints(
+            ("timeline-detach-ancestor::before_starting_after_locking_pausable", "off")
+        )
+        fut.result()
 
     # detach ancestor request handling is not sensitive to http cancellation.
     # this means that the "stuck" is on its way to complete the detach, but the restarted is off
