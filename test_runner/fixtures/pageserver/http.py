@@ -819,6 +819,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
         batch_size: int | None = None,
+        **kwargs,
     ) -> List[TimelineId]:
         params = {}
         if batch_size is not None:
@@ -826,6 +827,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
             params=params,
+            **kwargs,
         )
         self.verbose_error(res)
         json = res.json()
