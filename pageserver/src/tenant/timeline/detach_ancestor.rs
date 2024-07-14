@@ -201,7 +201,10 @@ pub(super) async fn prepare(
 
     let _gate_entered = detached.gate.enter().map_err(|_| ShuttingDown)?;
 
-    utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable");
+    tokio::select! {
+        _ = async { utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable") } => {},
+        _ = detached.cancel.cancelled() => { return Err(ShuttingDown); }
+    }
 
     if ancestor_lsn >= ancestor.get_disk_consistent_lsn() {
         let span =

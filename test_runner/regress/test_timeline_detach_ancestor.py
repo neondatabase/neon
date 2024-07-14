@@ -649,6 +649,14 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
 
 
 def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
+    """
+    Sharded timeline detach ancestor; 4 nodes: 1 stuck, 1 restarted, 2 normal.
+
+    Stuck node gets stuck on a pause failpoint for first storage controller request.
+    Restarted node remains stuck until explicit restart from test code.
+
+    We retry the request until storage controller gets 200 OK from all nodes.
+    """
     branch_name = "soon_detached"
     shard_count = 4
     neon_env_builder.num_pageservers = shard_count
@@ -660,6 +668,10 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
 
     # FIXME: should this be in the neon_env_builder.init_start?
     env.storage_controller.reconcile_until_idle()
+    # as we will stop a node, make sure there is no clever rebalancing
+    env.storage_controller.tenant_policy_update(env.initial_tenant, body={"scheduling": "Stop"})
+    env.storage_controller.allowed_errors.append(".*: Scheduling is disabled by policy Stop .*")
+
     shards = env.storage_controller.locate(env.initial_tenant)
 
     utilized_pageservers = {x["node_id"] for x in shards}
@@ -684,12 +696,30 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         assert Lsn(detail["initdb_lsn"]) < lsn
         assert TimelineId(detail["ancestor_timeline_id"]) == env.initial_timeline
 
-    victim = pageservers[int(shards[0]["node_id"])]
-    victim.allowed_errors.append(".*: request was dropped before completing")
+    # make one of the nodes get stuck, but continue the initial operation
+    # make another of the nodes get stuck, then restart
+
+    stuck = pageservers[int(shards[0]["node_id"])]
+    stuck.allowed_errors.append(".*: request was dropped before completing")
     env.storage_controller.allowed_errors.append(".*: request was dropped before completing")
-    victim_http = victim.http_client()
-    victim_http.configure_failpoints(
+    stuck_http = stuck.http_client()
+    stuck_http.configure_failpoints(
         ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause")
+    )
+
+    restarted = pageservers[int(shards[1]["node_id"])]
+    restarted.allowed_errors.extend(
+        [
+            ".*: request was dropped before completing",
+            ".*: Cancelled request finished with an error: ShuttingDown",
+        ]
+    )
+    assert restarted.id != stuck.id
+    restarted_http = restarted.http_client()
+    restarted_http.configure_failpoints(
+        [
+            ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause"),
+        ]
     )
 
     target = env.storage_controller.pageserver_api()
@@ -697,15 +727,23 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
     with pytest.raises(ReadTimeout):
         target.detach_ancestor(env.initial_tenant, branch_timeline_id, timeout=1)
 
-    victim_http.configure_failpoints(
+    stuck_http.configure_failpoints(
         ("timeline-detach-ancestor::before_starting_after_locking_pausable", "off")
     )
 
+    # graceful shutdown should just work
+    restarted.stop()
+    # make sure the allowed error keeps getting hit
+    restarted.assert_log_contains("Cancelled request finished with an error: ShuttingDown")
+    restarted.start()
+
     # detach ancestor request handling is not sensitive to http cancellation.
+    # this means that the "stuck" is on its way to complete the detach, but the restarted is off
     # now it can either be complete on all nodes, or still in progress with
     # one.
     without_retrying = target.with_retry(None)
 
+    # this retry loop will be long enough that the tenant can always activate
     reparented = None
     for _ in range(10):
         try:
@@ -746,7 +784,3 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
 # TEST: 1. tad which partially succeeds, one returns 500
 #       2. create branch below timeline? or delete timeline below
 #       3. on retry all should report the same reparented timelines
-#
-# TEST: 1. tad is started, one node stalls, other restarts
-#       2. client timeout before stall over
-#       3. on retry with stalled and other being able to proceed
