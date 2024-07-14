@@ -757,7 +757,7 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
     # this means that the "stuck" is on its way to complete the detach, but the restarted is off
     # now it can either be complete on all nodes, or still in progress with
     # one.
-    without_retrying = target.with_retry(None)
+    without_retrying = target.without_status_retrying()
 
     # this retry loop will be long enough that the tenant can always activate
     reparented = None

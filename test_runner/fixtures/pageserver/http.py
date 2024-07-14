@@ -172,7 +172,17 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
 
-    def with_retry(self, retries: Optional[Retry]) -> PageserverHttpClient:
+    def without_status_retrying(self) -> PageserverHttpClient:
+        retries = Retry(
+            status=0,
+            connect=5,
+            read=False,
+            backoff_factor=0.2,
+            status_forcelist=[],
+            allowed_methods=None,
+            remove_headers_on_redirect=[],
+        )
+
         return PageserverHttpClient(
             self.port, self.is_testing_enabled_or_skip, self.auth_token, retries
         )
