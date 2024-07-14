@@ -741,7 +741,6 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         restarted.stop()
         # this does not happen always, depends how fast we exit after unpausing
         # restarted.assert_log_contains("Cancelled request finished with an error: ShuttingDown")
-
         restarted.start()
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -790,9 +789,10 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         assert count == 10000
 
 
-@pytest.mark.parametrize("mode", ["delete-timeline", "delete-tenant"])
+@pytest.mark.parametrize("mode", ["delete_timeline", "delete_tenant"])
+@pytest.mark.parametrize("sharded", [False, True])
 def test_timeline_detach_ancestor_interrupted_by_deletion(
-    neon_env_builder: NeonEnvBuilder, mode: str
+    neon_env_builder: NeonEnvBuilder, mode: str, sharded: bool
 ):
     """
     Timeline ancestor detach interrupted by deleting either:
@@ -805,67 +805,92 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     - shutdown winning over complete
     """
 
-    env = neon_env_builder.init_start()
+    if sharded and mode == "delete_tenant":
+        # the shared/exclusive lock for tenant is blocking this:
+        # timeline detach ancestor takes shared, delete tenant takes exclusive
+        pytest.skip(
+            "tenant deletion while timeline ancestor detach is underway is not supported yet"
+        )
 
-    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+    shard_count = 2 if sharded else 1
+
+    neon_env_builder.num_pageservers = shard_count
+
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count if sharded else None)
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
 
     detached_timeline = env.neon_cli.create_branch("detached soon", "main")
 
     failpoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
 
-    target = env.pageserver.http_client()
+    env.storage_controller.reconcile_until_idle()
+    shards = env.storage_controller.locate(env.initial_tenant)
+
+    assert len(set(info["node_id"] for info in shards)) == shard_count
+
+    target = env.storage_controller.pageserver_api() if sharded else env.pageserver.http_client()
     target = target.without_status_retrying()
-    target.configure_failpoints((failpoint, "pause"))
+
+    victim = pageservers[int(shards[-1]["node_id"])]
+    victim_http = victim.http_client()
+    victim_http.configure_failpoints((failpoint, "pause"))
 
     def detach_ancestor():
         target.detach_ancestor(env.initial_tenant, detached_timeline)
 
     def at_failpoint() -> Tuple[str, LogCursor]:
-        return env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        return victim.assert_log_contains(f"at failpoint {failpoint}")
 
     def start_delete():
-        if mode == "delete-timeline":
+        if mode == "delete_timeline":
             target.timeline_delete(env.initial_tenant, detached_timeline)
-        elif mode == "delete-tenant":
+        elif mode == "delete_tenant":
             target.tenant_delete(env.initial_tenant)
         else:
             raise RuntimeError(f"unimplemented mode {mode}")
 
     def at_waiting_on_gate_close(start_offset: LogCursor):
-        env.pageserver.assert_log_contains(
-            "closing is taking longer than expected", offset=start_offset
-        )
+        victim.assert_log_contains("closing is taking longer than expected", offset=start_offset)
 
     def is_deleted():
-        with pytest.raises(PageserverApiException) as exc:
-            if mode == "delete-timeline":
+        try:
+            if mode == "delete_timeline":
                 target.timeline_detail(env.initial_tenant, detached_timeline)
-            elif mode == "delete-tenant":
+            elif mode == "delete_tenant":
                 target.tenant_status(env.initial_tenant)
             else:
                 return False
-        assert exc.value.status_code == 404
-        return True
+        except PageserverApiException as e:
+            assert e.status_code == 404
+            return True
+        else:
+            raise RuntimeError("waiting for 404")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fut = pool.submit(detach_ancestor)
-        _, offset = wait_until(10, 1.0, at_failpoint)
+        try:
+            fut = pool.submit(detach_ancestor)
+            _, offset = wait_until(10, 1.0, at_failpoint)
 
-        log.info("it is at failpoint")
+            delete = pool.submit(start_delete)
 
-        delete = pool.submit(start_delete)
+            wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
 
-        wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
+            victim_http.configure_failpoints((failpoint, "off"))
 
-        target.configure_failpoints((failpoint, "off"))
+            delete.result()
 
-        delete.result()
+            assert wait_until(10, 1.0, is_deleted), f"unimplemented mode {mode}"
 
-        assert wait_until(10, 1.0, is_deleted), f"unimplemented mode {mode}"
-
-        with pytest.raises(PageserverApiException) as exc:
-            fut.result()
-        assert exc.value.status_code == 503
+            with pytest.raises(PageserverApiException) as exc:
+                fut.result()
+            assert exc.value.status_code == 503
+        except:
+            victim_http.configure_failpoints((failpoint, "off"))
+            raise
 
 
 # TODO:
