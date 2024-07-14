@@ -422,7 +422,11 @@ async fn copy_lsn_prefix(
     target_timeline: &Arc<Timeline>,
     ctx: &RequestContext,
 ) -> Result<Option<ResidentLayer>, Error> {
-    use Error::{CopyDeltaPrefix, RewrittenDeltaDownloadFailed};
+    use Error::{CopyDeltaPrefix, RewrittenDeltaDownloadFailed, ShuttingDown};
+
+    if target_timeline.cancel.is_cancelled() {
+        return Err(ShuttingDown);
+    }
 
     tracing::debug!(%layer, %end_lsn, "copying lsn prefix");
 
