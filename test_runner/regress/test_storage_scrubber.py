@@ -1,15 +1,19 @@
 import os
 import shutil
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
 )
 from fixtures.remote_storage import S3Storage, s3_storage
+from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
 
@@ -252,3 +256,120 @@ def test_scrubber_physical_gc_ancestors(
     drop_local_state(env, tenant_id)
 
     workload.validate()
+
+
+def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
+    """
+    Exercise ancestor GC while a tenant is partly split: this test ensures that if we have some child shards
+    which don't reference an ancestor, but some child shards that don't exist yet, then we do not incorrectly
+    GC any ancestor layers.
+    """
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    initial_shard_count = 2
+    env.neon_cli.create_tenant(
+        tenant_id,
+        timeline_id,
+        shard_count=initial_shard_count,
+        conf={
+            # Small layers and low compaction thresholds, so that when we split we can expect some to
+            # be dropped by child shards
+            "checkpoint_distance": f"{1024 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{1024 * 1024}",
+            "image_creation_threshold": "2",
+            "image_layer_creation_check_threshold": "0",
+            # Disable background compaction, we will do it explicitly
+            "compaction_period": "0s",
+            # No PITR, so that as soon as child shards generate an image layer, it covers ancestor deltas
+            # and makes them GC'able
+            "pitr_interval": "0s",
+        },
+    )
+
+    unstuck = threading.Event()
+
+    def stuck_split():
+        # Pause our shard split after the first shard but before the second, such that when we run
+        # the scrub, the S3 bucket contains shards 0002, 0101, 0004, 0204 (but not 0104, 0304).
+        env.storage_controller.configure_failpoints(
+            ("shard-split-post-remote-sleep", "return(3600000)")
+        )
+        try:
+            split_response = env.storage_controller.tenant_shard_split(tenant_id, shard_count=4)
+        except Exception as e:
+            log.info(f"Split failed with {e}")
+        else:
+            if not unstuck.is_set():
+                raise RuntimeError(f"Split succeeded unexpectedly ({split_response})")
+
+    with ThreadPoolExecutor(max_workers=1) as threads:
+        log.info("Starting hung shard split")
+        stuck_split_fut = threads.submit(stuck_split)
+
+        # Let the controller reach the failpoint
+        wait_until(
+            10,
+            1,
+            lambda: env.storage_controller.assert_log_contains(
+                'failpoint "shard-split-post-remote-sleep": sleeping'
+            ),
+        )
+
+        # Run compaction on the new child shards, so that they drop some refs to their parent
+        child_shards = [
+            TenantShardId(tenant_id, 0, 4),
+            TenantShardId(tenant_id, 2, 4),
+        ]
+        log.info("Compacting first two children")
+        for child in child_shards:
+            env.get_tenant_pageserver(
+                TenantShardId(tenant_id, 0, initial_shard_count)
+            ).http_client().timeline_compact(child, timeline_id)
+
+        # Check that the other child shards weren't created
+        assert env.get_tenant_pageserver(TenantShardId(tenant_id, 1, 4)) is None
+        assert env.get_tenant_pageserver(TenantShardId(tenant_id, 3, 4)) is None
+
+        # Run scrubber: it should not incorrectly interpret the **04 shards' lack of refs to all
+        # ancestor layers as a reason to GC them, because it should realize that a split is in progress.
+        # (GC requires that controller does not indicate split in progress, and that if we see the highest
+        #  shard count N, then there are N shards present with that shard count).
+        gc_output = env.storage_scrubber.pageserver_physical_gc(min_age_secs=0, mode="full")
+        log.info(f"Ran physical GC partway through split: {gc_output}")
+        assert gc_output["ancestor_layers_deleted"] == 0
+        assert gc_output["remote_storage_errors"] == 0
+        assert gc_output["controller_api_errors"] == 0
+
+        # Storage controller shutdown lets our split request client complete
+        log.info("Stopping storage controller")
+        unstuck.set()
+        env.storage_controller.allowed_errors.append(".*Timed out joining HTTP server task.*")
+        env.storage_controller.stop()
+        stuck_split_fut.result()
+
+        # Restart the controller and retry the split with the failpoint disabled, this should
+        # complete successfully and result in an S3 state that allows the scrubber to proceed with removing ancestor layers
+        log.info("Starting & retrying split")
+        env.storage_controller.start()
+        env.storage_controller.tenant_shard_split(tenant_id, shard_count=4)
+
+        # The other child shards exist now, we can compact them to drop refs to ancestor
+        log.info("Compacting second two children")
+        for child in [
+            TenantShardId(tenant_id, 1, 4),
+            TenantShardId(tenant_id, 3, 4),
+        ]:
+            env.get_tenant_pageserver(child).http_client().timeline_compact(child, timeline_id)
+
+        gc_output = env.storage_scrubber.pageserver_physical_gc(min_age_secs=0, mode="full")
+        log.info(f"Ran physical GC after split completed: {gc_output}")
+        assert gc_output["ancestor_layers_deleted"] > 0
+        assert gc_output["remote_storage_errors"] == 0
+        assert gc_output["controller_api_errors"] == 0
