@@ -1100,7 +1100,7 @@ impl Timeline {
         // and the second-to-last bucket is for the horizon. Each bucket contains lsn_last_bucket < deltas <= lsn_this_bucket.
         let (mut split_history, lsn_split_points) = {
             let mut split_history = Vec::new();
-            split_history.resize_with(retain_lsn_below_horizon.len() + 2, || Vec::new());
+            split_history.resize_with(retain_lsn_below_horizon.len() + 2, Vec::new);
             let mut lsn_split_points = Vec::with_capacity(retain_lsn_below_horizon.len() + 1);
             for lsn in retain_lsn_below_horizon {
                 lsn_split_points.push(*lsn);
