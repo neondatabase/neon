@@ -416,6 +416,7 @@ impl Timeline {
             .collect_vec();
         stats.level0_deltas_count = Some(level0_deltas.len());
         // Only compact if enough layers have accumulated.
+        const L0_COMPACTION_MAX_NUM_DELTA_LAYERS: usize = 60; // 256MB * 60 = 15GB
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
             debug!(
@@ -454,6 +455,14 @@ impl Timeline {
             }
             deltas_to_compact.push(l.download_and_keep_resident().await?);
             prev_lsn_end = lsn_range.end;
+
+            if deltas_to_compact.len() >= L0_COMPACTION_MAX_NUM_DELTA_LAYERS {
+                info!(
+                    "compaction picker hit max delta layers limit: {}, too many layers written by this timeline",
+                    L0_COMPACTION_MAX_NUM_DELTA_LAYERS
+                );
+                break;
+            }
         }
         let lsn_range = Range {
             start: deltas_to_compact
