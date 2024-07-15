@@ -250,17 +250,20 @@ impl StorageController {
             if !status.success() {
                 anyhow::bail!("initdb failed with status {status}");
             }
-
-            // Write a minimal config file:
-            // - Specify the port, since this is chosen dynamically
-            // - Switch off fsync, since we're running on lightweight test environments and when e.g. scale testing
-            //   the storage controller we don't want a slow local disk to interfere with that.
-            tokio::fs::write(
-                &pg_data_path.join("postgresql.conf"),
-                format!("port = {}\nfsync=off\n", self.postgres_port),
-            )
-            .await?;
         };
+
+        // Write a minimal config file:
+        // - Specify the port, since this is chosen dynamically
+        // - Switch off fsync, since we're running on lightweight test environments and when e.g. scale testing
+        //   the storage controller we don't want a slow local disk to interfere with that.
+        //
+        // NB: it's important that we rewrite this file on each start command so we propagate changes
+        // from `LocalEnv`'s config file (`.neon/config`).
+        tokio::fs::write(
+            &pg_data_path.join("postgresql.conf"),
+            format!("port = {}\nfsync=off\n", self.postgres_port),
+        )
+        .await?;
 
         println!("Starting storage controller database...");
         let db_start_args = [
