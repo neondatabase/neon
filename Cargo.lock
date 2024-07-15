@@ -2029,16 +2029,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4398,6 +4388,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-utils",
+ "typed-json",
  "url",
  "urlencoding",
  "utils",
@@ -5163,7 +5154,6 @@ dependencies = [
  "crc32c",
  "desim",
  "fail",
- "fs2",
  "futures",
  "git-version",
  "hex",
@@ -5190,6 +5180,8 @@ dependencies = [
  "sha2",
  "signal-hook",
  "storage_broker",
+ "strum",
+ "strum_macros",
  "thiserror",
  "tokio",
  "tokio-io-timeout",
@@ -6519,17 +6511,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6bc1c9ce2b5135ac7f93c72918fc37feb872bdc6a5533a8b85eb4b86bfdae52"
 
 [[package]]
-name = "trace"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "pageserver_api",
- "utils",
- "workspace_hack",
-]
-
-[[package]]
 name = "tracing"
 version = "0.1.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6690,6 +6671,16 @@ checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
  "static_assertions",
+]
+
+[[package]]
+name = "typed-json"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6024a8d0025400b3f6b189366e9aa92012cf9c4fe1cd2620848dd61425c49eed"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

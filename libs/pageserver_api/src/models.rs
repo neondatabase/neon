@@ -294,7 +294,6 @@ pub struct TenantConfig {
     pub walreceiver_connect_timeout: Option<String>,
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
-    pub trace_read_requests: Option<bool>,
     pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,

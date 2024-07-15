@@ -23,7 +23,6 @@ clap = { workspace = true, features = ["derive"] }
 const_format.workspace = true
 crc32c.workspace = true
 fail.workspace = true
-fs2.workspace = true
 git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
@@ -41,6 +40,8 @@ serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 signal-hook.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true }

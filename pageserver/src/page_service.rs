@@ -36,7 +36,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::id::ConnectionId;
 use utils::sync::gate::GateGuard;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -66,7 +65,6 @@ use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Tenant;
 use crate::tenant::Timeline;
-use crate::trace::Tracer;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -430,18 +428,6 @@ impl PageServerHandler {
             .get_active_tenant_with_timeout(tenant_id, ShardSelector::First, ACTIVE_TENANT_TIMEOUT)
             .await?;
 
-        // Make request tracer if needed
-        let mut tracer = if tenant.get_trace_read_requests() {
-            let connection_id = ConnectionId::generate();
-            let path =
-                tenant
-                    .conf
-                    .trace_path(&tenant.tenant_shard_id(), &timeline_id, &connection_id);
-            Some(Tracer::new(path))
-        } else {
-            None
-        };
-
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
         self.flush_cancellable(pgb, &tenant.cancel).await?;
@@ -472,11 +458,6 @@ impl PageServerHandler {
 
             trace!("query: {copy_data_bytes:?}");
             fail::fail_point!("ps::handle-pagerequest-message");
-
-            // Trace request if needed
-            if let Some(t) = tracer.as_mut() {
-                t.trace(&copy_data_bytes)
-            }
 
             let neon_fe_msg =
                 PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
@@ -1498,66 +1479,6 @@ where
                     ))?
                 }
             };
-        } else if let Some(params) = parts.strip_prefix(&["show"]) {
-            // show <tenant_id>
-            if params.len() != 1 {
-                return Err(QueryError::Other(anyhow::anyhow!(
-                    "invalid param number for config command"
-                )));
-            }
-            let tenant_id = TenantId::from_str(params[0])
-                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
-
-            tracing::Span::current().record("tenant_id", field::display(tenant_id));
-
-            self.check_permission(Some(tenant_id))?;
-
-            COMPUTE_COMMANDS_COUNTERS
-                .for_command(ComputeCommandKind::Show)
-                .inc();
-
-            let tenant = self
-                .get_active_tenant_with_timeout(
-                    tenant_id,
-                    ShardSelector::Zero,
-                    ACTIVE_TENANT_TIMEOUT,
-                )
-                .await?;
-            pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                RowDescriptor::int8_col(b"checkpoint_distance"),
-                RowDescriptor::int8_col(b"checkpoint_timeout"),
-                RowDescriptor::int8_col(b"compaction_target_size"),
-                RowDescriptor::int8_col(b"compaction_period"),
-                RowDescriptor::int8_col(b"compaction_threshold"),
-                RowDescriptor::int8_col(b"gc_horizon"),
-                RowDescriptor::int8_col(b"gc_period"),
-                RowDescriptor::int8_col(b"image_creation_threshold"),
-                RowDescriptor::int8_col(b"pitr_interval"),
-            ]))?
-            .write_message_noflush(&BeMessage::DataRow(&[
-                Some(tenant.get_checkpoint_distance().to_string().as_bytes()),
-                Some(
-                    tenant
-                        .get_checkpoint_timeout()
-                        .as_secs()
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(tenant.get_compaction_target_size().to_string().as_bytes()),
-                Some(
-                    tenant
-                        .get_compaction_period()
-                        .as_secs()
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Some(tenant.get_compaction_threshold().to_string().as_bytes()),
-                Some(tenant.get_gc_horizon().to_string().as_bytes()),
-                Some(tenant.get_gc_period().as_secs().to_string().as_bytes()),
-                Some(tenant.get_image_creation_threshold().to_string().as_bytes()),
-                Some(tenant.get_pitr_interval().as_secs().to_string().as_bytes()),
-            ]))?
-            .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             return Err(QueryError::Other(anyhow::anyhow!(
                 "unknown command {query_string}"

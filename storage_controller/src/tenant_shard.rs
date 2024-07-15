@@ -124,6 +124,7 @@ pub(crate) struct TenantShard {
     ///  - ReconcileWaiters need to Arc-clone the overall object to read it later
     ///  - ReconcileWaitError needs to use an `Arc<ReconcileError>` because we can construct
     ///    many waiters for one shard, and the underlying error types are not Clone.
+    ///
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
     #[serde(serialize_with = "read_last_error")]
@@ -383,9 +384,9 @@ impl ReconcilerWaiter {
     }
 
     pub(crate) fn get_status(&self) -> ReconcilerStatus {
-        if self.seq_wait.would_wait_for(self.seq).is_err() {
+        if self.seq_wait.would_wait_for(self.seq).is_ok() {
             ReconcilerStatus::Done
-        } else if self.error_seq_wait.would_wait_for(self.seq).is_err() {
+        } else if self.error_seq_wait.would_wait_for(self.seq).is_ok() {
             ReconcilerStatus::Failed
         } else {
             ReconcilerStatus::InProgress
@@ -1229,18 +1230,27 @@ impl TenantShard {
         }
     }
 
-    // If we had any state at all referring to this node ID, drop it.  Does not
-    // attempt to reschedule.
-    pub(crate) fn deref_node(&mut self, node_id: NodeId) {
+    /// If we had any state at all referring to this node ID, drop it.  Does not
+    /// attempt to reschedule.
+    ///
+    /// Returns true if we modified the node's intent state.
+    pub(crate) fn deref_node(&mut self, node_id: NodeId) -> bool {
+        let mut intent_modified = false;
+
+        // Drop if this node was our attached intent
         if self.intent.attached == Some(node_id) {
             self.intent.attached = None;
+            intent_modified = true;
         }
 
+        // Drop from the list of secondaries, and check if we modified it
+        let had_secondaries = self.intent.secondary.len();
         self.intent.secondary.retain(|n| n != &node_id);
-
-        self.observed.locations.remove(&node_id);
+        intent_modified |= self.intent.secondary.len() != had_secondaries;
 
         debug_assert!(!self.intent.all_pageservers().contains(&node_id));
+
+        intent_modified
     }
 
     pub(crate) fn set_scheduling_policy(&mut self, p: ShardSchedulingPolicy) {
