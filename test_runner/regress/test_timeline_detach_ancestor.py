@@ -893,9 +893,8 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
             with pytest.raises(PageserverApiException) as exc:
                 fut.result()
             assert exc.value.status_code == 503
-        except:
+        finally:
             victim_http.configure_failpoints((failpoint, "off"))
-            raise
 
 
 @pytest.mark.parametrize("mode", ["delete_reparentable_timeline"])
@@ -1040,10 +1039,9 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
             )
 
             assert not_found is None
-        except:
+        finally:
             stuck_http.configure_failpoints((pausepoint, "off"))
             victim_http.configure_failpoints((pausepoint, "off"))
-            raise
 
 
 # TODO:
