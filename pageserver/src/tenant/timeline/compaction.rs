@@ -27,7 +27,7 @@ use utils::id::TimelineId;
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
-use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
+use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::DeltaLayer;
@@ -536,7 +536,7 @@ impl Timeline {
             prev = Some(next_key.next());
         }
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
-        drop(guard);
+        drop_rlock(guard);
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
