@@ -176,6 +176,24 @@ pub(crate) struct Lineage {
     ///
     /// If you are adding support for detaching from a hierarchy, consider changing the ancestry
     /// into a `Vec<(TimelineId, Lsn)>` to be a path instead.
+    // FIXME: this is insufficient even for path of two timelines for future wal recovery
+    // purposes:
+    //
+    // assuming a "old main" which has received most of the WAL, and has a branch "new main",
+    // starting a bit before "old main" last_record_lsn. the current version works fine,
+    // because we will know to replay wal and branch at the recorded Lsn to do wal recovery.
+    //
+    // then assuming "new main" would similarly receive a branch right before its last_record_lsn,
+    // "new new main". the current implementation would just store ("new main", ancestor_lsn, _)
+    // here. however, we cannot recover from WAL using only that information, we would need the
+    // whole ancestry here:
+    //
+    // ```json
+    // [
+    //   ["old main", ancestor_lsn("new main"), _],
+    //   ["new main", ancestor_lsn("new new main"), _]
+    // ]
+    // ```
     #[serde(skip_serializing_if = "Option::is_none", default)]
     original_ancestor: Option<(TimelineId, Lsn, NaiveDateTime)>,
 }
@@ -214,8 +232,6 @@ impl Lineage {
     ///
     /// Returns true if the Lsn was previously our branch point.
     pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
-        // FIXME: this is insufficient even for path of two timelines for future wal recovery
-        // purposes
         self.original_ancestor
             .is_some_and(|(_, ancestor_lsn, _)| ancestor_lsn == lsn)
     }
