@@ -5027,20 +5027,27 @@ impl Timeline {
         };
 
         Ok(match (pitr, time_cutoff) {
-            (_, None) => {
-                // We didn't look up a timestamp successfully.  Conservatively assume PITR
-                // cannot advance beyond what was already GC'd, and respect space-based retention
-                GcCutoffs {
-                    pitr: *self.get_latest_gc_cutoff_lsn(),
-                    horizon: cutoff_horizon,
-                }
-            }
             (Duration::ZERO, Some(time_cutoff)) => {
                 // PITR is not configured. Retain the size-based limit, or the default time retention,
                 // whichever requires less data.
                 GcCutoffs {
                     pitr: std::cmp::max(time_cutoff, cutoff_horizon),
                     horizon: std::cmp::max(time_cutoff, cutoff_horizon),
+                }
+            }
+            (Duration::ZERO, None) => {
+                // PITR is not configured, and time lookup failed
+                GcCutoffs {
+                    pitr: self.get_last_record_lsn(),
+                    horizon: cutoff_horizon,
+                }
+            }
+            (_, None) => {
+                // PITR is configured & we didn't look up a timestamp successfully.  Conservatively assume PITR
+                // cannot advance beyond what was already GC'd, and respect space-based retention
+                GcCutoffs {
+                    pitr: *self.get_latest_gc_cutoff_lsn(),
+                    horizon: cutoff_horizon,
                 }
             }
             (_, Some(time_cutoff)) => {
