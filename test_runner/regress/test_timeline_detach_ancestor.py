@@ -950,6 +950,8 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
     victim_http.configure_failpoints(
         (pausepoint, "pause"),
     )
+
+    # noticed a surprising 409 if the other one would fail instead
     # victim_http.configure_failpoints([
     #     (pausepoint, "pause"),
     #     ("timeline-detach-ancestor::before_starting_after_locking", "return"),
@@ -993,11 +995,10 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
             stuck_http.configure_failpoints((pausepoint, "off"))
             wait_until(10, 1.0, first_completed)
 
-            # let victim fail
+            # if we would let victim fail, for some reason there'd be a 409 response instead of 500
             # victim_http.configure_failpoints((pausepoint, "off"))
             # with pytest.raises(PageserverApiException, match=".* 500 Internal Server Error failpoint: timeline-detach-ancestor::before_starting_after_locking") as exc:
             #     fut.result()
-            # # FIXME: why does this happen? should be 500, or even 503
             # assert exc.value.status_code == 409
 
             env.storage_controller.pageserver_api().timeline_delete(
@@ -1009,13 +1010,23 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
             # it now passes, and we should get an error messages about mixed reparenting as the stuck still had something to reparent
             fut.result()
 
-            msg, _ = env.storage_controller.assert_log_contains(
+            msg, offset = env.storage_controller.assert_log_contains(
                 ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*"
             )
             log.info(f"expected error message: {msg}")
             env.storage_controller.allowed_errors.append(
                 ".*: shards returned different results matching=0 .*"
             )
+
+            detach_timeline()
+
+            # FIXME: perhaps the above should be automatically retried, if we get mixed results?
+            not_found = env.storage_controller.log_contains(
+                ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*",
+                offset=offset,
+            )
+
+            assert not_found is None
         except:
             stuck_http.configure_failpoints((pausepoint, "off"))
             victim_http.configure_failpoints((pausepoint, "off"))
