@@ -4946,20 +4946,17 @@ impl Timeline {
     }
 
     /// Find the Lsns above which layer files need to be retained on
-    /// garbage collection. This is separate from actually performing the GC,
-    /// and is updated more frequently, so that compaction can remove obsolete
-    /// page versions more aggressively.
+    /// garbage collection.
     ///
-    /// TODO: that's wishful thinking, compaction doesn't actually do that
-    /// currently.
+    /// We calculate two cutoffs, one based on time and one based on WAL size.  `pitr`
+    /// controls the time cutoff (or ZERO to disable time-based retention), and `cutoff_horizon` controls
+    /// the space-based retention.
     ///
-    /// The 'cutoff_horizon' point is used to retain recent versions that might still be
-    /// needed by read-only nodes. (As of this writing, the caller just passes
-    /// the latest LSN subtracted by a constant, and doesn't do anything smart
-    /// to figure out what read-only nodes might actually need.)
-    ///
-    /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
-    /// whether a record is needed for PITR.
+    /// This function doesn't simply to calculate time & space based retention: it treats time-based
+    /// retention as authoritative if enabled, and falls back to space-based retention if calculating
+    /// the LSN for a time point isn't possible.  Therefore the GcCutoffs::horizon in the response might
+    /// be different to the `cutoff_horizon` input.  Callers should treat the min() of the two cutoffs
+    /// in the response as the GC cutoff point for the timeline.
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn find_gc_cutoffs(
         &self,
@@ -4987,8 +4984,8 @@ impl Timeline {
         }
 
         // Calculate a time-based limit on how much to retain:
-        // - if PITR interval is configured, then this is our cutoff.
-        // - if PITR interval is not configured, then we do a lookup
+        // - if PITR interval is set, then this is our cutoff.
+        // - if PITR interval is not set, then we do a lookup
         //   based on DEFAULT_PITR_INTERVAL, so that size-based retention (horizon)
         //   does not result in keeping history around permanently on idle databases.
         let time_cutoff = {
@@ -5028,7 +5025,7 @@ impl Timeline {
 
         Ok(match (pitr, time_cutoff) {
             (Duration::ZERO, Some(time_cutoff)) => {
-                // PITR is not configured. Retain the size-based limit, or the default time retention,
+                // PITR is not set. Retain the size-based limit, or the default time retention,
                 // whichever requires less data.
                 GcCutoffs {
                     pitr: std::cmp::max(time_cutoff, cutoff_horizon),
@@ -5036,14 +5033,14 @@ impl Timeline {
                 }
             }
             (Duration::ZERO, None) => {
-                // PITR is not configured, and time lookup failed
+                // PITR is not set, and time lookup failed
                 GcCutoffs {
                     pitr: self.get_last_record_lsn(),
                     horizon: cutoff_horizon,
                 }
             }
             (_, None) => {
-                // PITR is configured & we didn't look up a timestamp successfully.  Conservatively assume PITR
+                // PITR interval is set & we didn't look up a timestamp successfully.  Conservatively assume PITR
                 // cannot advance beyond what was already GC'd, and respect space-based retention
                 GcCutoffs {
                     pitr: *self.get_latest_gc_cutoff_lsn(),
@@ -5051,7 +5048,7 @@ impl Timeline {
                 }
             }
             (_, Some(time_cutoff)) => {
-                // PITR is configured and we looked up timestamp successfully.  Ignore configured
+                // PITR interval is set and we looked up timestamp successfully.  Ignore
                 // size based retention and make time cutoff authoritative
                 GcCutoffs {
                     pitr: time_cutoff,
