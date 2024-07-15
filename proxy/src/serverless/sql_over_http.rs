@@ -18,7 +18,6 @@ use hyper1::Response;
 use hyper1::StatusCode;
 use hyper1::{HeaderMap, Request};
 use pq_proto::StartupMessageParamsBuilder;
-use serde_json::json;
 use serde_json::Value;
 use tokio::time;
 use tokio_postgres::error::DbError;
@@ -32,6 +31,7 @@ use tokio_postgres::Transaction;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
+use typed_json::json;
 use url::Url;
 use utils::http::error::ApiError;
 
@@ -263,13 +263,8 @@ pub async fn handle(
                 | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                 _ => None,
             };
-            fn get<'a, T: serde::Serialize>(
-                db: Option<&'a DbError>,
-                x: impl FnOnce(&'a DbError) -> T,
-            ) -> Value {
-                db.map(x)
-                    .and_then(|t| serde_json::to_value(t).ok())
-                    .unwrap_or_default()
+            fn get<'a, T: Default>(db: Option<&'a DbError>, x: impl FnOnce(&'a DbError) -> T) -> T {
+                db.map(x).unwrap_or_default()
             }
 
             if let Some(db_error) = db_error {
@@ -278,17 +273,11 @@ pub async fn handle(
 
             let position = db_error.and_then(|db| db.position());
             let (position, internal_position, internal_query) = match position {
-                Some(ErrorPosition::Original(position)) => (
-                    Value::String(position.to_string()),
-                    Value::Null,
-                    Value::Null,
-                ),
-                Some(ErrorPosition::Internal { position, query }) => (
-                    Value::Null,
-                    Value::String(position.to_string()),
-                    Value::String(query.clone()),
-                ),
-                None => (Value::Null, Value::Null, Value::Null),
+                Some(ErrorPosition::Original(position)) => (Some(position.to_string()), None, None),
+                Some(ErrorPosition::Internal { position, query }) => {
+                    (None, Some(position.to_string()), Some(query.clone()))
+                }
+                None => (None, None, None),
             };
 
             let code = get(db_error, |db| db.code().code());
@@ -749,7 +738,7 @@ impl BatchQueryData {
                 }
             };
 
-        let results = typed_json::json!({ "results": results });
+        let results = json!({ "results": results });
         let json_output =
             serde_json::to_string(&results).expect("json serialization should not fail");
         Ok(json_output)
@@ -842,9 +831,9 @@ async fn query_to_json<T: GenericClient>(
     let mut columns = Vec::with_capacity(columns_len);
 
     for c in row_stream.columns() {
-        fields.push(typed_json::json!({
-            "name": Value::String(c.name().to_owned()),
-            "dataTypeID": Value::Number(c.type_().oid().into()),
+        fields.push(json!({
+            "name": c.name(),
+            "dataTypeID": c.type_().oid(),
             "tableID": c.table_oid(),
             "columnID": c.column_id(),
             "dataTypeSize": c.type_size(),
@@ -863,7 +852,7 @@ async fn query_to_json<T: GenericClient>(
         .collect::<Result<Vec<_>, _>>()?;
 
     // Resulting JSON format is based on the format of node-postgres result.
-    let results = typed_json::json!({
+    let results = json!({
         "command": command_tag_name,
         "rowCount": command_tag_count,
         "rows": rows,
