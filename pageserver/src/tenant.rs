@@ -2928,7 +2928,7 @@ impl Tenant {
                 timeline.metrics.pitr_history_size.set(
                     timeline
                         .get_last_record_lsn()
-                        .checked_sub(target.cutoffs.space)
+                        .checked_sub(target.cutoffs.time)
                         .unwrap_or(Lsn(0))
                         .0,
                 );
