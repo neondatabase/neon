@@ -1561,7 +1561,7 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
-            "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
+            "LSN {} is earlier than latest GC cutoff {} (we might've already garbage collected needed data)",
             lsn,
             **latest_gc_cutoff_lsn,
         );
@@ -4944,18 +4944,18 @@ impl Timeline {
     /// garbage collection.
     ///
     /// We calculate two cutoffs, one based on time and one based on WAL size.  `pitr`
-    /// controls the time cutoff (or ZERO to disable time-based retention), and `cutoff_horizon` controls
+    /// controls the time cutoff (or ZERO to disable time-based retention), and `space_cutoff` controls
     /// the space-based retention.
     ///
     /// This function doesn't simply to calculate time & space based retention: it treats time-based
     /// retention as authoritative if enabled, and falls back to space-based retention if calculating
     /// the LSN for a time point isn't possible.  Therefore the GcCutoffs::horizon in the response might
-    /// be different to the `cutoff_horizon` input.  Callers should treat the min() of the two cutoffs
+    /// be different to the `space_cutoff` input.  Callers should treat the min() of the two cutoffs
     /// in the response as the GC cutoff point for the timeline.
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn find_gc_cutoffs(
         &self,
-        cutoff_horizon: Lsn,
+        space_cutoff: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -4973,7 +4973,7 @@ impl Timeline {
             if pitr == Duration::ZERO {
                 return Ok(GcCutoffs {
                     time: self.get_last_record_lsn(),
-                    space: cutoff_horizon,
+                    space: space_cutoff,
                 });
             }
         }
@@ -4981,8 +4981,7 @@ impl Timeline {
         // Calculate a time-based limit on how much to retain:
         // - if PITR interval is set, then this is our cutoff.
         // - if PITR interval is not set, then we do a lookup
-        //   based on DEFAULT_PITR_INTERVAL, so that size-based retention (horizon)
-        //   does not result in keeping history around permanently on idle databases.
+        //   based on DEFAULT_PITR_INTERVAL, so that size-based retention does not result in keeping history around permanently on idle databases.
         let time_cutoff = {
             let now = SystemTime::now();
             let time_range = if pitr == Duration::ZERO {
@@ -5024,14 +5023,14 @@ impl Timeline {
                 // whichever requires less data.
                 GcCutoffs {
                     time: self.get_last_record_lsn(),
-                    space: std::cmp::max(time_cutoff, cutoff_horizon),
+                    space: std::cmp::max(time_cutoff, space_cutoff),
                 }
             }
             (Duration::ZERO, None) => {
                 // PITR is not set, and time lookup failed
                 GcCutoffs {
                     time: self.get_last_record_lsn(),
-                    space: cutoff_horizon,
+                    space: space_cutoff,
                 }
             }
             (_, None) => {
@@ -5039,7 +5038,7 @@ impl Timeline {
                 // cannot advance beyond what was already GC'd, and respect space-based retention
                 GcCutoffs {
                     time: *self.get_latest_gc_cutoff_lsn(),
-                    space: cutoff_horizon,
+                    space: space_cutoff,
                 }
             }
             (_, Some(time_cutoff)) => {
@@ -5074,11 +5073,11 @@ impl Timeline {
             return Err(GcError::TimelineCancelled);
         }
 
-        let (horizon_cutoff, pitr_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
+        let (space_cutoff, time_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
-            let horizon_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
-            let pitr_cutoff = gc_info.cutoffs.time;
+            let space_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
+            let time_cutoff = gc_info.cutoffs.time;
             let retain_lsns = gc_info.retain_lsns.clone();
 
             // Gets the maximum LSN that holds the valid lease.
@@ -5088,14 +5087,14 @@ impl Timeline {
             let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
 
             (
-                horizon_cutoff,
-                pitr_cutoff,
+                space_cutoff,
+                time_cutoff,
                 retain_lsns,
                 max_lsn_with_valid_lease,
             )
         };
 
-        let mut new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
+        let mut new_gc_cutoff = Lsn::min(space_cutoff, time_cutoff);
         let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
@@ -5124,8 +5123,8 @@ impl Timeline {
 
         let res = self
             .gc_timeline(
-                horizon_cutoff,
-                pitr_cutoff,
+                space_cutoff,
+                time_cutoff,
                 retain_lsns,
                 max_lsn_with_valid_lease,
                 new_gc_cutoff,
@@ -5143,8 +5142,8 @@ impl Timeline {
 
     async fn gc_timeline(
         &self,
-        horizon_cutoff: Lsn,
-        pitr_cutoff: Lsn,
+        space_cutoff: Lsn,
+        time_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         max_lsn_with_valid_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
@@ -5205,22 +5204,22 @@ impl Timeline {
             result.layers_total += 1;
 
             // 1. Is it newer than GC horizon cutoff point?
-            if l.get_lsn_range().end > horizon_cutoff {
+            if l.get_lsn_range().end > space_cutoff {
                 debug!(
-                    "keeping {} because it's newer than horizon_cutoff {}",
+                    "keeping {} because it's newer than space_cutoff {}",
                     l.layer_name(),
-                    horizon_cutoff,
+                    space_cutoff,
                 );
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
             }
 
             // 2. It is newer than PiTR cutoff point?
-            if l.get_lsn_range().end > pitr_cutoff {
+            if l.get_lsn_range().end > time_cutoff {
                 debug!(
-                    "keeping {} because it's newer than pitr_cutoff {}",
+                    "keeping {} because it's newer than time_cutoff {}",
                     l.layer_name(),
-                    pitr_cutoff,
+                    time_cutoff,
                 );
                 result.layers_needed_by_pitr += 1;
                 continue 'outer;

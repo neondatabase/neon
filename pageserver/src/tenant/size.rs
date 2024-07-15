@@ -167,7 +167,7 @@ pub(super) async fn gather_inputs(
     cancel: &CancellationToken,
     ctx: &RequestContext,
 ) -> Result<ModelInputs, CalculateSyntheticSizeError> {
-    // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
+    // refresh is needed to update [`timeline::GcCutoffs`]
     tenant.refresh_gc_info(cancel, ctx).await?;
 
     // Collect information about all the timelines
@@ -231,11 +231,11 @@ pub(super) async fn gather_inputs(
         // we don't consider the `Timeline::disk_consistent_lsn` at all, because we are not
         // actually removing files.
         //
-        // We only consider [`GcInfo::pitr_cutoff`], and not [`GcInfo::horizon_cutoff`], because from
+        // We only consider [`timeline::GcCutoffs::time`], and not [`timeline::GcCutoffs::space`], because from
         // a user's perspective they have only requested retention up to the time bound (pitr_cutoff), rather
-        // than a space bound (horizon cutoff).  This means that if someone drops a database and waits for their
+        // than our internal space cutoff.  This means that if someone drops a database and waits for their
         // PITR interval, they will see synthetic size decrease, even if we are still storing data inside
-        // horizon_cutoff.
+        // the space cutoff.
         let mut next_pitr_cutoff = gc_info.cutoffs.time;
 
         // If the caller provided a shorter retention period, use that instead of the GC cutoff.
@@ -742,8 +742,6 @@ fn verify_size_for_multiple_branches() {
       "ancestor_lsn": "0/176D998",
       "last_record": "0/1837770",
       "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/1817770",
-      "pitr_cutoff": "0/1817770",
       "next_pitr_cutoff": "0/1817770",
       "retention_param_cutoff": null,
       "lease_points": []
