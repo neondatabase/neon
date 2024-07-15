@@ -21,7 +21,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            f".*get_values_reconstruct_data for layer .*",
+            ".*get_values_reconstruct_data for layer .*",
             ".*could not find data for key.*",
             ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
@@ -74,7 +74,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     # (We don't check layer file contents on startup, when loading the timeline)
     #
     # This will change when we implement checksums for layers
-    with pytest.raises(Exception, match=f"{reconstruct_function_name} for layer ") as err:
+    with pytest.raises(Exception, match="get_values_reconstruct_data for layer ") as err:
         pg1.start()
     log.info(
         f"As expected, compute startup failed for timeline {tenant1}/{timeline1} with corrupt layers: {err}"
