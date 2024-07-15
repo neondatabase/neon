@@ -105,7 +105,7 @@ mod refs {
             &self,
             ttid: &TenantTimelineId,
         ) -> Option<&HashMap<(ShardIndex, LayerName), usize>> {
-            self.0.get(&ttid)
+            self.0.get(ttid)
         }
     }
 }
