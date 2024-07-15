@@ -197,12 +197,6 @@ impl PartialOrd for Hole {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
-    drop(rlock)
-}
-
-/// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
-/// Can be removed after all refactors are done.
 fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
     drop(rlock)
 }
@@ -270,7 +264,7 @@ pub struct Timeline {
     ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
-    pub(crate) layers: Arc<tokio::sync::RwLock<LayerManager>>,
+    pub(crate) layers: tokio::sync::RwLock<LayerManager>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
