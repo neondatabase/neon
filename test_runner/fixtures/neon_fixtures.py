@@ -727,8 +727,22 @@ class NeonEnvBuilder:
                 self.repo_dir / "local_fs_remote_storage",
             )
 
-        if (attachments_json := Path(repo_dir / "attachments.json")).exists():
-            shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
+        # restore storage controller (the db is small, don't bother with overlayfs)
+        storcon_db_from_dir = repo_dir / "storage_controller_db"
+        storcon_db_to_dir = self.repo_dir / "storage_controller_db"
+        log.info(f"Copying storage_controller_db from {storcon_db_from_dir} to {storcon_db_to_dir}")
+        assert storcon_db_from_dir.is_dir()
+        assert not storcon_db_to_dir.exists()
+
+        def ignore_postgres_log(path: str, _names):
+            if Path(path) == storcon_db_from_dir:
+                return {"postgres.log"}
+            return set()
+
+        shutil.copytree(storcon_db_from_dir, storcon_db_to_dir, ignore=ignore_postgres_log)
+        assert not (storcon_db_to_dir / "postgres.log").exists()
+        # NB: neon_local rewrites postgresql.conf on each start based on neon_local config.
+        # So, no need to patch the port number.
 
         # Update the config with info about tenants and timelines
         with (self.repo_dir / "config").open("r") as f:
