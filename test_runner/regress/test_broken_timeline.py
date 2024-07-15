@@ -17,16 +17,11 @@ from fixtures.pg_version import PgVersion
 # Test restarting page server, while safekeeper and compute node keep
 # running.
 def test_local_corruption(neon_env_builder: NeonEnvBuilder):
-    if neon_env_builder.pageserver_get_impl == "vectored":
-        reconstruct_function_name = "get_values_reconstruct_data"
-    else:
-        reconstruct_function_name = "get_value_reconstruct_data"
-
     env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.extend(
         [
-            f".*{reconstruct_function_name} for layer .*",
+            f".*get_values_reconstruct_data for layer .*",
             ".*could not find data for key.*",
             ".*is not active. Current state: Broken.*",
             ".*will not become active. Current state: Broken.*",
