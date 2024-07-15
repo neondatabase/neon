@@ -13,7 +13,8 @@ from fixtures.neon_fixtures import AuxFileStore, logical_replication_sync
 
 if TYPE_CHECKING:
     from fixtures.benchmark_fixture import NeonBenchmarker
-    from fixtures.neon_fixtures import NeonEnv, PgBin, RemoteNeonApiEndpoint
+    from fixtures.neon_api import NeonApiEndpoint
+    from fixtures.neon_fixtures import NeonEnv, PgBin
 
 
 @pytest.mark.parametrize("pageserver_aux_file_policy", [AuxFileStore.V2])
@@ -81,8 +82,8 @@ def measure_logical_replication_lag(sub_cur, pub_cur, timeout_sec=600):
 @pytest.mark.timeout(2 * 60 * 60)
 def test_subscriber_lag(
     pg_bin: PgBin,
-    benchmark_project_pub: RemoteNeonApiEndpoint,
-    benchmark_project_sub: RemoteNeonApiEndpoint,
+    benchmark_project_pub: NeonApiEndpoint,
+    benchmark_project_sub: NeonApiEndpoint,
     zenbenchmark: NeonBenchmarker,
 ):
     """
@@ -168,8 +169,8 @@ def test_subscriber_lag(
 @pytest.mark.timeout(2 * 60 * 60)
 def test_publisher_restart(
     pg_bin: PgBin,
-    benchmark_project_pub: RemoteNeonApiEndpoint,
-    benchmark_project_sub: RemoteNeonApiEndpoint,
+    benchmark_project_pub: NeonApiEndpoint,
+    benchmark_project_sub: NeonApiEndpoint,
     zenbenchmark: NeonBenchmarker,
 ):
     """
