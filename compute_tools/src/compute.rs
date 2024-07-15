@@ -1500,24 +1500,9 @@ impl ComputeNode {
             let mut conf = conf.as_ref().clone();
             conf.application_name("compute_ctl:migrations");
 
-            match conf.connect(NoTls).await {
-                Ok((mut client, connection)) => {
-                    tokio::spawn(async move {
-                        if let Err(e) = connection.await {
-                            eprintln!("connection error: {}", e);
-                        }
-                    });
-                    if let Err(e) = handle_migrations(&mut client).await {
-                        error!("Failed to run migrations: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to connect to the compute for running migrations: {}",
-                        e
-                    );
-                }
-            };
+            if let Err(e) = handle_migrations(conf).await {
+                error!("Failed to run migrations: {}", e);
+            }
         });
 
         Ok::<(), anyhow::Error>(())
