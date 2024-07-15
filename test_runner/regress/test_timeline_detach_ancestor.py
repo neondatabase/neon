@@ -853,8 +853,11 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
         else:
             raise RuntimeError(f"unimplemented mode {mode}")
 
-    def at_waiting_on_gate_close(start_offset: LogCursor):
-        victim.assert_log_contains("closing is taking longer than expected", offset=start_offset)
+    def at_waiting_on_gate_close(start_offset: LogCursor) -> LogCursor:
+        _, offset = victim.assert_log_contains(
+            "closing is taking longer than expected", offset=start_offset
+        )
+        return offset
 
     def is_deleted():
         try:
