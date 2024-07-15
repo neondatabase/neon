@@ -6,6 +6,7 @@ use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
@@ -325,12 +326,21 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Stop HTTP server first, so that we don't have to service requests
-    // while shutting down Service
+    // while shutting down Service.
     server_shutdown.cancel();
-    if let Err(e) = server_task.await {
-        tracing::error!("Error joining HTTP server task: {e}")
+    match tokio::time::timeout(Duration::from_secs(5), server_task).await {
+        Ok(Ok(_)) => {
+            tracing::info!("Joined HTTP server task");
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Error joining HTTP server task: {e}")
+        }
+        Err(_) => {
+            tracing::warn!("Timed out joining HTTP server task");
+            // We will fall through and shut down the service anyway, any request handlers
+            // in flight will experience cancellation & their clients will see a torn connection.
+        }
     }
-    tracing::info!("Joined HTTP server task");
 
     service.shutdown().await;
     tracing::info!("Service shutdown complete");
