@@ -18,6 +18,7 @@ use hyper1::Response;
 use hyper1::StatusCode;
 use hyper1::{HeaderMap, Request};
 use pq_proto::StartupMessageParamsBuilder;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::time;
 use tokio_postgres::error::DbError;
@@ -627,8 +628,11 @@ impl QueryData {
         .await
         {
             // The query successfully completed.
-            Either::Left((Ok((status, json_output)), __not_yet_cancelled)) => {
+            Either::Left((Ok((status, results)), __not_yet_cancelled)) => {
                 discard.check_idle(status);
+
+                let json_output =
+                    serde_json::to_string(&results).expect("json serialization should not fail");
                 Ok(json_output)
             }
             // The query failed with an error
@@ -647,7 +651,10 @@ impl QueryData {
                     // query successed before it was cancelled.
                     Ok(Ok((status, results))) => {
                         discard.check_idle(status);
-                        Ok(results)
+
+                        let json_output = serde_json::to_string(&results)
+                            .expect("json serialization should not fail");
+                        Ok(json_output)
                     }
                     // query failed or was cancelled.
                     Ok(Err(error)) => {
@@ -703,9 +710,9 @@ impl BatchQueryData {
             e
         })?;
 
-        let results =
+        let json_output =
             match query_batch(cancel.child_token(), &transaction, self, parsed_headers).await {
-                Ok(results) => {
+                Ok(json_output) => {
                     info!("commit");
                     let status = transaction.commit().await.map_err(|e| {
                         // if we cannot commit - for now don't return connection to pool
@@ -714,7 +721,7 @@ impl BatchQueryData {
                         e
                     })?;
                     discard.check_idle(status);
-                    results
+                    json_output
                 }
                 Err(SqlOverHttpError::Cancelled(_)) => {
                     if let Err(err) = cancel_token.cancel_query(NoTls).await {
@@ -738,9 +745,6 @@ impl BatchQueryData {
                 }
             };
 
-        let results = json!({ "results": results });
-        let json_output =
-            serde_json::to_string(&results).expect("json serialization should not fail");
         Ok(json_output)
     }
 }
@@ -750,7 +754,7 @@ async fn query_batch(
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
-) -> Result<Vec<String>, SqlOverHttpError> {
+) -> Result<String, SqlOverHttpError> {
     let mut results = Vec::with_capacity(queries.queries.len());
     let mut current_size = 0;
     for stmt in queries.queries {
@@ -775,7 +779,11 @@ async fn query_batch(
             }
         }
     }
-    Ok(results)
+
+    let results = json!({ "results": results });
+    let json_output = serde_json::to_string(&results).expect("json serialization should not fail");
+
+    Ok(json_output)
 }
 
 async fn query_to_json<T: GenericClient>(
@@ -783,7 +791,7 @@ async fn query_to_json<T: GenericClient>(
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
-) -> Result<(ReadyForQueryStatus, String), SqlOverHttpError> {
+) -> Result<(ReadyForQueryStatus, impl Serialize), SqlOverHttpError> {
     info!("executing query");
     let query_params = data.params;
     let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
@@ -832,7 +840,7 @@ async fn query_to_json<T: GenericClient>(
 
     for c in row_stream.columns() {
         fields.push(json!({
-            "name": c.name(),
+            "name": c.name().to_owned(),
             "dataTypeID": c.type_().oid(),
             "tableID": c.table_oid(),
             "columnID": c.column_id(),
@@ -853,13 +861,12 @@ async fn query_to_json<T: GenericClient>(
 
     // Resulting JSON format is based on the format of node-postgres result.
     let results = json!({
-        "command": command_tag_name,
+        "command": command_tag_name.to_string(),
         "rowCount": command_tag_count,
         "rows": rows,
         "fields": fields,
         "rowAsArray": array_mode,
     });
-    let json_output = serde_json::to_string(&results).expect("json serialization should not fail");
 
-    Ok((ready, json_output))
+    Ok((ready, results))
 }
