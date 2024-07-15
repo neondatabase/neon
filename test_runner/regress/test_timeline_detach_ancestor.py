@@ -803,6 +803,8 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 
     What remains not tested by this:
     - shutdown winning over complete
+
+    Shutdown winning over complete needs gc blocking and reparenting any left-overs on retry.
     """
 
     if sharded and mode == "delete_tenant":
@@ -896,14 +898,22 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
             raise
 
 
-@pytest.mark.parametrize("mode", ["delete-reparentable-timeline"])
+@pytest.mark.parametrize("mode", ["delete_reparentable_timeline"])
 def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnvBuilder, mode: str):
     """
-    Technically storage controller concurrent interleaving timeline deletion with timeline detach.
+    Technically possible storage controller concurrent interleaving timeline
+    deletion with timeline detach.
 
-    Deletion is fine, as any sharded pageservers reach the same end state, but creating reparentable timeline would create an issue as the two nodes would never agree.
-    There is a solution though: the created reparentable timeline must be detached.
+    Deletion is fine, as any sharded pageservers reach the same end state, but
+    creating reparentable timeline would create an issue as the two nodes would
+    never agree. There is a solution though: the created reparentable timeline
+    must be detached.
     """
+
+    assert (
+        mode == "delete_reparentable_timeline"
+    ), "only one now, but we could have the create just as well, need gc blocking"
+
     shard_count = 2
     neon_env_builder.num_pageservers = shard_count
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
