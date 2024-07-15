@@ -11,11 +11,12 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
+    flush_ep_to_pageserver,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
-from fixtures.pageserver.utils import wait_timeline_detail_404
-from fixtures.remote_storage import LocalFsStorage
+from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import assert_pageserver_backups_equal
 
 
@@ -559,11 +560,24 @@ def test_compaction_induced_by_detaches_in_history(
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
 
 
-def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
-    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+@pytest.mark.parametrize("sharded", [True, False])
+def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, sharded: bool):
+    shards = 2 if sharded else 1
 
-    client = env.pageserver.http_client()
+    neon_env_builder.num_pageservers = shards
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shards if sharded else None)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    for ps in pageservers.values():
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    if sharded:
+        # FIXME: should this be in the neon_env_builder.init_start?
+        env.storage_controller.reconcile_until_idle()
+        client = env.storage_controller.pageserver_api()
+    else:
+        client = env.pageserver.http_client()
 
     with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
         client.detach_ancestor(env.initial_tenant, env.initial_timeline)
@@ -577,11 +591,74 @@ def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
         client.detach_ancestor(env.initial_tenant, second_branch)
     assert info.value.status_code == 400
 
+    client.detach_ancestor(env.initial_tenant, first_branch)
+
+    # FIXME: this should be done by the http req handler
+    for ps in pageservers.values():
+        ps.quiesce_tenants()
+
+    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, first_branch)
+    # FIXME: this should be 200 OK because we've already completed it
+    assert info.value.status_code == 409
+
     client.tenant_delete(env.initial_tenant)
 
     with pytest.raises(PageserverApiException) as e:
         client.detach_ancestor(env.initial_tenant, first_branch)
     assert e.value.status_code == 404
+
+
+def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
+    branch_name = "soon_detached"
+    shard_count = 4
+    neon_env_builder.num_pageservers = shard_count
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    # FIXME: should this be in the neon_env_builder.init_start?
+    env.storage_controller.reconcile_until_idle()
+    shards = env.storage_controller.locate(env.initial_tenant)
+
+    branch_timeline_id = env.neon_cli.create_branch(branch_name, tenant_id=env.initial_tenant)
+
+    with env.endpoints.create_start(branch_name, tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql(
+            "create table foo as select 1::bigint, i::bigint from generate_series(1, 10000) v(i)"
+        )
+        lsn = flush_ep_to_pageserver(env, ep, env.initial_tenant, branch_timeline_id)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    for shard_info in shards:
+        node_id = int(shard_info["node_id"])
+        shard_id = shard_info["shard_id"]
+        detail = pageservers[node_id].http_client().timeline_detail(shard_id, branch_timeline_id)
+
+        assert Lsn(detail["last_record_lsn"]) >= lsn
+        assert Lsn(detail["initdb_lsn"]) < lsn
+        assert TimelineId(detail["ancestor_timeline_id"]) == env.initial_timeline
+
+    env.storage_controller.pageserver_api().detach_ancestor(env.initial_tenant, branch_timeline_id)
+
+    for shard_info in shards:
+        node_id = int(shard_info["node_id"])
+        shard_id = shard_info["shard_id"]
+
+        # TODO: ensure quescing is done on pageserver?
+        pageservers[node_id].quiesce_tenants()
+        detail = pageservers[node_id].http_client().timeline_detail(shard_id, branch_timeline_id)
+        wait_for_last_record_lsn(
+            pageservers[node_id].http_client(), shard_id, branch_timeline_id, lsn
+        )
+        assert detail.get("ancestor_timeline_id") is None
+
+    with env.endpoints.create_start(branch_name, tenant_id=env.initial_tenant) as ep:
+        count = int(ep.safe_psql("select count(*) from foo")[0][0])
+        assert count == 10000
 
 
 # TODO:
@@ -591,3 +668,11 @@ def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
 # - deletion of reparented while reparenting should fail once, then succeed (?)
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
+#
+# TEST: 1. tad which partially succeeds, one returns 500
+#       2. create branch below timeline? or delete timeline below
+#       3. on retry all should report the same reparented timelines
+#
+# TEST: 1. tad is started, one node stalls, other restarts
+#       2. client timeout before stall over
+#       3. on retry with stalled and other being able to proceed
