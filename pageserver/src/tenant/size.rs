@@ -135,11 +135,9 @@ pub struct TimelineInputs {
     ancestor_lsn: Lsn,
     last_record: Lsn,
     latest_gc_cutoff: Lsn,
-    horizon_cutoff: Lsn,
-    pitr_cutoff: Lsn,
 
     /// Cutoff point based on GC settings
-    next_gc_cutoff: Lsn,
+    next_pitr_cutoff: Lsn,
 
     /// Cutoff point calculated from the user-supplied 'max_retention_period'
     retention_param_cutoff: Option<Lsn>,
@@ -150,7 +148,7 @@ pub struct TimelineInputs {
 
 /// Gathers the inputs for the tenant sizing model.
 ///
-/// Tenant size does not consider the latest state, but only the state until next_gc_cutoff, which
+/// Tenant size does not consider the latest state, but only the state until next_pitr_cutoff, which
 /// is updated on-demand, during the start of this calculation and separate from the
 /// [`TimelineInputs::latest_gc_cutoff`].
 ///
@@ -158,11 +156,8 @@ pub struct TimelineInputs {
 ///
 /// ```text
 /// 0-----|---------|----|------------| · · · · · |·> lsn
-///   initdb_lsn  branchpoints*  next_gc_cutoff  latest
+///   initdb_lsn  branchpoints*  next_pitr_cutoff  latest
 /// ```
-///
-/// Until gc_horizon_cutoff > `Timeline::last_record_lsn` for any of the tenant's timelines, the
-/// tenant size will be zero.
 pub(super) async fn gather_inputs(
     tenant: &Tenant,
     limit: &Arc<Semaphore>,
@@ -241,15 +236,13 @@ pub(super) async fn gather_inputs(
         // than a space bound (horizon cutoff).  This means that if someone drops a database and waits for their
         // PITR interval, they will see synthetic size decrease, even if we are still storing data inside
         // horizon_cutoff.
-        let pitr_cutoff = gc_info.cutoffs.time;
-        let horizon_cutoff = gc_info.cutoffs.space;
-        let mut next_gc_cutoff = pitr_cutoff;
+        let mut next_pitr_cutoff = gc_info.cutoffs.time;
 
         // If the caller provided a shorter retention period, use that instead of the GC cutoff.
         let retention_param_cutoff = if let Some(max_retention_period) = max_retention_period {
             let param_cutoff = Lsn(last_record_lsn.0.saturating_sub(max_retention_period));
-            if next_gc_cutoff < param_cutoff {
-                next_gc_cutoff = param_cutoff;
+            if next_pitr_cutoff < param_cutoff {
+                next_pitr_cutoff = param_cutoff;
             }
             Some(param_cutoff)
         } else {
@@ -263,7 +256,7 @@ pub(super) async fn gather_inputs(
             .copied()
             .collect::<Vec<_>>();
 
-        // next_gc_cutoff in parent branch are not of interest (right now at least), nor do we
+        // next_pitr_cutoff in parent branch are not of interest (right now at least), nor do we
         // want to query any logical size before initdb_lsn.
         let branch_start_lsn = cmp::max(ancestor_lsn, timeline.initdb_lsn);
 
@@ -291,10 +284,10 @@ pub(super) async fn gather_inputs(
             )
         }
 
-        // Add a point for the GC cutoff
-        let branch_start_needed = next_gc_cutoff <= branch_start_lsn;
+        // Add a point for the PITR cutoff
+        let branch_start_needed = next_pitr_cutoff <= branch_start_lsn;
         if !branch_start_needed {
-            lsns.push((next_gc_cutoff, LsnKind::GcCutOff));
+            lsns.push((next_pitr_cutoff, LsnKind::GcCutOff));
         }
 
         lsns.sort_unstable();
@@ -333,7 +326,7 @@ pub(super) async fn gather_inputs(
                     parent: Some(parent),
                     lsn: lsn.0,
                     size: None,
-                    needed: lsn > next_gc_cutoff,
+                    needed: lsn > next_pitr_cutoff,
                 },
                 timeline_id: timeline.timeline_id,
                 kind,
@@ -357,8 +350,8 @@ pub(super) async fn gather_inputs(
                     segment: Segment {
                         parent: Some(lease_parent),
                         lsn: lsn.0,
-                        size: None,                   // Filled in later, if necessary
-                        needed: lsn > next_gc_cutoff, // only needed if the point is within rentention.
+                        size: None,                     // Filled in later, if necessary
+                        needed: lsn > next_pitr_cutoff, // only needed if the point is within rentention.
                     },
                     timeline_id: timeline.timeline_id,
                     kind: LsnKind::LeaseStart,
@@ -398,9 +391,7 @@ pub(super) async fn gather_inputs(
             last_record: last_record_lsn,
             // this is not used above, because it might not have updated recently enough
             latest_gc_cutoff: *timeline.get_latest_gc_cutoff_lsn(),
-            horizon_cutoff,
-            pitr_cutoff,
-            next_gc_cutoff,
+            next_pitr_cutoff,
             retention_param_cutoff,
             lease_points,
         });
@@ -742,9 +733,7 @@ fn verify_size_for_multiple_branches() {
       "ancestor_lsn": "0/18D3D98",
       "last_record": "0/2230CD0",
       "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/2210CD0",
-      "pitr_cutoff": "0/2210CD0",
-      "next_gc_cutoff": "0/2210CD0",
+      "next_pitr_cutoff": "0/2210CD0",
       "retention_param_cutoff": null,
       "lease_points": []
     },
@@ -755,7 +744,7 @@ fn verify_size_for_multiple_branches() {
       "latest_gc_cutoff": "0/1698C48",
       "horizon_cutoff": "0/1817770",
       "pitr_cutoff": "0/1817770",
-      "next_gc_cutoff": "0/1817770",
+      "next_pitr_cutoff": "0/1817770",
       "retention_param_cutoff": null,
       "lease_points": []
     },
@@ -764,9 +753,7 @@ fn verify_size_for_multiple_branches() {
       "ancestor_lsn": "0/0",
       "last_record": "0/18D3D98",
       "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/18B3D98",
-      "pitr_cutoff": "0/18B3D98",
-      "next_gc_cutoff": "0/18B3D98",
+      "next_pitr_cutoff": "0/18B3D98",
       "retention_param_cutoff": null,
       "lease_points": []
     }
@@ -820,9 +807,7 @@ fn verify_size_for_one_branch() {
       "ancestor_lsn": "0/0",
       "last_record": "47/280A5860",
       "latest_gc_cutoff": "47/240A5860",
-      "horizon_cutoff": "47/240A5860",
-      "pitr_cutoff": "47/240A5860",
-      "next_gc_cutoff": "47/240A5860",
+      "next_pitr_cutoff": "47/240A5860",
       "retention_param_cutoff": "0/0",
       "lease_points": []
     }
