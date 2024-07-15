@@ -1,10 +1,7 @@
 import json
-from contextlib import closing
 from typing import Any, Dict
 
-import psycopg2.extras
 from fixtures.common_types import Lsn
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
