@@ -160,13 +160,12 @@ pub struct Listing {
 /// providing basic CRUD operations for storage files.
 #[allow(async_fn_in_trait)]
 pub trait RemoteStorage: Send + Sync + 'static {
-    /// List objects in remote storage, with semantics matching AWS S3's ListObjectsV2.
-    /// (see `<https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>`)
+    /// List objects in remote storage, with semantics matching AWS S3's [`ListObjectsV2`].
     ///
     /// Note that the prefix is relative to any `prefix_in_bucket` configured for the client, not
     /// from the absolute root of the bucket.
     ///
-    /// `mode` configures whether to use a delimiter.  Without a delimiter all keys
+    /// `mode` configures whether to use a delimiter.  Without a delimiter, all keys
     /// within the prefix are listed in the `keys` of the result.  With a delimiter, any "directories" at the top level of
     /// the prefix are returned in the `prefixes` of the result, and keys in the top level of the prefix are
     /// returned in `keys` ().
@@ -174,7 +173,18 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// `max_keys` controls the maximum number of keys that will be returned.  If this is None, this function
     /// will iteratively call listobjects until it runs out of keys.  Note that this is not safe to use on
     /// unlimted size buckets, as the full list of objects is allocated into a monolithic data structure.
-    ///
+    /// `ListObjectsV2`: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
+    async fn list_streaming(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = anyhow::Result<Listing, DownloadError>> {
+        let listing = self.list(prefix, mode, max_keys, cancel);
+        futures::stream::once(listing)
+    }
+
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
@@ -298,6 +308,7 @@ pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
 }
 
 impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
+    // See [`RemoteStorage::list`].
     pub async fn list(
         &self,
         prefix: Option<&RemotePath>,
@@ -310,6 +321,23 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::AzureBlob(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::Unreliable(s) => s.list(prefix, mode, max_keys, cancel).await,
+        }
+    }
+
+    // See [`RemoteStorage::list_streaming`].
+    pub async fn list_streaming<'a>(
+        &'a self,
+        prefix: Option<&'a RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &'a CancellationToken,
+    ) -> impl Stream<Item = anyhow::Result<Listing, DownloadError>> + 'a {
+        match self {
+            Self::LocalFs(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await)
+                as Pin<Box<dyn Stream<Item = anyhow::Result<Listing, DownloadError>>>>,
+            Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
+            Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
+            Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
         }
     }
 
