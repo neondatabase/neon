@@ -25,7 +25,7 @@ pub struct PersistentLayerDesc {
     ///
     /// - For an open in-memory layer, the end bound is MAX_LSN
     /// - For a frozen in-memory layer or a delta layer, the end bound is a valid lsn after the
-    /// range start
+    ///   range start
     /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     pub lsn_range: Range<Lsn>,
     /// Whether this is a delta layer, and also, is this incremental.

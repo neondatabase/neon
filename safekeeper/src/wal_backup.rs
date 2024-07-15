@@ -119,6 +119,7 @@ async fn shut_down_task(entry: &mut Option<WalBackupTaskHandle>) {
 /// time we have several ones as they PUT the same files. Also,
 /// - frequently changing the offloader would be bad;
 /// - electing seriously lagging safekeeper is undesirable;
+///
 /// So we deterministically choose among the reasonably caught up candidates.
 /// TODO: take into account failed attempts to deal with hypothetical situation
 /// where s3 is unreachable only for some sks.

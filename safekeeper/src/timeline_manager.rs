@@ -186,6 +186,10 @@ pub(crate) struct Manager {
     // misc
     pub(crate) access_service: AccessService,
     pub(crate) partial_backup_rate_limiter: RateLimiter,
+
+    // Anti-flapping state: we evict timelines eagerly if they are inactive, but should not
+    // evict them if they go inactive very soon after being restored.
+    pub(crate) resident_since: std::time::Instant,
 }
 
 /// This task gets spawned alongside each timeline and is responsible for managing the timeline's
@@ -350,6 +354,7 @@ impl Manager {
             access_service: AccessService::new(manager_tx),
             tli,
             partial_backup_rate_limiter,
+            resident_since: std::time::Instant::now(),
         }
     }
 

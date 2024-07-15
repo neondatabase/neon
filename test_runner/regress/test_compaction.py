@@ -1,12 +1,14 @@
 import enum
 import json
 import os
+import time
 from typing import Optional
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, generate_uploads_and_deletions
 from fixtures.pageserver.http import PageserverApiException
+from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
@@ -257,3 +259,64 @@ def test_uploads_and_deletions(
         found_allowed_error = any(env.pageserver.log_contains(e) for e in allowed_errors)
         if not found_allowed_error:
             raise Exception("None of the allowed_errors occured in the log")
+
+
+def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that repeated failures in compaction result in a circuit breaker breaking
+    """
+    TENANT_CONF = {
+        # Very frequent runs to rack up failures quickly
+        "compaction_period": "100ms",
+        # Small checkpoint distance to create many layers
+        "checkpoint_distance": 1024 * 128,
+        # Compact small layers
+        "compaction_target_size": 1024 * 128,
+        "image_creation_threshold": 1,
+    }
+
+    FAILPOINT = "delta-layer-writer-fail-before-finish"
+    BROKEN_LOG = ".*Circuit breaker broken!.*"
+
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+
+    workload = Workload(env, env.initial_tenant, env.initial_timeline)
+    workload.init()
+
+    # Set a failpoint that will prevent compaction succeeding
+    env.pageserver.http_client().configure_failpoints((FAILPOINT, "return"))
+
+    # Write some data to trigger compaction
+    workload.write_rows(1024, upload=False)
+    workload.write_rows(1024, upload=False)
+    workload.write_rows(1024, upload=False)
+
+    def assert_broken():
+        env.pageserver.assert_log_contains(BROKEN_LOG)
+        assert (
+            env.pageserver.http_client().get_metric_value("pageserver_circuit_breaker_broken_total")
+            or 0
+        ) == 1
+        assert (
+            env.pageserver.http_client().get_metric_value(
+                "pageserver_circuit_breaker_unbroken_total"
+            )
+            or 0
+        ) == 0
+
+    # Wait for enough failures to break the circuit breaker
+    # This wait is fairly long because we back off on compaction failures, so 5 retries takes ~30s
+    wait_until(60, 1, assert_broken)
+
+    # Sleep for a while, during which time we expect that compaction will _not_ be retried
+    time.sleep(10)
+
+    assert (
+        env.pageserver.http_client().get_metric_value("pageserver_circuit_breaker_broken_total")
+        or 0
+    ) == 1
+    assert (
+        env.pageserver.http_client().get_metric_value("pageserver_circuit_breaker_unbroken_total")
+        or 0
+    ) == 0
+    assert not env.pageserver.log_contains(".*Circuit breaker failure ended.*")

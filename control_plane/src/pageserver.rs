@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use futures::SinkExt;
 use pageserver_api::models::{
     self, AuxFilePolicy, LocationConfig, TenantHistorySize, TenantInfo, TimelineInfo,
 };
@@ -350,11 +349,6 @@ impl PageServerNode {
                 .map(|x| x.parse::<NonZeroU64>())
                 .transpose()
                 .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-            trace_read_requests: settings
-                .remove("trace_read_requests")
-                .map(|x| x.parse::<bool>())
-                .transpose()
-                .context("Failed to parse 'trace_read_requests' as bool")?,
             eviction_policy: settings
                 .remove("eviction_policy")
                 .map(serde_json::from_str)
@@ -455,11 +449,6 @@ impl PageServerNode {
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-                trace_read_requests: settings
-                    .remove("trace_read_requests")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'trace_read_requests' as bool")?,
                 eviction_policy: settings
                     .remove("eviction_policy")
                     .map(serde_json::from_str)
@@ -566,60 +555,39 @@ impl PageServerNode {
         pg_wal: Option<(Lsn, PathBuf)>,
         pg_version: u32,
     ) -> anyhow::Result<()> {
-        let (client, conn) = self.page_server_psql_client().await?;
-        // The connection object performs the actual communication with the database,
-        // so spawn it off to run on its own.
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
-        let client = std::pin::pin!(client);
-
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
         let base_tarfile = tokio::fs::File::open(base_tarfile_path).await?;
-        let base_tarfile = tokio_util::io::ReaderStream::new(base_tarfile);
+        let base_tarfile =
+            mgmt_api::ReqwestBody::wrap_stream(tokio_util::io::ReaderStream::new(base_tarfile));
 
         // Init wal reader if necessary
         let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
             let wal_tarfile = tokio::fs::File::open(wal_tarfile_path).await?;
-            let wal_reader = tokio_util::io::ReaderStream::new(wal_tarfile);
+            let wal_reader =
+                mgmt_api::ReqwestBody::wrap_stream(tokio_util::io::ReaderStream::new(wal_tarfile));
             (end_lsn, Some(wal_reader))
         } else {
             (start_lsn, None)
         };
 
-        let copy_in = |reader, cmd| {
-            let client = &client;
-            async move {
-                let writer = client.copy_in(&cmd).await?;
-                let writer = std::pin::pin!(writer);
-                let mut writer = writer.sink_map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::Other, format!("{e}"))
-                });
-                let mut reader = std::pin::pin!(reader);
-                writer.send_all(&mut reader).await?;
-                writer.into_inner().finish().await?;
-                anyhow::Ok(())
-            }
-        };
-
         // Import base
-        copy_in(
-            base_tarfile,
-            format!(
-                "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
-            ),
-        )
-        .await?;
-        // Import wal if necessary
-        if let Some(wal_reader) = wal_reader {
-            copy_in(
-                wal_reader,
-                format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}"),
+        self.http_client
+            .import_basebackup(
+                tenant_id,
+                timeline_id,
+                start_lsn,
+                end_lsn,
+                pg_version,
+                base_tarfile,
             )
             .await?;
+
+        // Import wal if necessary
+        if let Some(wal_reader) = wal_reader {
+            self.http_client
+                .import_wal(tenant_id, timeline_id, start_lsn, end_lsn, wal_reader)
+                .await?;
         }
 
         Ok(())

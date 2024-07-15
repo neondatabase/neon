@@ -226,7 +226,7 @@ impl Node {
         fn is_fatal(e: &mgmt_api::Error) -> bool {
             use mgmt_api::Error::*;
             match e {
-                ReceiveBody(_) | ReceiveErrorBody(_) => false,
+                SendRequest(_) | ReceiveBody(_) | ReceiveErrorBody(_) => false,
                 ApiError(StatusCode::SERVICE_UNAVAILABLE, _)
                 | ApiError(StatusCode::GATEWAY_TIMEOUT, _)
                 | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,
