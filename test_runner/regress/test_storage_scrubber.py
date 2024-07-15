@@ -172,9 +172,16 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
 def test_scrubber_scan_pageserver_metadata(
     neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
 ):
+    """
+    Create some layers. Delete an object listed in index. Run scrubber and see if it detects the defect.
+    """
+
+    # Use s3_storage so we could test out scrubber.
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.num_pageservers = shard_count if shard_count is not None else 1
     env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+
+    # Create some layers.
 
     workload = Workload(env, env.initial_tenant, env.initial_timeline)
     workload.init()
@@ -188,6 +195,8 @@ def test_scrubber_scan_pageserver_metadata(
 
     for _ in range(3):
         workload.write_rows(128)
+
+    # Get the latest index for a particular timeline.
 
     tenant_shard_id = (
         TenantShardId(env.initial_tenant, 0, shard_count) if shard_count else env.initial_tenant
@@ -210,6 +219,7 @@ def test_scrubber_scan_pageserver_metadata(
     assert len(index.layer_metadata) > 0
     it = iter(index.layer_metadata.items())
 
+    # Delete a layer file that is listed in the index.
     layer, metadata = next(it)
     log.info(f"Deleting {timeline_path}/{layer.to_str()}")
     delete_response = remote_storage_delete_key(
@@ -218,6 +228,7 @@ def test_scrubber_scan_pageserver_metadata(
     )
     log.info(f"delete response: {delete_response}")
 
+    # Check scan summary. Expect it to be a L0 layer so only emit warnings.
     scan_summary = StorageScrubber(neon_env_builder).scan_metadata()
     log.info(f"{pprint.pformat(scan_summary)}")
     assert len(scan_summary["with_warnings"]) > 0

@@ -222,7 +222,7 @@ pub async fn scan_metadata(
         target: &RootTarget,
         ttid: TenantShardTimelineId,
     ) -> anyhow::Result<(TenantShardTimelineId, S3TimelineBlobData)> {
-        let data: S3TimelineBlobData = list_timeline_blobs(s3_client, ttid, target).await?;
+        let data = list_timeline_blobs(s3_client, ttid, target).await?;
         Ok((ttid, data))
     }
     let timelines = timelines.map_ok(|ttid| report_on_timeline(&s3_client, &target, ttid));
