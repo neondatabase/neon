@@ -165,9 +165,7 @@ fn initialize_config(
 
             let mut s = String::new();
             f.read_to_string(&mut s).context("read identity file")?;
-            let doc: toml_edit::Document = s.parse().context("parse identity file toml")?;
-
-            PageserverIdentity::parse_and_validate(&doc)?
+            toml_edit::de::from_str::<PageserverIdentity>(&s)?
         }
         Err(e) => {
             anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
@@ -193,7 +191,7 @@ fn initialize_config(
     debug!("Using pageserver toml: {config}");
 
     // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(identity.node_id, &config, workdir)
+    let conf = PageServerConf::parse_and_validate(identity.id, &config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
     Ok(Box::leak(Box::new(conf)))
