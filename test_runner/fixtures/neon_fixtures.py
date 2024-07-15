@@ -492,6 +492,7 @@ class NeonEnvBuilder:
         pageserver_virtual_file_io_engine: Optional[str] = None,
         pageserver_aux_file_policy: Optional[AuxFileStore] = None,
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
+        safekeeper_extra_opts: Optional[list[str]] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -556,6 +557,8 @@ class NeonEnvBuilder:
             log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
 
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
+
+        self.safekeeper_extra_opts = safekeeper_extra_opts
 
         assert test_name.startswith(
             "test_"
@@ -1193,7 +1196,9 @@ class NeonEnv:
                 sk_cfg[
                     "remote_storage"
                 ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
-            self.safekeepers.append(Safekeeper(env=self, id=id, port=port))
+            self.safekeepers.append(
+                Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
+            )
             cfg["safekeepers"].append(sk_cfg)
 
         log.info(f"Config: {cfg}")
@@ -2282,6 +2287,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def node_delete(self, node_id):
+        log.info(f"node_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def node_drain(self, node_id):
         log.info(f"node_drain({node_id})")
         self.request(
@@ -2387,7 +2400,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
-        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr": str, "listen_http_port": int}
         """
         response = self.request(
             "GET",
@@ -4016,16 +4029,28 @@ class Safekeeper(LogUtils):
     id: int
     running: bool = False
 
-    def __init__(self, env: NeonEnv, port: SafekeeperPort, id: int, running: bool = False):
+    def __init__(
+        self,
+        env: NeonEnv,
+        port: SafekeeperPort,
+        id: int,
+        running: bool = False,
+        extra_opts: Optional[List[str]] = None,
+    ):
         self.env = env
         self.port = port
         self.id = id
         self.running = running
         self.logfile = Path(self.data_dir) / f"safekeeper-{id}.log"
+        self.extra_opts = extra_opts
 
     def start(
         self, extra_opts: Optional[List[str]] = None, timeout_in_seconds: Optional[int] = None
     ) -> "Safekeeper":
+        if extra_opts is None:
+            # Apply either the extra_opts passed in, or the ones from our constructor: we do not merge the two.
+            extra_opts = self.extra_opts
+
         assert self.running is False
         self.env.neon_cli.safekeeper_start(
             self.id, extra_opts=extra_opts, timeout_in_seconds=timeout_in_seconds

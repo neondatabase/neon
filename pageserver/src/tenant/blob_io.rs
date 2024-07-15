@@ -137,14 +137,14 @@ impl<'a> BlockCursor<'a> {
 }
 
 /// Reserved bits for length and compression
-const LEN_COMPRESSION_BIT_MASK: u8 = 0xf0;
+pub(super) const LEN_COMPRESSION_BIT_MASK: u8 = 0xf0;
 
 /// The maximum size of blobs we support. The highest few bits
 /// are reserved for compression and other further uses.
 const MAX_SUPPORTED_LEN: usize = 0x0fff_ffff;
 
-const BYTE_UNCOMPRESSED: u8 = 0x80;
-const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
+pub(super) const BYTE_UNCOMPRESSED: u8 = 0x80;
+pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
 
 /// A wrapper of `VirtualFile` that allows users to write blobs.
 ///
@@ -273,12 +273,8 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
-        self.write_blob_maybe_compressed(
-            srcbuf,
-            ctx,
-            ImageCompressionAlgorithm::DisabledNoDecompress,
-        )
-        .await
+        self.write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
+            .await
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
@@ -340,8 +336,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                             (BYTE_UNCOMPRESSED, len, slice.into_inner())
                         }
                     }
-                    ImageCompressionAlgorithm::Disabled
-                    | ImageCompressionAlgorithm::DisabledNoDecompress => {
+                    ImageCompressionAlgorithm::Disabled => {
                         (BYTE_UNCOMPRESSED, len, srcbuf.slice_full().into_inner())
                     }
                 };
@@ -395,51 +390,63 @@ impl BlobWriter<false> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{context::DownloadBehavior, task_mgr::TaskKind, tenant::block_io::BlockReaderRef};
+    use camino::Utf8PathBuf;
+    use camino_tempfile::Utf8TempDir;
     use rand::{Rng, SeedableRng};
 
     async fn round_trip_test<const BUFFERED: bool>(blobs: &[Vec<u8>]) -> Result<(), Error> {
         round_trip_test_compressed::<BUFFERED>(blobs, false).await
     }
 
-    async fn round_trip_test_compressed<const BUFFERED: bool>(
+    pub(crate) async fn write_maybe_compressed<const BUFFERED: bool>(
         blobs: &[Vec<u8>],
         compression: bool,
-    ) -> Result<(), Error> {
+        ctx: &RequestContext,
+    ) -> Result<(Utf8TempDir, Utf8PathBuf, Vec<u64>), Error> {
         let temp_dir = camino_tempfile::tempdir()?;
         let pathbuf = temp_dir.path().join("file");
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         // Write part (in block to drop the file)
         let mut offsets = Vec::new();
         {
-            let file = VirtualFile::create(pathbuf.as_path(), &ctx).await?;
+            let file = VirtualFile::create(pathbuf.as_path(), ctx).await?;
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
                     wtr.write_blob_maybe_compressed(
                         blob.clone(),
-                        &ctx,
+                        ctx,
                         ImageCompressionAlgorithm::Zstd { level: Some(1) },
                     )
                     .await
                 } else {
-                    wtr.write_blob(blob.clone(), &ctx).await
+                    wtr.write_blob(blob.clone(), ctx).await
                 };
                 let offs = res?;
                 offsets.push(offs);
             }
             // Write out one page worth of zeros so that we can
             // read again with read_blk
-            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ], &ctx).await;
+            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ], ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
-            wtr.flush_buffer(&ctx).await?;
+            wtr.flush_buffer(ctx).await?;
         }
+        Ok((temp_dir, pathbuf, offsets))
+    }
 
-        let file = VirtualFile::open(pathbuf.as_path(), &ctx).await?;
+    async fn round_trip_test_compressed<const BUFFERED: bool>(
+        blobs: &[Vec<u8>],
+        compression: bool,
+    ) -> Result<(), Error> {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let (_temp_dir, pathbuf, offsets) =
+            write_maybe_compressed::<BUFFERED>(blobs, compression, &ctx).await?;
+
+        let file = VirtualFile::open(pathbuf, &ctx).await?;
         let rdr = BlockReaderRef::VirtualFile(&file);
         let rdr = BlockCursor::new_with_compression(rdr, compression);
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {
@@ -452,7 +459,7 @@ mod tests {
         Ok(())
     }
 
-    fn random_array(len: usize) -> Vec<u8> {
+    pub(crate) fn random_array(len: usize) -> Vec<u8> {
         let mut rng = rand::thread_rng();
         (0..len).map(|_| rng.gen()).collect::<_>()
     }

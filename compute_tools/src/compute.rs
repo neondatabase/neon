@@ -56,6 +56,7 @@ pub struct ComputeNode {
     /// - we push new spec and it does reconfiguration
     /// - but then something happens and compute pod / VM is destroyed,
     ///   so k8s controller starts it again with the **old** spec
+    ///
     /// and the same for empty computes:
     /// - we started compute without any spec
     /// - we push spec and it does configuration
@@ -798,7 +799,11 @@ impl ComputeNode {
         // In this case we need to connect with old `zenith_admin` name
         // and create new user. We cannot simply rename connected user,
         // but we can create a new one and grant it all privileges.
-        let connstr = self.connstr.clone();
+        let mut connstr = self.connstr.clone();
+        connstr
+            .query_pairs_mut()
+            .append_pair("application_name", "apply_config");
+
         let mut client = match Client::connect(connstr.as_str(), NoTls) {
             Err(e) => match e.code() {
                 Some(&SqlState::INVALID_PASSWORD)
@@ -867,6 +872,11 @@ impl ComputeNode {
 
         // Run migrations separately to not hold up cold starts
         thread::spawn(move || {
+            let mut connstr = connstr.clone();
+            connstr
+                .query_pairs_mut()
+                .append_pair("application_name", "migrations");
+
             let mut client = Client::connect(connstr.as_str(), NoTls)?;
             handle_migrations(&mut client).context("apply_config handle_migrations")
         });
@@ -1107,7 +1117,7 @@ impl ComputeNode {
     // EKS worker nodes have following core dump settings:
     //   /proc/sys/kernel/core_pattern -> core
     //   /proc/sys/kernel/core_uses_pid -> 1
-    //   ulimint -c -> unlimited
+    //   ulimit -c -> unlimited
     // which results in core dumps being written to postgres data directory as core.<pid>.
     //
     // Use that as a default location and pattern, except macos where core dumps are written

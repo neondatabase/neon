@@ -33,6 +33,7 @@ pub struct BufferedWriter<B, W> {
     /// invariant: always remains Some(buf) except
     /// - while IO is ongoing => goes back to Some() once the IO completed successfully
     /// - after an IO error => stays `None` forever
+    ///
     /// In these exceptional cases, it's `None`.
     buf: Option<B>,
 }

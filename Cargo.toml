@@ -15,7 +15,6 @@ members = [
     "storage_controller",
     "storage_scrubber",
     "workspace_hack",
-    "trace",
     "libs/compute_api",
     "libs/pageserver_api",
     "libs/postgres_ffi",
@@ -84,7 +83,6 @@ enumset = "1.0.12"
 fail = "0.5.0"
 fallible-iterator = "0.2"
 framed-websockets = { version = "0.1.0", git = "https://github.com/neondatabase/framed-websockets" }
-fs2 = "0.4.3"
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
@@ -111,8 +109,8 @@ lasso = "0.7"
 leaky-bucket = "1.0.1"
 libc = "0.2"
 md5 = "0.7.0"
-measured = { version = "0.0.21", features=["lasso"] }
-measured-process = { version = "0.0.21" }
+measured = { version = "0.0.22", features=["lasso"] }
+measured-process = { version = "0.0.22" }
 memoffset = "0.8"
 nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
@@ -186,6 +184,7 @@ tracing-error = "0.2.0"
 tracing-opentelemetry = "0.21.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json", "ansi"] }
 twox-hash = { version = "1.6.3", default-features = false }
+typed-json = "0.1"
 url = "2.2"
 urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }

@@ -569,6 +569,22 @@ static VALID_LSN_LEASE_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static CIRCUIT_BREAKERS_BROKEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_circuit_breaker_broken",
+        "How many times a circuit breaker has broken"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static CIRCUIT_BREAKERS_UNBROKEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_circuit_breaker_unbroken",
+        "How many times a circuit breaker has been un-broken (recovered)"
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) mod initial_logical_size {
     use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
     use once_cell::sync::Lazy;
@@ -1473,10 +1489,7 @@ pub(crate) enum ComputeCommandKind {
     PageStream,
     Basebackup,
     Fullbackup,
-    ImportBasebackup,
-    ImportWal,
     LeaseLsn,
-    Show,
 }
 
 pub(crate) struct ComputeCommandCounters {
