@@ -3785,12 +3785,12 @@ class Endpoint(PgProtocol, LogUtils):
             self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
         )
 
-    def respec(self, **kwargs):
+    def respec(self, **kwargs: Any) -> None:
         """Update the endpoint.json file used by control_plane."""
         # Read config
         config_path = os.path.join(self.endpoint_path(), "endpoint.json")
         with open(config_path, "r") as f:
-            data_dict = json.load(f)
+            data_dict: dict[str, Any] = json.load(f)
 
         # Write it back updated
         with open(config_path, "w") as file:
