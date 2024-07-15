@@ -189,7 +189,8 @@ pub(super) async fn prepare(
     };
 
     if !ancestor_lsn.is_valid() {
-        // FIXME: this should be distinct error, permanent until manual fix
+        // rare case, probably wouldn't even load
+        tracing::error!("ancestor is set, but ancestor_lsn is invalid, this timeline needs fixing");
         return Err(NoAncestor);
     }
 
