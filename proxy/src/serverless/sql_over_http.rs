@@ -578,10 +578,8 @@ async fn handle_inner(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json");
 
-    //
-    // Now execute the query and return the result
-    //
-    let result = match payload {
+    // Now execute the query and return the result.
+    let json_output = match payload {
         Payload::Single(stmt) => stmt.process(cancel, &mut client, parsed_headers).await?,
         Payload::Batch(statements) => {
             if parsed_headers.txn_read_only {
@@ -605,11 +603,9 @@ async fn handle_inner(
 
     let metrics = client.metrics();
 
-    // how could this possibly fail
-    let body = serde_json::to_string(&result).expect("json serialization should not fail");
-    let len = body.len();
+    let len = json_output.len();
     let response = response
-        .body(Full::new(Bytes::from(body)))
+        .body(Full::new(Bytes::from(json_output)))
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
@@ -631,7 +627,7 @@ impl QueryData {
         cancel: CancellationToken,
         client: &mut Client<tokio_postgres::Client>,
         parsed_headers: HttpHeaders,
-    ) -> Result<Value, SqlOverHttpError> {
+    ) -> Result<String, SqlOverHttpError> {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
@@ -642,9 +638,9 @@ impl QueryData {
         .await
         {
             // The query successfully completed.
-            Either::Left((Ok((status, results)), __not_yet_cancelled)) => {
+            Either::Left((Ok((status, json_output)), __not_yet_cancelled)) => {
                 discard.check_idle(status);
-                Ok(results)
+                Ok(json_output)
             }
             // The query failed with an error
             Either::Left((Err(e), __not_yet_cancelled)) => {
@@ -696,7 +692,7 @@ impl BatchQueryData {
         cancel: CancellationToken,
         client: &mut Client<tokio_postgres::Client>,
         parsed_headers: HttpHeaders,
-    ) -> Result<Value, SqlOverHttpError> {
+    ) -> Result<String, SqlOverHttpError> {
         info!("starting transaction");
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
@@ -753,7 +749,10 @@ impl BatchQueryData {
                 }
             };
 
-        Ok(json!({ "results": results }))
+        let results = typed_json::json!({ "results": results });
+        let json_output =
+            serde_json::to_string(&results).expect("json serialization should not fail");
+        Ok(json_output)
     }
 }
 
@@ -762,7 +761,7 @@ async fn query_batch(
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
-) -> Result<Vec<Value>, SqlOverHttpError> {
+) -> Result<Vec<String>, SqlOverHttpError> {
     let mut results = Vec::with_capacity(queries.queries.len());
     let mut current_size = 0;
     for stmt in queries.queries {
@@ -795,7 +794,7 @@ async fn query_to_json<T: GenericClient>(
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
-) -> Result<(ReadyForQueryStatus, Value), SqlOverHttpError> {
+) -> Result<(ReadyForQueryStatus, String), SqlOverHttpError> {
     info!("executing query");
     let query_params = data.params;
     let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
@@ -843,7 +842,7 @@ async fn query_to_json<T: GenericClient>(
     let mut columns = Vec::with_capacity(columns_len);
 
     for c in row_stream.columns() {
-        fields.push(json!({
+        fields.push(typed_json::json!({
             "name": Value::String(c.name().to_owned()),
             "dataTypeID": Value::Number(c.type_().oid().into()),
             "tableID": c.table_oid(),
@@ -863,15 +862,15 @@ async fn query_to_json<T: GenericClient>(
         .map(|row| pg_text_row_to_json(row, &columns, parsed_headers.raw_output, array_mode))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // resulting JSON format is based on the format of node-postgres result
-    Ok((
-        ready,
-        json!({
-            "command": command_tag_name,
-            "rowCount": command_tag_count,
-            "rows": rows,
-            "fields": fields,
-            "rowAsArray": array_mode,
-        }),
-    ))
+    // Resulting JSON format is based on the format of node-postgres result.
+    let results = typed_json::json!({
+        "command": command_tag_name,
+        "rowCount": command_tag_count,
+        "rows": rows,
+        "fields": fields,
+        "rowAsArray": array_mode,
+    });
+    let json_output = serde_json::to_string(&results).expect("json serialization should not fail");
+
+    Ok((ready, json_output))
 }
