@@ -29,7 +29,6 @@ use utils::{
 pub struct StorageController {
     env: LocalEnv,
     listen: String,
-    path: Utf8PathBuf,
     private_key: Option<Vec<u8>>,
     public_key: Option<String>,
     postgres_port: u16,
@@ -65,10 +64,6 @@ pub struct InspectResponse {
 
 impl StorageController {
     pub fn from_env(env: &LocalEnv) -> Self {
-        let path = Utf8PathBuf::from_path_buf(env.base_data_dir.clone())
-            .unwrap()
-            .join("attachments.json");
-
         // Makes no sense to construct this if pageservers aren't going to use it: assume
         // pageservers have control plane API set
         let listen_url = env.control_plane_api.clone().unwrap();
@@ -128,7 +123,6 @@ impl StorageController {
 
         Self {
             env: env.clone(),
-            path,
             listen,
             private_key,
             public_key,
@@ -299,8 +293,6 @@ impl StorageController {
         let mut args = vec![
             "-l",
             &self.listen,
-            "-p",
-            self.path.as_ref(),
             "--dev",
             "--database-url",
             &database_url,
