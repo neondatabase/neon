@@ -542,6 +542,7 @@ impl Persistence {
         Ok(Generation::new(g as u32))
     }
 
+    #[allow(non_local_definitions)]
     /// For use when updating a persistent property of a tenant, such as its config or placement_policy.
     ///
     /// Do not use this for settting generation, unless in the special onboarding code path (/location_config)

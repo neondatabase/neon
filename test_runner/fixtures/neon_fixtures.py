@@ -2287,6 +2287,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def node_delete(self, node_id):
+        log.info(f"node_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def node_drain(self, node_id):
         log.info(f"node_drain({node_id})")
         self.request(

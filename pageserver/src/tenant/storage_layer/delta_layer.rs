@@ -1321,7 +1321,7 @@ impl DeltaLayerInner {
                         offsets.start.pos(),
                         offsets.end.pos(),
                         meta,
-                        Some(max_read_size),
+                        max_read_size,
                     ))
                 }
             } else {
@@ -1615,13 +1615,17 @@ impl<'a> DeltaLayerIterator<'a> {
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
                 let offset = blob_ref.pos();
-                if let Some(batch_plan) = self.planner.handle(key, lsn, offset, BlobFlag::None) {
+                if let Some(batch_plan) = self.planner.handle(key, lsn, offset) {
                     break batch_plan;
                 }
             } else {
                 self.is_end = true;
                 let data_end_offset = self.delta_layer.index_start_offset();
-                break self.planner.handle_range_end(data_end_offset);
+                if let Some(item) = self.planner.handle_range_end(data_end_offset) {
+                    break item;
+                } else {
+                    return Ok(()); // TODO: test empty iterator
+                }
             }
         };
         let vectored_blob_reader = VectoredBlobReader::new(&self.delta_layer.file);

@@ -809,7 +809,11 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
+        let compression = self.conf.image_compression;
+        let (_img, res) = self
+            .blob_writer
+            .write_blob_maybe_compressed(img, ctx, compression)
+            .await;
         // TODO: re-use the buffer for `img` further upstack
         let off = res?;
 
@@ -994,14 +998,17 @@ impl<'a> ImageLayerIterator<'a> {
                     Key::from_slice(&raw_key[..KEY_SIZE]),
                     self.image_layer.lsn,
                     offset,
-                    BlobFlag::None,
                 ) {
                     break batch_plan;
                 }
             } else {
                 self.is_end = true;
                 let payload_end = self.image_layer.index_start_blk as u64 * PAGE_SZ as u64;
-                break self.planner.handle_range_end(payload_end);
+                if let Some(item) = self.planner.handle_range_end(payload_end) {
+                    break item;
+                } else {
+                    return Ok(()); // TODO: a test case on empty iterator
+                }
             }
         };
         let vectored_blob_reader = VectoredBlobReader::new(&self.image_layer.file);

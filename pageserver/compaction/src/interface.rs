@@ -131,7 +131,7 @@ impl CompactionKey for Key {
 pub type CompactionKeySpace<K> = Vec<Range<K>>;
 
 /// Functions needed from all layers.
-pub trait CompactionLayer<K: CompactionKey + ?Sized> {
+pub trait CompactionLayer<K: CompactionKey> {
     fn key_range(&self) -> &Range<K>;
     fn lsn_range(&self) -> &Range<Lsn>;
 

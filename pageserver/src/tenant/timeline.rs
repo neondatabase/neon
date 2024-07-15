@@ -3409,6 +3409,7 @@ impl Timeline {
         }
     }
 
+    #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
     /// The algorithm is as follows:
@@ -4475,10 +4476,10 @@ impl Timeline {
     /// are required. Since checking if new image layers are required is expensive in
     /// terms of CPU, we only do it in the following cases:
     /// 1. If the timeline has ingested sufficient WAL to justify the cost
-    /// 2. If enough time has passed since the last check
-    /// 2.1. For large tenants, we wish to perform the check more often since they
-    /// suffer from the lack of image layers
-    /// 2.2. For small tenants (that can mostly fit in RAM), we use a much longer interval
+    /// 2. If enough time has passed since the last check:
+    ///     1. For large tenants, we wish to perform the check more often since they
+    ///        suffer from the lack of image layers
+    ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
         const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -4720,7 +4721,7 @@ impl Timeline {
     /// Requires a timeline that:
     /// - has an ancestor to detach from
     /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
-    /// a technical requirement
+    ///   a technical requirement
     ///
     /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
     /// polled again until completion.
