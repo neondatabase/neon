@@ -143,12 +143,21 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                                 .await;
 
                             if response.is_err() {
-                                result.errors.push(format!(
-                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage",
+                                // Object is not present.
+
+                                let msg = format!(
+                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_maybe_l0: {})",
                                     layer,
                                     metadata.generation.get_suffix(),
-                                    metadata.shard
-                                ))
+                                    metadata.shard,
+                                    layer.is_maybe_l0(),
+                                );
+
+                                if layer.is_maybe_l0() {
+                                    result.warnings.push(msg);
+                                } else {
+                                    result.errors.push(msg);
+                                }
                             }
                         }
                     }

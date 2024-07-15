@@ -12,7 +12,7 @@ import boto3
 import toml
 from mypy_boto3_s3 import S3Client
 
-from fixtures.common_types import TenantId, TimelineId
+from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
@@ -263,10 +263,15 @@ class S3Storage:
         log.info(f"deleted {cnt} objects from remote storage")
 
     def tenants_path(self) -> str:
-        return f"{self.prefix_in_bucket}/tenants"
+        return f"{self.prefix_in_bucket}tenants"
 
-    def tenant_path(self, tenant_id: TenantId) -> str:
+    def tenant_path(self, tenant_id: Union[TenantShardId, TenantId]) -> str:
         return f"{self.tenants_path()}/{tenant_id}"
+
+    def timeline_path(
+        self, tenant_id: Union[TenantShardId, TenantId], timeline_id: TimelineId
+    ) -> str:
+        return f"{self.tenant_path(tenant_id)}/timelines/{timeline_id}"
 
     def heatmap_key(self, tenant_id: TenantId) -> str:
         return f"{self.tenant_path(tenant_id)}/{TENANT_HEATMAP_FILE_NAME}"

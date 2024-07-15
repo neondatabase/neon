@@ -1,12 +1,20 @@
 import os
+import pprint
 import shutil
 from typing import Optional
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     StorageScrubber,
+)
+from fixtures.pageserver.utils import (
+    list_prefix,
+    remote_storage_delete_key,
+    remote_storage_download_index_part,
+    remote_storage_get_lastest_index_key,
 )
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.workload import Workload
@@ -158,3 +166,58 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
     gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] == (expect_indices_per_shard - 2) * shard_count
+
+
+@pytest.mark.parametrize("shard_count", [None, 4])
+def test_scrubber_scan_pageserver_metadata(
+    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
+):
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.num_pageservers = shard_count if shard_count is not None else 1
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+
+    workload = Workload(env, env.initial_tenant, env.initial_timeline)
+    workload.init()
+
+    for _ in range(3):
+        workload.write_rows(128)
+
+    for pageserver in env.pageservers:
+        pageserver.stop()
+        pageserver.start()
+
+    for _ in range(3):
+        workload.write_rows(128)
+
+    tenant_shard_id = (
+        TenantShardId(env.initial_tenant, 0, shard_count) if shard_count else env.initial_tenant
+    )
+
+    timeline_path = env.pageserver_remote_storage.timeline_path(
+        tenant_shard_id, env.initial_timeline
+    )
+    objects = list_prefix(env.pageserver_remote_storage, prefix=f"{timeline_path}/").get(
+        "Contents", []
+    )
+    keys = [obj["Key"] for obj in objects]
+    index_keys = list(filter(lambda s: s.startswith(f"/{timeline_path}/index_part"), keys))
+
+    latest_index_key = remote_storage_get_lastest_index_key(index_keys)
+    log.info(f"{latest_index_key=}")
+
+    index = remote_storage_download_index_part(env.pageserver_remote_storage, latest_index_key)
+
+    assert len(index.layer_metadata) > 0
+    it = iter(index.layer_metadata.items())
+
+    layer, metadata = next(it)
+    log.info(f"Deleting {timeline_path}/{layer.to_str()}")
+    delete_response = remote_storage_delete_key(
+        env.pageserver_remote_storage,
+        f"{timeline_path}/{layer.to_str()}-{metadata.generation:08x}",
+    )
+    log.info(f"delete response: {delete_response}")
+
+    scan_summary = StorageScrubber(neon_env_builder).scan_metadata()
+    log.info(f"{pprint.pformat(scan_summary)}")
+    assert len(scan_summary["with_warnings"]) > 0
