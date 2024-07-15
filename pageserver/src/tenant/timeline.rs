@@ -478,37 +478,32 @@ impl GcInfo {
     }
 }
 
-/// The `GcInfo` component describing which Lsns need to be retained.
+/// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
+/// is a single number (the oldest LSN which we must retain), but it internally distinguishes
+/// between time-based and space-based retention for observability and consumption metrics purposes.
 #[derive(Debug)]
 pub(crate) struct GcCutoffs {
-    /// Keep everything newer than this point.
-    ///
-    /// This is calculated by subtracting 'gc_horizon' setting from
-    /// last-record LSN
-    ///
-    /// FIXME: is this inclusive or exclusive?
-    pub(crate) horizon: Lsn,
+    /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
+    /// history we must keep to retain a specified number of bytes of WAL.
+    pub(crate) space: Lsn,
 
-    /// In addition to 'retain_lsns' and 'horizon_cutoff', keep everything newer than this
-    /// point.
-    ///
-    /// This is calculated by finding a number such that a record is needed for PITR
-    /// if only if its LSN is larger than 'pitr_cutoff'.
-    pub(crate) pitr: Lsn,
+    /// Calculated from [`TenantConf::pitr_interval`], this LSN indicates how much
+    /// history we must keep to enable reading back at least the PITR interval duration.
+    pub(crate) time: Lsn,
 }
 
 impl Default for GcCutoffs {
     fn default() -> Self {
         Self {
-            horizon: Lsn::INVALID,
-            pitr: Lsn::INVALID,
+            space: Lsn::INVALID,
+            time: Lsn::INVALID,
         }
     }
 }
 
 impl GcCutoffs {
     fn select_min(&self) -> Lsn {
-        std::cmp::min(self.horizon, self.pitr)
+        std::cmp::min(self.space, self.time)
     }
 }
 
@@ -867,7 +862,7 @@ impl Timeline {
         let gc_info = self.gc_info.read().unwrap();
         let history = self
             .get_last_record_lsn()
-            .checked_sub(gc_info.cutoffs.pitr)
+            .checked_sub(gc_info.cutoffs.time)
             .unwrap_or(Lsn(0))
             .0;
         (history, gc_info.within_ancestor_pitr)
@@ -4977,8 +4972,8 @@ impl Timeline {
             // Unit tests which specify zero PITR interval expect to avoid doing any I/O for timestamp lookup
             if pitr == Duration::ZERO {
                 return Ok(GcCutoffs {
-                    pitr: self.get_last_record_lsn(),
-                    horizon: cutoff_horizon,
+                    time: self.get_last_record_lsn(),
+                    space: cutoff_horizon,
                 });
             }
         }
@@ -5028,31 +5023,31 @@ impl Timeline {
                 // PITR is not set. Retain the size-based limit, or the default time retention,
                 // whichever requires less data.
                 GcCutoffs {
-                    pitr: std::cmp::max(time_cutoff, cutoff_horizon),
-                    horizon: std::cmp::max(time_cutoff, cutoff_horizon),
+                    time: self.get_last_record_lsn(),
+                    space: std::cmp::max(time_cutoff, cutoff_horizon),
                 }
             }
             (Duration::ZERO, None) => {
                 // PITR is not set, and time lookup failed
                 GcCutoffs {
-                    pitr: self.get_last_record_lsn(),
-                    horizon: cutoff_horizon,
+                    time: self.get_last_record_lsn(),
+                    space: cutoff_horizon,
                 }
             }
             (_, None) => {
                 // PITR interval is set & we didn't look up a timestamp successfully.  Conservatively assume PITR
                 // cannot advance beyond what was already GC'd, and respect space-based retention
                 GcCutoffs {
-                    pitr: *self.get_latest_gc_cutoff_lsn(),
-                    horizon: cutoff_horizon,
+                    time: *self.get_latest_gc_cutoff_lsn(),
+                    space: cutoff_horizon,
                 }
             }
             (_, Some(time_cutoff)) => {
                 // PITR interval is set and we looked up timestamp successfully.  Ignore
                 // size based retention and make time cutoff authoritative
                 GcCutoffs {
-                    pitr: time_cutoff,
-                    horizon: time_cutoff,
+                    time: time_cutoff,
+                    space: time_cutoff,
                 }
             }
         })
@@ -5082,8 +5077,8 @@ impl Timeline {
         let (horizon_cutoff, pitr_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
-            let horizon_cutoff = min(gc_info.cutoffs.horizon, self.get_disk_consistent_lsn());
-            let pitr_cutoff = gc_info.cutoffs.pitr;
+            let horizon_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
+            let pitr_cutoff = gc_info.cutoffs.time;
             let retain_lsns = gc_info.retain_lsns.clone();
 
             // Gets the maximum LSN that holds the valid lease.

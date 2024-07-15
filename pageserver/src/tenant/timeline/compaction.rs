@@ -195,7 +195,7 @@ impl Timeline {
         tracing::info!(
             "latest_gc_cutoff: {}, pitr cutoff {}",
             *latest_gc_cutoff,
-            self.gc_info.read().unwrap().cutoffs.pitr
+            self.gc_info.read().unwrap().cutoffs.time
         );
 
         let layers = self.layers.read().await;
@@ -990,7 +990,7 @@ impl Timeline {
                     "enhanced legacy compaction currently does not support retain_lsns (branches)"
                 )));
             }
-            let gc_cutoff = Lsn::min(gc_info.cutoffs.horizon, gc_info.cutoffs.pitr);
+            let gc_cutoff = gc_info.cutoffs.select_min();
             let mut selected_layers = Vec::new();
             // TODO: consider retain_lsns
             drop(gc_info);

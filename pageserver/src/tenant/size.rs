@@ -241,8 +241,8 @@ pub(super) async fn gather_inputs(
         // than a space bound (horizon cutoff).  This means that if someone drops a database and waits for their
         // PITR interval, they will see synthetic size decrease, even if we are still storing data inside
         // horizon_cutoff.
-        let pitr_cutoff = gc_info.cutoffs.pitr;
-        let horizon_cutoff = gc_info.cutoffs.horizon;
+        let pitr_cutoff = gc_info.cutoffs.time;
+        let horizon_cutoff = gc_info.cutoffs.space;
         let mut next_gc_cutoff = pitr_cutoff;
 
         // If the caller provided a shorter retention period, use that instead of the GC cutoff.
