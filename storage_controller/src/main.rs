@@ -75,6 +75,10 @@ struct Cli {
     #[arg(long)]
     reconciler_concurrency: Option<usize>,
 
+    /// Whether to spawn a background reconciliation task (enabled by default)
+    #[arg(long)]
+    background_reconcile: Option<bool>,
+
     /// How long to wait for the initial database connection to be available.
     #[arg(long, default_value = "5s")]
     db_connect_timeout: humantime::Duration,
@@ -266,6 +270,7 @@ async fn async_main() -> anyhow::Result<()> {
         reconciler_concurrency: args
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
+        background_reconcile: args.background_reconcile.unwrap_or(true),
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
     };

@@ -240,6 +240,8 @@ pub struct Config {
     /// How many Reconcilers may be spawned concurrently
     pub reconciler_concurrency: usize,
 
+    pub background_reconcile: bool,
+
     /// How large must a shard grow in bytes before we split it?
     /// None disables auto-splitting.
     pub split_threshold: Option<u64>,
@@ -1229,14 +1231,16 @@ impl Service {
             }
         });
 
-        tokio::task::spawn({
-            let this = this.clone();
-            let startup_complete = startup_complete.clone();
-            async move {
-                startup_complete.wait().await;
-                this.background_reconcile().await;
-            }
-        });
+        if config.background_reconcile {
+            tokio::task::spawn({
+                let this = this.clone();
+                let startup_complete = startup_complete.clone();
+                async move {
+                    startup_complete.wait().await;
+                    this.background_reconcile().await;
+                }
+            });
+        }
 
         tokio::task::spawn({
             let this = this.clone();

@@ -17,7 +17,6 @@ from fixtures.metrics import (
     parse_metrics,
 )
 from fixtures.neon_fixtures import (
-    NeonEnv,
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
@@ -29,7 +28,14 @@ from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
 
-def test_tenant_creation_fails(neon_simple_env: NeonEnv):
+def test_tenant_creation_fails(neon_env_builder: NeonEnvBuilder):
+
+    neon_env_builder.storage_controller_config = {
+        "background_reconcile": False
+    }
+
+    neon_simple_env = neon_env_builder.init_start()
+
     tenants_dir = neon_simple_env.pageserver.tenant_dir()
     initial_tenants = sorted(
         map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())

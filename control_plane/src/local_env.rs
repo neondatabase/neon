@@ -155,6 +155,9 @@ pub struct NeonStorageControllerConf {
 
     /// Threshold for auto-splitting a tenant into shards
     pub split_threshold: Option<u64>,
+
+    /// Whether to enable background reconciliation
+    pub background_reconcile: Option<bool>,
 }
 
 impl NeonStorageControllerConf {
@@ -168,6 +171,7 @@ impl Default for NeonStorageControllerConf {
         Self {
             max_unavailable: Self::DEFAULT_MAX_UNAVAILABLE_INTERVAL,
             split_threshold: None,
+            background_reconcile: None,
         }
     }
 }
