@@ -68,7 +68,7 @@ class PgSniRouter(PgProtocol):
 
         self._popen = subprocess.Popen(args, stderr=router_log)
         self._wait_until_ready()
-        log.info(f"pg_sni_router started, log file: {router_log_path}")
+        log.info("pg_sni_router started, log file: %s", router_log_path)
         return self
 
     @backoff.on_exception(backoff.expo, OSError, max_time=10)

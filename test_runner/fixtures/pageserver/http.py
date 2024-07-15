@@ -197,13 +197,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         else:
             pairs = config_strings
 
-        log.info(f"Requesting config failpoints: {repr(pairs)}")
+        log.info("Requesting config failpoints: %s", repr(pairs))
 
         res = self.put(
             f"http://localhost:{self.port}/v1/failpoints",
             json=[{"name": name, "actions": actions} for name, actions in pairs],
         )
-        log.info(f"Got failpoints request response code {res.status_code}")
+        log.info("Got failpoints request response code %s", res.status_code)
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
@@ -525,13 +525,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.is_testing_enabled_or_skip()
 
         log.info(
-            f"Requesting GC: tenant {tenant_id}, timeline {timeline_id}, gc_horizon {repr(gc_horizon)}"
+            "Requesting GC: tenant %s, timeline %s, gc_horizon %s", tenant_id, timeline_id, repr(gc_horizon)
         )
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc",
             json={"gc_horizon": gc_horizon},
         )
-        log.info(f"Got GC request response code: {res.status_code}")
+        log.info("Got GC request response code: %s", res.status_code)
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is not None
@@ -558,12 +558,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if enhanced_gc_bottom_most_compaction:
             query["enhanced_gc_bottom_most_compaction"] = "true"
 
-        log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
+        log.info("Requesting compact: tenant %s, timeline %s", tenant_id, timeline_id)
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact",
             params=query,
         )
-        log.info(f"Got compact request response code: {res.status_code}")
+        log.info("Got compact request response code: %s", res.status_code)
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
@@ -572,7 +572,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
     ):
         log.info(
-            f"Requesting initdb archive preservation for tenant {tenant_id} and timeline {timeline_id}"
+            "Requesting initdb archive preservation for tenant %s and timeline %s", tenant_id, timeline_id
         )
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/preserve_initdb_archive",
@@ -588,7 +588,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         **kwargs,
     ):
         log.info(
-            f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}, {with_lease=}"
+            "Requesting lsn by timestamp %s, tenant %s, timeline %s, %s", timestamp, tenant_id, timeline_id, f"{with_lease=}"
         )
         with_lease_query = f"{with_lease=}".lower()
         res = self.get(
@@ -606,7 +606,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             "lsn": str(lsn),
         }
 
-        log.info(f"Requesting lsn lease for {lsn=}, {tenant_id=}, {timeline_id=}")
+        log.info("Requesting lsn lease for %s, %s, %s", f"{lsn=}", f"{tenant_id=}", f"{timeline_id=}")
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/lsn_lease",
             json=data,
@@ -618,7 +618,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def timeline_get_timestamp_of_lsn(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
     ):
-        log.info(f"Requesting time range of lsn {lsn}, tenant {tenant_id}, timeline {timeline_id}")
+        log.info("Requesting time range of lsn %s, tenant %s, timeline %s", lsn, tenant_id, timeline_id)
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_timestamp_of_lsn?lsn={lsn}",
         )
@@ -629,7 +629,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def timeline_layer_map_info(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
     ):
-        log.info(f"Requesting layer map info of tenant {tenant_id}, timeline {timeline_id}")
+        log.info("Requesting layer map info of tenant %s, timeline %s", tenant_id, timeline_id)
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer",
         )
@@ -654,12 +654,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
 
-        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
+        log.info("Requesting checkpoint: tenant %s, timeline %s", tenant_id, timeline_id)
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
             params=query,
         )
-        log.info(f"Got checkpoint request response code: {res.status_code}")
+        log.info("Got checkpoint request response code: %s", res.status_code)
         self.verbose_error(res)
         res_json = res.json()
         assert res_json is None
@@ -903,10 +903,10 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     ):
         self.is_testing_enabled_or_skip()
 
-        log.info(f"Requesting perf info: tenant {tenant_id}, timeline {timeline_id}")
+        log.info("Requesting perf info: tenant %s, timeline %s", tenant_id, timeline_id)
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/perf_info",
         )
-        log.info(f"Got perf info response code: {res.status_code}")
+        log.info("Got perf info response code: %s", res.status_code)
         self.verbose_error(res)
         return res.json()

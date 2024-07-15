@@ -49,7 +49,7 @@ def compute_reconfigure_listener(make_httpserver):
     def handler(request: Request):
         assert request.json is not None
         body: dict[str, Any] = request.json
-        log.info(f"notify-attach request: {body}")
+        log.info("notify-attach request: %s", body)
 
         if self.on_notify is not None:
             self.on_notify(body)

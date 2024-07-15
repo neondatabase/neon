@@ -79,5 +79,5 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
     )
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):
-            log.info(f"layer {filename} size is {os.path.getsize(timeline_path + filename)}")
+            log.info("layer %s size is %s", filename, os.path.getsize(timeline_path + filename))
             assert os.path.getsize(timeline_path + filename) < 512_000_000

@@ -43,8 +43,8 @@ def main(args: argparse.Namespace):
                 logging.info("fetching flaky tests...")
                 cur.execute(FLAKY_TESTS_QUERY, (interval_days,))
                 rows = cur.fetchall()
-    except psycopg2.OperationalError as exc:
-        logging.error("cannot fetch flaky tests from the DB due to an error", exc)
+    except psycopg2.OperationalError:
+        logging.error("cannot fetch flaky tests from the DB due to an error")
         rows = []
 
     # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_ENGINE (i.e. not empty, not tokio-epoll-uring),
@@ -93,10 +93,10 @@ def main(args: argparse.Namespace):
         res[row["parent_suite"]][row["suite"]][parametrized_test] = True
 
         logging.info(
-            f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{parametrized_test}"
+            "\t%s/%s.py::%s", row['parent_suite'].replace('.', '/'), row['suite'], parametrized_test
         )
 
-    logging.info(f"saving results to {output.name}")
+    logging.info("saving results to %s", output.name)
     json.dump(res, output, indent=2)
 
 

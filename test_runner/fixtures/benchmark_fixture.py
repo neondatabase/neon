@@ -79,6 +79,8 @@ class PgBenchRunResult:
 
         # we know significant parts of these values from test input
         # but to be precise take them from output
+        scale = number_of_clients = number_of_threads = \
+            number_of_transactions_actually_processed = latency_average = tps = None
         for line in stdout_lines:
             # scaling factor: 5
             if line.startswith("scaling factor:"):

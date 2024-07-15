@@ -121,7 +121,7 @@ def subprocess_capture(
     try:
         with open(stdout_filename, "wb") as stdout_f:
             with open(stderr_filename, "wb") as stderr_f:
-                log.info(f'Capturing stdout to "{base}.stdout" and stderr to "{base}.stderr"')
+                log.info('Capturing stdout to "%s.stdout" and stderr to "%s.stderr"', base, base)
 
                 p = subprocess.Popen(
                     cmd,
@@ -337,7 +337,7 @@ def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, 
 
     for name, link in links.items():
         allure.dynamic.link(link, name=name)
-        log.info(f"{name}: {link}")
+        log.info("%s: %s", name, link)
 
 
 def start_in_background(
@@ -345,7 +345,7 @@ def start_in_background(
 ) -> subprocess.Popen[bytes]:
     """Starts a process, creates the logfile and redirects stderr and stdout there. Runs the start checks before the process is started, or errors."""
 
-    log.info(f'Running command "{" ".join(command)}"')
+    log.info('Running command "%s"', " ".join(command))
 
     with open(cwd / log_file_name, "wb") as log_file:
         spawned_process = subprocess.Popen(command, stdout=log_file, stderr=log_file, cwd=cwd)
@@ -481,14 +481,14 @@ def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List
 
 def assert_no_errors(log_file, service, allowed_errors):
     if not log_file.exists():
-        log.warning(f"Skipping {service} log check: {log_file} does not exist")
+        log.warning("Skipping %s log check: %s does not exist", service, log_file)
         return
 
     with log_file.open("r") as f:
         errors = scan_log_for_errors(f, allowed_errors)
 
     for _lineno, error in errors:
-        log.info(f"not allowed {service} error: {error.strip()}")
+        log.info("not allowed %s error: %s", service, error.strip())
 
     assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
 
@@ -559,7 +559,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str
     assert len(mismatching) == 0, f"files with hash mismatch: {mismatching}"
 
     elapsed = time.time() - started_at
-    log.info(f"assert_pageserver_backups_equal completed in {elapsed}s")
+    log.info("assert_pageserver_backups_equal completed in %ss", elapsed)
 
 
 class PropagatingThread(threading.Thread):

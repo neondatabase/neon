@@ -49,7 +49,7 @@ def test_old_request_lsn(neon_env_builder: NeonEnvBuilder):
     )
     row = cur.fetchone()
     assert row is not None
-    log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
+    log.info("shared_buffers is %s, table size %s", row[0], row[1])
     assert int(row[0]) < int(row[1])
 
     cur.execute("VACUUM foo")

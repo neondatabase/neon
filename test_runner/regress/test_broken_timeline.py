@@ -54,7 +54,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
 
     # Leave the first timeline alone, but corrupt the others in different ways
     (tenant0, timeline0, pg0) = tenant_timelines[0]
-    log.info(f"Timeline {tenant0}/{timeline0} is left intact")
+    log.info("Timeline %s/%s is left intact", tenant0, timeline0)
 
     (tenant1, timeline1, pg1) = tenant_timelines[2]
     timeline_path = f"{env.pageserver.workdir}/tenants/{tenant1}/timelines/{timeline1}/"
@@ -66,7 +66,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
             with open(p, "wb") as f:
                 f.truncate(0)
                 f.truncate(size)
-    log.info(f"Timeline {tenant1}/{timeline1} got its local layer files spoiled")
+    log.info("Timeline %s/%s got its local layer files spoiled", tenant1, timeline1)
 
     env.pageserver.start()
 
@@ -82,7 +82,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     with pytest.raises(Exception, match=f"{reconstruct_function_name} for layer ") as err:
         pg1.start()
     log.info(
-        f"As expected, compute startup failed for timeline {tenant1}/{timeline1} with corrupt layers: {err}"
+        "As expected, compute startup failed for timeline %s/%s with corrupt layers: %s", tenant1, timeline1, err
     )
 
 

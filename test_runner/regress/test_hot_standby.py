@@ -197,7 +197,7 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
 
 
 def run_pgbench(connstr: str, pg_bin: PgBin):
-    log.info(f"Start a pgbench workload on pg {connstr}")
+    log.info("Start a pgbench workload on pg %s", connstr)
     # s10 is about 150MB of data. In debug mode init takes about 15s on SSD.
     pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
     log.info("pgbench init done")
@@ -245,7 +245,7 @@ def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             ],
         ) as secondary:
             log.info(
-                f"primary connstr is {primary.connstr()}, secondary connstr {secondary.connstr()}"
+                "primary connstr is %s, secondary connstr %s", primary.connstr(), secondary.connstr()
             )
             t = threading.Thread(target=run_pgbench, args=(primary.connstr(), pg_bin))
             t.start()
@@ -261,14 +261,14 @@ def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
                     "select xmin from pg_replication_slots where slot_name = 'wal_proposer_slot'",
                     log_query=False,
                 )
-                log.info(f"xmin is {slot_xmin}")
+                log.info("xmin is %s", slot_xmin)
                 assert int(slot_xmin) > 0
 
             wait_until(10, 1.0, xmin_is_not_null)
             for _ in range(1, 5):
                 # in debug mode takes about 5-7s
                 balance = secondary.safe_psql_scalar("select sum(abalance) from pgbench_accounts")
-                log.info(f"balance={balance}")
+                log.info("balance=%s", balance)
                 log_replica_lag(primary, secondary)
             t.join()
 
@@ -278,7 +278,7 @@ def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
                 "select xmin from pg_replication_slots where slot_name = 'wal_proposer_slot'",
                 log_query=False,
             )
-            log.info(f"xmin is {slot_xmin}")
+            log.info("xmin is %s", slot_xmin)
             assert slot_xmin is None
 
         wait_until(10, 1.0, xmin_is_null)
@@ -329,7 +329,7 @@ def test_replica_query_race(neon_simple_env: NeonEnv):
             # assert(writecounter - readcounter < 1000)
             assert readcounter <= writecounter
             if reads % 100 == 0:
-                log.info(f"read {reads}: counter {readcounter}, last update {writecounter}")
+                log.info("read %s: counter %s, last update %s", reads, readcounter, writecounter)
             reads += 1
 
             await conn.execute("SELECT clear_buffer_cache()")

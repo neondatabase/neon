@@ -22,7 +22,7 @@ def assert_tenant_state(
     message: Optional[str] = None,
 ) -> None:
     tenant_status = pageserver_http.tenant_status(tenant)
-    log.info(f"tenant_status: {tenant_status}")
+    log.info("tenant_status: %s", tenant_status)
     assert tenant_status["state"]["slug"] == expected_state, message or tenant_status
 
 
@@ -58,7 +58,7 @@ def wait_for_upload(
             return
         lr_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         log.info(
-            f"waiting for remote_consistent_lsn to reach {lsn}, now {current_lsn}, last_record_lsn={lr_lsn}, iteration {i + 1}"
+            "waiting for remote_consistent_lsn to reach %s, now %s, last_record_lsn=%s, iteration %s", lsn, current_lsn, lr_lsn, i + 1
         )
         time.sleep(1)
     raise Exception(
@@ -88,9 +88,9 @@ def wait_until_tenant_state(
         try:
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
         except Exception as e:
-            log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
+            log.debug("Tenant %s state retrieval failure: %s", tenant_id, e)
         else:
-            log.debug(f"Tenant {tenant_id} data: {tenant}")
+            log.debug("Tenant %s data: %s", tenant_id, tenant)
             if _tenant_in_expected_state(tenant, expected_state):
                 return tenant
 
@@ -116,7 +116,7 @@ def wait_until_all_tenants_state(
             tenants = pageserver_http.tenant_list()
         except Exception as e:
             if http_error_ok:
-                log.debug(f"Failed to list tenants: {e}")
+                log.debug("Failed to list tenants: %s", e)
             else:
                 raise
         else:
@@ -143,7 +143,7 @@ def wait_until_timeline_state(
     for i in range(iterations):
         try:
             timeline = pageserver_http.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
-            log.debug(f"Timeline {tenant_id}/{timeline_id} data: {timeline}")
+            log.debug("Timeline %s/%s data: %s", tenant_id, timeline_id, timeline)
             if isinstance(timeline["state"], str):
                 if timeline["state"] == expected_state:
                     return timeline
@@ -152,7 +152,7 @@ def wait_until_timeline_state(
                     return timeline
 
         except Exception as e:
-            log.debug(f"Timeline {tenant_id}/{timeline_id} state retrieval failure: {e}")
+            log.debug("Timeline %s/%s state retrieval failure: %s", tenant_id, timeline_id, e)
 
         if i == iterations - 1:
             # do not sleep last time, we already know that we failed
@@ -204,7 +204,7 @@ def wait_for_last_record_lsn(
             return current_lsn
         if i % 10 == 0:
             log.info(
-                f"{tenant}/{timeline} waiting for last_record_lsn to reach {lsn}, now {current_lsn}, iteration {i + 1}"
+                "%s/%s waiting for last_record_lsn to reach %s, now %s, iteration %s", tenant, timeline, lsn, current_lsn, i + 1
             )
         time.sleep(0.1)
     raise Exception(
@@ -248,9 +248,9 @@ def wait_for_upload_queue_empty(
             if not found:
                 tl.append((s.labels, int(s.value)))
         assert len(tl) == len(started), "something broken with join logic"
-        log.info(f"upload queue for {tenant_id}/{timeline_id}:")
+        log.info("upload queue for %s/%s:", tenant_id, timeline_id)
         for labels, queue_count in tl:
-            log.info(f"  {labels}: {queue_count}")
+            log.info("  %s: %s", labels, queue_count)
         if all(queue_count == 0 for (_, queue_count) in tl):
             return
         time.sleep(wait_period_secs)
@@ -270,7 +270,7 @@ def wait_timeline_detail_404(
         data = {}
         try:
             data = pageserver_http.timeline_detail(tenant_id, timeline_id)
-            log.info(f"timeline detail {data}")
+            log.info("timeline detail %s", data)
         except PageserverApiException as e:
             log.debug(e)
             if e.status_code == 404:
@@ -313,7 +313,7 @@ def assert_prefix_empty(
             # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-5322/6207777020/index.html#suites/3556ed71f2d69272a7014df6dcb02317/53b5c368b5a68865
             # this seems like a mock_s3 issue
             log.warning(
-                f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
+                "contradicting ListObjectsV2 response with KeyCount=%s and Contents=%s, CommonPrefixes=%s, assuming this means KeyCount=0", keys, objects, common_prefixes
             )
             keys = 0
         elif keys != 0 and len(objects) == 0:
@@ -321,7 +321,7 @@ def assert_prefix_empty(
             # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-4938/6000769714/index.html#suites/3556ed71f2d69272a7014df6dcb02317/ca01e4f4d8d9a11f
             # looking at moto impl, it might be there's a race with common prefix (sub directory) not going away with deletes
             log.warning(
-                f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}"
+                "contradicting ListObjectsV2 response with KeyCount=%s and Contents=%s, CommonPrefixes=%s", keys, objects, common_prefixes
             )
 
     filtered_count = 0

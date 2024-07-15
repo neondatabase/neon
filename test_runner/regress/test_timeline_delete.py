@@ -243,7 +243,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         )
 
         reason = timeline_info["state"]["Broken"]["reason"]
-        log.info(f"timeline broken: {reason}")
+        log.info("timeline broken: %s", reason)
 
         # failpoint may not be the only error in the stack
         assert reason.endswith(f"failpoint: {failpoint}"), reason
@@ -831,7 +831,7 @@ def test_timeline_delete_resumed_on_attach(
     )
 
     reason = timeline_info["state"]["Broken"]["reason"]
-    log.info(f"timeline broken: {reason}")
+    log.info("timeline broken: %s", reason)
 
     # failpoint may not be the only error in the stack
     assert reason.endswith(f"failpoint: {failpoint}"), reason

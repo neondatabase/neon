@@ -142,10 +142,10 @@ def test_tenants_attached_after_download(neon_env_builder: NeonEnvBuilder):
         # run checkpoint manually to be sure that data landed in remote storage
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
-        log.info(f"waiting for checkpoint {checkpoint_number} upload")
+        log.info("waiting for checkpoint %s upload", checkpoint_number)
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         wait_for_upload(client, tenant_id, timeline_id, current_lsn)
-        log.info(f"upload of checkpoint {checkpoint_number} is done")
+        log.info("upload of checkpoint %s is done", checkpoint_number)
 
     # Check that we had to retry the uploads
     env.pageserver.assert_log_contains(

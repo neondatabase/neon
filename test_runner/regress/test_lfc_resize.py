@@ -25,7 +25,7 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     scale = 10
 
     def run_pgbench(connstr: str):
-        log.info(f"Start a pgbench workload on pg {connstr}")
+        log.info("Start a pgbench workload on pg %s", connstr)
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", "-c4", f"-T{n_resize}", "-Mprepared", connstr])
 

@@ -70,7 +70,7 @@ def test_tenant_s3_restore(
             last_flush_lsns.append(last_flush_lsn)
         ps_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
-        log.info(f"{timeline} timeline {timeline_id} {last_flush_lsn=}")
+        log.info("%s timeline %s %s", timeline, timeline_id, f"{last_flush_lsn=}")
         parent = timeline
 
     # These sleeps are important because they fend off differences in clocks between us and S3
@@ -115,7 +115,7 @@ def test_tenant_s3_restore(
     env.pageserver.quiesce_tenants()
 
     for tline in ps_http.timeline_list(env.initial_tenant):
-        log.info(f"timeline detail: {tline}")
+        log.info("timeline detail: %s", tline)
 
     for i, timeline in enumerate(["first", "second"]):
         with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:

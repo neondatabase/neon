@@ -147,13 +147,13 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     assert isinstance(future_layer, ImageLayerName)
     assert future_layer.lsn == last_record_lsn
     log.info(
-        f"got layer from the future: lsn={future_layer.lsn} disk_consistent_lsn={ip.disk_consistent_lsn} last_record_lsn={last_record_lsn}"
+        "got layer from the future: lsn=%s disk_consistent_lsn=%s last_record_lsn=%s", future_layer.lsn, ip.disk_consistent_lsn, last_record_lsn
     )
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     future_layer_path = env.pageserver_remote_storage.remote_layer_path(
         tenant_id, timeline_id, future_layer.to_str()
     )
-    log.info(f"future layer path: {future_layer_path}")
+    log.info("future layer path: %s", future_layer_path)
     pre_stat = future_layer_path.stat()
     time.sleep(1.1)  # so that we can use change in pre_stat.st_mtime to detect overwrites
 
@@ -192,7 +192,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     future_layer_path = env.pageserver_remote_storage.remote_layer_path(
         tenant_id, timeline_id, future_layer.to_str(), generation=generation_before_detach
     )
-    log.info(f"future layer path: {future_layer_path}")
+    log.info("future layer path: %s", future_layer_path)
     assert future_layer_path.exists()
 
     # wait for re-ingestion of the WAL from safekeepers into the in-memory layer
@@ -232,7 +232,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     log.info("integrity-check the remote storage")
     ip = get_index_part()
     for layer_file_name, layer_metadata in ip.layer_metadata.items():
-        log.info(f"Layer metadata {layer_file_name.to_str()}: {layer_metadata}")
+        log.info("Layer metadata %s: %s", layer_file_name.to_str(), layer_metadata)
         layer_path = env.pageserver_remote_storage.remote_layer_path(
             tenant_id, timeline_id, layer_file_name.to_str(), layer_metadata.generation
         )
@@ -243,5 +243,5 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         tenant_id, timeline_id, future_layer.to_str(), generation=generation_after_reattach
     )
     final_stat = future_layer_path.stat()
-    log.info(f"future layer path: {future_layer_path}")
+    log.info("future layer path: %s", future_layer_path)
     assert final_stat.st_mtime != pre_stat.st_mtime

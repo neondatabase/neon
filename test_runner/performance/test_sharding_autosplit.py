@@ -146,7 +146,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             #         f"pgbench on tenant {endpoint.tenant_id} run at {out_path} has tps < {min_tps}"
             #     )
 
-        log.info(f"Checked {matched_lines} progress lines, lowest TPS was {min_tps}")
+        log.info("Checked %s progress lines, lowest TPS was %s", matched_lines, min_tps)
 
         if matched_lines == 0:
             raise RuntimeError(f"pgbench output at {out_path} contained no progress lines")
@@ -223,7 +223,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         timeline_info = shard_zero_ps.http_client().timeline_detail(
             shard_zero_id, tenant_state.timeline_id
         )
-        log.info(f"{shard_zero_id} timeline: {timeline_info}")
+        log.info("%s timeline: %s", shard_zero_id, timeline_info)
 
     # Run compaction for all tenants, restart endpoint so that on subsequent reads we will
     # definitely hit pageserver for reads.  This compaction passis expected to drop unwanted

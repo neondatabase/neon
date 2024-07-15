@@ -131,7 +131,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
                 c.execute("select * from page_header(get_raw_page('foo', 'main', 0));")
                 raise AssertionError("query should have failed")
             except UndefinedTable as e:
-                log.info(f"Caught an expected failure: {e}")
+                log.info("Caught an expected failure: %s", e)
 
 
 def test_read_validation_neg(neon_simple_env: NeonEnv):
@@ -161,7 +161,7 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
                 )
                 raise AssertionError("query should have failed")
             except UndefinedTable as e:
-                log.info(f"Caught an expected failure: {e}")
+                log.info("Caught an expected failure: %s", e)
 
             c.execute("create table foo (c int) with (autovacuum_enabled = false)")
             c.execute("insert into foo values (1)")
@@ -173,7 +173,7 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
                 )
                 raise AssertionError("query should have failed")
             except IoError as e:
-                log.info(f"Caught an expected failure: {e}")
+                log.info("Caught an expected failure: %s", e)
 
             log.info("Pass NULL as an input")
             expected = (None, None, None)

@@ -152,8 +152,8 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder):
         # file unnecessarily.
         pageserver_http.timeline_compact(tenant_id, timeline_id)
 
-        log.info(f"{num_index_uploads} index uploads after GC iteration {i}")
+        log.info("%s index uploads after GC iteration %s", num_index_uploads, i)
 
     after = num_index_uploads
-    log.info(f"{after - before} new index uploads during test")
+    log.info("%s new index uploads during test", after - before)
     assert after - before < 5

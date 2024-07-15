@@ -60,7 +60,7 @@ def get_consistent_node_shard_counts(env: NeonEnv, total_shards) -> defaultdict[
                 "secondary"
             ]
 
-    log.info(f"{tenant_placement=}")
+    log.info("%s", f"{tenant_placement=}")
 
     matching = {
         tid: intent[tid] for tid in observed if tid in intent and intent[tid] == observed[tid]
@@ -155,7 +155,7 @@ def test_storage_controller_many_tenants(
 
         rss = env.storage_controller.get_metric_value("process_resident_memory_bytes")
         assert rss is not None
-        log.info(f"Resident memory: {rss} ({ rss / (shard_count * tenant_count)} per shard)")
+        log.info("Resident memory: %s (%s per shard)", rss,  rss / (shard_count * tenant_count))
         assert rss < expect_memory_per_shard * shard_count * tenant_count
 
     # We use a fixed seed to make the test somewhat reproducible: we want a randomly
@@ -188,7 +188,7 @@ def test_storage_controller_many_tenants(
         for f in futs:
             f.result()
         log.info(
-            f"Created {len(tenants)} tenants in {time.time() - t1}, {len(tenants) / (time.time() - t1)}/s"
+            "Created %s tenants in %s, %s/s", len(tenants), time.time() - t1, len(tenants) / (time.time() - t1)
         )
 
         run_ops = api_concurrency * 4
@@ -242,7 +242,7 @@ def test_storage_controller_many_tenants(
             # Time how long a no-op background reconcile takes: this measures how long it takes to
             # loop over all the shards looking for work to do.
             runtime = time.time() - t1
-            log.info(f"No-op call to reconcile_all took {runtime}s")
+            log.info("No-op call to reconcile_all took %ss", runtime)
             assert runtime < 1
             break
 
@@ -262,7 +262,7 @@ def test_storage_controller_many_tenants(
     check_memory()
 
     shard_counts = get_consistent_node_shard_counts(env, total_shards)
-    log.info(f"Shard counts before rolling restart: {shard_counts}")
+    log.info("Shard counts before rolling restart: %s", shard_counts)
 
     assert_consistent_balanced_attachments(env, total_shards)
 
@@ -278,7 +278,7 @@ def test_storage_controller_many_tenants(
         )
 
         shard_counts = get_consistent_node_shard_counts(env, total_shards)
-        log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
+        log.info("Shard counts after draining node %s: %s", ps.id, shard_counts)
         # Assert that we've drained the node
         assert shard_counts[str(ps.id)] == 0
         # Assert that those shards actually went somewhere
@@ -293,7 +293,7 @@ def test_storage_controller_many_tenants(
         env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=24, backoff=5)
 
         shard_counts = get_consistent_node_shard_counts(env, total_shards)
-        log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
+        log.info("Shard counts after filling node %s: %s", ps.id, shard_counts)
 
         assert_consistent_balanced_attachments(env, total_shards)
 

@@ -62,7 +62,7 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
 
         pub_conn = f"host=localhost port={pub.pg_port} dbname=neondb user=mr_whiskers password=cat"
         query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub"
-        log.info(f"Creating subscription: {query}")
+        log.info("Creating subscription: %s", query)
         cur.execute(query)
 
         with pub.cursor(dbname="neondb", user="mr_whiskers", password="cat") as pcur:
@@ -95,5 +95,5 @@ def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
         cur.execute("RESET ROLE")
         cur.execute("DROP ROLE not_a_superuser")
         query = "DROP SUBSCRIPTION sub CASCADE"
-        log.info(f"Dropping subscription: {query}")
+        log.info("Dropping subscription: %s", query)
         cur.execute(query)

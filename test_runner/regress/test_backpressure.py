@@ -27,17 +27,17 @@ def check_backpressure(endpoint: Endpoint, stop_event: threading.Event, polling_
         cur.execute("select pg_size_bytes(current_setting('max_replication_write_lag'))")
         res = cur.fetchone()
         max_replication_write_lag_bytes = res[0]
-        log.info(f"max_replication_write_lag: {max_replication_write_lag_bytes} bytes")
+        log.info("max_replication_write_lag: %s bytes", max_replication_write_lag_bytes)
 
         cur.execute("select pg_size_bytes(current_setting('max_replication_flush_lag'))")
         res = cur.fetchone()
         max_replication_flush_lag_bytes = res[0]
-        log.info(f"max_replication_flush_lag: {max_replication_flush_lag_bytes} bytes")
+        log.info("max_replication_flush_lag: %s bytes", max_replication_flush_lag_bytes)
 
         cur.execute("select pg_size_bytes(current_setting('max_replication_apply_lag'))")
         res = cur.fetchone()
         max_replication_apply_lag_bytes = res[0]
-        log.info(f"max_replication_apply_lag: {max_replication_apply_lag_bytes} bytes")
+        log.info("max_replication_apply_lag: %s bytes", max_replication_apply_lag_bytes)
 
     with pg_cur(endpoint) as cur:
         while not stop_event.is_set():
@@ -60,9 +60,11 @@ def check_backpressure(endpoint: Endpoint, stop_event: threading.Event, polling_
                 remote_consistent_lsn_lag = res[2]
 
                 log.info(
-                    f"received_lsn_lag = {received_lsn_lag} ({res[3]}), "
-                    f"disk_consistent_lsn_lag = {disk_consistent_lsn_lag} ({res[4]}), "
-                    f"remote_consistent_lsn_lag = {remote_consistent_lsn_lag} ({res[5]})"
+                    "received_lsn_lag = %s (%s), "
+                    "disk_consistent_lsn_lag = %s (%s), "
+                    "remote_consistent_lsn_lag = %s (%s)",
+                    received_lsn_lag, res[3], disk_consistent_lsn_lag, res[4], remote_consistent_lsn_lag,
+                    res[5]
                 )
 
                 # Since feedback from pageserver is not immediate, we should allow some lag overflow
@@ -80,7 +82,7 @@ def check_backpressure(endpoint: Endpoint, stop_event: threading.Event, polling_
                 time.sleep(polling_interval)
 
             except Exception as e:
-                log.info(f"backpressure check query failed: {e}")
+                log.info("backpressure check query failed: %s", e)
                 stop_event.set()
 
     log.info("check thread stopped")
@@ -150,7 +152,7 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
                         f"Exception {e} while inserting rows and WAL lag overflowed configured threshold. That means backpressure doesn't work."
                     ) from e
 
-        log.info(f"inserted {rows_inserted} rows")
+        log.info("inserted %s rows", rows_inserted)
 
     if check_thread.is_alive():
         log.info("stopping check thread")

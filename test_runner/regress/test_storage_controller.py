@@ -470,7 +470,7 @@ def test_storage_controller_compute_hook(
 
     def handler(request: Request):
         status = handle_params["status"]
-        log.info(f"Notify request[{status}]: {request}")
+        log.info("Notify request[%s]: %s", status, request)
         notifications.append(request.json)
         return Response(status=status)
 
@@ -497,7 +497,7 @@ def test_storage_controller_compute_hook(
     wait_until(10, 1, lambda: node_evacuated(env.pageservers[0].id))
 
     # Additional notification from migration
-    log.info(f"notifications: {notifications}")
+    log.info("notifications: %s", notifications)
     expect = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
@@ -690,15 +690,15 @@ def test_storage_controller_s3_time_travel_recovery(
         f"tenants/{tenant_id}-{shard_id_for_list}/timelines/{timeline_id}/",
     ).get("Contents", [])
     assert len(objects) > 1
-    log.info(f"Found {len(objects)} objects in remote storage")
+    log.info("Found %s objects in remote storage", len(objects))
     should_delete = False
     for obj in objects:
         obj_key = obj["Key"]
         should_delete = not should_delete
         if not should_delete:
-            log.info(f"Keeping key on remote storage: {obj_key}")
+            log.info("Keeping key on remote storage: %s", obj_key)
             continue
-        log.info(f"Deleting key from remote storage: {obj_key}")
+        log.info("Deleting key from remote storage: %s", obj_key)
         remote_storage_delete_key(env.pageserver_remote_storage, obj_key)
         pass
 
@@ -1032,7 +1032,7 @@ def test_storage_controller_heartbeats(
     # ... expecting that each tenant will be placed on a different node
     def tenants_placed():
         node_to_tenants = build_node_to_tenants_map(env)
-        log.info(f"{node_to_tenants=}")
+        log.info("%s", f"{node_to_tenants=}")
 
         # Check that all the tenants have been attached
         assert sum((len(ts) for ts in node_to_tenants.values())) == len(tenant_ids)
@@ -1056,7 +1056,7 @@ def test_storage_controller_heartbeats(
     # ... expecting the heartbeats to mark it offline
     def nodes_offline():
         nodes = env.storage_controller.node_list()
-        log.info(f"{nodes=}")
+        log.info("%s", f"{nodes=}")
         for node in nodes:
             if node["id"] in offline_node_ids:
                 assert node["availability"] == "Offline"
@@ -1072,7 +1072,7 @@ def test_storage_controller_heartbeats(
             return
 
         node_to_tenants = build_node_to_tenants_map(env)
-        log.info(f"{node_to_tenants=}")
+        log.info("%s", f"{node_to_tenants=}")
 
         observed_tenants = set()
         for node_id in online_node_ids:
@@ -1097,7 +1097,7 @@ def test_storage_controller_heartbeats(
     time.sleep(5)
 
     node_to_tenants = build_node_to_tenants_map(env)
-    log.info(f"Back online: {node_to_tenants=}")
+    log.info("Back online: %s", f"{node_to_tenants=}")
 
     # ... expecting the storage controller to reach a consistent state
     def storage_controller_consistent():
@@ -1138,7 +1138,7 @@ def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
     # Heatbeater will notice it's offline, and consequently attachments move to the other pageserver
     def failed_over():
         locations = survivor_ps.http_client().tenant_list_locations()["tenant_shards"]
-        log.info(f"locations: {locations}")
+        log.info("locations: %s", locations)
         assert len(locations) == 2
         assert all(loc[1]["mode"] == "AttachedSingle" for loc in locations)
 
@@ -1289,8 +1289,8 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
             timeout=10,
         )
         if status_code:
-            log.warning(f"Command {args} failed")
-            log.warning(f"Output at: {output_path}")
+            log.warning("Command %s failed", args)
+            log.warning("Output at: %s", output_path)
 
             raise RuntimeError("CLI failure (check logs for stderr)")
 
@@ -1549,7 +1549,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.poll_node_status(ps.id, "PauseForRestart", max_attempts=6, backoff=5)
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
-        log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
+        log.info("Shard counts after draining node %s: %s", ps.id, shard_counts)
         # Assert that we've drained the node
         assert shard_counts[ps.id] == 0
         # Assert that those shards actually went somewhere
@@ -1564,12 +1564,12 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=6, backoff=5)
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
-        log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
+        log.info("Shard counts after filling node %s: %s", ps.id, shard_counts)
         assert_shard_counts_balanced(env, shard_counts, total_shards)
 
     # Now check that shards are reasonably balanced
     shard_counts = get_node_shard_counts(env, tenant_ids)
-    log.info(f"Shard counts after rolling restart: {shard_counts}")
+    log.info("Shard counts after rolling restart: %s", shard_counts)
     assert_shard_counts_balanced(env, shard_counts, total_shards)
 
 

@@ -71,7 +71,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         tasks_panicked = client.get_metric_value(
             "pageserver_tenant_task_events_total", {"event": "panic"}
         )
-        log.info(f"started {tasks_started}, ended {tasks_ended}, panicked {tasks_panicked}")
+        log.info("started %s, ended %s, panicked %s", tasks_started, tasks_ended, tasks_panicked)
         assert tasks_started == tasks_ended
         assert tasks_panicked is None or int(tasks_panicked) == 0
 

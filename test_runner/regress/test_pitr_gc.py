@@ -37,7 +37,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
             assert res is not None
             lsn_a = res[0]
             xid_a = res[1]
-            log.info(f"LSN after 100 rows: {lsn_a} xid {xid_a}")
+            log.info("LSN after 100 rows: %s xid %s", lsn_a, xid_a)
 
     main_cur.execute("SELECT pg_current_wal_insert_lsn(), txid_current()")
     res = main_cur.fetchone()
@@ -45,7 +45,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     debug_lsn = res[0]
     debug_xid = res[1]
-    log.info(f"LSN after 10000 rows: {debug_lsn} xid {debug_xid}")
+    log.info("LSN after 10000 rows: %s xid %s", debug_lsn, debug_xid)
 
     # run GC
     with env.pageserver.http_client() as pageserver_http:

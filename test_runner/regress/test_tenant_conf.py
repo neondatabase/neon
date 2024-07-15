@@ -65,7 +65,7 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     # it should match global configuration
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            log.info(f"show {env.initial_tenant}")
+            log.info("show %s", env.initial_tenant)
             pscur.execute(f"show {env.initial_tenant}")
             res = pscur.fetchone()
             assert res is not None
@@ -107,7 +107,7 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
-            log.info(f"res: {res}")
+            log.info("res: %s", res)
             assert res is not None
             assert all(
                 i in res.items()
@@ -170,7 +170,7 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
-            log.info(f"after config res: {res}")
+            log.info("after config res: %s", res)
             assert res is not None
             assert all(
                 i in res.items()
@@ -226,7 +226,7 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
-            log.info(f"after restart res: {res}")
+            log.info("after restart res: %s", res)
             assert res is not None
             assert all(
                 i in res.items()
@@ -287,7 +287,7 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
         with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
-            log.info(f"after restart res: {res}")
+            log.info("after restart res: %s", res)
             assert res is not None
             assert all(
                 i in res.items()

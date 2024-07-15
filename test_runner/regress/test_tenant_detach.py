@@ -200,11 +200,11 @@ def test_tenant_reattach_while_busy(
                     await pg_conn.fetchrow(f"UPDATE t SET counter = counter + 1 WHERE id = {id}")
                     updates_finished += 1
                     if updates_finished % 1000 == 0:
-                        log.info(f"update {updates_finished} / {updates_to_perform}")
+                        log.info("update %s / %s", updates_finished, updates_to_perform)
                     break
                 except asyncpg.PostgresError as e:
                     # Received error from Postgres. Log it, sleep a little, and continue
-                    log.info(f"UPDATE error: {e}")
+                    log.info("UPDATE error: %s", e)
                     await asyncio.sleep(0.1)
 
     async def sleep_and_reattach(pageserver_http: PageserverHttpClient, tenant_id: TenantId):

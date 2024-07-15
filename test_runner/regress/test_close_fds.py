@@ -47,7 +47,7 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
         # parse the `lsof` command's output to get only the list of commands
         commands = [line.split(" ")[0] for line in res.stdout.strip().split("\n")[1:]]
         if len(commands) > 0:
-            log.info(f"lsof commands: {commands}")
+            log.info("lsof commands: %s", commands)
             assert commands == ["pageserve"]
 
         time.sleep(1.0)

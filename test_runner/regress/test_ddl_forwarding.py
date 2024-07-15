@@ -45,7 +45,7 @@ def handle_role(dbs, roles, operation):
 def ddl_forward_handler(
     request: Request, dbs: Dict[str, str], roles: Dict[str, str], ddl: "DdlForwardingContext"
 ) -> Response:
-    log.info(f"Received request with data {request.get_data(as_text=True)}")
+    log.info("Received request with data %s", f"{request.get_data(as_text=True)}")
     if ddl.fail:
         log.info("FAILING")
         return Response(status=500, response="Failed just cuz")
@@ -80,7 +80,7 @@ class DdlForwardingContext:
                 "shared_preload_libraries = 'neon'",
             ]
         )
-        log.info(f"Listening on {ddl_url}")
+        log.info("Listening on %s", ddl_url)
         self.server.expect_request(endpoint, method="PATCH").respond_with_handler(
             lambda request: ddl_forward_handler(request, self.dbs, self.roles, self)
         )
@@ -123,7 +123,7 @@ def ddl(
 
 def test_ddl_forwarding(ddl: DdlForwardingContext):
     curr_user = ddl.send("SELECT current_user")[0][0]
-    log.info(f"Current user is {curr_user}")
+    log.info("Current user is %s", curr_user)
     ddl.send_and_wait("CREATE DATABASE bork")
     assert ddl.dbs == {"bork": curr_user}
     ddl.send_and_wait("CREATE ROLE volk WITH PASSWORD 'nu_zayats'")

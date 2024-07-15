@@ -42,7 +42,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     """
     )
     lsn_a = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
-    log.info(f"LSN after 100 rows: {lsn_a}")
+    log.info("LSN after 100 rows: %s", lsn_a)
 
     # Insert some more rows. (This generates enough WAL to fill a few segments.)
     main_cur.execute(
@@ -53,7 +53,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     """
     )
     lsn_b = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
-    log.info(f"LSN after 200100 rows: {lsn_b}")
+    log.info("LSN after 200100 rows: %s", lsn_b)
 
     # Branch at the point where only 100 rows were inserted
     env.neon_cli.create_branch(
@@ -70,7 +70,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     )
     lsn_c = Lsn(query_scalar(main_cur, "SELECT pg_current_wal_insert_lsn()"))
 
-    log.info(f"LSN after 400100 rows: {lsn_c}")
+    log.info("LSN after 400100 rows: %s", lsn_c)
 
     # Branch at the point where only 200100 rows were inserted
     env.neon_cli.create_branch(
@@ -107,7 +107,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # retry the same with the HTTP API, so that we can inspect the status code
     with pytest.raises(TimelineCreate406):
         new_timeline_id = TimelineId.generate()
-        log.info(f"Expecting failure for branch pre-initdb LSN, new_timeline_id={new_timeline_id}")
+        log.info("Expecting failure for branch pre-initdb LSN, new_timeline_id=%s", new_timeline_id)
         pageserver_http.timeline_create(
             env.pg_version, env.initial_tenant, new_timeline_id, env.initial_timeline, Lsn("0/42")
         )
@@ -121,7 +121,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     with pytest.raises(TimelineCreate406):
         new_timeline_id = TimelineId.generate()
         log.info(
-            f"Expecting failure for branch pre-ancestor LSN, new_timeline_id={new_timeline_id}"
+            "Expecting failure for branch pre-ancestor LSN, new_timeline_id=%s", new_timeline_id
         )
         pageserver_http.timeline_create(
             env.pg_version,
@@ -143,7 +143,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # retry the same with the HTTP API, so that we can inspect the status code
     with pytest.raises(TimelineCreate406):
         new_timeline_id = TimelineId.generate()
-        log.info(f"Expecting failure for branch behind gc'd LSN, new_timeline_id={new_timeline_id}")
+        log.info("Expecting failure for branch behind gc'd LSN, new_timeline_id=%s", new_timeline_id)
         pageserver_http.timeline_create(
             env.pg_version, env.initial_tenant, new_timeline_id, branch_behind_timeline_id, gced_lsn
         )

@@ -44,10 +44,10 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
     # wait for autovacuum to truncate the pg_xact
     # XXX Is it worth to add a timeout here?
     pg_xact_0000_path = os.path.join(endpoint.pg_xact_dir_path(), "0000")
-    log.info(f"pg_xact_0000_path = {pg_xact_0000_path}")
+    log.info("pg_xact_0000_path = %s", pg_xact_0000_path)
 
     while os.path.isfile(pg_xact_0000_path):
-        log.info(f"file exists. wait for truncation: {pg_xact_0000_path=}")
+        log.info("file exists. wait for truncation: %s", f"{pg_xact_0000_path=}")
         time.sleep(5)
 
     # checkpoint to advance latest lsn
@@ -56,7 +56,7 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
         lsn_after_truncation = query_scalar(cur, "select pg_current_wal_insert_lsn()")
 
     # create new branch after clog truncation and start a compute node on it
-    log.info(f"create branch at lsn_after_truncation {lsn_after_truncation}")
+    log.info("create branch at lsn_after_truncation %s", lsn_after_truncation)
     env.neon_cli.create_branch(
         "test_clog_truncate_new", "test_clog_truncate", ancestor_start_lsn=lsn_after_truncation
     )
@@ -64,5 +64,5 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
 
     # check that new node doesn't contain truncated segment
     pg_xact_0000_path_new = os.path.join(endpoint2.pg_xact_dir_path(), "0000")
-    log.info(f"pg_xact_0000_path_new = {pg_xact_0000_path_new}")
+    log.info("pg_xact_0000_path_new = %s", pg_xact_0000_path_new)
     assert os.path.isfile(pg_xact_0000_path_new) is False
