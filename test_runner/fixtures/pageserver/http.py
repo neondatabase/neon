@@ -238,8 +238,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def tenant_attach(
         self,
         tenant_id: Union[TenantId, TenantShardId],
+        generation: int,
         config: None | Dict[str, Any] = None,
-        generation: Optional[int] = None,
     ):
         config = config or {}
 

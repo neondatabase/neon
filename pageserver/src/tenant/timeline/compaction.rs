@@ -27,8 +27,8 @@ use utils::id::TimelineId;
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
-use crate::tenant::timeline::{drop_rlock, Hole, ImageLayerCreationOutcome};
-use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
+use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
+use crate::tenant::timeline::{Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::DeltaLayer;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
@@ -195,7 +195,7 @@ impl Timeline {
         tracing::info!(
             "latest_gc_cutoff: {}, pitr cutoff {}",
             *latest_gc_cutoff,
-            self.gc_info.read().unwrap().cutoffs.pitr
+            self.gc_info.read().unwrap().cutoffs.time
         );
 
         let layers = self.layers.read().await;
@@ -379,7 +379,7 @@ impl Timeline {
             };
 
             let begin = tokio::time::Instant::now();
-            let phase1_layers_locked = Arc::clone(&self.layers).read_owned().await;
+            let phase1_layers_locked = self.layers.read().await;
             let now = tokio::time::Instant::now();
             stats.read_lock_acquisition_micros =
                 DurationRecorder::Recorded(RecordedDuration(now - begin), now);
@@ -399,9 +399,9 @@ impl Timeline {
     }
 
     /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
-    async fn compact_level0_phase1(
-        self: &Arc<Self>,
-        guard: tokio::sync::OwnedRwLockReadGuard<LayerManager>,
+    async fn compact_level0_phase1<'a>(
+        self: &'a Arc<Self>,
+        guard: tokio::sync::RwLockReadGuard<'a, LayerManager>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         ctx: &RequestContext,
@@ -990,7 +990,7 @@ impl Timeline {
                     "enhanced legacy compaction currently does not support retain_lsns (branches)"
                 )));
             }
-            let gc_cutoff = Lsn::min(gc_info.cutoffs.horizon, gc_info.cutoffs.pitr);
+            let gc_cutoff = gc_info.cutoffs.select_min();
             let mut selected_layers = Vec::new();
             // TODO: consider retain_lsns
             drop(gc_info);
