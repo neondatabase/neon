@@ -2912,7 +2912,7 @@ impl Tenant {
                 if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
                     if let Some(ancestor_gc_cutoffs) = gc_cutoffs.get(&ancestor_id) {
                         target.within_ancestor_pitr =
-                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.pitr;
+                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.time;
                     }
                 }
 
@@ -2928,7 +2928,7 @@ impl Tenant {
                 timeline.metrics.pitr_history_size.set(
                     timeline
                         .get_last_record_lsn()
-                        .checked_sub(target.cutoffs.pitr)
+                        .checked_sub(target.cutoffs.time)
                         .unwrap_or(Lsn(0))
                         .0,
                 );
@@ -4262,7 +4262,7 @@ mod tests {
                     .source()
                     .unwrap()
                     .to_string()
-                    .contains("is earlier than latest GC horizon"));
+                    .contains("is earlier than latest GC cutoff"));
             }
         }
 
@@ -6718,8 +6718,8 @@ mod tests {
         {
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.pitr = Lsn(0x30);
-            guard.cutoffs.horizon = Lsn(0x30);
+            guard.cutoffs.time = Lsn(0x30);
+            guard.cutoffs.space = Lsn(0x30);
         }
 
         let expected_result = [
@@ -7109,8 +7109,8 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![],
                 cutoffs: GcCutoffs {
-                    pitr: Lsn(0x30),
-                    horizon: Lsn(0x30),
+                    time: Lsn(0x30),
+                    space: Lsn(0x30),
                 },
                 leases: Default::default(),
                 within_ancestor_pitr: false,
