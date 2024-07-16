@@ -431,7 +431,7 @@ paths:
             text/html:
               schema:
                 type: string
-                description: SVG representation of the tenant and it's timelines.
+                description: SVG representation of the tenant and its timelines.
         "401":
           description: Unauthorized Error
           content:
