@@ -40,6 +40,8 @@ const COMMAND: &str = "storage_controller";
 
 const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 
+const DB_NAME: &str = "storage_controller";
+
 #[derive(Serialize, Deserialize)]
 pub struct AttachHookRequest {
     pub tenant_shard_id: TenantShardId,
@@ -197,7 +199,6 @@ impl StorageController {
     ///
     /// Returns the database url
     pub async fn setup_database(&self) -> anyhow::Result<String> {
-        const DB_NAME: &str = "storage_controller";
         let database_url = format!("postgresql://localhost:{}/{DB_NAME}", self.postgres_port);
 
         let pg_bin_dir = self.get_pg_bin_dir().await?;
@@ -224,6 +225,30 @@ impl StorageController {
         }
 
         Ok(database_url)
+    }
+
+    pub async fn connect_to_database(
+        &self,
+    ) -> anyhow::Result<(
+        tokio_postgres::Client,
+        tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
+    )> {
+        tokio_postgres::Config::new()
+            .host("localhost")
+            .port(self.postgres_port)
+            // The user is the ambient operating system user name.
+            // That is an impurity which we want to fix in => TODO https://github.com/neondatabase/neon/issues/8400
+            //
+            // Until we get there, use the ambient operating system user name.
+            // Recent tokio-postgres versions default to this if the user isn't specified.
+            // But tokio-postgres fork doesn't have this upstream commit:
+            // https://github.com/sfackler/rust-postgres/commit/cb609be758f3fb5af537f04b584a2ee0cebd5e79
+            // => we should rebase our fork => TODO https://github.com/neondatabase/neon/issues/8399
+            .user(&whoami::username())
+            .dbname(DB_NAME)
+            .connect(tokio_postgres::NoTls)
+            .await
+            .map_err(anyhow::Error::new)
     }
 
     pub async fn start(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
@@ -292,6 +317,35 @@ impl StorageController {
 
         // Run migrations on every startup, in case something changed.
         let database_url = self.setup_database().await?;
+
+        // We support running a startup SQL script to fiddle with the database before we launch storcon.
+        // This is used by the test suite.
+        let startup_script_path = self
+            .env
+            .base_data_dir
+            .join("storage_controller_db.startup.sql");
+        let startup_script = match tokio::fs::read_to_string(&startup_script_path).await {
+            Ok(script) => {
+                tokio::fs::remove_file(startup_script_path).await?;
+                script
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    // always run some startup script so that this code path doesn't bit rot
+                    "BEGIN; COMMIT;".to_string()
+                } else {
+                    anyhow::bail!("Failed to read startup script: {e}")
+                }
+            }
+        };
+        let (mut client, conn) = self.connect_to_database().await?;
+        let conn = tokio::spawn(conn);
+        let tx = client.build_transaction();
+        let tx = tx.start().await?;
+        tx.batch_execute(&startup_script).await?;
+        tx.commit().await?;
+        drop(client);
+        conn.await??;
 
         let mut args = vec![
             "-l",
