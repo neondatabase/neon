@@ -87,7 +87,7 @@ from fixtures.utils import (
 )
 from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
-from .neon_api import NeonAPI
+from .neon_api import NeonAPI, NeonApiEndpoint
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -3156,6 +3156,18 @@ class RemotePostgres(PgProtocol):
     ):
         # do nothing
         pass
+
+
+@pytest.fixture(scope="function")
+def benchmark_project_pub(neon_api: NeonAPI, pg_version: PgVersion) -> NeonApiEndpoint:
+    project_id = os.getenv("BENCHMARK_PROJECT_ID_PUB")
+    return NeonApiEndpoint(neon_api, pg_version, project_id)
+
+
+@pytest.fixture(scope="function")
+def benchmark_project_sub(neon_api: NeonAPI, pg_version: PgVersion) -> NeonApiEndpoint:
+    project_id = os.getenv("BENCHMARK_PROJECT_ID_SUB")
+    return NeonApiEndpoint(neon_api, pg_version, project_id)
 
 
 @pytest.fixture(scope="function")

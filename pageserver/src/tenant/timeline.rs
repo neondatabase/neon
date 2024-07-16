@@ -198,7 +198,7 @@ impl PartialOrd for Hole {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
+fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<T>) {
     drop(rlock)
 }
 
@@ -271,7 +271,7 @@ pub struct Timeline {
     ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
-    pub(crate) layers: Arc<tokio::sync::RwLock<LayerManager>>,
+    pub(crate) layers: tokio::sync::RwLock<LayerManager>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -3409,6 +3409,7 @@ impl Timeline {
         }
     }
 
+    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
@@ -4733,13 +4734,7 @@ impl Timeline {
         tenant: &crate::tenant::Tenant,
         options: detach_ancestor::Options,
         ctx: &RequestContext,
-    ) -> Result<
-        (
-            completion::Completion,
-            detach_ancestor::PreparedTimelineDetach,
-        ),
-        detach_ancestor::Error,
-    > {
+    ) -> Result<detach_ancestor::Progress, detach_ancestor::Error> {
         detach_ancestor::prepare(self, tenant, options, ctx).await
     }
 
