@@ -10,6 +10,7 @@ use crate::{
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use pageserver_api::models::detach_ancestor::AncestorDetached;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
@@ -39,6 +40,9 @@ pub(crate) enum Error {
 
     #[error("unexpected error")]
     Unexpected(#[source] anyhow::Error),
+
+    #[error("failpoint: {}", .0)]
+    Failpoint(&'static str),
 }
 
 impl From<Error> for ApiError {
@@ -57,9 +61,39 @@ impl From<Error> for ApiError {
             | e @ Error::CopyDeltaPrefix(_)
             | e @ Error::UploadRewritten(_)
             | e @ Error::CopyFailed(_)
-            | e @ Error::Unexpected(_) => ApiError::InternalServerError(e.into()),
+            | e @ Error::Unexpected(_)
+            | e @ Error::Failpoint(_) => ApiError::InternalServerError(e.into()),
         }
     }
+}
+
+impl From<crate::tenant::upload_queue::NotInitialized> for Error {
+    fn from(_: crate::tenant::upload_queue::NotInitialized) -> Self {
+        // treat all as shutting down signals, even though that is not entirely correct
+        // (uninitialized state)
+        Error::ShuttingDown
+    }
+}
+
+impl From<FlushLayerError> for Error {
+    fn from(value: FlushLayerError) -> Self {
+        match value {
+            FlushLayerError::Cancelled => Error::ShuttingDown,
+            FlushLayerError::NotRunning(_) => {
+                // FIXME(#6424): technically statically unreachable right now, given how we never
+                // drop the sender
+                Error::ShuttingDown
+            }
+            FlushLayerError::CreateImageLayersError(_) | FlushLayerError::Other(_) => {
+                Error::FlushAncestor(value)
+            }
+        }
+    }
+}
+
+pub(crate) enum Progress {
+    Prepared(completion::Completion, PreparedTimelineDetach),
+    Done(AncestorDetached),
 }
 
 pub(crate) struct PreparedTimelineDetach {
@@ -88,7 +122,7 @@ pub(super) async fn prepare(
     tenant: &Tenant,
     options: Options,
     ctx: &RequestContext,
-) -> Result<(completion::Completion, PreparedTimelineDetach), Error> {
+) -> Result<Progress, Error> {
     use Error::*;
 
     let Some((ancestor, ancestor_lsn)) = detached
@@ -96,15 +130,67 @@ pub(super) async fn prepare(
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
-        // TODO: check if we have already been detached; for this we need to read the stored data
-        // on remote client, for that we need a follow-up which makes uploads cheaper and maintains
-        // a projection of the commited data.
+        {
+            let accessor = detached.remote_client.initialized_upload_queue()?;
+
+            // we are safe to inspect the latest uploaded, because we can only witness this after
+            // restart is complete and ancestor is no more.
+            let latest = accessor.latest_uploaded_index_part();
+            if !latest.lineage.is_detached_from_original_ancestor() {
+                return Err(NoAncestor);
+            }
+        }
+
+        // detached has previously been detached; let's inspect each of the current timelines and
+        // report back the timelines which have been reparented by our detach
+        let mut all_direct_children = tenant
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|tl| matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached)))
+            .map(|tl| (tl.ancestor_lsn, tl.clone()))
+            .collect::<Vec<_>>();
+
+        let mut any_shutdown = false;
+
+        all_direct_children.retain(
+            |(_, tl)| match tl.remote_client.initialized_upload_queue() {
+                Ok(accessor) => accessor
+                    .latest_uploaded_index_part()
+                    .lineage
+                    .is_reparented(),
+                Err(_shutdownalike) => {
+                    // not 100% a shutdown, but let's bail early not to give inconsistent results in
+                    // sharded enviroment.
+                    any_shutdown = true;
+                    true
+                }
+            },
+        );
+
+        if any_shutdown {
+            // it could be one or many being deleted; have client retry
+            return Err(Error::ShuttingDown);
+        }
+
+        let mut reparented = all_direct_children;
+        // why this instead of hashset? there is a reason, but I've forgotten it many times.
         //
-        // the error is wrong per openapi
-        return Err(NoAncestor);
+        // maybe if this was a hashset we would not be able to distinguish some race condition.
+        reparented.sort_unstable_by_key(|(lsn, tl)| (*lsn, tl.timeline_id));
+
+        return Ok(Progress::Done(AncestorDetached {
+            reparented_timelines: reparented
+                .into_iter()
+                .map(|(_, tl)| tl.timeline_id)
+                .collect(),
+        }));
     };
 
     if !ancestor_lsn.is_valid() {
+        // rare case, probably wouldn't even load
+        tracing::error!("ancestor is set, but ancestor_lsn is invalid, this timeline needs fixing");
         return Err(NoAncestor);
     }
 
@@ -131,6 +217,15 @@ pub(super) async fn prepare(
 
     let _gate_entered = detached.gate.enter().map_err(|_| ShuttingDown)?;
 
+    utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable");
+
+    fail::fail_point!(
+        "timeline-detach-ancestor::before_starting_after_locking",
+        |_| Err(Error::Failpoint(
+            "timeline-detach-ancestor::before_starting_after_locking"
+        ))
+    );
+
     if ancestor_lsn >= ancestor.get_disk_consistent_lsn() {
         let span =
             tracing::info_span!("freeze_and_flush", ancestor_timeline_id=%ancestor.timeline_id);
@@ -151,7 +246,7 @@ pub(super) async fn prepare(
                 }
             };
 
-            res.map_err(FlushAncestor)?;
+            res?;
 
             // we do not need to wait for uploads to complete but we do need `struct Layer`,
             // copying delta prefix is unsupported currently for `InMemoryLayer`.
@@ -159,7 +254,7 @@ pub(super) async fn prepare(
                 elapsed_ms = started_at.elapsed().as_millis(),
                 "froze and flushed the ancestor"
             );
-            Ok(())
+            Ok::<_, Error>(())
         }
         .instrument(span)
         .await?;
@@ -283,7 +378,7 @@ pub(super) async fn prepare(
 
     let prepared = PreparedTimelineDetach { layers: new_layers };
 
-    Ok((guard, prepared))
+    Ok(Progress::Prepared(guard, prepared))
 }
 
 fn partition_work(
@@ -350,7 +445,11 @@ async fn copy_lsn_prefix(
     target_timeline: &Arc<Timeline>,
     ctx: &RequestContext,
 ) -> Result<Option<ResidentLayer>, Error> {
-    use Error::{CopyDeltaPrefix, RewrittenDeltaDownloadFailed};
+    use Error::{CopyDeltaPrefix, RewrittenDeltaDownloadFailed, ShuttingDown};
+
+    if target_timeline.cancel.is_cancelled() {
+        return Err(ShuttingDown);
+    }
 
     tracing::debug!(%layer, %end_lsn, "copying lsn prefix");
 
@@ -529,7 +628,7 @@ pub(super) async fn complete(
         match res {
             Ok(Some(timeline)) => {
                 tracing::info!(reparented=%timeline.timeline_id, "reparenting done");
-                reparented.push(timeline.timeline_id);
+                reparented.push((timeline.ancestor_lsn, timeline.timeline_id));
             }
             Ok(None) => {
                 // lets just ignore this for now. one or all reparented timelines could had
@@ -550,6 +649,13 @@ pub(super) async fn complete(
     if reparenting_candidates != reparented.len() {
         tracing::info!("failed to reparent some candidates");
     }
+
+    reparented.sort_unstable();
+
+    let reparented = reparented
+        .into_iter()
+        .map(|(_, timeline_id)| timeline_id)
+        .collect();
 
     Ok(reparented)
 }
