@@ -415,8 +415,8 @@ impl Timeline {
             .map(|x| guard.get_from_desc(&x))
             .collect_vec();
         stats.level0_deltas_count = Some(level0_deltas.len());
+
         // Only compact if enough layers have accumulated.
-        const L0_COMPACTION_MAX_NUM_DELTA_LAYERS: usize = 60; // 256MB * 60 = 15GB
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
             debug!(
@@ -446,6 +446,15 @@ impl Timeline {
         let mut prev_lsn_end = first_level0_delta.layer_desc().lsn_range.end;
         let mut deltas_to_compact = Vec::with_capacity(level0_deltas.len());
 
+        // Accumulate the size of layers in `deltas_to_compact`
+        let mut deltas_to_compact_bytes = 0;
+
+        // Under normal circumstances, we will accumulate up to compaction_interval L0s of size
+        // checkpoint_distance each.  To avoid edge cases using extra system resources, bound our
+        // work in this function to only operate on this much delta data at once.
+        let delta_size_limit =
+            self.get_compaction_threshold() as u64 * self.get_checkpoint_distance();
+
         deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
@@ -454,13 +463,18 @@ impl Timeline {
                 break;
             }
             deltas_to_compact.push(l.download_and_keep_resident().await?);
+            deltas_to_compact_bytes += l.metadata().file_size;
             prev_lsn_end = lsn_range.end;
 
-            if deltas_to_compact.len() >= L0_COMPACTION_MAX_NUM_DELTA_LAYERS {
+            if deltas_to_compact_bytes >= delta_size_limit {
                 info!(
-                    "compaction picker hit max delta layers limit: {}, too many layers written by this timeline",
-                    L0_COMPACTION_MAX_NUM_DELTA_LAYERS
+                    l0_deltas_selected = deltas_to_compact.len(),
+                    l0_deltas_total = level0_deltas.len(),
+                    "L0 compaction picker hit max delta layer size limit: {}",
+                    delta_size_limit
                 );
+
+                // Proceed with compaction, but only a subset of L0s
                 break;
             }
         }
