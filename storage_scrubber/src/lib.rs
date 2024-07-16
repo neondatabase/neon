@@ -46,35 +46,6 @@ pub struct S3Target {
     pub delimiter: String,
 }
 
-/// Convenience for referring to timelines within a particular shard: more ergonomic
-/// than using a 2-tuple.
-///
-/// This is the shard-aware equivalent of TenantTimelineId.  It's defined here rather
-/// than somewhere more broadly exposed, because this kind of thing is rarely needed
-/// in the pageserver, as all timeline objects existing in the scope of a particular
-/// tenant: the scrubber is different in that it handles collections of data referring to many
-/// TenantShardTimelineIds in on place.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct TenantShardTimelineId {
-    tenant_shard_id: TenantShardId,
-    timeline_id: TimelineId,
-}
-
-impl TenantShardTimelineId {
-    fn new(tenant_shard_id: TenantShardId, timeline_id: TimelineId) -> Self {
-        Self {
-            tenant_shard_id,
-            timeline_id,
-        }
-    }
-}
-
-impl Display for TenantShardTimelineId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.tenant_shard_id, self.timeline_id)
-    }
-}
-
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraversingDepth {
     Tenant,

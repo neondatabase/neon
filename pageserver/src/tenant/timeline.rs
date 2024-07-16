@@ -3,6 +3,7 @@ mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
+pub(crate) mod handle;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
@@ -442,6 +443,8 @@ pub struct Timeline {
     pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
+
+    handlers: handle::Handles,
 }
 
 pub struct WalReceiverInfo {
@@ -2429,6 +2432,8 @@ impl Timeline {
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
 
                 l0_flush_global_state: resources.l0_flush_global_state,
+
+                handlers: Default::default(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
