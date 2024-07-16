@@ -11,8 +11,6 @@ from fixtures.neon_fixtures import (
     StorageScrubber,
 )
 from fixtures.pageserver.utils import (
-    list_prefix,
-    remote_storage_delete_key,
     remote_storage_download_index_part,
     remote_storage_get_lastest_index_key,
 )
@@ -204,11 +202,15 @@ def test_scrubber_scan_pageserver_metadata(
     timeline_path = env.pageserver_remote_storage.timeline_path(
         tenant_shard_id, env.initial_timeline
     )
-    objects = list_prefix(env.pageserver_remote_storage, prefix=f"{timeline_path}/").get(
+
+    client = env.pageserver_remote_storage.client
+    bucket = env.pageserver_remote_storage.bucket_name
+    objects = client.list_objects_v2(Bucket=bucket, Prefix=f"{timeline_path}/", Delimiter="").get(
         "Contents", []
     )
     keys = [obj["Key"] for obj in objects]
-    index_keys = list(filter(lambda s: s.startswith(f"/{timeline_path}/index_part"), keys))
+    index_keys = list(filter(lambda s: s.startswith(f"{timeline_path}/index_part"), keys))
+    assert len(index_keys) > 0
 
     latest_index_key = remote_storage_get_lastest_index_key(index_keys)
     log.info(f"{latest_index_key=}")
@@ -221,9 +223,9 @@ def test_scrubber_scan_pageserver_metadata(
     # Delete a layer file that is listed in the index.
     layer, metadata = next(it)
     log.info(f"Deleting {timeline_path}/{layer.to_str()}")
-    delete_response = remote_storage_delete_key(
-        env.pageserver_remote_storage,
-        f"{timeline_path}/{layer.to_str()}-{metadata.generation:08x}",
+    delete_response = client.delete_object(
+        Bucket=bucket,
+        Key=f"{timeline_path}/{layer.to_str()}-{metadata.generation:08x}",
     )
     log.info(f"delete response: {delete_response}")
 

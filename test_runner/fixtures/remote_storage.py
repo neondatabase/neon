@@ -263,7 +263,7 @@ class S3Storage:
         log.info(f"deleted {cnt} objects from remote storage")
 
     def tenants_path(self) -> str:
-        return f"{self.prefix_in_bucket}tenants"
+        return f"{self.prefix_in_bucket}/tenants"
 
     def tenant_path(self, tenant_id: Union[TenantShardId, TenantId]) -> str:
         return f"{self.tenants_path()}/{tenant_id}"
