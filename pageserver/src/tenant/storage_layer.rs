@@ -676,6 +676,16 @@ impl LayerAccessStats {
             },
         }
     }
+
+    /// Whether this layer has been accessed (excluding in [`AccessStatsBehavior::Skip`]).
+    ///
+    /// This indicates whether the layer has been used for some purpose that would motivate
+    /// us to keep it on disk, such as for serving a getpage request.
+    fn accessed(&self) -> bool {
+        let locked = self.0.lock().unwrap();
+        let inner = &locked.for_eviction_policy;
+        inner.last_accesses.recent().is_some()
+    }
 }
 
 /// Get a layer descriptor from a layer.
