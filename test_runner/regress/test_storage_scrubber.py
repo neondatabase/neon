@@ -198,10 +198,9 @@ def test_scrubber_scan_pageserver_metadata(
 
     # Get the latest index for a particular timeline.
 
-    tenant_shard_id = (
-        TenantShardId(env.initial_tenant, 0, shard_count) if shard_count else env.initial_tenant
-    )
+    tenant_shard_id = TenantShardId(env.initial_tenant, 0, shard_count if shard_count else 0)
 
+    assert isinstance(env.pageserver_remote_storage, S3Storage)
     timeline_path = env.pageserver_remote_storage.timeline_path(
         tenant_shard_id, env.initial_timeline
     )

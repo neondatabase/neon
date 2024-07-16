@@ -262,8 +262,8 @@ pub async fn scan_metadata(
             // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
             // reference counts for layers across the tenant.
             let analysis = branch_cleanup_and_check_errors(
-                &s3_client,
-                &target,
+                s3_client,
+                target,
                 &ttid,
                 &mut tenant_objects,
                 None,

@@ -373,7 +373,7 @@ def list_prefix(
     return response
 
 
-def remote_storage_get_lastest_index_key(index_keys: List[str]) -> int:
+def remote_storage_get_lastest_index_key(index_keys: List[str]) -> str:
     """
     Gets the latest index file key.
 
@@ -387,7 +387,7 @@ def remote_storage_get_lastest_index_key(index_keys: List[str]) -> int:
     return max(index_keys, key=parse_gen)
 
 
-def remote_storage_download_index_part(remote: RemoteStorage, index_key: str) -> IndexPartDump:
+def remote_storage_download_index_part(remote: S3Storage, index_key: str) -> IndexPartDump:
     """
     Downloads the index content from remote storage.
 

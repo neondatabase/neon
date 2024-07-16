@@ -108,9 +108,10 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                     if index_part.layer_metadata.is_empty() {
                         if index_part.metadata.ancestor_timeline().is_none() {
                             // The initial timeline with no ancestor should ALWAYS have layers.
-                            result.errors.push(format!(
+                            result.errors.push(
                                 "index_part.json has no layers (ancestor_timeline=None)"
-                            ))
+                                    .to_string(),
+                            );
                         } else {
                             // Not an error, can happen for branches with zero writes, but notice that
                             info!("index_part.json has no layers (ancestor_timeline exists)");
@@ -125,7 +126,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         }
 
                         if !tenant_objects.check_ref(id.timeline_id, &layer, &metadata) {
-                            let timeline_root = root_target.timeline_root(&id);
+                            let timeline_root = root_target.timeline_root(id);
                             let remote_layer_path = format!(
                                 "{}{}{}",
                                 timeline_root.prefix_in_bucket,
