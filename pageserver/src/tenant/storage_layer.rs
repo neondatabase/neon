@@ -684,7 +684,17 @@ impl LayerAccessStats {
     fn accessed(&self) -> bool {
         let locked = self.0.lock().unwrap();
         let inner = &locked.for_eviction_policy;
-        inner.last_accesses.recent().is_some()
+
+        // Consider it accessed if the most recent access is more recent than
+        // the most recent change in residence status.
+        match (
+            inner.last_accesses.recent(),
+            inner.last_residence_changes.recent(),
+        ) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(a), Some(r)) => a.when >= r.timestamp,
+        }
     }
 }
 
