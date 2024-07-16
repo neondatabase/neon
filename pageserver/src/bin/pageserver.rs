@@ -430,8 +430,10 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
+    let background_purges = mgr::BackgroundPurges::default();
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
+        background_purges.clone(),
         TenantSharedResources {
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
@@ -642,6 +644,7 @@ fn start_pageserver(
                 consumption_metrics_tasks,
                 disk_usage_eviction_task,
                 &tenant_manager,
+                background_purges,
                 deletion_queue.clone(),
                 0,
             )

@@ -32,7 +32,7 @@ pub mod walredo;
 
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
-use tenant::mgr::TenantManager;
+use tenant::mgr::{BackgroundPurges, TenantManager};
 use tracing::info;
 
 /// Current storage format version
@@ -70,12 +70,14 @@ impl CancellableTask {
 }
 
 #[tracing::instrument(skip_all, fields(%exit_code))]
+#[allow(clippy::too_many_arguments)]
 pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
     page_service: page_service::Listener,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
     tenant_manager: &TenantManager,
+    background_purges: BackgroundPurges,
     mut deletion_queue: DeletionQueue,
     exit_code: i32,
 ) {
@@ -120,6 +122,13 @@ pub async fn shutdown_pageserver(
     timed(
         futures::future::OptionFuture::from(disk_usage_eviction_task.map(|t| t.0.shutdown())),
         "shutdown disk usage eviction",
+        Duration::from_secs(1),
+    )
+    .await;
+
+    timed(
+        background_purges.shutdown(),
+        "shutdown background purges",
         Duration::from_secs(1),
     )
     .await;
