@@ -2786,8 +2786,8 @@ class NeonPageserver(PgProtocol, LogUtils):
             )
         return client.tenant_attach(
             tenant_id,
+            generation,
             config,
-            generation=generation,
         )
 
     def tenant_detach(self, tenant_id: TenantId):
