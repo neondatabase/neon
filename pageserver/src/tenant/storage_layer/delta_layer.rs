@@ -1672,6 +1672,7 @@ pub(crate) mod test {
     use rand::RngCore;
 
     use super::*;
+    use crate::repository::Value;
     use crate::tenant::harness::TIMELINE_ID;
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
     use crate::tenant::Tenant;
@@ -1681,6 +1682,7 @@ pub(crate) mod test {
         tenant::{disk_btree::tests::TestDisk, harness::TenantHarness},
         DEFAULT_PG_VERSION,
     };
+    use bytes::Bytes;
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -2249,6 +2251,15 @@ pub(crate) mod test {
         (k1, l1).cmp(&(k2, l2))
     }
 
+    pub(crate) fn sort_delta_value(
+        (k1, l1, v1): &(Key, Lsn, Value),
+        (k2, l2, v2): &(Key, Lsn, Value),
+    ) -> std::cmp::Ordering {
+        let order_1 = if v1.is_image() { 0 } else { 1 };
+        let order_2 = if v2.is_image() { 0 } else { 1 };
+        (k1, l1, order_1).cmp(&(k2, l2, order_2))
+    }
+
     pub(crate) async fn produce_delta_layer(
         tenant: &Tenant,
         tline: &Arc<Timeline>,
@@ -2257,7 +2268,7 @@ pub(crate) mod test {
     ) -> anyhow::Result<ResidentLayer> {
         deltas.sort_by(sort_delta);
         let (key_start, _, _) = deltas.first().unwrap();
-        let (key_max, _, _) = deltas.first().unwrap();
+        let (key_max, _, _) = deltas.last().unwrap();
         let lsn_min = deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
         let lsn_max = deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
         let lsn_end = Lsn(lsn_max.0 + 1);
@@ -2302,9 +2313,6 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn delta_layer_iterator() {
-        use crate::repository::Value;
-        use bytes::Bytes;
-
         let harness = TenantHarness::create("delta_layer_iterator").unwrap();
         let (tenant, ctx) = harness.load().await;
 
