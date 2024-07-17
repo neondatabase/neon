@@ -200,7 +200,7 @@ async fn redownload_partial_segment(
 
     let final_path = local_segment_path(mgr, partial);
     info!(
-        "downloaded {} bytes, renaming to {}",
+        "downloaded {actual_len} bytes, renaming to {final_path}",
         actual_len, final_path,
     );
     if let Err(e) = durable_rename(&tmp_file, &final_path, !mgr.conf.no_sync).await {
