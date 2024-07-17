@@ -59,7 +59,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - DEFAULT_PG_VERSION: 14
+          - DEFAULT_PG_VERSION: 16
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
             provisioner: 'k8s-pod' 
@@ -146,6 +146,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   replication-tests:
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
@@ -215,6 +216,8 @@ jobs:
     # Available platforms:
     # - neon-captest-new: Freshly created project (1 CU)
     # - neon-captest-freetier: Use freetier-sized compute (0.25 CU)
+    # - neonvm-captest-azure-new: Freshly created project (1 CU) in azure region
+    # - neonvm-captest-azure-freetier: Use freetier-sized compute (0.25 CU) in azure region
     # - neon-captest-reuse: Reusing existing project
     # - rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
     # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
@@ -230,23 +233,30 @@ jobs:
     - name: Generate matrix for pgbench benchmark
       id: pgbench-compare-matrix
       run: |
+        region_id_default=${{ github.event.inputs.region_id || 'aws-us-east-2' }}
         matrix='{
+          "region_id" : [
+            "$region_id_default",
+            ]
           "platform": [
             "neon-captest-new",
             "neon-captest-reuse",
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "platform": "neon-captest-freetier",         "db_size": "3gb"  },
-                      { "platform": "neon-captest-new",              "db_size": "50gb" },
-                      { "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
-                      { "platform": "neonvm-captest-new",            "db_size": "50gb" },
-                      { "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
+          "include": [{ "region_id": "$region_id_default", "platform": "neon-captest-freetier",         "db_size": "3gb"  },
+                      { "region_id": "$region_id_default", "platform": "neon-captest-new",              "db_size": "50gb" },
+                      { "region_id": "$region_id_default", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
+                      { "region_id": "$region_id_default", "platform": "neonvm-captest-new",            "db_size": "50gb" },
+                      { "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
+                      { "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
+                      { "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
+                      { "region_id": "$region_id_default", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
-                                                     { "platform": "rds-aurora",   "db_size": "50gb"}]')
+          matrix=$(echo "$matrix" | jq '.include += [{ "region_id": "$region_id_default", "platform": "rds-postgres", "db_size": "10gb"},
+                                                     { "region_id": "$region_id_default", "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -298,7 +308,7 @@ jobs:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
@@ -323,14 +333,14 @@ jobs:
         prefix: latest
 
     - name: Create Neon Project
-      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier", "neonvm-captest-new", "neonvm-captest-freetier"]'), matrix.platform)
+      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier", "neonvm-captest-new", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+        region_id: ${{ matrix.region_id }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-        compute_units: ${{ (matrix.platform == 'neon-captest-freetier' && '[0.25, 0.25]') || '[1, 1]' }}
+        compute_units: ${{ (contains(matrix.platform, 'captest-freetier') && '[0.25, 0.25]') || '[1, 1]' }}
         provisioner: ${{ (contains(matrix.platform, 'neonvm-') && 'k8s-neonvm') || 'k8s-pod' }}
 
     - name: Set up Connection String
@@ -343,7 +353,7 @@ jobs:
           neonvm-captest-sharding-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_SHARDING_CONNSTR }}
             ;;
-          neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier)
+          neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier | neonvm-azure-captest-new | neonvm-azure-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
