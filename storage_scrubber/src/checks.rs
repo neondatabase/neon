@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use aws_sdk_s3::Client;
+use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use tracing::{error, info, warn};
@@ -145,16 +146,17 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 
                             if response.is_err() {
                                 // Object is not present.
+                                let is_l0 = LayerMap::is_l0(layer.key_range());
 
                                 let msg = format!(
-                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_maybe_l0: {})",
+                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {})",
                                     layer,
                                     metadata.generation.get_suffix(),
                                     metadata.shard,
-                                    layer.is_maybe_l0(),
+                                    is_l0,
                                 );
 
-                                if layer.is_maybe_l0() {
+                                if is_l0 {
                                     result.warnings.push(msg);
                                 } else {
                                     result.errors.push(msg);

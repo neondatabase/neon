@@ -249,14 +249,11 @@ impl LayerName {
         }
     }
 
-    /// Checks if the layer name might be an L0 layer.
-    ///
-    /// **Implementation specific:** an L0 layer is a delta layer and it's key range is from [`Key::MIN`] to [`Key::MAX`]
-    pub fn is_maybe_l0(&self) -> bool {
-        if let LayerName::Delta(delta) = &self {
-            delta.key_range == (Key::MIN..Key::MAX)
-        } else {
-            false
+    /// Gets the key range encoded in the layer name.
+    pub fn key_range(&self) -> &Range<Key> {
+        match &self {
+            LayerName::Image(layer) => &layer.key_range,
+            LayerName::Delta(layer) => &layer.key_range,
         }
     }
 }
