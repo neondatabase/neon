@@ -300,7 +300,10 @@ pub struct Tenant {
     pub(crate) timeline_get_throttle:
         Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
 
-    /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
+    /// An ongoing timeline detach must be checked during attempts to GC a timeline.
+    ///
+    /// After starting the timeline detach ancestor, blocking GC until it completes allows retrying
+    /// the ancestor detach, until we can be certain that all reparentings have been done.
     ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
 
     l0_flush_global_state: L0FlushGlobalState,
