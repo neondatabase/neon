@@ -385,6 +385,7 @@ impl Layer {
     }
 
     /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
+    #[allow(dead_code)]
     pub(crate) async fn load_key_values(
         &self,
         ctx: &RequestContext,
@@ -1897,7 +1898,7 @@ impl ResidentLayer {
         self.owner.metadata()
     }
 
-    #[cfg(test)]
+    /// Cast the layer to a delta, return an error if it is indeed an image layer.
     pub(crate) async fn get_as_delta(
         &self,
         ctx: &RequestContext,
@@ -1909,7 +1910,7 @@ impl ResidentLayer {
         }
     }
 
-    #[cfg(test)]
+    /// Cast the layer to an image, return an error if it is indeed a delta layer.
     pub(crate) async fn get_as_image(
         &self,
         ctx: &RequestContext,
