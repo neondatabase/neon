@@ -199,10 +199,7 @@ async fn redownload_partial_segment(
     file.flush().await?;
 
     let final_path = local_segment_path(mgr, partial);
-    info!(
-        "downloaded {actual_len} bytes, renaming to {final_path}",
-        actual_len, final_path,
-    );
+    info!("downloaded {actual_len} bytes, renaming to {final_path}");
     if let Err(e) = durable_rename(&tmp_file, &final_path, !mgr.conf.no_sync).await {
         // Probably rename succeeded, but fsync of it failed. Remove
         // the file then to avoid using it.
