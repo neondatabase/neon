@@ -13,7 +13,7 @@ use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
 use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::StreamExt;
-use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
+use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use remote_storage::RemotePath;
@@ -44,7 +44,7 @@ impl TimelineAnalysis {
 
 pub(crate) async fn branch_cleanup_and_check_errors(
     s3_client: &Client,
-    root_target: &RootTarget,
+    target: &RootTarget,
     id: &TenantShardTimelineId,
     tenant_objects: &mut TenantObjectListing,
     s3_active_branch: Option<&BranchData>,
@@ -127,20 +127,20 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         }
 
                         if !tenant_objects.check_ref(id.timeline_id, &layer, &metadata) {
-                            let timeline_root = root_target.timeline_root(id);
-                            let remote_layer_path = format!(
-                                "{}{}{}",
-                                timeline_root.prefix_in_bucket,
-                                layer,
-                                metadata.generation.get_suffix()
+                            let path = remote_layer_path(
+                                &id.tenant_shard_id.tenant_id,
+                                &id.timeline_id,
+                                metadata.shard,
+                                &layer,
+                                metadata.generation,
                             );
 
                             // HEAD request used here to address a race condition  when an index was uploaded concurrently
                             // with our scan. We check if the object is uploaded to S3 after taking the listing snapshot.
                             let response = s3_client
                                 .head_object()
-                                .bucket(timeline_root.bucket_name)
-                                .key(remote_layer_path)
+                                .bucket(target.bucket_name())
+                                .key(path.get_path().as_str())
                                 .send()
                                 .await;
 
