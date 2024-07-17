@@ -349,11 +349,6 @@ impl PageServerNode {
                 .map(|x| x.parse::<NonZeroU64>())
                 .transpose()
                 .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-            trace_read_requests: settings
-                .remove("trace_read_requests")
-                .map(|x| x.parse::<bool>())
-                .transpose()
-                .context("Failed to parse 'trace_read_requests' as bool")?,
             eviction_policy: settings
                 .remove("eviction_policy")
                 .map(serde_json::from_str)
@@ -454,11 +449,6 @@ impl PageServerNode {
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-                trace_read_requests: settings
-                    .remove("trace_read_requests")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'trace_read_requests' as bool")?,
                 eviction_policy: settings
                     .remove("eviction_policy")
                     .map(serde_json::from_str)

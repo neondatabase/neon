@@ -66,12 +66,13 @@ use std::{
     ops::{Deref, Range},
 };
 
-use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
+        config::defaults::DEFAULT_PITR_INTERVAL,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
+        storage_layer::PersistentLayerDesc,
     },
 };
 use crate::{
@@ -98,6 +99,7 @@ use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
 use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
@@ -196,7 +198,7 @@ impl PartialOrd for Hole {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
+fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<T>) {
     drop(rlock)
 }
 
@@ -269,7 +271,7 @@ pub struct Timeline {
     ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
-    pub(crate) layers: Arc<tokio::sync::RwLock<LayerManager>>,
+    pub(crate) layers: tokio::sync::RwLock<LayerManager>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -476,37 +478,32 @@ impl GcInfo {
     }
 }
 
-/// The `GcInfo` component describing which Lsns need to be retained.
+/// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
+/// is a single number (the oldest LSN which we must retain), but it internally distinguishes
+/// between time-based and space-based retention for observability and consumption metrics purposes.
 #[derive(Debug)]
 pub(crate) struct GcCutoffs {
-    /// Keep everything newer than this point.
-    ///
-    /// This is calculated by subtracting 'gc_horizon' setting from
-    /// last-record LSN
-    ///
-    /// FIXME: is this inclusive or exclusive?
-    pub(crate) horizon: Lsn,
+    /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
+    /// history we must keep to retain a specified number of bytes of WAL.
+    pub(crate) space: Lsn,
 
-    /// In addition to 'retain_lsns' and 'horizon_cutoff', keep everything newer than this
-    /// point.
-    ///
-    /// This is calculated by finding a number such that a record is needed for PITR
-    /// if only if its LSN is larger than 'pitr_cutoff'.
-    pub(crate) pitr: Lsn,
+    /// Calculated from [`TenantConf::pitr_interval`], this LSN indicates how much
+    /// history we must keep to enable reading back at least the PITR interval duration.
+    pub(crate) time: Lsn,
 }
 
 impl Default for GcCutoffs {
     fn default() -> Self {
         Self {
-            horizon: Lsn::INVALID,
-            pitr: Lsn::INVALID,
+            space: Lsn::INVALID,
+            time: Lsn::INVALID,
         }
     }
 }
 
 impl GcCutoffs {
     fn select_min(&self) -> Lsn {
-        std::cmp::min(self.horizon, self.pitr)
+        std::cmp::min(self.space, self.time)
     }
 }
 
@@ -865,7 +862,7 @@ impl Timeline {
         let gc_info = self.gc_info.read().unwrap();
         let history = self
             .get_last_record_lsn()
-            .checked_sub(gc_info.cutoffs.pitr)
+            .checked_sub(gc_info.cutoffs.time)
             .unwrap_or(Lsn(0))
             .0;
         (history, gc_info.within_ancestor_pitr)
@@ -1564,7 +1561,7 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
-            "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
+            "LSN {} is earlier than latest GC cutoff {} (we might've already garbage collected needed data)",
             lsn,
             **latest_gc_cutoff_lsn,
         );
@@ -3407,6 +3404,8 @@ impl Timeline {
         }
     }
 
+    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
+    #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
     /// The algorithm is as follows:
@@ -4473,10 +4472,10 @@ impl Timeline {
     /// are required. Since checking if new image layers are required is expensive in
     /// terms of CPU, we only do it in the following cases:
     /// 1. If the timeline has ingested sufficient WAL to justify the cost
-    /// 2. If enough time has passed since the last check
-    /// 2.1. For large tenants, we wish to perform the check more often since they
-    /// suffer from the lack of image layers
-    /// 2.2. For small tenants (that can mostly fit in RAM), we use a much longer interval
+    /// 2. If enough time has passed since the last check:
+    ///     1. For large tenants, we wish to perform the check more often since they
+    ///        suffer from the lack of image layers
+    ///     2. For small tenants (that can mostly fit in RAM), we use a much longer interval
     fn should_check_if_image_layers_required(self: &Arc<Timeline>, lsn: Lsn) -> bool {
         const LARGE_TENANT_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -4570,6 +4569,22 @@ impl Timeline {
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
                 if !check_for_image_layers || !self.time_for_new_image_layer(partition, lsn).await {
                     start = img_range.end;
+                    continue;
+                }
+            } else if let ImageLayerCreationMode::Force = mode {
+                // When forced to create image layers, we might try and create them where they already
+                // exist.  This mode is only used in tests/debug.
+                let layers = self.layers.read().await;
+                if layers.contains_key(&PersistentLayerKey {
+                    key_range: img_range.clone(),
+                    lsn_range: PersistentLayerDesc::image_layer_lsn_range(lsn),
+                    is_delta: false,
+                }) {
+                    tracing::info!(
+                        "Skipping image layer at {lsn} {}..{}, already exists",
+                        img_range.start,
+                        img_range.end
+                    );
                     continue;
                 }
             }
@@ -4702,7 +4717,7 @@ impl Timeline {
     /// Requires a timeline that:
     /// - has an ancestor to detach from
     /// - the ancestor does not have an ancestor -- follows from the original RFC limitations, not
-    /// a technical requirement
+    ///   a technical requirement
     ///
     /// After the operation has been started, it cannot be canceled. Upon restart it needs to be
     /// polled again until completion.
@@ -4714,13 +4729,7 @@ impl Timeline {
         tenant: &crate::tenant::Tenant,
         options: detach_ancestor::Options,
         ctx: &RequestContext,
-    ) -> Result<
-        (
-            completion::Completion,
-            detach_ancestor::PreparedTimelineDetach,
-        ),
-        detach_ancestor::Error,
-    > {
+    ) -> Result<detach_ancestor::Progress, detach_ancestor::Error> {
         detach_ancestor::prepare(self, tenant, options, ctx).await
     }
 
@@ -4927,24 +4936,21 @@ impl Timeline {
     }
 
     /// Find the Lsns above which layer files need to be retained on
-    /// garbage collection. This is separate from actually performing the GC,
-    /// and is updated more frequently, so that compaction can remove obsolete
-    /// page versions more aggressively.
+    /// garbage collection.
     ///
-    /// TODO: that's wishful thinking, compaction doesn't actually do that
-    /// currently.
+    /// We calculate two cutoffs, one based on time and one based on WAL size.  `pitr`
+    /// controls the time cutoff (or ZERO to disable time-based retention), and `space_cutoff` controls
+    /// the space-based retention.
     ///
-    /// The 'cutoff_horizon' point is used to retain recent versions that might still be
-    /// needed by read-only nodes. (As of this writing, the caller just passes
-    /// the latest LSN subtracted by a constant, and doesn't do anything smart
-    /// to figure out what read-only nodes might actually need.)
-    ///
-    /// The 'pitr' duration is used to calculate a 'pitr_cutoff', which can be used to determine
-    /// whether a record is needed for PITR.
+    /// This function doesn't simply to calculate time & space based retention: it treats time-based
+    /// retention as authoritative if enabled, and falls back to space-based retention if calculating
+    /// the LSN for a time point isn't possible.  Therefore the GcCutoffs::horizon in the response might
+    /// be different to the `space_cutoff` input.  Callers should treat the min() of the two cutoffs
+    /// in the response as the GC cutoff point for the timeline.
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn find_gc_cutoffs(
         &self,
-        cutoff_horizon: Lsn,
+        space_cutoff: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -4957,58 +4963,87 @@ impl Timeline {
 
         pausable_failpoint!("Timeline::find_gc_cutoffs-pausable");
 
-        // First, calculate pitr_cutoff_timestamp and then convert it to LSN.
-        //
-        // Some unit tests depend on garbage-collection working even when
-        // CLOG data is missing, so that find_lsn_for_timestamp() doesn't
-        // work, so avoid calling it altogether if time-based retention is not
-        // configured. It would be pointless anyway.
-        let pitr_cutoff = if pitr != Duration::ZERO {
-            let now = SystemTime::now();
-            if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
-                let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
-
-                match self
-                    .find_lsn_for_timestamp(pitr_timestamp, cancel, ctx)
-                    .await?
-                {
-                    LsnForTimestamp::Present(lsn) => lsn,
-                    LsnForTimestamp::Future(lsn) => {
-                        // The timestamp is in the future. That sounds impossible,
-                        // but what it really means is that there hasn't been
-                        // any commits since the cutoff timestamp.
-                        //
-                        // In this case we should use the LSN of the most recent commit,
-                        // which is implicitly the last LSN in the log.
-                        debug!("future({})", lsn);
-                        self.get_last_record_lsn()
-                    }
-                    LsnForTimestamp::Past(lsn) => {
-                        debug!("past({})", lsn);
-                        // conservative, safe default is to remove nothing, when we
-                        // have no commit timestamp data available
-                        *self.get_latest_gc_cutoff_lsn()
-                    }
-                    LsnForTimestamp::NoData(lsn) => {
-                        debug!("nodata({})", lsn);
-                        // conservative, safe default is to remove nothing, when we
-                        // have no commit timestamp data available
-                        *self.get_latest_gc_cutoff_lsn()
-                    }
-                }
-            } else {
-                // If we don't have enough data to convert to LSN,
-                // play safe and don't remove any layers.
-                *self.get_latest_gc_cutoff_lsn()
+        if cfg!(test) {
+            // Unit tests which specify zero PITR interval expect to avoid doing any I/O for timestamp lookup
+            if pitr == Duration::ZERO {
+                return Ok(GcCutoffs {
+                    time: self.get_last_record_lsn(),
+                    space: space_cutoff,
+                });
             }
-        } else {
-            // No time-based retention was configured. Interpret this as "keep no history".
-            self.get_last_record_lsn()
+        }
+
+        // Calculate a time-based limit on how much to retain:
+        // - if PITR interval is set, then this is our cutoff.
+        // - if PITR interval is not set, then we do a lookup
+        //   based on DEFAULT_PITR_INTERVAL, so that size-based retention does not result in keeping history around permanently on idle databases.
+        let time_cutoff = {
+            let now = SystemTime::now();
+            let time_range = if pitr == Duration::ZERO {
+                humantime::parse_duration(DEFAULT_PITR_INTERVAL).expect("constant is invalid")
+            } else {
+                pitr
+            };
+
+            // If PITR is so large or `now` is so small that this underflows, we will retain no history (highly unexpected case)
+            let time_cutoff = now.checked_sub(time_range).unwrap_or(now);
+            let timestamp = to_pg_timestamp(time_cutoff);
+
+            match self.find_lsn_for_timestamp(timestamp, cancel, ctx).await? {
+                LsnForTimestamp::Present(lsn) => Some(lsn),
+                LsnForTimestamp::Future(lsn) => {
+                    // The timestamp is in the future. That sounds impossible,
+                    // but what it really means is that there hasn't been
+                    // any commits since the cutoff timestamp.
+                    //
+                    // In this case we should use the LSN of the most recent commit,
+                    // which is implicitly the last LSN in the log.
+                    debug!("future({})", lsn);
+                    Some(self.get_last_record_lsn())
+                }
+                LsnForTimestamp::Past(lsn) => {
+                    debug!("past({})", lsn);
+                    None
+                }
+                LsnForTimestamp::NoData(lsn) => {
+                    debug!("nodata({})", lsn);
+                    None
+                }
+            }
         };
 
-        Ok(GcCutoffs {
-            horizon: cutoff_horizon,
-            pitr: pitr_cutoff,
+        Ok(match (pitr, time_cutoff) {
+            (Duration::ZERO, Some(time_cutoff)) => {
+                // PITR is not set. Retain the size-based limit, or the default time retention,
+                // whichever requires less data.
+                GcCutoffs {
+                    time: self.get_last_record_lsn(),
+                    space: std::cmp::max(time_cutoff, space_cutoff),
+                }
+            }
+            (Duration::ZERO, None) => {
+                // PITR is not set, and time lookup failed
+                GcCutoffs {
+                    time: self.get_last_record_lsn(),
+                    space: space_cutoff,
+                }
+            }
+            (_, None) => {
+                // PITR interval is set & we didn't look up a timestamp successfully.  Conservatively assume PITR
+                // cannot advance beyond what was already GC'd, and respect space-based retention
+                GcCutoffs {
+                    time: *self.get_latest_gc_cutoff_lsn(),
+                    space: space_cutoff,
+                }
+            }
+            (_, Some(time_cutoff)) => {
+                // PITR interval is set and we looked up timestamp successfully.  Ignore
+                // size based retention and make time cutoff authoritative
+                GcCutoffs {
+                    time: time_cutoff,
+                    space: time_cutoff,
+                }
+            }
         })
     }
 
@@ -5033,11 +5068,11 @@ impl Timeline {
             return Err(GcError::TimelineCancelled);
         }
 
-        let (horizon_cutoff, pitr_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
+        let (space_cutoff, time_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
-            let horizon_cutoff = min(gc_info.cutoffs.horizon, self.get_disk_consistent_lsn());
-            let pitr_cutoff = gc_info.cutoffs.pitr;
+            let space_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
+            let time_cutoff = gc_info.cutoffs.time;
             let retain_lsns = gc_info.retain_lsns.clone();
 
             // Gets the maximum LSN that holds the valid lease.
@@ -5047,14 +5082,14 @@ impl Timeline {
             let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
 
             (
-                horizon_cutoff,
-                pitr_cutoff,
+                space_cutoff,
+                time_cutoff,
                 retain_lsns,
                 max_lsn_with_valid_lease,
             )
         };
 
-        let mut new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
+        let mut new_gc_cutoff = Lsn::min(space_cutoff, time_cutoff);
         let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
@@ -5083,8 +5118,8 @@ impl Timeline {
 
         let res = self
             .gc_timeline(
-                horizon_cutoff,
-                pitr_cutoff,
+                space_cutoff,
+                time_cutoff,
                 retain_lsns,
                 max_lsn_with_valid_lease,
                 new_gc_cutoff,
@@ -5102,8 +5137,8 @@ impl Timeline {
 
     async fn gc_timeline(
         &self,
-        horizon_cutoff: Lsn,
-        pitr_cutoff: Lsn,
+        space_cutoff: Lsn,
+        time_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         max_lsn_with_valid_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
@@ -5164,22 +5199,22 @@ impl Timeline {
             result.layers_total += 1;
 
             // 1. Is it newer than GC horizon cutoff point?
-            if l.get_lsn_range().end > horizon_cutoff {
+            if l.get_lsn_range().end > space_cutoff {
                 debug!(
-                    "keeping {} because it's newer than horizon_cutoff {}",
+                    "keeping {} because it's newer than space_cutoff {}",
                     l.layer_name(),
-                    horizon_cutoff,
+                    space_cutoff,
                 );
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
             }
 
             // 2. It is newer than PiTR cutoff point?
-            if l.get_lsn_range().end > pitr_cutoff {
+            if l.get_lsn_range().end > time_cutoff {
                 debug!(
-                    "keeping {} because it's newer than pitr_cutoff {}",
+                    "keeping {} because it's newer than time_cutoff {}",
                     l.layer_name(),
-                    pitr_cutoff,
+                    time_cutoff,
                 );
                 result.layers_needed_by_pitr += 1;
                 continue 'outer;

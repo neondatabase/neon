@@ -59,6 +59,7 @@
 //! 1. It should be easy to forward the context to callees.
 //! 2. To propagate more data from high-level to low-level code, the functions in
 //!    the middle should not need to be modified.
+//!
 //! The solution is to have a container structure ([`RequestContext`]) that
 //! carries the information. Functions that don't care about what's in it
 //! pass it along to callees.

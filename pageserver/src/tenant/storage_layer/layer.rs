@@ -1469,14 +1469,22 @@ impl LayerInner {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
                     Ok(elapsed) => {
-                        timeline
-                            .metrics
-                            .evictions_with_low_residence_duration
-                            .read()
-                            .unwrap()
-                            .observe(elapsed);
+                        let accessed = self.access_stats.accessed();
+                        if accessed {
+                            // Only layers used for reads contribute to our "low residence" metric that is used
+                            // to detect thrashing.  Layers promoted for other reasons (e.g. compaction) are allowed
+                            // to be rapidly evicted without contributing to this metric.
+                            timeline
+                                .metrics
+                                .evictions_with_low_residence_duration
+                                .read()
+                                .unwrap()
+                                .observe(elapsed);
+                        }
+
                         tracing::info!(
                             residence_millis = elapsed.as_millis(),
+                            accessed,
                             "evicted layer after known residence period"
                         );
                     }
@@ -1685,7 +1693,6 @@ impl DownloadedLayer {
                     lsn,
                     summary,
                     Some(owner.conf.max_vectored_read_bytes),
-                    owner.conf.image_compression.allow_decompression(),
                     ctx,
                 )
                 .await

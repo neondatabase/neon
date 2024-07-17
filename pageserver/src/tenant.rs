@@ -39,6 +39,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::backoff;
+use utils::circuit_breaker::CircuitBreaker;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::failpoint_support;
@@ -76,7 +77,8 @@ use crate::is_uninit_mark;
 use crate::l0_flush::L0FlushGlobalState;
 use crate::metrics::TENANT;
 use crate::metrics::{
-    remove_tenant_metrics, BROKEN_TENANTS_SET, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
+    remove_tenant_metrics, BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN,
+    TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
 };
 use crate::repository::GcResult;
 use crate::task_mgr;
@@ -275,6 +277,10 @@ pub struct Tenant {
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
+
+    /// Track repeated failures to compact, so that we can back off.
+    /// Overhead of mutex is acceptable because compaction is done with a multi-second period.
+    compaction_circuit_breaker: std::sync::Mutex<CircuitBreaker>,
 
     /// If the tenant is in Activating state, notify this to encourage it
     /// to proceed to Active as soon as possible, rather than waiting for lazy
@@ -1641,12 +1647,30 @@ impl Tenant {
             timelines_to_compact
         };
 
+        // Before doing any I/O work, check our circuit breaker
+        if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
+            info!("Skipping compaction due to previous failures");
+            return Ok(());
+        }
+
         for (timeline_id, timeline) in &timelines_to_compact {
             timeline
                 .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
-                .await?;
+                .await
+                .map_err(|e| {
+                    self.compaction_circuit_breaker
+                        .lock()
+                        .unwrap()
+                        .fail(&CIRCUIT_BREAKERS_BROKEN, &e);
+                    e
+                })?;
         }
+
+        self.compaction_circuit_breaker
+            .lock()
+            .unwrap()
+            .success(&CIRCUIT_BREAKERS_UNBROKEN);
 
         Ok(())
     }
@@ -2341,13 +2365,6 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.pitr_interval)
     }
 
-    pub fn get_trace_read_requests(&self) -> bool {
-        let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
-        tenant_conf
-            .trace_read_requests
-            .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
-    }
-
     pub fn get_min_resident_size_override(&self) -> Option<u64> {
         let tenant_conf = self.tenant_conf.load().tenant_conf.clone();
         tenant_conf
@@ -2570,6 +2587,14 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
+            compaction_circuit_breaker: std::sync::Mutex::new(CircuitBreaker::new(
+                format!("compaction-{tenant_shard_id}"),
+                5,
+                // Compaction can be a very expensive operation, and might leak disk space.  It also ought
+                // to be infallible, as long as remote storage is available.  So if it repeatedly fails,
+                // use an extremely long backoff.
+                Some(Duration::from_secs(3600 * 24)),
+            )),
             activate_now_sem: tokio::sync::Semaphore::new(0),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
@@ -2887,7 +2912,7 @@ impl Tenant {
                 if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
                     if let Some(ancestor_gc_cutoffs) = gc_cutoffs.get(&ancestor_id) {
                         target.within_ancestor_pitr =
-                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.pitr;
+                            timeline.get_ancestor_lsn() >= ancestor_gc_cutoffs.time;
                     }
                 }
 
@@ -2903,7 +2928,7 @@ impl Tenant {
                 timeline.metrics.pitr_history_size.set(
                     timeline
                         .get_last_record_lsn()
-                        .checked_sub(target.cutoffs.pitr)
+                        .checked_sub(target.cutoffs.time)
                         .unwrap_or(Lsn(0))
                         .0,
                 );
@@ -3718,7 +3743,6 @@ pub(crate) mod harness {
                 walreceiver_connect_timeout: Some(tenant_conf.walreceiver_connect_timeout),
                 lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
                 max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
-                trace_read_requests: Some(tenant_conf.trace_read_requests),
                 eviction_policy: Some(tenant_conf.eviction_policy),
                 min_resident_size_override: tenant_conf.min_resident_size_override,
                 evictions_low_residence_duration_metric_threshold: Some(
@@ -4238,7 +4262,7 @@ mod tests {
                     .source()
                     .unwrap()
                     .to_string()
-                    .contains("is earlier than latest GC horizon"));
+                    .contains("is earlier than latest GC cutoff"));
             }
         }
 
@@ -6694,8 +6718,8 @@ mod tests {
         {
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
-            guard.cutoffs.pitr = Lsn(0x30);
-            guard.cutoffs.horizon = Lsn(0x30);
+            guard.cutoffs.time = Lsn(0x30);
+            guard.cutoffs.space = Lsn(0x30);
         }
 
         let expected_result = [
@@ -7085,8 +7109,8 @@ mod tests {
             *guard = GcInfo {
                 retain_lsns: vec![],
                 cutoffs: GcCutoffs {
-                    pitr: Lsn(0x30),
-                    horizon: Lsn(0x30),
+                    time: Lsn(0x30),
+                    space: Lsn(0x30),
                 },
                 leases: Default::default(),
                 within_ancestor_pitr: false,

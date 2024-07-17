@@ -56,6 +56,7 @@ pub struct ComputeNode {
     /// - we push new spec and it does reconfiguration
     /// - but then something happens and compute pod / VM is destroyed,
     ///   so k8s controller starts it again with the **old** spec
+    ///
     /// and the same for empty computes:
     /// - we started compute without any spec
     /// - we push spec and it does configuration
@@ -1116,7 +1117,7 @@ impl ComputeNode {
     // EKS worker nodes have following core dump settings:
     //   /proc/sys/kernel/core_pattern -> core
     //   /proc/sys/kernel/core_uses_pid -> 1
-    //   ulimint -c -> unlimited
+    //   ulimit -c -> unlimited
     // which results in core dumps being written to postgres data directory as core.<pid>.
     //
     // Use that as a default location and pattern, except macos where core dumps are written

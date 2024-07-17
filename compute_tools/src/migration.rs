@@ -9,6 +9,9 @@ pub(crate) struct MigrationRunner<'m> {
 
 impl<'m> MigrationRunner<'m> {
     pub fn new(client: &'m mut Client, migrations: &'m [&'m str]) -> Self {
+        // The neon_migration.migration_id::id column is a bigint, which is equivalent to an i64
+        assert!(migrations.len() + 1 < i64::MAX as usize);
+
         Self { client, migrations }
     }
 
@@ -22,11 +25,8 @@ impl<'m> MigrationRunner<'m> {
         Ok(row.get::<&str, i64>("id"))
     }
 
-    fn update_migration_id(&mut self) -> Result<()> {
-        let setval = format!(
-            "UPDATE neon_migration.migration_id SET id={}",
-            self.migrations.len()
-        );
+    fn update_migration_id(&mut self, migration_id: i64) -> Result<()> {
+        let setval = format!("UPDATE neon_migration.migration_id SET id={}", migration_id);
 
         self.client
             .simple_query(&setval)
@@ -57,43 +57,48 @@ impl<'m> MigrationRunner<'m> {
     pub fn run_migrations(mut self) -> Result<()> {
         self.prepare_migrations()?;
 
-        let mut current_migration: usize = self.get_migration_id()? as usize;
-        let starting_migration_id = current_migration;
-
-        let query = "BEGIN";
-        self.client
-            .simple_query(query)
-            .context("run_migrations begin")?;
-
+        let mut current_migration = self.get_migration_id()? as usize;
         while current_migration < self.migrations.len() {
+            macro_rules! migration_id {
+                ($cm:expr) => {
+                    ($cm + 1) as i64
+                };
+            }
+
             let migration = self.migrations[current_migration];
 
             if migration.starts_with("-- SKIP") {
-                info!("Skipping migration id={}", current_migration);
+                info!("Skipping migration id={}", migration_id!(current_migration));
             } else {
                 info!(
                     "Running migration id={}:\n{}\n",
-                    current_migration, migration
+                    migration_id!(current_migration),
+                    migration
                 );
+
+                self.client
+                    .simple_query("BEGIN")
+                    .context("begin migration")?;
+
                 self.client.simple_query(migration).with_context(|| {
-                    format!("run_migration current_migration={}", current_migration)
+                    format!(
+                        "run_migrations migration id={}",
+                        migration_id!(current_migration)
+                    )
                 })?;
+
+                // Migration IDs start at 1
+                self.update_migration_id(migration_id!(current_migration))?;
+
+                self.client
+                    .simple_query("COMMIT")
+                    .context("commit migration")?;
+
+                info!("Finished migration id={}", migration_id!(current_migration));
             }
 
             current_migration += 1;
         }
-
-        self.update_migration_id()?;
-
-        let query = "COMMIT";
-        self.client
-            .simple_query(query)
-            .context("run_migrations commit")?;
-
-        info!(
-            "Ran {} migrations",
-            (self.migrations.len() - starting_migration_id)
-        );
 
         Ok(())
     }

@@ -87,7 +87,7 @@ from fixtures.utils import (
 )
 from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
-from .neon_api import NeonAPI
+from .neon_api import NeonAPI, NeonApiEndpoint
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -492,6 +492,7 @@ class NeonEnvBuilder:
         pageserver_virtual_file_io_engine: Optional[str] = None,
         pageserver_aux_file_policy: Optional[AuxFileStore] = None,
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
+        safekeeper_extra_opts: Optional[list[str]] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -556,6 +557,8 @@ class NeonEnvBuilder:
             log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
 
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
+
+        self.safekeeper_extra_opts = safekeeper_extra_opts
 
         assert test_name.startswith(
             "test_"
@@ -1193,7 +1196,9 @@ class NeonEnv:
                 sk_cfg[
                     "remote_storage"
                 ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
-            self.safekeepers.append(Safekeeper(env=self, id=id, port=port))
+            self.safekeepers.append(
+                Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
+            )
             cfg["safekeepers"].append(sk_cfg)
 
         log.info(f"Config: {cfg}")
@@ -2282,6 +2287,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def node_delete(self, node_id):
+        log.info(f"node_delete({node_id})")
+        self.request(
+            "DELETE",
+            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
     def node_drain(self, node_id):
         log.info(f"node_drain({node_id})")
         self.request(
@@ -2387,7 +2400,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
-        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr": str, "listen_http_port": int}
         """
         response = self.request(
             "GET",
@@ -2773,8 +2786,8 @@ class NeonPageserver(PgProtocol, LogUtils):
             )
         return client.tenant_attach(
             tenant_id,
+            generation,
             config,
-            generation=generation,
         )
 
     def tenant_detach(self, tenant_id: TenantId):
@@ -3143,6 +3156,18 @@ class RemotePostgres(PgProtocol):
     ):
         # do nothing
         pass
+
+
+@pytest.fixture(scope="function")
+def benchmark_project_pub(neon_api: NeonAPI, pg_version: PgVersion) -> NeonApiEndpoint:
+    project_id = os.getenv("BENCHMARK_PROJECT_ID_PUB")
+    return NeonApiEndpoint(neon_api, pg_version, project_id)
+
+
+@pytest.fixture(scope="function")
+def benchmark_project_sub(neon_api: NeonAPI, pg_version: PgVersion) -> NeonApiEndpoint:
+    project_id = os.getenv("BENCHMARK_PROJECT_ID_SUB")
+    return NeonApiEndpoint(neon_api, pg_version, project_id)
 
 
 @pytest.fixture(scope="function")
@@ -3760,12 +3785,12 @@ class Endpoint(PgProtocol, LogUtils):
             self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
         )
 
-    def respec(self, **kwargs):
+    def respec(self, **kwargs: Any) -> None:
         """Update the endpoint.json file used by control_plane."""
         # Read config
         config_path = os.path.join(self.endpoint_path(), "endpoint.json")
         with open(config_path, "r") as f:
-            data_dict = json.load(f)
+            data_dict: dict[str, Any] = json.load(f)
 
         # Write it back updated
         with open(config_path, "w") as file:
@@ -3773,13 +3798,13 @@ class Endpoint(PgProtocol, LogUtils):
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Please note: Migrations only run if pg_skip_catalog_updates is false
-    def wait_for_migrations(self):
+    def wait_for_migrations(self, num_migrations: int = 10):
         with self.cursor() as cur:
 
             def check_migrations_done():
                 cur.execute("SELECT id FROM neon_migration.migration_id")
-                migration_id = cur.fetchall()[0][0]
-                assert migration_id != 0
+                migration_id: int = cur.fetchall()[0][0]
+                assert migration_id >= num_migrations
 
             wait_until(20, 0.5, check_migrations_done)
 
@@ -4016,16 +4041,28 @@ class Safekeeper(LogUtils):
     id: int
     running: bool = False
 
-    def __init__(self, env: NeonEnv, port: SafekeeperPort, id: int, running: bool = False):
+    def __init__(
+        self,
+        env: NeonEnv,
+        port: SafekeeperPort,
+        id: int,
+        running: bool = False,
+        extra_opts: Optional[List[str]] = None,
+    ):
         self.env = env
         self.port = port
         self.id = id
         self.running = running
         self.logfile = Path(self.data_dir) / f"safekeeper-{id}.log"
+        self.extra_opts = extra_opts
 
     def start(
         self, extra_opts: Optional[List[str]] = None, timeout_in_seconds: Optional[int] = None
     ) -> "Safekeeper":
+        if extra_opts is None:
+            # Apply either the extra_opts passed in, or the ones from our constructor: we do not merge the two.
+            extra_opts = self.extra_opts
+
         assert self.running is False
         self.env.neon_cli.safekeeper_start(
             self.id, extra_opts=extra_opts, timeout_in_seconds=timeout_in_seconds
