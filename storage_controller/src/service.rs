@@ -2859,6 +2859,7 @@ impl Service {
                             ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
                         }
                         // rest can be mapped as usual
+                        // FIXME: this converts some 500 to 409 which is not per openapi
                         other => passthrough_api_error(&node, other),
                     }
                 })

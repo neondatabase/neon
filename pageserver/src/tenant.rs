@@ -995,6 +995,10 @@ impl Tenant {
                 .remove(&timeline_id)
                 .expect("just put it in above");
 
+            // FIXME: collect here **any** timelines which have started and not finished
+            // detach_ancestor (ignoring the ones which have started deletion instead)
+            // then later reflect it in the Tenant::detach_ancestor whatever
+
             // TODO again handle early failure
             self.load_remote_timeline(
                 timeline_id,

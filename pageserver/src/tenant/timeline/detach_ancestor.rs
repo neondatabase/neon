@@ -150,6 +150,9 @@ pub(super) async fn prepare(
             .values()
             .filter(|tl| matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached)))
             .map(|tl| (tl.ancestor_lsn, tl.clone()))
+            // FIXME: instead of collecting, partition based on if they are still reparentable
+            // if gc has been blocked, we can still reparent these timelines
+            //
             // Collect to avoid lock taking order problem with Tenant::timelines and
             // Timeline::remote_client
             .collect::<Vec<_>>();
@@ -176,12 +179,19 @@ pub(super) async fn prepare(
             return Err(Error::ShuttingDown);
         }
 
+        // FIXME: reparent the reparentable (return Progress::Prepared if there were any) -- we
+        // will need to acquire the lock as well..? so it would make sense that at load time we
+        // would detect the in-progress ness and "soft-acquire it for us".
+        // FIXME: otherwise release gc blocking if it still is there, and wait for upload
+
         let mut reparented = all_direct_children;
         // why this instead of hashset? there is a reason, but I've forgotten it many times.
         //
         // maybe if this was a hashset we would not be able to distinguish some race condition.
         reparented.sort_unstable_by_key(|(lsn, tl)| (*lsn, tl.timeline_id));
 
+        // FIXME: add the non-reparented in to the response -- these would be the reparentable, but
+        // no longer reparentable because they appeared *after* gc blocking was released.
         return Ok(Progress::Done(AncestorDetached {
             reparented_timelines: reparented
                 .into_iter()
@@ -216,6 +226,9 @@ pub(super) async fn prepare(
         }
         *guard = Some((detached.timeline_id, barrier));
     }
+
+    // FIXME: modify the index part to have a "detach-ancestor: inprogress { started_at }"
+    // unsure if it should be awaited to upload yet...
 
     let _gate_entered = detached.gate.enter().map_err(|_| ShuttingDown)?;
 
@@ -564,6 +577,9 @@ pub(super) async fn complete(
         )
         .await?;
 
+    // FIXME: assert that the persistent record of inprogress detach exists
+    // FIXME: assert that gc is still blocked
+
     let mut tasks = tokio::task::JoinSet::new();
 
     // because we are now keeping the slot in progress, it is unlikely that there will be any
@@ -649,6 +665,7 @@ pub(super) async fn complete(
     }
 
     if reparenting_candidates != reparented.len() {
+        // FIXME: we must return 503 kind of response
         tracing::info!("failed to reparent some candidates");
     }
 
@@ -658,6 +675,9 @@ pub(super) async fn complete(
         .into_iter()
         .map(|(_, timeline_id)| timeline_id)
         .collect();
+
+    // FIXME: here everything has gone peachy, the tenant will be restarted next.
+    // after restart and before returning the response, the gc blocking must be undone
 
     Ok(reparented)
 }
