@@ -240,7 +240,7 @@ jobs:
             16
           ],
           "region_id" : [
-            "$region_id_default",
+            "'"$region_id_default"'"
             ],
           "platform": [
             "neon-captest-new",
@@ -248,19 +248,19 @@ jobs:
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "pg_version": 16, "region_id": "$region_id_default", "platform": "neon-captest-freetier",         "db_size": "3gb"  },
-                      { "pg_version": 16, "region_id": "$region_id_default", "platform": "neon-captest-new",              "db_size": "50gb" },
-                      { "pg_version": 16, "region_id": "$region_id_default", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
-                      { "pg_version": 16, "region_id": "$region_id_default", "platform": "neonvm-captest-new",            "db_size": "50gb" },
+          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neon-captest-freetier",         "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neon-captest-new",              "db_size": "50gb" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb" },
                       { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
                       { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
                       { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
-                      { "pg_version": 16, "region_id": "$region_id_default", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "$region_id_default", "platform": "rds-postgres", "db_size": "10gb"},
-                                                     { "pg_version": 14, "region_id": "$region_id_default", "platform": "rds-aurora",   "db_size": "50gb"}]')
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb"},
+                                                     { "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
