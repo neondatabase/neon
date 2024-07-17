@@ -420,6 +420,12 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   pgbench-pgvector:
+    strategy:
+      matrix:
+        include:
+          - PLATFORM: "neon-captest-pgvector"
+          - PLATFORM: "azure-captest-pgvector"
+            
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
       TEST_PG_BENCH_SCALES_MATRIX: "1"
@@ -428,7 +434,7 @@ jobs:
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: "neon-captest-pgvector"
+      PLATFORM: ${{ matrix.PLATFORM }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
@@ -448,7 +454,18 @@ jobs:
     - name: Set up Connection String
       id: set-up-connstr
       run: |
-        CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR }}
+        case "${PLATFORM}" in
+          neon-captest-pgvector)
+            CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR }}
+            ;;
+          azure-captest-pgvector)
+            CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR_AZURE }}
+            ;;
+          *)
+            echo >&2 "Unknown PLATFORM=${PLATFORM}"
+            exit 1
+            ;;
+        esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
@@ -487,7 +504,7 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing neon-captest-pgvector: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: "Periodic perf testing ${PLATFORM}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
