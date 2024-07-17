@@ -8,6 +8,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import wait_until
+from fixtures.workload import Workload
 
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
@@ -265,6 +266,13 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     (tenant_id, timeline_id) = env.initial_tenant, env.initial_timeline
     ps_http = env.pageserver.http_client()
 
+    # When we evict/download layers, we will use this Workload to generate getpage requests
+    # that touch some layers, as otherwise the pageserver doesn't report totally unused layers
+    # as problems when they have short residence duration.
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(100)
+
     def get_metric():
         metrics = ps_http.get_metrics()
         metric = metrics.query_one(
@@ -285,6 +293,7 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     assert default_value == "1day"
 
     ps_http.download_all_layers(tenant_id, timeline_id)
+    workload.validate()
     ps_http.evict_all_layers(tenant_id, timeline_id)
     metric = get_metric()
     assert int(metric.value) > 0, "metric is updated"
@@ -305,6 +314,7 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     assert int(metric.value) == 0
 
     ps_http.download_all_layers(tenant_id, timeline_id)
+    workload.validate()
     ps_http.evict_all_layers(tenant_id, timeline_id)
     metric = get_metric()
     assert int(metric.labels["low_threshold_secs"]) == 2 * 24 * 60 * 60
@@ -318,6 +328,7 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     assert int(metric.value) == 0, "value resets if label changes"
 
     ps_http.download_all_layers(tenant_id, timeline_id)
+    workload.validate()
     ps_http.evict_all_layers(tenant_id, timeline_id)
     metric = get_metric()
     assert int(metric.labels["low_threshold_secs"]) == 2 * 60 * 60

@@ -26,6 +26,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Hole, ImageLayerCreationOutcome};
@@ -415,6 +416,7 @@ impl Timeline {
             .map(|x| guard.get_from_desc(&x))
             .collect_vec();
         stats.level0_deltas_count = Some(level0_deltas.len());
+
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
@@ -445,6 +447,22 @@ impl Timeline {
         let mut prev_lsn_end = first_level0_delta.layer_desc().lsn_range.end;
         let mut deltas_to_compact = Vec::with_capacity(level0_deltas.len());
 
+        // Accumulate the size of layers in `deltas_to_compact`
+        let mut deltas_to_compact_bytes = 0;
+
+        // Under normal circumstances, we will accumulate up to compaction_interval L0s of size
+        // checkpoint_distance each.  To avoid edge cases using extra system resources, bound our
+        // work in this function to only operate on this much delta data at once.
+        //
+        // Take the max of the configured value & the default, so that tests that configure tiny values
+        // can still use a sensible amount of memory, but if a deployed system configures bigger values we
+        // still let them compact a full stack of L0s in one go.
+        let delta_size_limit = std::cmp::max(
+            self.get_compaction_threshold(),
+            DEFAULT_COMPACTION_THRESHOLD,
+        ) as u64
+            * std::cmp::max(self.get_checkpoint_distance(), DEFAULT_CHECKPOINT_DISTANCE);
+
         deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
@@ -453,7 +471,20 @@ impl Timeline {
                 break;
             }
             deltas_to_compact.push(l.download_and_keep_resident().await?);
+            deltas_to_compact_bytes += l.metadata().file_size;
             prev_lsn_end = lsn_range.end;
+
+            if deltas_to_compact_bytes >= delta_size_limit {
+                info!(
+                    l0_deltas_selected = deltas_to_compact.len(),
+                    l0_deltas_total = level0_deltas.len(),
+                    "L0 compaction picker hit max delta layer size limit: {}",
+                    delta_size_limit
+                );
+
+                // Proceed with compaction, but only a subset of L0s
+                break;
+            }
         }
         let lsn_range = Range {
             start: deltas_to_compact
