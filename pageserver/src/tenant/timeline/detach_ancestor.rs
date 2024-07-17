@@ -179,6 +179,9 @@ pub(super) async fn prepare(
         *guard = Some((detached.timeline_id, barrier));
     }
 
+    // FIXME: modify the index part to have a "detach-ancestor: inprogress { started_at }"
+    // unsure if it should be awaited to upload yet...
+
     let _gate_entered = detached.gate.enter().map_err(|_| ShuttingDown)?;
 
     utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable");
@@ -580,6 +583,9 @@ pub(super) async fn complete(
         )
         .await?;
 
+    // FIXME: assert that the persistent record of inprogress detach exists
+    // FIXME: assert that gc is still blocked
+
     let mut tasks = tokio::task::JoinSet::new();
 
     // because we are now keeping the slot in progress, it is unlikely that there will be any
@@ -670,8 +676,11 @@ pub(super) async fn complete(
     }
 
     if reparenting_candidates != reparented.len() {
+        // FIXME: we must return 503 kind of response
         tracing::info!("failed to reparent some candidates");
     }
 
+    // FIXME: here everything has gone peachy, the tenant will be restarted next.
+    // after restart and before returning the response, the gc blocking must be undone
     Ok(reparented)
 }
