@@ -224,6 +224,7 @@ jobs:
     # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
     env:
       RUN_AWS_RDS_AND_AURORA: ${{ github.event.inputs.run_AWS_RDS_AND_AURORA || 'false' }}
+      DEFAULT_REGION_ID: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
     runs-on: ubuntu-22.04
     outputs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
@@ -234,7 +235,7 @@ jobs:
     - name: Generate matrix for pgbench benchmark
       id: pgbench-compare-matrix
       run: |
-        region_id_default=${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+        region_id_default=${{ env.DEFAULT_REGION_ID }}
         matrix='{
           "pg_version" : [
             16
