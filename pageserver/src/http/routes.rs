@@ -1887,7 +1887,7 @@ async fn timeline_detach_ancestor_handler(
         // drop(tenant);
 
         let resp = match progress {
-            detach_ancestor::Progress::Prepared(_guard, prepared) => {
+            detach_ancestor::Progress::Prepared(attempt, prepared) => {
                 // it would be great to tag the guard on to the tenant activation future
                 let reparented_timelines = state
                     .tenant_manager
@@ -1895,6 +1895,7 @@ async fn timeline_detach_ancestor_handler(
                         tenant_shard_id,
                         timeline_id,
                         prepared,
+                        attempt,
                         ctx,
                     )
                     .await
@@ -1908,6 +1909,7 @@ async fn timeline_detach_ancestor_handler(
             detach_ancestor::Progress::Done(resp) => resp,
         };
 
+        // FIXME: if the ordering is really needed and not a hashset, move it here?
         json_response(StatusCode::OK, resp)
     }
     .instrument(span)
