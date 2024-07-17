@@ -117,6 +117,9 @@ class LayerMapInfo:
     def image_layers(self) -> List[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Image"]
 
+    def delta_l0_layers(self) -> List[HistoricLayerInfo]:
+        return [x for x in self.historic_layers if x.kind == "Delta" and x.l0]
+
     def historic_by_name(self) -> Set[str]:
         return set(x.layer_file_name for x in self.historic_layers)
 
