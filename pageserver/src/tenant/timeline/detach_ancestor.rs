@@ -121,6 +121,66 @@ impl Default for Options {
     }
 }
 
+/// SharedState manages the pausing of background tasks (GC) for the duration of timeline detach
+/// ancestor.
+///
+/// Currently this is tracked at tenant level, but it could be moved to be on the roots
+/// of each timeline tree.
+struct SharedState {}
+
+impl SharedState {
+    /// Only GC must be paused while a detach ancestor is ongoing. Compaction can happen, to aid
+    /// with any ongoing ingestion. Compaction even after restart is ok because layers will not be
+    /// removed until the detach has been persistently completed.
+    ///
+    /// Cancellation safe.
+    pub(super) async fn pause_gc(&self) {
+        // if we have any started and not finished ancestor detaches, we must remain paused
+        // and also let any trying to start operation know that we've paused.
+    }
+
+    /// Acquire the exclusive lock for a new detach ancestor attempt and ensure that GC task has
+    /// been persistently paused via [`crate::tenant::IndexPart`], awaiting for completion.
+    ///
+    /// Cancellation safe.
+    async fn start_new_attempt(
+        &self,
+        _remote_client: &crate::tenant::remote_timeline_client::RemoteTimelineClient,
+    ) -> Result<completion::Completion, Error> {
+        Err(Error::OtherTimelineDetachOngoing(TimelineId::generate()))
+    }
+
+    /// Completes a previously started detach ancestor attempt. To be called *after* the operation
+    /// including the tenant has been restarted. The completion is persistent, and no reparentings
+    /// can be done afterwards.
+    ///
+    /// Cancellation safe.
+    async fn complete(
+        &self,
+        _attempt: DetachAncestorAttempt,
+        _remote_client: &crate::tenant::remote_timeline_client::RemoteTimelineClient,
+    ) -> Result<(), Error> {
+        Err(Error::ShuttingDown)
+    }
+}
+
+/// Token which represents a persistent, exclusive, awaitable single attempt.
+struct DetachAncestorAttempt {}
+
+impl DetachAncestorAttempt {}
+
+struct SharedStateBuilder {}
+
+impl SharedStateBuilder {
+    /// While loading, visit a timelines persistent [`crate::tenant::IndexPart`] and record if it is being
+    /// detached.
+    pub(super) fn record_loaded_timeline(&mut self, _index_part: &crate::tenant::IndexPart) {}
+
+    pub(super) fn build(self) -> Option<SharedState> {
+        None
+    }
+}
+
 /// See [`Timeline::prepare_to_detach_from_ancestor`]
 pub(super) async fn prepare(
     detached: &Arc<Timeline>,
