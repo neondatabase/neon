@@ -97,7 +97,7 @@ impl From<FlushLayerError> for Error {
 }
 
 pub(crate) enum Progress {
-    Prepared(completion::Completion, PreparedTimelineDetach),
+    Prepared(Attempt, PreparedTimelineDetach),
     Done(AncestorDetached),
 }
 
@@ -126,28 +126,71 @@ impl Default for Options {
 ///
 /// Currently this is tracked at tenant level, but it could be moved to be on the roots
 /// of each timeline tree.
-struct SharedState {}
+pub(crate) struct SharedState {
+    inner: std::sync::Mutex<Option<(TimelineId, completion::Barrier)>>,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        SharedState {
+            inner: Default::default(),
+        }
+    }
+}
 
 impl SharedState {
     /// Only GC must be paused while a detach ancestor is ongoing. Compaction can happen, to aid
     /// with any ongoing ingestion. Compaction even after restart is ok because layers will not be
     /// removed until the detach has been persistently completed.
-    ///
-    /// Cancellation safe.
-    pub(super) async fn pause_gc(&self) {
+    pub(crate) fn attempt_blocks_gc(&self) -> bool {
         // if we have any started and not finished ancestor detaches, we must remain paused
         // and also let any trying to start operation know that we've paused.
+        false
+    }
+
+    /// Sleep for the duration, while letting any ongoing ancestor_detach attempt know that gc has
+    /// been paused.
+    ///
+    /// Cancellation safe.
+    pub(crate) async fn gc_sleeping_while<T, F: std::future::Future<Output = T>>(
+        &self,
+        fut: F,
+    ) -> T {
+        // this needs to wrap the sleeping so that we can quickly let ancestor_detach continue
+        fut.await
     }
 
     /// Acquire the exclusive lock for a new detach ancestor attempt and ensure that GC task has
     /// been persistently paused via [`crate::tenant::IndexPart`], awaiting for completion.
     ///
     /// Cancellation safe.
-    async fn start_new_attempt(
-        &self,
-        _remote_client: &crate::tenant::remote_timeline_client::RemoteTimelineClient,
-    ) -> Result<completion::Completion, Error> {
-        Err(Error::OtherTimelineDetachOngoing(TimelineId::generate()))
+    async fn start_new_attempt(&self, detached: &Arc<Timeline>) -> Result<Attempt, Error> {
+        if detached.cancel.is_cancelled() {
+            return Err(Error::ShuttingDown);
+        }
+
+        let (guard, barrier) = completion::channel();
+
+        {
+            let mut guard = self.inner.lock().unwrap();
+            if let Some((tl, other)) = guard.as_ref() {
+                if !other.is_ready() {
+                    return Err(Error::OtherTimelineDetachOngoing(*tl));
+                }
+            }
+            *guard = Some((detached.timeline_id, barrier));
+        }
+
+        // FIXME: modify the index part to have a "detach-ancestor: inprogress { started_at }"
+        // unsure if it should be awaited to upload yet...
+
+        // finally
+        let gate_entered = detached.gate.enter().map_err(|_| Error::ShuttingDown)?;
+
+        Ok(Attempt {
+            _guard: guard,
+            gate_entered: Some(gate_entered),
+        })
     }
 
     /// Completes a previously started detach ancestor attempt. To be called *after* the operation
@@ -155,30 +198,44 @@ impl SharedState {
     /// can be done afterwards.
     ///
     /// Cancellation safe.
-    async fn complete(
+    pub(crate) async fn complete(
         &self,
-        _attempt: DetachAncestorAttempt,
-        _remote_client: &crate::tenant::remote_timeline_client::RemoteTimelineClient,
+        _attempt: Attempt,
+        _tenant: &Arc<Tenant>,
     ) -> Result<(), Error> {
-        Err(Error::ShuttingDown)
+        // do we need the tenant to actually activate...? yes we do, but that can happen via
+        // background task starting, because we will similarly want to confirm that the gc has
+        // paused, before we unpause it?
+        //
+        // assert that such and such state has been collected
+        // find the timeline the attempt represents
+        // using the timelines remote client, upload an index part with completion information
+        Ok(())
     }
 }
 
 /// Token which represents a persistent, exclusive, awaitable single attempt.
-struct DetachAncestorAttempt {}
+pub(crate) struct Attempt {
+    _guard: completion::Completion,
+    gate_entered: Option<utils::sync::gate::GateGuard>,
+}
 
-impl DetachAncestorAttempt {}
+impl Attempt {
+    pub(crate) fn before_shutdown(&mut self) {
+        let taken = self.gate_entered.take();
+        assert!(taken.is_some());
+    }
+}
 
-struct SharedStateBuilder {}
+#[derive(Default)]
+pub(crate) struct SharedStateBuilder {}
 
 impl SharedStateBuilder {
     /// While loading, visit a timelines persistent [`crate::tenant::IndexPart`] and record if it is being
     /// detached.
-    pub(super) fn record_loaded_timeline(&mut self, _index_part: &crate::tenant::IndexPart) {}
+    pub(crate) fn record_loading_timeline(&mut self, _index_part: &crate::tenant::IndexPart) {}
 
-    pub(super) fn build(self) -> Option<SharedState> {
-        None
-    }
+    pub(crate) fn build(self, _target: &SharedState) {}
 }
 
 /// See [`Timeline::prepare_to_detach_from_ancestor`]
@@ -224,25 +281,10 @@ pub(super) async fn prepare(
         return Err(TooManyAncestors);
     }
 
-    // before we acquire the gate, we must mark the ancestor as having a detach operation
-    // ongoing which will block other concurrent detach operations so we don't get to ackward
-    // situations where there would be two branches trying to reparent earlier branches.
-    let (guard, barrier) = completion::channel();
-
-    {
-        let mut guard = tenant.ongoing_timeline_detach.lock().unwrap();
-        if let Some((tl, other)) = guard.as_ref() {
-            if !other.is_ready() {
-                return Err(OtherTimelineDetachOngoing(*tl));
-            }
-        }
-        *guard = Some((detached.timeline_id, barrier));
-    }
-
-    // FIXME: modify the index part to have a "detach-ancestor: inprogress { started_at }"
-    // unsure if it should be awaited to upload yet...
-
-    let _gate_entered = detached.gate.enter().map_err(|_| ShuttingDown)?;
+    let attempt = tenant
+        .ongoing_timeline_detach
+        .start_new_attempt(detached)
+        .await?;
 
     utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable");
 
@@ -405,7 +447,7 @@ pub(super) async fn prepare(
 
     let prepared = PreparedTimelineDetach { layers: new_layers };
 
-    Ok(Progress::Prepared(guard, prepared))
+    Ok(Progress::Prepared(attempt, prepared))
 }
 
 fn reparented_direct_children(

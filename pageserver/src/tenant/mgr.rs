@@ -54,7 +54,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
-use super::timeline::detach_ancestor::PreparedTimelineDetach;
+use super::timeline::detach_ancestor::{self, PreparedTimelineDetach};
 use super::{GlobalShutDown, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
@@ -1927,6 +1927,7 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, anyhow::Error> {
         // FIXME: this is unnecessary, slotguard already has these semantics
@@ -1977,11 +1978,13 @@ impl TenantManager {
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
-        let reparented = timeline
+        let resp = timeline
             .complete_detaching_timeline_ancestor(&tenant, prepared, ctx)
             .await?;
 
         let mut slot_guard = slot_guard.into_inner();
+
+        attempt.before_shutdown();
 
         let (_guard, progress) = utils::completion::channel();
         match tenant.shutdown(progress, ShutdownMode::Hard).await {
@@ -2011,9 +2014,14 @@ impl TenantManager {
             ctx,
         )?;
 
-        slot_guard.upsert(TenantSlot::Attached(tenant))?;
+        slot_guard.upsert(TenantSlot::Attached(tenant.clone()))?;
 
-        Ok(reparented)
+        tenant
+            .ongoing_timeline_detach
+            .complete(attempt, &tenant)
+            .await?;
+
+        Ok(resp)
     }
 
     /// A page service client sends a TenantId, and to look up the correct Tenant we must

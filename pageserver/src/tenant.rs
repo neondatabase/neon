@@ -306,7 +306,7 @@ pub struct Tenant {
     ///
     /// After starting the timeline detach ancestor, blocking GC until it completes allows retrying
     /// the ancestor detach, until we can be certain that all reparentings have been done.
-    ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
+    ongoing_timeline_detach: timeline::detach_ancestor::SharedState,
 
     /// `index_part.json` based gc blocking reason tracking.
     ///

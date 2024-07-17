@@ -129,9 +129,11 @@ pub fn start_background_loops(
             let background_jobs_can_start = background_jobs_can_start.cloned();
             async move {
                 let cancel = task_mgr::shutdown_token();
+                let can_start = completion::Barrier::maybe_wait(background_jobs_can_start);
+                let can_start = tenant.ongoing_timeline_detach.gc_sleeping_while(can_start);
                 tokio::select! {
                     _ = cancel.cancelled() => { return Ok(()) },
-                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                    _ = can_start => {}
                 };
                 gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug()))
@@ -366,14 +368,13 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             if first {
                 first = false;
 
-                if delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
+                let delays = async {
+                    delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel).await?;
+                    random_init_delay(period, &cancel).await?;
+                    Ok::<_, Cancelled>(())
+                };
 
-                if random_init_delay(period, &cancel).await.is_err() {
+                if tenant.ongoing_timeline_detach.gc_sleeping_while(delays).await.is_err() {
                     break;
                 }
             }
@@ -426,7 +427,9 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
 
             // Sleep
-            if tokio::time::timeout(sleep_duration, cancel.cancelled())
+            let cancelled = cancel.cancelled();
+            let cancelled = tenant.ongoing_timeline_detach.gc_sleeping_while(cancelled);
+            if tokio::time::timeout(sleep_duration, cancelled)
                 .await
                 .is_ok()
             {
