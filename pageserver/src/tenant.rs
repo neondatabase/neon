@@ -304,7 +304,7 @@ pub struct Tenant {
     ///
     /// After starting the timeline detach ancestor, blocking GC until it completes allows retrying
     /// the ancestor detach, until we can be certain that all reparentings have been done.
-    ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
+    ongoing_timeline_detach: timeline::detach_ancestor::SharedState,
 
     l0_flush_global_state: L0FlushGlobalState,
 }
@@ -986,6 +986,8 @@ impl Tenant {
             }
         }
 
+        let mut shared_state_builder = timeline::detach_ancestor::SharedStateBuilder::default();
+
         // For every timeline, download the metadata file, scan the local directory,
         // and build a layer map that contains an entry for each remote and local
         // layer file.
@@ -995,9 +997,7 @@ impl Tenant {
                 .remove(&timeline_id)
                 .expect("just put it in above");
 
-            // FIXME: collect here **any** timelines which have started and not finished
-            // detach_ancestor (ignoring the ones which have started deletion instead)
-            // then later reflect it in the Tenant::detach_ancestor whatever
+            shared_state_builder.record_loading_timeline(&index_part);
 
             // TODO again handle early failure
             self.load_remote_timeline(
@@ -1042,6 +1042,8 @@ impl Tenant {
         // The local filesystem contents are a cache of what's in the remote IndexPart;
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
+
+        shared_state_builder.build(&self.ongoing_timeline_detach);
 
         fail::fail_point!("attach-before-activate", |_| {
             anyhow::bail!("attach-before-activate");
@@ -1613,6 +1615,11 @@ impl Tenant {
                 info!("Skipping GC in location state {:?}", conf.location);
                 return Ok(GcResult::default());
             }
+        }
+
+        if self.ongoing_timeline_detach.attempt_blocks_gc() {
+            info!("Skipping GC while there is an ongoing detach_ancestor attempt");
+            return Ok(GcResult::default());
         }
 
         self.gc_iteration_internal(target_timeline_id, horizon, pitr, cancel, ctx)
@@ -2622,7 +2629,7 @@ impl Tenant {
                 &crate::metrics::tenant_throttling::TIMELINE_GET,
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
-            ongoing_timeline_detach: std::sync::Mutex::default(),
+            ongoing_timeline_detach: Default::default(),
             l0_flush_global_state,
         }
     }
