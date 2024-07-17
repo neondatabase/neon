@@ -18,6 +18,7 @@ use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
@@ -3707,6 +3708,16 @@ impl Timeline {
     #[inline(always)]
     pub(crate) fn tenant_shard_timeline_id(&self) -> TenantShardTimelineId {
         TenantShardTimelineId::new(self.tenant_shard_id, self.timeline_id)
+    }
+
+    pub(crate) fn shard_timeline_id(&self) -> ShardTimelineId {
+        ShardTimelineId {
+            shard_index: ShardIndex {
+                shard_number: self.shard_identity.number,
+                shard_count: self.shard_identity.count,
+            },
+            timeline_id: self.timeline_id,
+        }
     }
 
     ///
