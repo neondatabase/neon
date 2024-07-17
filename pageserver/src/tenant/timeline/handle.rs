@@ -36,8 +36,11 @@ use super::Timeline;
 /// Without this, we'd have to go through the [`crate::tenant::mgr`] for each
 /// getpage request.
 #[derive(Default)]
-pub(crate) struct Cache {
-    cache: HashMap<TenantShardTimelineId, Weak<HandleInner>>,
+pub(crate) struct Cache(Arc<CacheInner>);
+
+#[derive(Default)]
+struct CacheInner {
+    map: Mutex<HashMap<TenantShardTimelineId, Weak<HandleInner>>>,
 }
 
 /// This struct is a reference to [`Timeline`]
@@ -48,7 +51,9 @@ pub(crate) struct Cache {
 /// the handle.
 pub(crate) struct Handle(Arc<HandleInner>);
 struct HandleInner {
+    key: TenantShardTimelineId,
     timeline: Arc<Timeline>,
+    cache: Weak<CacheInner>,
     // The timeline's gate held open.
     _gate_guard: utils::sync::gate::GateGuard,
 }
@@ -73,11 +78,14 @@ pub(crate) trait TenantManager {
 pub(crate) enum GetError<M> {
     TenantManager(M),
     TimelineGateClosed,
+    PerTimelineStateShutDown,
 }
 
 impl Cache {
     /// Get a [`Handle`] for the Timeline identified by `key`.
-    /// See [`Cache`] and other structs for more context.
+    ///
+    /// The returned [`Handle`] must be short-lived so that
+    /// the [`Timeline::gate`] is not held open longer than necessary.
     ///
     /// Note: this method will not fail if the timeline is
     /// [`Timeline::is_stopping`] or [`Timeline::cancel`]led,
@@ -96,7 +104,8 @@ impl Cache {
     where
         M: TenantManager<Error = E>,
     {
-        let cached: Option<_> = match self.cache.get(&key) {
+        let mut map = self.0.map.lock().expect("mutex poisoned");
+        let cached: Option<_> = match map.get(&key) {
             None => {
                 trace!("cache miss, never seen");
                 None
@@ -105,7 +114,7 @@ impl Cache {
                 None => {
                     trace!("handle cache stale");
                     // clean up cache
-                    self.cache.remove(&key).unwrap();
+                    map.remove(&key).unwrap();
                     None
                 }
                 Some(timeline) => {
@@ -118,6 +127,11 @@ impl Cache {
             Some(handle) => Ok(Handle(handle)),
             None => match tenant_manager.resolve(key) {
                 Ok(timeline) => {
+                    assert_eq!(
+                        &timeline.tenant_shard_timeline_id(),
+                        key,
+                        "broken tenant_mnager implementation"
+                    );
                     let gate_guard = match timeline.gate.enter() {
                         Ok(guard) => guard,
                         Err(_) => {
@@ -128,7 +142,9 @@ impl Cache {
                         // TODO: global metric that keeps track of the number of live HandlerTimeline instances
                         // so we can identify reference cycle bugs.
                         HandleInner {
+                            key: key.clone(),
                             _gate_guard: gate_guard,
+                            cache: Arc::downgrade(&self.0),
                             timeline: timeline.clone(),
                         },
                     );
@@ -141,10 +157,10 @@ impl Cache {
                                     assert!(!Arc::ptr_eq(handler, &handle));
                                 }
                                 timeline_handlers_list.push(Arc::clone(&handle));
-                                self.cache.insert(*key, Arc::downgrade(&handle));
+                                map.insert(*key, Arc::downgrade(&handle));
                             }
                             None => {
-                                return Err(GetError::TimelineGateClosed);
+                                return Err(GetError::PerTimelineStateShutDown);
                             }
                         }
                     }
@@ -157,26 +173,43 @@ impl Cache {
 }
 
 impl PerTimelineState {
-    /// After this method returns, [`Cache::get`] misses will fail.
-    /// Already-alive [`Handle`]s keep a cache entry alive.
-    /// The expectation is that users of these [`Handle`]s will
-    /// observe timeline cancellation when using the [`Timeline`]
-    /// for the next time.
+    /// After this method returns, [`Cache::get`] are guaranteed to fail,
+    /// even if [`TenantManager::resolve`] would still succeed.
+    /// This means no new [`Handle`]s will be created for this [`Timeline`].
     ///
-    /// TOOD: we can keep a back-pointer to the [`Cache`] in each
-    /// [`HandleInner`] and take it out, Much simpler to do this
-    /// using intrusive linked lists :(.
+    /// Already-alive [`Handle`]s for this Timeline will remain open
+    /// and keep the `Arc<Timeline>` allocation alive.
+    ///
+    /// The expectation is that
+    /// 1. [`Handle`]s are short-lived (single call to [`Timeline`] method) and
+    /// 2. [`Timeline`] methods invoked through [`Handle`] are sensitive
+    ///    to [`Timeline::cancel`] and [`Timeline::is_stopping`].
+    ///
+    /// Thus, the [`Arc<Timeline>`] allocation's lifetime will only be minimally
+    /// extended by the already-alive [`Handle`]s.
     pub(super) fn shutdown(&self) {
         let mut handlers = self.handlers.lock().expect("mutex poisoned");
         Self::shutdown_impl(&mut handlers);
     }
     fn shutdown_impl(locked: &mut MutexGuard<Option<Vec<Arc<HandleInner>>>>) {
-        let Some(handlers) = locked.take() else {
+        // NB: this .take() sets locked to None. That's what makes future `Cache::get` calls fail.
+        let Some(handles) = locked.take() else {
             trace!("PerTimelineState already shut down");
             return;
         };
-        let nhandlers = handlers.len();
-        trace!(nhandlers, "dropping PerTimelineState");
+        for handle in handles {
+            let Some(cache) = handle.cache.upgrade() else {
+                trace!("cache already dropped");
+                continue;
+            };
+            let mut map = cache
+                .map
+                // This cannot dead-lock because Cache::get() doesn't call this method
+                // and we don't call Cache::get().
+                .lock()
+                .expect("mutex poisoned");
+            map.remove(&handle.key);
+        }
     }
 }
 
@@ -195,12 +228,13 @@ impl Drop for PerTimelineState {
 /// cycle between the [`HandleInner::timeline`] and the [`Timeline::handlers`].
 impl Drop for Cache {
     fn drop(&mut self) {
-        for (_, cached) in self.cache.drain() {
-            if let Some(cached) = cached.upgrade() {
-                let per_timeline_state: &PerTimelineState = &cached.timeline.handlers;
+        let mut map = self.0.map.lock().expect("mutex poisoned");
+        for (_, weak_handler) in map.drain() {
+            if let Some(strong_handler) = weak_handler.upgrade() {
+                let per_timeline_state: &PerTimelineState = &strong_handler.timeline.handlers;
                 let mut lock_guard = per_timeline_state.handlers.lock().expect("mutex poisoned");
                 if let Some(handlers) = &mut *lock_guard {
-                    handlers.retain(|handler| !Arc::ptr_eq(handler, &cached));
+                    handlers.retain(|handler| !Arc::ptr_eq(handler, &strong_handler));
                 }
             }
         }

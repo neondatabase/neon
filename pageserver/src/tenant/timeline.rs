@@ -44,7 +44,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
-    fs_ext, pausable_failpoint,
+    fs_ext,
+    id::TenantShardTimelineId,
+    pausable_failpoint,
     sync::gate::{Gate, GateGuard},
     vec_map::VecMap,
 };
@@ -3700,6 +3702,11 @@ impl Timeline {
 
     pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
         &self.shard_identity
+    }
+
+    #[inline(always)]
+    pub(crate) fn tenant_shard_timeline_id(&self) -> TenantShardTimelineId {
+        TenantShardTimelineId::new(self.tenant_shard_id, self.timeline_id)
     }
 
     ///
