@@ -191,6 +191,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 5400
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -235,28 +236,31 @@ jobs:
       run: |
         region_id_default=${{ github.event.inputs.region_id || 'aws-us-east-2' }}
         matrix='{
+          "pg_version" : [
+            16
+          ],
           "region_id" : [
             "$region_id_default",
-            ]
+            ],
           "platform": [
             "neon-captest-new",
             "neon-captest-reuse",
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "region_id": "$region_id_default", "platform": "neon-captest-freetier",         "db_size": "3gb"  },
-                      { "region_id": "$region_id_default", "platform": "neon-captest-new",              "db_size": "50gb" },
-                      { "region_id": "$region_id_default", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
-                      { "region_id": "$region_id_default", "platform": "neonvm-captest-new",            "db_size": "50gb" },
-                      { "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
-                      { "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
-                      { "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
-                      { "region_id": "$region_id_default", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
+          "include": [{ "pg_version": 16, "region_id": "$region_id_default", "platform": "neon-captest-freetier",         "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "$region_id_default", "platform": "neon-captest-new",              "db_size": "50gb" },
+                      { "pg_version": 16, "region_id": "$region_id_default", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "$region_id_default", "platform": "neonvm-captest-new",            "db_size": "50gb" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
+                      { "pg_version": 16, "region_id": "$region_id_default", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "region_id": "$region_id_default", "platform": "rds-postgres", "db_size": "10gb"},
-                                                     { "region_id": "$region_id_default", "platform": "rds-aurora",   "db_size": "50gb"}]')
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "$region_id_default", "platform": "rds-postgres", "db_size": "10gb"},
+                                                     { "pg_version": 14, "region_id": "$region_id_default", "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -308,7 +312,7 @@ jobs:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 16
+      DEFAULT_PG_VERSION: ${{ matrix.pg_version }}
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
@@ -378,6 +382,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -391,6 +396,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -404,6 +410,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -487,6 +494,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgvector_indexing
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -500,6 +508,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -762,6 +771,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_user_examples
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
