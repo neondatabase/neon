@@ -150,6 +150,8 @@ pub(super) async fn prepare(
             .values()
             .filter(|tl| matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached)))
             .map(|tl| (tl.ancestor_lsn, tl.clone()))
+            // Collect to avoid lock taking order problem with Tenant::timelines and
+            // Timeline::remote_client
             .collect::<Vec<_>>();
 
         let mut any_shutdown = false;
