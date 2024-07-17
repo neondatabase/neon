@@ -2953,7 +2953,7 @@ impl Service {
                         Error::ApiError(StatusCode::BAD_REQUEST, msg) => {
                             ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
                         }
-                        // rest can be mapped
+                        // rest can be mapped as usual
                         other => passthrough_api_error(&node, other),
                     }
                 })
