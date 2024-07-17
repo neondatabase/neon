@@ -146,6 +146,8 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_smgr_query_seconds_sum",
     "pageserver_archive_size",
     "pageserver_pitr_history_size",
+    "pageserver_layer_bytes",
+    "pageserver_layer_count",
     "pageserver_storage_operations_seconds_count_total",
     "pageserver_storage_operations_seconds_sum_total",
     "pageserver_evictions_total",
