@@ -444,7 +444,7 @@ pub struct Timeline {
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
 
-    handlers: handle::Handles,
+    handlers: handle::PerTimelineState,
 }
 
 pub struct WalReceiverInfo {

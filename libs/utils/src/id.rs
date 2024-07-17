@@ -360,8 +360,8 @@ impl FromStr for TenantTimelineId {
 /// This is the shard-aware equivalent of TenantTimelineId.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TenantShardTimelineId {
-    tenant_shard_id: TenantShardId,
-    timeline_id: TimelineId,
+    pub tenant_shard_id: TenantShardId,
+    pub timeline_id: TimelineId,
 }
 
 impl TenantShardTimelineId {
