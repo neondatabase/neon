@@ -140,7 +140,11 @@ impl SharedState {
     pub(crate) fn attempt_blocks_gc(&self) -> bool {
         // if we have any started and not finished ancestor detaches, we must remain paused
         // and also let any trying to start operation know that we've paused.
-        false
+
+        // Two cases:
+        // - there is an actual attempt started
+        // - we have learned from indexparts that an attempt will be retried in near future
+        self.inner.lock().unwrap().is_some()
     }
 
     /// Sleep for the duration, while letting any ongoing ancestor_detach attempt know that gc has
