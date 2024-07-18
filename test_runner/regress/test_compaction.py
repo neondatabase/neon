@@ -330,9 +330,8 @@ def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder)
     assert not env.pageserver.log_contains(".*Circuit breaker failure ended.*")
 
 
-def test_image_layer_compression(
-    neon_env_builder: NeonEnvBuilder,
-):
+@pytest.mark.parametrize("enabled", [True, False])
+def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool):
     tenant_conf = {
         # small checkpointing and compaction targets to ensure we generate many upload operations
         "checkpoint_distance": f"{128 * 1024}",
@@ -347,6 +346,13 @@ def test_image_layer_compression(
         "image_creation_threshold": "1",
         "image_layer_creation_check_threshold": "0",
     }
+
+    # Explicitly enable/disable compression, rather than using default
+    if enabled:
+        neon_env_builder.pageserver_config_override = "image_compression='zstd'"
+    else:
+        neon_env_builder.pageserver_config_override = "image_compression='disabled'"
+
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
 
     tenant_id = env.initial_tenant
@@ -395,9 +401,13 @@ def test_image_layer_compression(
     assert bytes_out is not None
     log.info(f"Compression ratio: {bytes_out/bytes_in} ({bytes_out} in, {bytes_out} out)")
 
-    # We are writing high compressible repetitive plain text, expect excellent compression
-    EXPECT_RATIO = 0.2
-    assert bytes_out / bytes_in < EXPECT_RATIO
+    if enabled:
+        # We are writing high compressible repetitive plain text, expect excellent compression
+        EXPECT_RATIO = 0.2
+        assert bytes_out / bytes_in < EXPECT_RATIO
+    else:
+        # Nothing should be compressed if we disabled it.
+        assert bytes_out >= bytes_in
 
     # Destroy the endpoint and create a new one to resetthe caches
     with env.endpoints.create_start(
