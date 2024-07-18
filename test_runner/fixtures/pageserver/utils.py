@@ -1,4 +1,3 @@
-import json
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -11,7 +10,6 @@ from mypy_boto3_s3.type_defs import (
 
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
-from fixtures.pageserver.common_types import IndexPartDump
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
 from fixtures.utils import wait_until
@@ -371,32 +369,6 @@ def list_prefix(
         Prefix=prefix,
     )
     return response
-
-
-def remote_storage_get_lastest_index_key(index_keys: List[str]) -> str:
-    """
-    Gets the latest index file key.
-
-    @param index_keys: A list of index keys of different generations.
-    """
-
-    def parse_gen(index_key: str) -> int:
-        parts = index_key.split("index_part.json-")
-        return int(parts[-1], base=16) if len(parts) == 2 else -1
-
-    return max(index_keys, key=parse_gen)
-
-
-def remote_storage_download_index_part(remote: S3Storage, index_key: str) -> IndexPartDump:
-    """
-    Downloads the index content from remote storage.
-
-    @param index_key: index key in remote storage.
-    """
-    response = remote.client.get_object(Bucket=remote.bucket_name, Key=index_key)
-    body = response["Body"].read().decode("utf-8")
-    log.info(f"index_part.json: {body}")
-    return IndexPartDump.from_json(json.loads(body))
 
 
 def remote_storage_delete_key(

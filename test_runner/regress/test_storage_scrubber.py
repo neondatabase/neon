@@ -10,10 +10,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     StorageScrubber,
 )
-from fixtures.pageserver.utils import (
-    remote_storage_download_index_part,
-    remote_storage_get_lastest_index_key,
-)
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.workload import Workload
 
@@ -212,10 +208,10 @@ def test_scrubber_scan_pageserver_metadata(
     index_keys = list(filter(lambda s: s.startswith(f"{timeline_path}/index_part"), keys))
     assert len(index_keys) > 0
 
-    latest_index_key = remote_storage_get_lastest_index_key(index_keys)
+    latest_index_key = env.pageserver_remote_storage.get_latest_index_key(index_keys)
     log.info(f"{latest_index_key=}")
 
-    index = remote_storage_download_index_part(env.pageserver_remote_storage, latest_index_key)
+    index = env.pageserver_remote_storage.download_index_part(latest_index_key)
 
     assert len(index.layer_metadata) > 0
     it = iter(index.layer_metadata.items())
