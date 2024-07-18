@@ -230,6 +230,7 @@ impl SharedStateBuilder {
     /// detached.
     pub(crate) fn record_loading_timeline(&mut self, _index_part: &crate::tenant::IndexPart) {}
 
+    /// Merge the loaded not yet deleting in-progress to the existing datastructure.
     pub(crate) fn build(self, _target: &SharedState) {}
 }
 
