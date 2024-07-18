@@ -376,24 +376,24 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
         # run compaction to create image layers
         ps_http.timeline_gc(tenant_id, timeline_id, 0)
         final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id)
-        # Finish uploads
-        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
-        # Finish all remote writes (including deletions)
-        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
+    ps_http.timeline_checkpoint(tenant_id, timeline_id)
+    # Finish uploads
+    ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+    # Finish all remote writes (including deletions)
+    wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
-        layer_map = ps_http.layer_map_info(tenant_id, timeline_id)
-        image_layer_count = 0
-        delta_layer_count = 0
-        for layer in layer_map.historic_layers:
-            if layer.kind == "Image":
-                image_layer_count += 1
-            elif layer.kind == "Delta":
-                delta_layer_count += 1
-        assert image_layer_count > 0
-        assert delta_layer_count > 0
+    layer_map = ps_http.layer_map_info(tenant_id, timeline_id)
+    image_layer_count = 0
+    delta_layer_count = 0
+    for layer in layer_map.historic_layers:
+        if layer.kind == "Image":
+            image_layer_count += 1
+        elif layer.kind == "Delta":
+            delta_layer_count += 1
+    assert image_layer_count > 0
+    assert delta_layer_count > 0
 
-        log.info(f"images: {image_layer_count}, deltas: {delta_layer_count}")
+    log.info(f"images: {image_layer_count}, deltas: {delta_layer_count}")
 
     bytes_in = pageserver.http_client().get_metric_value(
         "pageserver_compression_image_in_bytes_total"
