@@ -245,7 +245,7 @@ files:
         query: |
           select neon.approximate_working_set_size(false) as approximate_working_set_size;
 
-      - metric_name: lfc_approximate_working_set_size_seconds
+      - metric_name: lfc_approximate_working_set_size_windows
         type: gauge
         help: 'Approximate working set size in pages of 8192 bytes'
         key_labels: [duration]
@@ -392,19 +392,19 @@ files:
         query: |
           select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
 
-      - metric_name: lfc_approximate_working_set_size_seconds
+      - metric_name: lfc_approximate_working_set_size_windows
         type: gauge
         help: 'Approximate working set size in pages of 8192 bytes'
-        key_labels: [duration_minutes]
+        key_labels: [duration_seconds]
         values: [size]
         # NOTE: This is the "internal" / "machine-readable" version. This outputs the working set
         # size looking back 1..60 minutes, labeled with the number of minutes.
         query: |
           select
-            x::text as duration_minutes,
-            neon.approximate_working_set_size_seconds(60 * x) as size
+            x::text as duration_seconds,
+            neon.approximate_working_set_size_seconds(x) as size
           from
-            (select generate_series as x from generate_series(1, 60));
+            (select generate_series * 60 as x from generate_series(1, 60));
 build: |
   # Build cgroup-tools
   #
