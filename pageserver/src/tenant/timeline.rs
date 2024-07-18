@@ -4362,7 +4362,7 @@ impl Timeline {
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
+    ) -> Result<(HashSet<TimelineId>, bool), anyhow::Error> {
         detach_ancestor::complete(self, tenant, prepared, ctx).await
     }
 
