@@ -255,11 +255,3 @@ def run_pagebench_benchmark(
             unit="ms",
             report=MetricReport.LOWER_IS_BETTER,
         )
-
-    env.storage_controller.allowed_errors.append(
-        # The test setup swaps NeonEnv instances, hence different
-        # pg instances are used for the storage controller db. This means
-        # the storage controller doesn't know about the nodes mentioned
-        # in attachments.json at start-up.
-        ".* Scheduler missing node 1",
-    )
