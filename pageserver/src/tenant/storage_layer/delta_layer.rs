@@ -457,8 +457,15 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-        // We don't want to use compression in delta layer creation
-        let compression = ImageCompressionAlgorithm::Disabled;
+
+        let compression = if val.len() >= 8192 {
+            // For full page images, respect configured image compression algorithm.
+            self.conf.image_compression
+        } else {
+            // For small writes, do not use compression.  Compression ratios on tiny buffers do not justify CPU cost.
+            ImageCompressionAlgorithm::Disabled
+        };
+
         let (val, res) = self
             .blob_writer
             .write_blob_maybe_compressed(val, ctx, compression)
@@ -477,6 +484,10 @@ impl DeltaLayerWriterInner {
 
     fn size(&self) -> u64 {
         self.blob_writer.size() + self.tree.borrow_writer().size()
+    }
+
+    fn size_values(&self) -> u64 {
+        self.blob_writer.size()
     }
 
     ///
@@ -666,6 +677,10 @@ impl DeltaLayerWriter {
 
     pub fn size(&self) -> u64 {
         self.inner.as_ref().unwrap().size()
+    }
+
+    pub fn size_values(&self) -> u64 {
+        self.inner.as_ref().unwrap().size_values()
     }
 
     ///
