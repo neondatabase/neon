@@ -378,7 +378,7 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
         final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
         ps_http.timeline_checkpoint(tenant_id, timeline_id)
         # Finish uploads
-        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
         # Finish all remote writes (including deletions)
         wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
