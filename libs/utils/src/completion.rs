@@ -12,6 +12,14 @@ pub struct Completion {
 #[derive(Clone)]
 pub struct Barrier(TaskTracker);
 
+impl std::fmt::Debug for Barrier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Barrier")
+            .field("remaining", &self.0.len())
+            .finish()
+    }
+}
+
 impl Default for Barrier {
     fn default() -> Self {
         let (_, rx) = channel();
