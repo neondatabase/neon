@@ -22,6 +22,7 @@ from fixtures.utils import subprocess_capture
         "swift/PostgresNIOExample",
         "typescript/postgresql-client",
         "typescript/serverless-driver",
+        "clickhouse/clickhouse",
     ],
 )
 def test_pg_clients(test_output_dir: Path, remote_pg: RemotePostgres, client: str):
