@@ -375,8 +375,6 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
             )
     # run compaction to create image layers
     ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
-    # Finish all remote writes (including deletions)
-    wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
     layer_map = ps_http.layer_map_info(tenant_id, timeline_id)
     image_layer_count = 0
