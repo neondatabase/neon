@@ -4760,7 +4760,7 @@ impl Timeline {
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+    ) -> Result<(Vec<TimelineId>, bool), anyhow::Error> {
         detach_ancestor::complete(self, tenant, prepared, ctx).await
     }
 
