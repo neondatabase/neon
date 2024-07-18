@@ -24,9 +24,7 @@ timeout_query() {
   fi
 }
 /entrypoint.sh > /dev/null 2>/dev/null &
-while ! [ "$(clickhouse -q "select 1")" = 1 ]; do
-  sleep 1
-done
+timeout_query 'select 1' e5fa44f2b31c1fb553b6021e7360d07d5d91ff5e
 psql -q -c "DROP TABLE IF EXISTS table1;
         CREATE TABLE table1 (
     id         integer primary key,
