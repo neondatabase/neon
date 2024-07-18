@@ -8,14 +8,9 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    flush_ep_to_pageserver,
     generate_uploads_and_deletions,
 )
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.pageserver.utils import (
-    wait_for_upload,
-    wait_for_upload_queue_empty,
-)
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
