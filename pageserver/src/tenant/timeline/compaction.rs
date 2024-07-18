@@ -1055,10 +1055,13 @@ impl Timeline {
     /// horizon = 0x50, retain_lsn = 0x20, 0x40, delta_threshold=3
     ///
     /// The function will produce:
+    ///
+    /// ```plain
     /// 0x20(retain_lsn) -> img=AB@0x20                  always produce a single image below the lowest retain LSN
     /// 0x40(retain_lsn) -> deltas=[+C@0x30, +D@0x40]    two deltas since the last base image, keeping the deltas
     /// 0x50(horizon)    -> deltas=[ABCDE@0x50]          three deltas since the last base image, generate an image but put it in the delta
     /// above_horizon    -> deltas=[+F@0x60]             full history above the horizon
+    /// ```
     ///
     /// Note that `accumulated_values` must be sorted by LSN and should belong to a single key.
     pub(crate) async fn generate_key_retention(
