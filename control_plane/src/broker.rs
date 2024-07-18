@@ -1,9 +1,9 @@
 //! Code to manage the storage broker
 //!
-//! In the local test environment, the data for each safekeeper is stored in
+//! In the local test environment, the storage broker stores its data directly in
 //!
 //! ```text
-//!   .neon/safekeepers/<safekeeper id>
+//!   .neon
 //! ```
 use std::time::Duration;
 
