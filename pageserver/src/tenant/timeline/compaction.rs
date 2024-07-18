@@ -1273,10 +1273,15 @@ impl Timeline {
             }
             (selected_layers, gc_cutoff, retain_lsns_below_horizon)
         };
+        let lowest_retain_lsn = retain_lsns_below_horizon
+            .first()
+            .copied()
+            .unwrap_or(gc_cutoff);
         info!(
-            "picked {} layers for compaction with gc_cutoff={}",
+            "picked {} layers for compaction with gc_cutoff={} lowest_retain_lsn={}",
             layer_selection.len(),
-            gc_cutoff
+            gc_cutoff,
+            lowest_retain_lsn
         );
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         // Also, collect the layer information to decide when to split the new delta layers.
@@ -1318,7 +1323,7 @@ impl Timeline {
             delta_split_points: &[Key],
             current_delta_split_point: &mut usize,
             tline: &Arc<Timeline>,
-            gc_cutoff: Lsn,
+            lowest_retain_lsn: Lsn,
             ctx: &RequestContext,
         ) -> anyhow::Result<Option<ResidentLayer>> {
             // Check if we need to split the delta layer. We split at the original delta layer boundary to avoid
@@ -1353,7 +1358,7 @@ impl Timeline {
                 tline.timeline_id,
                 tline.tenant_shard_id,
                 deltas.first().unwrap().0,
-                gc_cutoff..end_lsn,
+                lowest_retain_lsn..end_lsn,
                 ctx,
             )
             .await?;
@@ -1370,7 +1375,7 @@ impl Timeline {
             self.timeline_id,
             self.tenant_shard_id,
             &(Key::MIN..Key::MAX), // covers the full key range
-            gc_cutoff,
+            lowest_retain_lsn,
             ctx,
         )
         .await?;
@@ -1407,7 +1412,7 @@ impl Timeline {
                         &delta_split_points,
                         &mut current_delta_split_point,
                         self,
-                        gc_cutoff,
+                        lowest_retain_lsn,
                         ctx,
                     )
                     .await?,
@@ -1440,7 +1445,7 @@ impl Timeline {
                 &delta_split_points,
                 &mut current_delta_split_point,
                 self,
-                gc_cutoff,
+                lowest_retain_lsn,
                 ctx,
             )
             .await?,
