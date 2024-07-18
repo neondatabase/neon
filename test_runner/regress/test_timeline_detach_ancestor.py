@@ -19,7 +19,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
-from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
 from fixtures.utils import assert_pageserver_backups_equal, wait_until
 from requests import ReadTimeout
 
@@ -913,7 +913,9 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
 
     assert (
         mode == "delete_reparentable_timeline"
-    ), "only one now, but we could have the create just as well, need gc blocking"
+    ), "only one now, but creating reparentable timelines cannot be supported even with gc blocking"
+    # perhaps it could be supported by always doing this for the shard0 first, and after that for others.
+    # when we run shard0 to completion, we can use it's timelines to restrict which can be reparented.
 
     shard_count = 2
     neon_env_builder.num_pageservers = shard_count
@@ -1044,6 +1046,97 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
         finally:
             stuck_http.configure_failpoints((pausepoint, "off"))
             victim_http.configure_failpoints((pausepoint, "off"))
+
+
+@pytest.mark.parametrize("action", ["return"])
+def test_retried_detach_ancestor_after_failed_reparenting(
+    neon_env_builder: NeonEnvBuilder, action: str
+):
+    """
+    Using a failpoint, force the completion step of timeline ancestor detach to fail after reparenting a single timeline.
+    Retrying should try reparenting until all reparentings are done, all the time blocking gc.
+    """
+    assert action in ["return"]
+
+    # to get the remote storage metrics
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "1s",
+        }
+    )
+
+    http = env.pageserver.http_client()
+
+    # main ------A-----B-----C-----D-----E> lsn
+    timelines = []
+    with env.endpoints.create_start("main") as ep:
+        for counter in range(5):
+            ep.safe_psql(
+                f"create table foo_{counter} as select i::bigint from generate_series(1, 10000) t(i)"
+            )
+            branch_lsn = wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+            http.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
+            branch = env.neon_cli.create_branch(
+                f"branch_{counter}", "main", ancestor_start_lsn=branch_lsn
+            )
+            timelines.append(branch)
+
+        flush_ep_to_pageserver(env, ep, env.initial_tenant, env.initial_timeline)
+
+    # detach E
+    detached = timelines.pop()
+
+    http = http.without_status_retrying()
+
+    http.configure_failpoints(("timeline-detach-ancestor::allow_one_reparented", action))
+
+    remote_storage = env.pageserver_remote_storage
+    assert isinstance(remote_storage, S3Storage)
+
+    for round in range(len(timelines) - 1):
+        if action == "return":
+            with pytest.raises(PageserverApiException) as exc:
+                http.detach_ancestor(env.initial_tenant, detached)
+            assert exc.value.status_code in [
+                500,
+                503,
+            ], f"its retryable, should be 500 or 503? {exc.value}"
+        else:
+            raise RuntimeError("not implemented {action}")
+
+        # now the tenant should be restarted, but because it has already detached in the remote storage, we dont expect any remote copies from attempt N+1
+        # FIXME: validate using remote storage metrics
+
+        env.pageserver.quiesce_tenants()
+
+        assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
+        reparented = 0
+        for timeline in timelines:
+            detail = http.timeline_detail(env.initial_tenant, timeline)
+            ancestor = TimelineId(detail["ancestor_timeline_id"])
+            if ancestor == detached:
+                reparented += 1
+
+        assert reparented == round + 1
+
+        if round == 0:
+            time.sleep(1)
+            # find the error log line, find the gc paused log line after It
+
+    # final round, the failpoint is hit no longer, and everything completes
+    reparented_resp = http.detach_ancestor(env.initial_tenant, detached)
+    assert reparented_resp == timelines
+    # no need to quiesce_tenants anymore, because completion does that
+
+    reparented = 0
+    for timeline in timelines:
+        if http.timeline_detail(env.initial_tenant, timeline)["ancestor_timeline_id"] is None:
+            reparented += 1
+    assert reparented == len(timelines)
+
+    time.sleep(1)
+    # find the gc is now unblocked line, find nothing to gc
 
 
 # TODO:

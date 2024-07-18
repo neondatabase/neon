@@ -11,6 +11,7 @@ use crate::{
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use anyhow::Context;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -956,7 +957,7 @@ pub(super) async fn complete(
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
     _ctx: &RequestContext,
-) -> Result<HashSet<TimelineId>, anyhow::Error> {
+) -> Result<(HashSet<TimelineId>, bool), anyhow::Error> {
     let PreparedTimelineDetach { layers } = prepared;
 
     let ancestor = detached
@@ -980,12 +981,24 @@ pub(super) async fn complete(
             &layers,
             (ancestor.timeline_id, ancestor_lsn),
         )
-        .await?;
+        .await
+        .context("publish layers and detach ancestor")?;
 
     // FIXME: assert that the persistent record of inprogress detach exists
     // FIXME: assert that gc is still blocked
 
     let mut tasks = tokio::task::JoinSet::new();
+
+    fn fail_all_but_one() -> bool {
+        fail::fail_point!("timeline-detach-ancestor::allow_one_reparented", |_| true);
+        false
+    }
+
+    let failpoint_sem = if fail_all_but_one() {
+        Some(Arc::new(tokio::sync::Semaphore::new(1)))
+    } else {
+        None
+    };
 
     // because we are now keeping the slot in progress, it is unlikely that there will be any
     // timeline deletions during this time. if we raced one, then we'll just ignore it.
@@ -1023,18 +1036,36 @@ pub(super) async fn complete(
             // important in this scope: we are holding the Tenant::timelines lock
             let span = tracing::info_span!("reparent", reparented=%timeline.timeline_id);
             let new_parent = detached.timeline_id;
+            let failpoint_sem = failpoint_sem.clone();
 
             tasks.spawn(
                 async move {
-                    let res = timeline
-                        .remote_client
-                        .schedule_reparenting_and_wait(&new_parent)
-                        .await;
+                    let res = async {
+                        if let Some(failpoint_sem) = failpoint_sem {
+                            let permit = failpoint_sem.acquire().await.map_err(|_| {
+                                anyhow::anyhow!(
+                                    "failpoint: timeline-detach-ancestor::allow_one_reparented",
+                                )
+                            })?;
+                            permit.forget();
+                            failpoint_sem.close();
+                        }
+
+                        timeline
+                            .remote_client
+                            .schedule_reparenting_and_wait(&new_parent)
+                            .await
+                    }
+                    .await;
 
                     match res {
-                        Ok(()) => Some(timeline),
+                        Ok(()) => {
+                            tracing::info!("reparented");
+                            Some(timeline)
+                        }
                         Err(e) => {
-                            // with the use of tenant slot, we no longer expect these.
+                            // with the use of tenant slot, timeline deletion is the most likely
+                            // reason.
                             tracing::warn!("reparenting failed: {e:#}");
                             None
                         }
@@ -1060,26 +1091,32 @@ pub(super) async fn complete(
             }
             Ok(None) => {
                 // lets just ignore this for now. one or all reparented timelines could had
-                // started deletion, and that is fine.
+                // started deletion, and that is fine. deleting a timeline is the most likely
+                // reason for this.
             }
             Err(je) if je.is_cancelled() => unreachable!("not used"),
             Err(je) if je.is_panic() => {
                 // ignore; it's better to continue with a single reparenting failing (or even
-                // all of them) in order to get to the goal state.
-                //
-                // these timelines will never be reparentable, but they can be always detached as
-                // separate tree roots.
+                // all of them) in order to get to the goal state. we will retry this after
+                // restart.
             }
             Err(je) => tracing::error!("unexpected join error: {je:?}"),
         }
     }
 
-    if reparenting_candidates != reparented.len() {
-        // FIXME: we must return 503 kind of response
-        tracing::info!("failed to reparent some candidates");
+    let reparented_all = reparenting_candidates == reparented.len();
+
+    if reparented_all {
+        // FIXME: we must return 503 kind of response in the end; do the restart anyways because
+        // otherwise the runtime state remains diverged
+        tracing::info!(
+            reparented = reparented.len(),
+            candidates = reparenting_candidates,
+            "failed to reparent all candidates; they will be retried after the restart",
+        );
     }
 
     // FIXME: here everything has gone peachy, the tenant will be restarted next.
     // after restart and before returning the response, the gc blocking must be undone
-    Ok(reparented)
+    Ok((reparented, reparented_all))
 }
