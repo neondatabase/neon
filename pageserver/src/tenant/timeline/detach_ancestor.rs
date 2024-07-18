@@ -512,32 +512,65 @@ pub(super) async fn prepare(
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
-        {
+        let (can_still_reparent, detached_ancestor, detached_ancestor_lsn) = {
             let accessor = detached.remote_client.initialized_upload_queue()?;
 
             // we are safe to inspect the latest uploaded, because we can only witness this after
             // restart is complete and ancestor is no more.
             let latest = accessor.latest_uploaded_index_part();
-            if !latest.lineage.is_detached_from_ancestor() {
+            let Some((detached_ancestor, detached_ancestor_lsn)) =
+                latest.lineage.detached_previous_ancestor()
+            else {
                 return Err(NoAncestor);
-            }
-        }
+            };
 
-        // detached has previously been detached; let's inspect each of the current timelines and
-        // report back the timelines which have been reparented by our detach
-        let mut all_direct_children = tenant
+            let can_still_reparent = latest.ongoing_detach_ancestor.is_some();
+
+            (can_still_reparent, detached_ancestor, detached_ancestor_lsn)
+        };
+
+        // `detached` has previously been detached; let's inspect each of the current timelines and
+        // report back the timelines which have been reparented by our detach, or which are still
+        // reparentable
+        let mut all_direct_children = Vec::new();
+        let mut reparenting_candidates = Vec::new();
+
+        tenant
             .timelines
             .lock()
             .unwrap()
             .values()
-            .filter(|tl| matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached)))
-            .map(|tl| (tl.ancestor_lsn, tl.clone()))
-            // FIXME: instead of collecting, partition based on if they are still reparentable
-            // if gc has been blocked, we can still reparent these timelines
+            .for_each(|tl| {
+                // Collect to avoid lock taking order problem with Tenant::timelines and
+                // Timeline::remote_client
+
+                let is_direct_child = matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached));
+
+                if is_direct_child {
+                    all_direct_children.push((tl.ancestor_lsn, tl.clone()));
+                    return;
+                }
+
+                let shared_detached_ancestor = tl.ancestor_timeline.as_ref().is_some_and(|x| x.timeline_id == detached_ancestor);
+                let branchpoint_in_range = tl.ancestor_lsn <= detached_ancestor_lsn;
+
+                if shared_detached_ancestor && branchpoint_in_range {
+                    reparenting_candidates.push(tl.clone());
+                    return;
+                }
+            });
+
+        if can_still_reparent {
+            // gc is still blocked, we can still reparent.
             //
-            // Collect to avoid lock taking order problem with Tenant::timelines and
-            // Timeline::remote_client
-            .collect::<Vec<_>>();
+            // this of course represents a challenge: how to *not* reparent branches which were not
+            // there when we started? cannot, unfortunately, if not recorded to the ongoing_detach_ancestor.
+            if !reparenting_candidates.is_empty() {
+                todo!("reparent the candidates by acquiring a lock, then jumping into completion?")
+            } else {
+                todo!("we must complete the attempt, note these timelines in the response")
+            }
+        }
 
         let mut any_shutdown = false;
 
