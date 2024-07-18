@@ -216,6 +216,11 @@ def test_scrubber_scan_pageserver_metadata(
     assert len(index.layer_metadata) > 0
     it = iter(index.layer_metadata.items())
 
+    scrubber = StorageScrubber(neon_env_builder)
+    scan_summary = scrubber.scan_metadata()
+    assert not scan_summary["with_warnings"]
+    assert not scan_summary["with_errors"]
+
     # Delete a layer file that is listed in the index.
     layer, metadata = next(it)
     log.info(f"Deleting {timeline_path}/{layer.to_str()}")
@@ -226,6 +231,6 @@ def test_scrubber_scan_pageserver_metadata(
     log.info(f"delete response: {delete_response}")
 
     # Check scan summary. Expect it to be a L0 layer so only emit warnings.
-    scan_summary = StorageScrubber(neon_env_builder).scan_metadata()
+    scan_summary = scrubber.scan_metadata()
     log.info(f"{pprint.pformat(scan_summary)}")
     assert len(scan_summary["with_warnings"]) > 0
