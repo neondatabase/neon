@@ -756,9 +756,9 @@ impl Tenant {
                             // The Stopping case is for when we have passed control on to DeleteTenantFlow:
                             // if it errors, we will call make_broken when tenant is already in Stopping.
                             assert!(
-                            matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
-                            "the attach task owns the tenant state until activation is complete"
-                        );
+                                matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
+                                "the attach task owns the tenant state until activation is complete"
+                            );
 
                             *state = TenantState::broken_from_reason(err.to_string());
                         });
