@@ -150,6 +150,10 @@ def test_sharding_compaction(
         "image_layer_creation_check_threshold": 0,
     }
 
+    # Disable compression, as we can't estimate the size of layers with compression enabled
+    # TODO: implement eager layer cutting during compaction
+    neon_env_builder.pageserver_config_override = "image_compression='disabled'"
+
     neon_env_builder.num_pageservers = 1 if shard_count is None else shard_count
     env = neon_env_builder.init_start(
         initial_tenant_conf=TENANT_CONF,
