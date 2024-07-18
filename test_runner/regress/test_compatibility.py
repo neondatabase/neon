@@ -93,29 +93,6 @@ check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
 )
 
 
-def fixup_storage_controller(env: NeonEnv):
-    """
-    After importing a repo_dir, we need to massage the storage controller's state a bit: it will have
-    initially started up with no nodes, but some tenants, and thereby those tenants won't be scheduled
-    anywhere.
-
-    After NeonEnv.start() is done (i.e. nodes are started + registered), call this function to get
-    the storage controller into a good state.
-
-    This function should go away once compat tests carry the controller database in their snapshots, so
-    that the controller properly remembers nodes between creating + restoring the snapshot.
-    """
-    env.storage_controller.allowed_errors.extend(
-        [
-            ".*Tenant shard .+ references non-existent node.*",
-            ".*Failed to schedule tenant .+ at startup.*",
-        ]
-    )
-    env.storage_controller.stop()
-    env.storage_controller.start()
-    env.storage_controller.reconcile_until_idle()
-
-
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
 def test_create_snapshot(
@@ -198,7 +175,6 @@ def test_backward_compatibility(
         neon_env_builder.num_safekeepers = 3
         env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
         neon_env_builder.start()
-        fixup_storage_controller(env)
 
         check_neon_works(
             env,
@@ -287,7 +263,6 @@ def test_forward_compatibility(
         assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
 
         neon_env_builder.start()
-        fixup_storage_controller(env)
 
         # ensure the specified pageserver is running
         assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)

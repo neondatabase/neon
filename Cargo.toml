@@ -191,6 +191,7 @@ uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 rustls-native-certs = "0.7"
 x509-parser = "0.15"
+whoami = "1.5.1"
 
 ## TODO replace this with tracing
 env_logger = "0.10"

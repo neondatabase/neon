@@ -262,7 +262,7 @@ where
 
     pub fn iter<'a>(self, start_key: &'a [u8; L], ctx: &'a RequestContext) -> DiskBtreeIterator<'a>
     where
-        R: 'a,
+        R: 'a + Send,
     {
         DiskBtreeIterator {
             stream: Box::pin(self.into_stream(start_key, ctx)),
@@ -521,7 +521,7 @@ where
 pub struct DiskBtreeIterator<'a> {
     #[allow(clippy::type_complexity)]
     stream: std::pin::Pin<
-        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a>,
+        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a + Send>,
     >,
 }
 

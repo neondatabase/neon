@@ -702,20 +702,16 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
     # make another of the nodes get stuck, then restart
 
     stuck = pageservers[int(shards[0]["node_id"])]
-    stuck.allowed_errors.append(".*: request was dropped before completing")
-    env.storage_controller.allowed_errors.append(".*: request was dropped before completing")
+    log.info(f"stuck pageserver is id={stuck.id}")
     stuck_http = stuck.http_client()
     stuck_http.configure_failpoints(
         ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause")
     )
 
     restarted = pageservers[int(shards[1]["node_id"])]
-    restarted.allowed_errors.extend(
-        [
-            ".*: request was dropped before completing",
-            ".*: Cancelled request finished with an error: ShuttingDown",
-        ]
-    )
+    log.info(f"restarted pageserver is id={restarted.id}")
+    # this might be hit; see `restart_restarted`
+    restarted.allowed_errors.append(".*: Cancelled request finished with an error: ShuttingDown")
     assert restarted.id != stuck.id
     restarted_http = restarted.http_client()
     restarted_http.configure_failpoints(
@@ -723,6 +719,14 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
             ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause"),
         ]
     )
+
+    for info in shards:
+        pageserver = pageservers[int(info["node_id"])]
+        # the first request can cause these, but does not repeatedly
+        pageserver.allowed_errors.append(".*: request was dropped before completing")
+
+    # first request again
+    env.storage_controller.allowed_errors.append(".*: request was dropped before completing")
 
     target = env.storage_controller.pageserver_api()
 
