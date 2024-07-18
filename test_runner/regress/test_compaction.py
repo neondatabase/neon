@@ -385,6 +385,20 @@ def test_image_layer_compression(
 
         log.info(f"images: {image_layer_count}, deltas: {delta_layer_count}")
 
+    bytes_in = pageserver.http_client().get_metric_value(
+        "pageserver_compression_image_in_bytes_total"
+    )
+    bytes_out = pageserver.http_client().get_metric_value(
+        "pageserver_compression_image_out_bytes_total"
+    )
+    assert bytes_in is not None
+    assert bytes_out is not None
+    log.info(f"Compression ratio: {bytes_out/bytes_in} ({bytes_out} in, {bytes_out} out)")
+
+    # We are writing high compressible repetitive plain text, expect excellent compression
+    EXPECT_RATIO = 0.2
+    assert bytes_out / bytes_in < EXPECT_RATIO
+
     # Destroy the endpoint and create a new one to resetthe caches
     with env.endpoints.create_start(
         "main", tenant_id=tenant_id, pageserver_id=pageserver.id
