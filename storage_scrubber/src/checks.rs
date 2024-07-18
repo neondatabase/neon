@@ -341,6 +341,9 @@ pub(crate) async fn list_timeline_blobs(
                 tracing::debug!("initdb archive {key}");
                 initdb_archive = true;
             }
+            Some("initdb-preserved.tar.zst") => {
+                tracing::info!("initdb archive preserved {key}");
+            }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
                 Ok((new_layer, gen)) => {
                     tracing::debug!("Parsed layer key: {} {:?}", new_layer, gen);
