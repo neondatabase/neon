@@ -59,7 +59,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - DEFAULT_PG_VERSION: 14
+          - DEFAULT_PG_VERSION: 16
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
             provisioner: 'k8s-pod' 
@@ -146,6 +146,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   replication-tests:
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
@@ -190,6 +191,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 5400
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -215,11 +217,14 @@ jobs:
     # Available platforms:
     # - neon-captest-new: Freshly created project (1 CU)
     # - neon-captest-freetier: Use freetier-sized compute (0.25 CU)
+    # - neonvm-captest-azure-new: Freshly created project (1 CU) in azure region
+    # - neonvm-captest-azure-freetier: Use freetier-sized compute (0.25 CU) in azure region
     # - neon-captest-reuse: Reusing existing project
     # - rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
     # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
     env:
       RUN_AWS_RDS_AND_AURORA: ${{ github.event.inputs.run_AWS_RDS_AND_AURORA || 'false' }}
+      DEFAULT_REGION_ID: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
     runs-on: ubuntu-22.04
     outputs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
@@ -230,23 +235,33 @@ jobs:
     - name: Generate matrix for pgbench benchmark
       id: pgbench-compare-matrix
       run: |
+        region_id_default=${{ env.DEFAULT_REGION_ID }}
         matrix='{
+          "pg_version" : [
+            16
+          ],
+          "region_id" : [
+            "'"$region_id_default"'"
+            ],
           "platform": [
             "neon-captest-new",
             "neon-captest-reuse",
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "platform": "neon-captest-freetier",         "db_size": "3gb"  },
-                      { "platform": "neon-captest-new",              "db_size": "50gb" },
-                      { "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
-                      { "platform": "neonvm-captest-new",            "db_size": "50gb" },
-                      { "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
+          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neon-captest-freetier",         "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neon-captest-new",              "db_size": "50gb" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
-                                                     { "platform": "rds-aurora",   "db_size": "50gb"}]')
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb"},
+                                                     { "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-aurora",   "db_size": "50gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -298,7 +313,7 @@ jobs:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: ${{ matrix.pg_version }}
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
@@ -323,14 +338,14 @@ jobs:
         prefix: latest
 
     - name: Create Neon Project
-      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier", "neonvm-captest-new", "neonvm-captest-freetier"]'), matrix.platform)
+      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier", "neonvm-captest-new", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
-        region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+        region_id: ${{ matrix.region_id }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-        compute_units: ${{ (matrix.platform == 'neon-captest-freetier' && '[0.25, 0.25]') || '[1, 1]' }}
+        compute_units: ${{ (contains(matrix.platform, 'captest-freetier') && '[0.25, 0.25]') || '[1, 1]' }}
         provisioner: ${{ (contains(matrix.platform, 'neonvm-') && 'k8s-neonvm') || 'k8s-pod' }}
 
     - name: Set up Connection String
@@ -343,7 +358,7 @@ jobs:
           neonvm-captest-sharding-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_SHARDING_CONNSTR }}
             ;;
-          neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier)
+          neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier | neonvm-azure-captest-new | neonvm-azure-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
@@ -368,6 +383,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -381,6 +397,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -394,6 +411,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -420,6 +438,12 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   pgbench-pgvector:
+    strategy:
+      matrix:
+        include:
+          - PLATFORM: "neon-captest-pgvector"
+          - PLATFORM: "azure-captest-pgvector"
+            
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
       TEST_PG_BENCH_SCALES_MATRIX: "1"
@@ -428,7 +452,7 @@ jobs:
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
-      PLATFORM: "neon-captest-pgvector"
+      PLATFORM: ${{ matrix.PLATFORM }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
@@ -448,7 +472,18 @@ jobs:
     - name: Set up Connection String
       id: set-up-connstr
       run: |
-        CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR }}
+        case "${PLATFORM}" in
+          neon-captest-pgvector)
+            CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR }}
+            ;;
+          azure-captest-pgvector)
+            CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR_AZURE }}
+            ;;
+          *)
+            echo >&2 "Unknown PLATFORM=${PLATFORM}"
+            exit 1
+            ;;
+        esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
@@ -460,6 +495,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_pgvector_indexing
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -473,6 +509,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
@@ -487,7 +524,7 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing neon-captest-pgvector: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: "Periodic perf testing ${PLATFORM}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -735,6 +772,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_user_examples
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"

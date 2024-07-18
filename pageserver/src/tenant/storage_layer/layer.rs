@@ -693,6 +693,18 @@ impl Drop for LayerInner {
             // and we could be delaying shutdown for nothing.
         }
 
+        if let Some(timeline) = self.timeline.upgrade() {
+            // Only need to decrement metrics if the timeline still exists: otherwise
+            // it will have already de-registered these metrics via TimelineMetrics::shutdown
+            if self.desc.is_delta() {
+                timeline.metrics.layer_count_delta.dec();
+                timeline.metrics.layer_size_delta.sub(self.desc.file_size);
+            } else {
+                timeline.metrics.layer_count_image.dec();
+                timeline.metrics.layer_size_image.sub(self.desc.file_size);
+            }
+        }
+
         if !*self.wanted_deleted.get_mut() {
             return;
         }
@@ -790,6 +802,15 @@ impl LayerInner {
         } else {
             (heavier_once_cell::OnceCell::default(), 0, Status::Evicted)
         };
+
+        // This object acts as a RAII guard on these metrics: increment on construction
+        if desc.is_delta() {
+            timeline.metrics.layer_count_delta.inc();
+            timeline.metrics.layer_size_delta.add(desc.file_size);
+        } else {
+            timeline.metrics.layer_count_image.inc();
+            timeline.metrics.layer_size_image.add(desc.file_size);
+        }
 
         LayerInner {
             conf,
