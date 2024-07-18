@@ -289,6 +289,18 @@ impl PartialBackup {
             })
             .collect();
 
+        if new_segments.len() == 1 {
+            // we have an uploaded segment, it must not be deleted from remote storage
+            segments_to_delete.retain(|name| name != &new_segments[0].name);
+        } else {
+            // there should always be zero or one uploaded segment
+            assert!(
+                new_segments.is_empty(),
+                "too many uploaded segments: {:?}",
+                new_segments
+            );
+        }
+
         info!("deleting objects: {:?}", segments_to_delete);
         let mut objects_to_delete = vec![];
         for seg in segments_to_delete.iter() {
