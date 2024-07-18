@@ -7230,11 +7230,10 @@ mod tests {
                 Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
             ),
         ];
-        let history_ref = history.iter().collect_vec();
         let res = tline
             .generate_key_retention(
                 key,
-                &history_ref,
+                &history,
                 Lsn(0x60),
                 &[Lsn(0x20), Lsn(0x40), Lsn(0x50)],
                 3,

@@ -1064,7 +1064,7 @@ impl Timeline {
     pub(crate) async fn generate_key_retention(
         self: &Arc<Timeline>,
         key: Key,
-        history: &[&(Key, Lsn, Value)],
+        history: &[(Key, Lsn, Value)],
         horizon: Lsn,
         retain_lsn_below_horizon: &[Lsn],
         delta_threshold_cnt: usize,
@@ -1111,7 +1111,7 @@ impl Timeline {
                 while current_idx < lsn_split_points.len() && *lsn > lsn_split_points[current_idx] {
                     current_idx += 1;
                 }
-                split_history[current_idx].push(*item);
+                split_history[current_idx].push(item);
             }
             (split_history, lsn_split_points)
         };
@@ -1119,9 +1119,9 @@ impl Timeline {
         for split_for_lsn in &mut split_history {
             let mut prev_lsn = None;
             let mut new_split_for_lsn = Vec::with_capacity(split_for_lsn.len());
-            for record @ (_, lsn, _) in &*split_for_lsn {
+            for record @ (_, lsn, _) in std::mem::take(split_for_lsn) {
                 if let Some(prev_lsn) = &prev_lsn {
-                    if *prev_lsn == *lsn {
+                    if *prev_lsn == lsn {
                         // The case that we have an LSN with both data from the delta layer and the image layer. As
                         // `ValueWrapper` ensures that an image is ordered before a delta at the same LSN, we simply
                         // drop this delta and keep the image.
@@ -1132,8 +1132,8 @@ impl Timeline {
                         continue;
                     }
                 }
-                prev_lsn = Some(*lsn);
-                new_split_for_lsn.push(*record);
+                prev_lsn = Some(lsn);
+                new_split_for_lsn.push(record);
             }
             *split_for_lsn = new_split_for_lsn;
         }
@@ -1309,54 +1309,6 @@ impl Timeline {
         let mut accumulated_values = Vec::new();
         let mut last_key: Option<Key> = None;
 
-        /// Take a list of images and deltas, produce an image at the GC horizon, and a list of deltas above the GC horizon.
-        async fn flush_accumulated_states(
-            tline: &Arc<Timeline>,
-            key: Key,
-            accumulated_values: &[(Key, Lsn, crate::repository::Value)],
-            horizon: Lsn,
-        ) -> anyhow::Result<(Vec<(Key, Lsn, crate::repository::Value)>, bytes::Bytes)> {
-            let mut base_image = None;
-            let mut keys_above_horizon = Vec::new();
-            let mut delta_above_base_image = Vec::new();
-            // We have a list of deltas/images. We want to create image layers while collect garbages.
-            for (key, lsn, val) in accumulated_values.iter().rev() {
-                if *lsn > horizon {
-                    if let Some((_, prev_lsn, _)) = keys_above_horizon.last_mut() {
-                        if *prev_lsn == *lsn {
-                            // The case that we have an LSN with both data from the delta layer and the image layer. As
-                            // `ValueWrapper` ensures that an image is ordered before a delta at the same LSN, we simply
-                            // drop this delta and keep the image.
-                            //
-                            // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
-                            // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
-                            // dropped.
-                            continue;
-                        }
-                    }
-                    keys_above_horizon.push((*key, *lsn, val.clone()));
-                } else if *lsn <= horizon {
-                    match val {
-                        crate::repository::Value::Image(image) => {
-                            base_image = Some((*lsn, image.clone()));
-                            break;
-                        }
-                        crate::repository::Value::WalRecord(wal) => {
-                            delta_above_base_image.push((*lsn, wal.clone()));
-                        }
-                    }
-                }
-            }
-            // do not reverse delta_above_base_image, reconstruct state expects reversely-ordered records
-            keys_above_horizon.reverse();
-            let state = ValueReconstructState {
-                img: base_image,
-                records: delta_above_base_image,
-            };
-            let img = tline.reconstruct_value(key, horizon, state).await?;
-            Ok((keys_above_horizon, img))
-        }
-
         async fn flush_deltas(
             deltas: &mut Vec<(Key, Lsn, crate::repository::Value)>,
             last_key: Key,
@@ -1431,9 +1383,10 @@ impl Timeline {
                 }
                 accumulated_values.push((key, lsn, val));
             } else {
+                let last_key = last_key.as_mut().unwrap();
                 let retention = self
                     .generate_key_retention(
-                        last_key,
+                        *last_key,
                         &accumulated_values,
                         gc_cutoff,
                         &retain_lsns_below_horizon,
@@ -1442,7 +1395,7 @@ impl Timeline {
                     .await?;
                 // Put the image into the image layer. Currently we have a single big layer for the compaction.
                 retention
-                    .pipe_to(last_key, &mut delta_values, &mut image_layer_writer, ctx)
+                    .pipe_to(*last_key, &mut delta_values, &mut image_layer_writer, ctx)
                     .await?;
                 delta_layers.extend(
                     flush_deltas(
