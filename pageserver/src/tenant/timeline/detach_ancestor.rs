@@ -517,14 +517,40 @@ pub(super) async fn prepare(
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
-        {
+        let (can_still_reparent, detached_ancestor, detached_ancestor_lsn) = {
             let accessor = detached.remote_client.initialized_upload_queue()?;
 
             // we are safe to inspect the latest uploaded, because we can only witness this after
             // restart is complete and ancestor is no more.
             let latest = accessor.latest_uploaded_index_part();
-            if !latest.lineage.is_detached_from_ancestor() {
+            let Some((detached_ancestor, detached_ancestor_lsn)) =
+                latest.lineage.detached_previous_ancestor()
+            else {
                 return Err(NoAncestor);
+            };
+
+            let can_still_reparent = latest.gc_blocking.is_some_and(|b| {
+                b.blocked_by(
+                    crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
+                )
+            });
+
+            (can_still_reparent, detached_ancestor, detached_ancestor_lsn)
+        };
+
+        // `detached` has previously been detached; let's inspect each of the current timelines and
+        // report back the timelines which have been reparented by our detach, or which are still
+        // reparentable
+
+        if can_still_reparent {
+            // gc is still blocked, we can still reparent.
+            //
+            // this of course represents a challenge: how to *not* reparent branches which were not
+            // there when we started? cannot, unfortunately, if not recorded to the ongoing_detach_ancestor.
+            if !reparenting_candidates.is_empty() {
+                todo!("reparent the candidates by acquiring a lock, then jumping into completion?")
+            } else {
+                todo!("we must complete the attempt, note these timelines in the response")
             }
         }
 
