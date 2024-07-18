@@ -464,11 +464,14 @@ jobs:
 
     # until https://github.com/neondatabase/neon/issues/8275 is fixed we temporarily install postgresql-16
     # instead of using Neon artifacts containing pgbench
-    - name: Install postgresql-16
+    - name: Install postgresql-16 where pytest expects it
       run: |
         apt-get update && apt-get install -y postgresql-common
         /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
         apt-get -y install postgresql-16
+        mkdir -p /tmp/neon/pg_install/v16/bin
+        ln -s /usr/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench
+        ln -s /usr/bin/psql /tmp/neon/pg_install/v16/bin/psql
 
     - name: Set up Connection String
       id: set-up-connstr
