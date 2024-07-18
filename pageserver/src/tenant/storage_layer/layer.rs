@@ -1910,7 +1910,7 @@ impl ResidentLayer {
         }
     }
 
-    /// Cast the layer to an image, return an error if it is indeed a delta layer.
+    /// Cast the layer to an image, return an error if it is a delta layer.
     pub(crate) async fn get_as_image(
         &self,
         ctx: &RequestContext,
