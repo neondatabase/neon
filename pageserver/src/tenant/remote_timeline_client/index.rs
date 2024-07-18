@@ -210,10 +210,10 @@ fn is_false(b: &bool) -> bool {
 impl Lineage {
     const REMEMBER_AT_MOST: usize = 100;
 
-    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
+    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) -> bool {
         if self.reparenting_history.last() == Some(old_ancestor) {
             // do not re-record it
-            return;
+            return false;
         }
 
         let drop_oldest = self.reparenting_history.len() + 1 >= Self::REMEMBER_AT_MOST;
@@ -223,13 +223,21 @@ impl Lineage {
             self.reparenting_history.remove(0);
         }
         self.reparenting_history.push(*old_ancestor);
+        true
     }
 
-    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) {
-        assert!(self.original_ancestor.is_none());
-
-        self.original_ancestor =
-            Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
+    /// Returns true if anything changed.
+    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) -> bool {
+        if let Some((id, lsn, _)) = self.original_ancestor {
+            assert_eq!(id, branchpoint.0);
+            assert_eq!(lsn, branchpoint.1);
+            false
+        } else {
+            assert!(self.original_ancestor.is_none());
+            self.original_ancestor =
+                Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
+            true
+        }
     }
 
     /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed

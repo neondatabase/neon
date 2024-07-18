@@ -697,17 +697,31 @@ impl RemoteTimelineClient {
                 ));
             };
 
-            upload_queue.dirty.metadata.reparent(new_parent);
-            upload_queue.dirty.lineage.record_previous_ancestor(&prev);
+            let uploaded = &upload_queue.clean.0.metadata;
 
-            self.schedule_index_upload(upload_queue)?;
+            if uploaded.ancestor_timeline().is_none() && !uploaded.ancestor_lsn().is_valid() {
+                // nothing to do
+                None
+            } else {
+                let mut modified = false;
 
-            self.schedule_barrier0(upload_queue)
+                modified |= upload_queue.dirty.metadata.reparent(new_parent);
+                modified |= upload_queue.dirty.lineage.record_previous_ancestor(&prev);
+
+                if modified {
+                    self.schedule_index_upload(upload_queue)?;
+                } else {
+                    // the modifications are already being uploaded
+                }
+
+                Some(self.schedule_barrier0(upload_queue))
+            }
         };
 
-        Self::wait_completion0(receiver)
-            .await
-            .context("wait completion")
+        if let Some(receiver) = receiver {
+            Self::wait_completion0(receiver).await?;
+        }
+        Ok(())
     }
 
     /// Schedules uploading a new version of `index_part.json` with the given layers added,
@@ -723,26 +737,33 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
-            upload_queue.dirty.lineage.record_detaching(&adopted);
+            if upload_queue.clean.0.lineage.detached_previous_ancestor() == Some(adopted) {
+                None
+            } else {
+                let mut modified = false;
+                modified |= upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
+                modified |= upload_queue.dirty.lineage.record_detaching(&adopted);
 
-            for layer in layers {
-                upload_queue
-                    .dirty
-                    .layer_metadata
-                    .insert(layer.layer_desc().layer_name(), layer.metadata());
+                for layer in layers {
+                    let prev = upload_queue
+                        .dirty
+                        .layer_metadata
+                        .insert(layer.layer_desc().layer_name(), layer.metadata());
+                    modified |= prev.is_none();
+                }
+
+                if modified {
+                    self.schedule_index_upload(upload_queue)?;
+                }
+
+                Some(self.schedule_barrier0(upload_queue))
             }
-
-            self.schedule_index_upload(upload_queue)?;
-
-            let barrier = self.schedule_barrier0(upload_queue);
-            self.launch_queued_tasks(upload_queue);
-            barrier
         };
 
-        Self::wait_completion0(barrier)
-            .await
-            .context("wait completion")
+        if let Some(barrier) = barrier {
+            Self::wait_completion0(barrier).await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn schedule_started_detach_ancestor_mark_and_wait(
@@ -771,10 +792,9 @@ impl RemoteTimelineClient {
         };
 
         if let Some(barrier) = maybe_barrier {
-            Self::wait_completion0(barrier).await
-        } else {
-            Ok(())
+            Self::wait_completion0(barrier).await?;
         }
+        Ok(())
     }
 
     pub(crate) async fn schedule_completed_detach_ancestor_mark_and_wait(
@@ -801,10 +821,9 @@ impl RemoteTimelineClient {
         };
 
         if let Some(barrier) = maybe_barrier {
-            Self::wait_completion0(barrier).await
-        } else {
-            Ok(())
+            Self::wait_completion0(barrier).await?;
         }
+        Ok(())
     }
 
     /// Launch an upload operation in the background; the file is added to be included in next
