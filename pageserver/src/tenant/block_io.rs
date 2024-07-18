@@ -149,24 +149,19 @@ impl<'a> BlockReaderRef<'a> {
 /// ```
 ///
 pub struct BlockCursor<'a> {
-    pub(super) read_compressed: bool,
     reader: BlockReaderRef<'a>,
 }
 
 impl<'a> BlockCursor<'a> {
     pub(crate) fn new(reader: BlockReaderRef<'a>) -> Self {
-        Self::new_with_compression(reader, false)
+        Self::new_with_compression(reader, true)
     }
-    pub(crate) fn new_with_compression(reader: BlockReaderRef<'a>, read_compressed: bool) -> Self {
-        BlockCursor {
-            read_compressed,
-            reader,
-        }
+    pub(crate) fn new_with_compression(reader: BlockReaderRef<'a>, _read_compressed: bool) -> Self {
+        BlockCursor { reader }
     }
     // Needed by cli
     pub fn new_fileblockreader(reader: &'a FileBlockReader) -> Self {
         BlockCursor {
-            read_compressed: false,
             reader: BlockReaderRef::FileBlockReader(reader),
         }
     }
@@ -196,17 +191,11 @@ pub struct FileBlockReader<'a> {
 
     /// Unique ID of this file, used as key in the page cache.
     file_id: page_cache::FileId,
-
-    compressed_reads: bool,
 }
 
 impl<'a> FileBlockReader<'a> {
     pub fn new(file: &'a VirtualFile, file_id: FileId) -> Self {
-        FileBlockReader {
-            file_id,
-            file,
-            compressed_reads: true,
-        }
+        FileBlockReader { file_id, file }
     }
 
     /// Read a page from the underlying file into given buffer.
@@ -253,10 +242,7 @@ impl<'a> FileBlockReader<'a> {
 
 impl BlockReader for FileBlockReader<'_> {
     fn block_cursor(&self) -> BlockCursor<'_> {
-        BlockCursor::new_with_compression(
-            BlockReaderRef::FileBlockReader(self),
-            self.compressed_reads,
-        )
+        BlockCursor::new_with_compression(BlockReaderRef::FileBlockReader(self), true)
     }
 }
 

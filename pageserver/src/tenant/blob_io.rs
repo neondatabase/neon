@@ -19,7 +19,6 @@ use bytes::{BufMut, BytesMut};
 use pageserver_api::models::ImageCompressionAlgorithm;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
-use tracing::warn;
 
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
@@ -73,22 +72,14 @@ impl<'a> BlockCursor<'a> {
                 len_buf.copy_from_slice(&buf[off..off + 4]);
                 off += 4;
             }
-            let bit_mask = if self.read_compressed {
-                !LEN_COMPRESSION_BIT_MASK
-            } else {
-                0x7f
-            };
-            len_buf[0] &= bit_mask;
+            len_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
             u32::from_be_bytes(len_buf) as usize
         };
         let compression_bits = first_len_byte & LEN_COMPRESSION_BIT_MASK;
 
         let mut tmp_buf = Vec::new();
         let buf_to_write;
-        let compression = if compression_bits <= BYTE_UNCOMPRESSED || !self.read_compressed {
-            if compression_bits > BYTE_UNCOMPRESSED {
-                warn!("reading key above future limit ({len} bytes)");
-            }
+        let compression = if compression_bits <= BYTE_UNCOMPRESSED {
             buf_to_write = dstbuf;
             None
         } else if compression_bits == BYTE_ZSTD {
@@ -331,6 +322,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         if compressed.len() < len {
                             let compressed_len = compressed.len();
                             compressed_buf = Some(compressed);
+
                             (BYTE_ZSTD, compressed_len, slice.into_inner())
                         } else {
                             (BYTE_UNCOMPRESSED, len, slice.into_inner())
