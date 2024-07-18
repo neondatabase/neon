@@ -373,11 +373,7 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
             endpoint.safe_psql(
                 f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))"
             )
-        # run compaction to create image layers
-        ps_http.timeline_gc(tenant_id, timeline_id, 0)
-        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-    ps_http.timeline_checkpoint(tenant_id, timeline_id)
-    # Finish uploads
+    # run compaction to create image layers
     ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
     # Finish all remote writes (including deletions)
     wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
