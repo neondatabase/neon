@@ -31,6 +31,7 @@ import backoff
 import httpx
 import jwt
 import psycopg2
+import psycopg2.sql
 import pytest
 import requests
 import toml
@@ -87,7 +88,7 @@ from fixtures.utils import (
 )
 from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
-from .neon_api import NeonAPI
+from .neon_api import NeonAPI, NeonApiEndpoint
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -727,8 +728,30 @@ class NeonEnvBuilder:
                 self.repo_dir / "local_fs_remote_storage",
             )
 
-        if (attachments_json := Path(repo_dir / "attachments.json")).exists():
-            shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
+        # restore storage controller (the db is small, don't bother with overlayfs)
+        storcon_db_from_dir = repo_dir / "storage_controller_db"
+        storcon_db_to_dir = self.repo_dir / "storage_controller_db"
+        log.info(f"Copying storage_controller_db from {storcon_db_from_dir} to {storcon_db_to_dir}")
+        assert storcon_db_from_dir.is_dir()
+        assert not storcon_db_to_dir.exists()
+
+        def ignore_postgres_log(path: str, _names):
+            if Path(path) == storcon_db_from_dir:
+                return {"postgres.log"}
+            return set()
+
+        shutil.copytree(storcon_db_from_dir, storcon_db_to_dir, ignore=ignore_postgres_log)
+        assert not (storcon_db_to_dir / "postgres.log").exists()
+        # NB: neon_local rewrites postgresql.conf on each start based on neon_local config. No need to patch it.
+        # However, in this new NeonEnv, the pageservers listen on different ports, and the storage controller
+        # will currently reject re-attach requests from them because the NodeMetadata isn't identical.
+        # So, from_repo_dir patches up the the storcon database.
+        patch_script_path = self.repo_dir / "storage_controller_db.startup.sql"
+        assert not patch_script_path.exists()
+        patch_script = ""
+        for ps in self.env.pageservers:
+            patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
+        patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
         with (self.repo_dir / "config").open("r") as f:
@@ -2400,7 +2423,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def locate(self, tenant_id: TenantId) -> list[dict[str, Any]]:
         """
-        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr": str, "listen_http_port": int}
         """
         response = self.request(
             "GET",
@@ -2786,8 +2809,8 @@ class NeonPageserver(PgProtocol, LogUtils):
             )
         return client.tenant_attach(
             tenant_id,
+            generation,
             config,
-            generation=generation,
         )
 
     def tenant_detach(self, tenant_id: TenantId):
@@ -3156,6 +3179,18 @@ class RemotePostgres(PgProtocol):
     ):
         # do nothing
         pass
+
+
+@pytest.fixture(scope="function")
+def benchmark_project_pub(neon_api: NeonAPI, pg_version: PgVersion) -> NeonApiEndpoint:
+    project_id = os.getenv("BENCHMARK_PROJECT_ID_PUB")
+    return NeonApiEndpoint(neon_api, pg_version, project_id)
+
+
+@pytest.fixture(scope="function")
+def benchmark_project_sub(neon_api: NeonAPI, pg_version: PgVersion) -> NeonApiEndpoint:
+    project_id = os.getenv("BENCHMARK_PROJECT_ID_SUB")
+    return NeonApiEndpoint(neon_api, pg_version, project_id)
 
 
 @pytest.fixture(scope="function")
@@ -3773,12 +3808,12 @@ class Endpoint(PgProtocol, LogUtils):
             self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
         )
 
-    def respec(self, **kwargs):
+    def respec(self, **kwargs: Any) -> None:
         """Update the endpoint.json file used by control_plane."""
         # Read config
         config_path = os.path.join(self.endpoint_path(), "endpoint.json")
         with open(config_path, "r") as f:
-            data_dict = json.load(f)
+            data_dict: dict[str, Any] = json.load(f)
 
         # Write it back updated
         with open(config_path, "w") as file:
@@ -3786,13 +3821,13 @@ class Endpoint(PgProtocol, LogUtils):
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Please note: Migrations only run if pg_skip_catalog_updates is false
-    def wait_for_migrations(self):
+    def wait_for_migrations(self, num_migrations: int = 10):
         with self.cursor() as cur:
 
             def check_migrations_done():
                 cur.execute("SELECT id FROM neon_migration.migration_id")
-                migration_id = cur.fetchall()[0][0]
-                assert migration_id != 0
+                migration_id: int = cur.fetchall()[0][0]
+                assert migration_id >= num_migrations
 
             wait_until(20, 0.5, check_migrations_done)
 
@@ -4042,6 +4077,22 @@ class Safekeeper(LogUtils):
         self.id = id
         self.running = running
         self.logfile = Path(self.data_dir) / f"safekeeper-{id}.log"
+
+        if extra_opts is None:
+            # Testing defaults: enable everything, and set short timeouts so that background
+            # work will happen during short tests.
+            # **Note**: Any test that explicitly sets extra_opts will not get these defaults.
+            extra_opts = [
+                "--enable-offload",
+                "--delete-offloaded-wal",
+                "--partial-backup-timeout",
+                "10s",
+                "--control-file-save-interval",
+                "1s",
+                "--eviction-min-resident",
+                "10s",
+            ]
+
         self.extra_opts = extra_opts
 
     def start(
