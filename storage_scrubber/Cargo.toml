@@ -36,9 +36,18 @@ rustls-native-certs.workspace = true
 once_cell.workspace = true
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "json"] }
-aws-config = { workspace = true, default-features = false, features = ["rustls", "sso"] }
+chrono = { workspace = true, default-features = false, features = [
+    "clock",
+    "serde",
+] }
+reqwest = { workspace = true, default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+aws-config = { workspace = true, default-features = false, features = [
+    "rustls",
+    "sso",
+] }
 
 pageserver = { path = "../pageserver" }
 pageserver_api = { path = "../libs/pageserver_api" }
@@ -48,6 +57,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 tracing-appender = "0.2"
-histogram = "0.7"
 
 futures.workspace = true
