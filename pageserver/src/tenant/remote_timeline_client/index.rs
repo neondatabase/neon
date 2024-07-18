@@ -252,6 +252,11 @@ impl Lineage {
         self.original_ancestor.is_some()
     }
 
+    /// Returns original ancestor timeline id and lsn that this timeline has been detached from.
+    pub(crate) fn detached_previous_ancestor(&self) -> Option<(TimelineId, Lsn)> {
+        self.original_ancestor.map(|(id, lsn, _)| (id, lsn))
+    }
+
     pub(crate) fn is_reparented(&self) -> bool {
         !self.reparenting_history.is_empty()
     }
