@@ -247,6 +247,8 @@ impl Lineage {
             .is_some_and(|(_, ancestor_lsn, _)| ancestor_lsn == lsn)
     }
 
+    // FIXME: rename to is_detached_from_ancestor as the reparented will not be detached from
+    // original ancestor
     pub(crate) fn is_detached_from_original_ancestor(&self) -> bool {
         self.original_ancestor.is_some()
     }
