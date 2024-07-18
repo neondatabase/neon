@@ -1898,7 +1898,7 @@ impl ResidentLayer {
         self.owner.metadata()
     }
 
-    /// Cast the layer to a delta, return an error if it is indeed an image layer.
+    /// Cast the layer to a delta, return an error if it is an image layer.
     pub(crate) async fn get_as_delta(
         &self,
         ctx: &RequestContext,
