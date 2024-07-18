@@ -738,6 +738,9 @@ struct ImageLayerWriterInner {
     key_range: Range<Key>,
     lsn: Lsn,
 
+    // Total uncompressed bytes passed into put_image
+    uncompressed_bytes: u64,
+
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 }
@@ -793,6 +796,7 @@ impl ImageLayerWriterInner {
             lsn,
             tree: tree_builder,
             blob_writer,
+            uncompressed_bytes: 0,
         };
 
         Ok(writer)
@@ -811,6 +815,7 @@ impl ImageLayerWriterInner {
     ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
         let compression = self.conf.image_compression;
+        self.uncompressed_bytes += img.len() as u64;
         let (_img, res) = self
             .blob_writer
             .write_blob_maybe_compressed(img, ctx, compression)
@@ -835,6 +840,11 @@ impl ImageLayerWriterInner {
     ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+
+        // Calculate compression ratio
+        let compressed_size = self.blob_writer.size() - PAGE_SZ as u64; // Subtract PAGE_SZ for header
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES.inc_by(self.uncompressed_bytes);
+        crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
         let mut file = self.blob_writer.into_inner();
 
