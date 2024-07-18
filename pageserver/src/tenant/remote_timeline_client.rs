@@ -745,6 +745,68 @@ impl RemoteTimelineClient {
             .context("wait completion")
     }
 
+    pub(crate) async fn schedule_started_detach_ancestor_mark_and_wait(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<()> {
+        let maybe_barrier = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
+
+            match upload_queue.dirty.ongoing_detach_ancestor {
+                Some(_) if upload_queue.clean.0.ongoing_detach_ancestor.is_some() => {
+                    // we don't need to upload anything
+                    None
+                }
+                Some(_) => {
+                    // we need to wait until current uploads
+                    Some(self.schedule_barrier0(upload_queue))
+                }
+                None => {
+                    upload_queue.dirty.ongoing_detach_ancestor =
+                        Some(chrono::Utc::now().naive_utc().into());
+                    self.schedule_index_upload(upload_queue)?;
+                    Some(self.schedule_barrier0(upload_queue))
+                }
+            }
+        };
+
+        if let Some(barrier) = maybe_barrier {
+            Self::wait_completion0(barrier).await
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn schedule_completed_detach_ancestor_mark_and_wait(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<()> {
+        let maybe_barrier = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
+
+            assert!(upload_queue.clean.0.lineage.is_detached_from_ancestor());
+
+            match upload_queue.dirty.ongoing_detach_ancestor {
+                Some(_) => {
+                    upload_queue.dirty.ongoing_detach_ancestor = None;
+                    self.schedule_index_upload(upload_queue)?;
+                    Some(self.schedule_barrier0(upload_queue))
+                }
+                None if upload_queue.clean.0.ongoing_detach_ancestor.is_some() => {
+                    // the upload is already underway; avoid new upload
+                    Some(self.schedule_barrier0(upload_queue))
+                }
+                None => None,
+            }
+        };
+
+        if let Some(barrier) = maybe_barrier {
+            Self::wait_completion0(barrier).await
+        } else {
+            Ok(())
+        }
+    }
+
     /// Launch an upload operation in the background; the file is added to be included in next
     /// `index_part.json` upload.
     pub(crate) fn schedule_layer_file_upload(
