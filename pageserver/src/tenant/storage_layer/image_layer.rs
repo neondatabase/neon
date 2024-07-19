@@ -1310,7 +1310,7 @@ mod test {
 
     #[tokio::test]
     async fn image_layer_iterator() {
-        let harness = TenantHarness::create("image_layer_iterator").unwrap();
+        let harness = TenantHarness::create("image_layer_iterator").await.unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let tline = tenant
