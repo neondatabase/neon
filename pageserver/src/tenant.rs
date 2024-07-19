@@ -710,7 +710,9 @@ impl Tenant {
         ));
 
         if let Some(attempt) = existing_detach_attempt {
-            tenant.ongoing_timeline_detach.notify(attempt);
+            tenant
+                .ongoing_timeline_detach
+                .continue_existing_attempt(attempt);
         }
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
