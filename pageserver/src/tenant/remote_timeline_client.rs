@@ -740,8 +740,6 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         new_parent: &TimelineId,
     ) -> anyhow::Result<()> {
-        // FIXME: because of how Timeline::schedule_uploads works when called from layer flushing
-        // and reads the in-memory part we cannot do the detaching like this
         let receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
