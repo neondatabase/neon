@@ -5,7 +5,6 @@ from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    StorageScrubber,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
@@ -325,7 +324,6 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
 
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-    scrubber = StorageScrubber(neon_env_builder)
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
     ps_http = env.pageserver.http_client()
@@ -340,7 +338,7 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
     wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
     env.stop()
 
-    result = scrubber.scan_metadata()
+    result = env.storage_scrubber.scan_metadata()
     assert result["with_warnings"] == []
 
     env.start()
@@ -348,5 +346,5 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
     ps_http.tenant_delete(tenant_id)
     env.stop()
 
-    scrubber.scan_metadata()
+    env.storage_scrubber.scan_metadata()
     assert result["with_warnings"] == []

@@ -3956,6 +3956,8 @@ impl Service {
                 "failpoint".to_string()
             )));
 
+            failpoint_support::sleep_millis_async!("shard-split-post-remote-sleep", &self.cancel);
+
             tracing::info!(
                 "Split {} into {}",
                 parent_id,
