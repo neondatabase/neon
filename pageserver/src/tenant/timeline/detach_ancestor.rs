@@ -141,7 +141,7 @@ impl Default for SharedState {
 impl SharedState {
     /// Notify an uninitialized shared state that an attempt to detach timeline ancestor continues
     /// from previous instance.
-    pub(crate) fn notify(&self, _attempt: &Attempt) {}
+    pub(crate) fn continue_existing_attempt(&self, attempt: &Attempt) {}
 
     /// Only GC must be paused while a detach ancestor is ongoing. Compaction can happen, to aid
     /// with any ongoing ingestion. Compaction even after restart is ok because layers will not be
