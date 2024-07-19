@@ -523,6 +523,13 @@ jobs:
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
+    # until https://github.com/neondatabase/neon/issues/8275 is fixed we temporarily install postgresql-16 and thus run this job as root user
+    - name: temporarily ensure no files with root user permissions are left over in work directory from this job that other job steps running as non-root cannot delete
+      if: ${{ !cancelled() }}
+      run: |
+        rm -rf /__w/neon/neon/allure-2.27.0
+        chmod -R 777 /__w/neon/neon
+
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
@@ -531,11 +538,8 @@ jobs:
         slack-message: "Periodic perf testing ${PLATFORM}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-    # until https://github.com/neondatabase/neon/issues/8275 is fixed we temporarily install postgresql-16 and thus run this job as root user
-    - name: temporarily ensure no files with root user permissions are left over in work directory from this job that other job steps running as non-root cannot delete
-      if: ${{ !cancelled() }}
-      run: |
-        chmod -R 777 /__w/neon/neon
+
+    
 
   clickbench-compare:
     # ClichBench DB for rds-aurora and rds-Postgres deployed to the same clusters
