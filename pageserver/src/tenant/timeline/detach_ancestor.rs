@@ -281,17 +281,19 @@ impl SharedState {
             g.validate(&attempt);
         }
 
-        let attempt = scopeguard::guard(attempt, |attempt| {
+        let mut attempt = scopeguard::guard(attempt, |attempt| {
             // our attempt will no longer be valid, so release it
             self.inner.lock().unwrap().cancel(attempt);
         });
-
-        // no failpoint needed here, because the next one is the first mutating
 
         tenant
             .wait_to_become_active(std::time::Duration::from_secs(9999))
             .await
             .map_err(Error::WaitToActivate)?;
+
+        // TODO: pause failpoint here to catch the situation where detached timeline is deleted...?
+        // we are not yet holding the gate so it could advance to the point of removing from
+        // timelines.
 
         let Some(timeline) = tenant
             .timelines
@@ -300,8 +302,14 @@ impl SharedState {
             .get(&attempt.timeline_id)
             .cloned()
         else {
+            // FIXME: this needs a test case ... basically deletion right after activation?
             unreachable!("unsure if there is an ordering, but perhaps this is possible?");
         };
+
+        // the gate being antered does not matter much, but lets be strict
+        assert!(attempt.gate_entered.is_none());
+        let entered = timeline.gate.enter().map_err(|_| Error::ShuttingDown)?;
+        attempt.gate_entered = Some(entered);
 
         // this should be an 503 at least...?
         fail::fail_point!(
@@ -323,6 +331,12 @@ impl SharedState {
         self.inner.lock().unwrap().complete(attempt);
 
         Ok(())
+    }
+
+    pub(crate) fn cancel(&self, attempt: Attempt) {
+        let mut g = self.inner.lock().unwrap();
+        g.cancel(attempt);
+        tracing::info!("keeping the gc blocking for retried detach_ancestor");
     }
 }
 
