@@ -322,22 +322,6 @@ async fn main() -> anyhow::Result<()> {
         ),
         aws_credentials_provider,
     ));
-    // let regional_redis_client =  match (args.redis_host, args.redis_port) {
-    //     (Some(host), Some(port)) => Some(
-    //         ConnectionWithCredentialsProvider::new_with_credentials_provider(
-    //             host,
-    //             port,
-    //             elasticache_credentials_provider.clone(),
-    //         ),
-    //     ),
-    //     (None, None) => {
-    //         warn!("Redis events from console are disabled");
-    //         None
-    //     }
-    //     _ => {
-    //         bail!("redis-host and redis-port must be specified together");
-    //     }
-    // };
     let regional_redis_client = match args.redis_auth_type.as_str() {
         "plain" => {
             match args.redis_notifications {
