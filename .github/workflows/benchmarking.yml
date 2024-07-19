@@ -328,6 +328,10 @@ jobs:
     timeout-minutes: 480
 
     steps:
+    - name: Reset permissions before checkout
+      run: |
+        chmod -R 777 /__w/neon/neon
+
     - uses: actions/checkout@v4
 
     - name: Download Neon artifact
