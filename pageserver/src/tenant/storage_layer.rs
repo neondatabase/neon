@@ -610,11 +610,13 @@ impl LayerAccessStats {
         reset: LayerAccessStatsReset,
     ) -> pageserver_api::models::LayerAccessStats {
         let ret = pageserver_api::models::LayerAccessStats {
-            access_count_by_access_kind: Default::default(),
-            task_kind_access_flag: Default::default(),
-            first: None,
-            accesses_history: Default::default(),
-            residence_events_history: Default::default(),
+            access_time: self
+                .read_low_res_timestamp(Self::ATIME_SHIFT)
+                .unwrap_or(UNIX_EPOCH),
+            residence_time: self
+                .read_low_res_timestamp(Self::RTIME_SHIFT)
+                .unwrap_or(UNIX_EPOCH),
+            visible: matches!(self.visibility(), LayerVisibilityHint::Visible),
         };
         match reset {
             LayerAccessStatsReset::NoReset | LayerAccessStatsReset::JustTaskKindFlags => (),

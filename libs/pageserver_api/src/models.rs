@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use utils::{
     completion,
-    history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
     serde_system_time,
@@ -797,13 +796,16 @@ impl LayerResidenceEvent {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerAccessStats {
-    pub access_count_by_access_kind: HashMap<LayerAccessKind, u64>,
-    pub task_kind_access_flag: Vec<Cow<'static, str>>,
-    pub first: Option<LayerAccessStatFullDetails>,
-    pub accesses_history: HistoryBufferWithDropCounter<LayerAccessStatFullDetails, 16>,
-    pub residence_events_history: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
+    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    pub access_time: SystemTime,
+
+    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    pub residence_time: SystemTime,
+
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
