@@ -709,10 +709,13 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        let shard_selector = ShardSelector::Known(tenant_shard_id.to_index());
-        let timeline = self
-            .get_active_tenant_timeline(tenant_shard_id.tenant_id, timeline_id, shard_selector)
-            .await?;
+        let timeline = self.timeline_handles.get(
+            tenant_shard_id.tenant_id,
+            timeline_id,
+            GetArg::Known(tenant_shard_id.to_index()),
+        )?;
+        set_tracing_field_shard_id(&timeline);
+
         let lease = timeline.make_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)?;
         let valid_until = lease
             .valid_until
@@ -738,7 +741,9 @@ impl PageServerHandler {
         req: &PagestreamExistsRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+        let timeline = self
+            .timeline_handles
+            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
         let _timer = timeline
             .query_metrics
             .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
@@ -770,7 +775,9 @@ impl PageServerHandler {
         req: &PagestreamNblocksRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+        let timeline = self
+            .timeline_handles
+            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
 
         let _timer = timeline
             .query_metrics
@@ -803,7 +810,9 @@ impl PageServerHandler {
         req: &PagestreamDbSizeRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+        let timeline = self
+            .timeline_handles
+            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
 
         let _timer = timeline
             .query_metrics
@@ -827,15 +836,6 @@ impl PageServerHandler {
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
             db_size,
         }))
-    }
-
-    async fn get_timeline_shard_zero(
-        &mut self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-    ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
-        self.timeline_handles
-            .get(tenant_id, timeline_id, GetArg::ShardZero)
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -902,7 +902,9 @@ impl PageServerHandler {
         req: &PagestreamGetSlruSegmentRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = self.get_timeline_shard_zero(tenant_id, timeline_id).await?;
+        let timeline = self
+            .timeline_handles
+            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
 
         let _timer = timeline
             .query_metrics
@@ -965,10 +967,11 @@ impl PageServerHandler {
 
         let started = std::time::Instant::now();
 
-        // check that the timeline exists
         let timeline = self
-            .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
-            .await?;
+            .timeline_handles
+            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
+        set_tracing_field_shard_id(&timeline);
+
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
@@ -1083,7 +1086,7 @@ impl PageServerHandler {
     }
 
     /// Shorthand for getting a reference to a Timeline of an Active tenant.
-    async fn get_active_tenant_timeline(
+    fn get_active_tenant_timeline(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
