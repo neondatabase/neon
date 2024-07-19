@@ -57,6 +57,7 @@ jobs:
   bench:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - DEFAULT_PG_VERSION: 16
@@ -443,6 +444,7 @@ jobs:
 
   pgbench-pgvector:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - PLATFORM: "neon-captest-pgvector"
