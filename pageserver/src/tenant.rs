@@ -21,6 +21,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
@@ -1226,6 +1227,14 @@ impl Tenant {
         }
 
         Ok(timeline_preloads)
+    }
+
+    pub async fn apply_timeline_archival_config(
+        &self,
+        timeline_id: TimelineId,
+        config: TimelineArchivalState,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
