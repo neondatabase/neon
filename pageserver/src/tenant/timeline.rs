@@ -3707,10 +3707,6 @@ impl Timeline {
         Ok(ancestor.clone())
     }
 
-    pub(crate) fn get_ancestor_timeline(&self) -> Option<Arc<Timeline>> {
-        self.ancestor_timeline.clone()
-    }
-
     pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
         &self.shard_identity
     }
