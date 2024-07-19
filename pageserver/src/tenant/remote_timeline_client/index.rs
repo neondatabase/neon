@@ -213,17 +213,28 @@ impl Lineage {
     pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) -> bool {
         if self.reparenting_history.last() == Some(old_ancestor) {
             // do not re-record it
-            return false;
-        }
+            false
+        } else {
+            #[cfg(feature = "testing")]
+            {
+                let existing = self
+                    .reparenting_history
+                    .iter()
+                    .position(|x| x == old_ancestor);
+                assert_eq!(
+                    existing, None,
+                    "we cannot reparent onto and off and onto the same timeline twice"
+                );
+            }
+            let drop_oldest = self.reparenting_history.len() + 1 >= Self::REMEMBER_AT_MOST;
 
-        let drop_oldest = self.reparenting_history.len() + 1 >= Self::REMEMBER_AT_MOST;
-
-        self.reparenting_history_truncated |= drop_oldest;
-        if drop_oldest {
-            self.reparenting_history.remove(0);
+            self.reparenting_history_truncated |= drop_oldest;
+            if drop_oldest {
+                self.reparenting_history.remove(0);
+            }
+            self.reparenting_history.push(*old_ancestor);
+            true
         }
-        self.reparenting_history.push(*old_ancestor);
-        true
     }
 
     /// Returns true if anything changed.
