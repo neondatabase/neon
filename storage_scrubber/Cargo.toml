@@ -34,6 +34,7 @@ camino.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 once_cell.workspace = true
+storage_controller_client.workspace = true
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
