@@ -1056,7 +1056,7 @@ pub(super) async fn complete(
             .context("publish layers and detach ancestor")?;
     }
 
-    let (mut reparented, reparented_all) =
+    let (reparented, reparented_all) =
         if let Some((ancestor, ancestor_lsn)) = ancestor.as_branchpoint() {
             assert!(detach_is_ongoing, "to reparent, gc must still be blocked");
             let mut tasks = tokio::task::JoinSet::new();
@@ -1176,22 +1176,22 @@ pub(super) async fn complete(
                     candidates = reparenting_candidates,
                     "failed to reparent all candidates; they will be retried after the restart",
                 );
+
+                // TODO: two-state Ok(return_value)?
+                (Vec::new(), false)
+            } else {
+                reparented.sort_unstable();
+
+                let reparented = reparented
+                    .into_iter()
+                    .map(|(_, timeline_id)| timeline_id)
+                    .collect();
+
+                (reparented, true)
             }
-            (reparented, reparented_all)
         } else {
-            // FIXME: again, get the list of (ancestor_lsn, reparented)
-            (Vec::new(), true)
+            (reparented_direct_children(detached, tenant)?, true)
         };
-
-    reparented.sort_unstable();
-
-    let reparented = reparented
-        .into_iter()
-        .map(|(_, timeline_id)| timeline_id)
-        .collect();
-
-    // FIXME: here everything has gone peachy, the tenant will be restarted next.
-    // after restart and before returning the response, the gc blocking must be undone
 
     Ok((reparented, reparented_all))
 }
