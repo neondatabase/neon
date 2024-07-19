@@ -45,9 +45,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
     bin_ser::BeSer,
-    fs_ext,
-    id::TenantShardTimelineId,
-    pausable_failpoint,
+    fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
     vec_map::VecMap,
 };

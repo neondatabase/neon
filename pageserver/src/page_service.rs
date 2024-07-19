@@ -277,7 +277,6 @@ struct PageServerHandler {
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
-
     /// The context created for the lifetime of the connection
     /// services by this PageServerHandler.
     /// For each query received over the connection,
@@ -290,11 +289,7 @@ struct PageServerHandler {
 }
 
 struct TimelineHandles {
-    tenant_manager: Arc<TenantManager>,
-    // We do not support switching tenant_id on a connection at this point.
-    // We can can add support for this later if needed without changing
-    // the protocol.
-    tenant_id: once_cell::sync::OnceCell<TenantId>,
+    wrapper: TenantManagerWrapper,
     /// Note on size: the typical size of this map is 1.  The largest size we expect
     /// to see is the number of shards divided by the number of pageservers (typically < 2),
     /// or the ratio used when splitting shards (i.e. how many children created from one)
@@ -305,24 +300,26 @@ struct TimelineHandles {
 impl TimelineHandles {
     fn new(tenant_manager: Arc<TenantManager>) -> Self {
         Self {
-            tenant_manager,
-            tenant_id: OnceCell::new(),
+            wrapper: TenantManagerWrapper {
+                tenant_manager,
+                tenant_id: OnceCell::new(),
+            },
             handles: Default::default(),
         }
     }
     async fn get(
-        &self,
+        &mut self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
     ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
-        if *self.tenant_id.get_or_init(|| tenant_id) != tenant_id {
+        if *self.wrapper.tenant_id.get_or_init(|| tenant_id) != tenant_id {
             return Err(GetActiveTimelineError::Tenant(
                 GetActiveTenantError::SwitchedTenant,
             ));
         }
         self.handles
-            .get(timeline_id, shard_selector, self)
+            .get(timeline_id, shard_selector, &self.wrapper)
             .await
             .map_err(|e| match e {
                 timeline::handle::GetError::TenantManager(e) => e,
@@ -336,7 +333,15 @@ impl TimelineHandles {
     }
 }
 
-impl timeline::handle::TenantManager for TimelineHandles {
+struct TenantManagerWrapper {
+    tenant_manager: Arc<TenantManager>,
+    // We do not support switching tenant_id on a connection at this point.
+    // We can can add support for this later if needed without changing
+    // the protocol.
+    tenant_id: once_cell::sync::OnceCell<TenantId>,
+}
+
+impl timeline::handle::TenantManager for TenantManagerWrapper {
     type Error = GetActiveTimelineError;
 
     async fn resolve(
@@ -749,7 +754,7 @@ impl PageServerHandler {
 
     #[instrument(skip_all, fields(shard_id, %lsn))]
     async fn handle_make_lsn_lease<IO>(
-        &self,
+        &mut self,
         pgb: &mut PostgresBackend<IO>,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
@@ -1027,7 +1032,8 @@ impl PageServerHandler {
 
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero).await?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)
+            .await?;
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
@@ -1140,28 +1146,6 @@ impl PageServerHandler {
             .as_ref()
             .expect("claims presence already checked");
         check_permission(claims, tenant_id).map_err(|e| QueryError::Unauthorized(e.0))
-    }
-
-    /// Shorthand for getting a reference to a Timeline of an Active tenant.
-    async fn get_active_tenant_timeline(
-        &self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        selector: ShardSelector,
-    ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
-        let res = self
-            .timeline_handles
-            .get(
-                tenant_id,
-                timeline_id,
-                match selector {
-                    ShardSelector::Zero => ShardSelector::Zero,
-                    ShardSelector::Page(k) => ShardSelector::Page(k),
-                    ShardSelector::Known(idx) => ShardSelector::Known(idx),
-                },
-            )
-            .await;
-        res
     }
 }
 

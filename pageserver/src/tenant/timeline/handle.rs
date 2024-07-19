@@ -34,19 +34,16 @@ use super::Timeline;
 /// Without this, we'd have to go through the [`crate::tenant::mgr`] for each
 /// getpage request.
 #[derive(Default)]
-pub(crate) struct Cache(Arc<CacheInner>);
+pub(crate) struct Cache {
+    map: Map,
+}
+
+type Map = HashMap<ShardTimelineId, Weak<HandleInner>>;
 
 #[derive(PartialEq, Eq, Debug, Hash, Clone, Copy)]
 pub(crate) struct ShardTimelineId {
     pub(crate) shard_index: ShardIndex,
     pub(crate) timeline_id: TimelineId,
-}
-
-type Map = HashMap<ShardTimelineId, Weak<HandleInner>>;
-
-#[derive(Default)]
-struct CacheInner {
-    map: Mutex<Map>,
 }
 
 /// This struct is a reference to [`Timeline`]
@@ -112,7 +109,7 @@ impl Cache {
     /// close the connection.
     #[instrument(level = "trace", skip_all)]
     pub(crate) async fn get<M, E>(
-        &self,
+        &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
         tenant_manager: &M,
@@ -131,7 +128,7 @@ impl Cache {
 
     #[instrument(level = "trace", skip_all)]
     async fn get_impl<M, E>(
-        &self,
+        &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
         tenant_manager: &M,
@@ -140,8 +137,7 @@ impl Cache {
         M: TenantManager<Error = E>,
     {
         let miss: ShardSelector = {
-            let mut map = self.0.map.lock().expect("mutex poisoned");
-            let routing_state = self.shard_routing(&mut map, timeline_id, shard_selector);
+            let routing_state = self.shard_routing(shard_selector);
             match routing_state {
                 RoutingResult::FastPath(handle) => return Ok(handle),
                 RoutingResult::Index(shard_index) => {
@@ -149,12 +145,12 @@ impl Cache {
                         shard_index,
                         timeline_id,
                     };
-                    match map.get(&key) {
+                    match self.map.get(&key) {
                         Some(cached) => match cached.upgrade() {
                             Some(upgraded) => return Ok(Handle(upgraded)),
                             None => {
                                 trace!("handle cache stale");
-                                map.remove(&key).unwrap();
+                                self.map.remove(&key).unwrap();
                                 ShardSelector::Known(shard_index)
                             }
                         },
@@ -168,22 +164,17 @@ impl Cache {
     }
 
     #[inline(always)]
-    fn shard_routing(
-        &self,
-        map: &mut Map,
-        timeline_id: TimelineId,
-        shard_selector: ShardSelector,
-    ) -> RoutingResult {
+    fn shard_routing(&mut self, shard_selector: ShardSelector) -> RoutingResult {
         loop {
             // terminates because when every iteration we remove an element from the map
-            let Some((first_key, first_handle)) = map.iter().next() else {
+            let Some((first_key, first_handle)) = self.map.iter().next() else {
                 return RoutingResult::NeedConsultTenantManager;
             };
             let Some(first_handle) = first_handle.upgrade() else {
                 // TODO: dedup with get()
                 trace!("handle cache stale");
                 let first_key_owned = *first_key;
-                map.remove(&first_key_owned).unwrap();
+                self.map.remove(&first_key_owned).unwrap();
                 continue;
             };
 
@@ -210,8 +201,9 @@ impl Cache {
     }
 
     #[instrument(level = "trace", skip_all)]
+    #[inline(always)]
     async fn get_miss<'a, M, E>(
-        &self,
+        &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
         tenant_manager: &M,
@@ -251,8 +243,7 @@ impl Cache {
                                 assert!(!Arc::ptr_eq(handler, &handle));
                             }
                             timeline_handlers_list.push(Arc::clone(&handle));
-                            let mut map = self.0.map.lock().unwrap();
-                            match map.entry(key) {
+                            match self.map.entry(key) {
                                 hash_map::Entry::Occupied(mut o) => {
                                     // This should not happen in practice because the page_service
                                     // isn't calling get() concurrently(). Yet, let's deal with
