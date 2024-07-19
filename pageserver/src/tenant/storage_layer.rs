@@ -10,29 +10,19 @@ pub mod merge_iterator;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Value;
-use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
-use enum_map::EnumMap;
-use enumset::EnumSet;
-use once_cell::sync::Lazy;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
-use pageserver_api::models::{
-    LayerAccessKind, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
-};
-use std::borrow::Cow;
+use pageserver_api::models::{LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus};
 use std::cmp::{Ordering, Reverse};
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::warn;
-use utils::history_buffer::HistoryBufferWithDropCounter;
-use utils::rate_limit::RateLimit;
 
-use utils::{id::TimelineId, lsn::Lsn};
+use utils::lsn::Lsn;
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
@@ -462,7 +452,7 @@ pub enum ValueReconstructResult {
 /// than an authoritative value, so that we do not have to update it synchronously when changing the visibility
 /// of layers (for example when creating a branch that makes some previously covered layers visible).  It should
 /// be used for cache management but not for correctness-critical checks.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LayerVisibilityHint {
     /// A Visible layer might be read while serving a read, because there is not an image layer between it
     /// and a readable LSN (the tip of the branch or a child's branch point)
@@ -478,41 +468,7 @@ pub(crate) enum LayerVisibilityHint {
     Uninitialized,
 }
 
-#[derive(Debug)]
-pub struct LayerAccessStats(Mutex<LayerAccessStatsLocked>);
-
-/// This struct holds two instances of [`LayerAccessStatsInner`].
-/// Accesses are recorded to both instances.
-/// The `for_scraping_api`instance can be reset from the management API via [`LayerAccessStatsReset`].
-/// The `for_eviction_policy` is never reset.
-#[derive(Debug, Default, Clone)]
-struct LayerAccessStatsLocked {
-    for_scraping_api: LayerAccessStatsInner,
-    for_eviction_policy: LayerAccessStatsInner,
-    visibility: LayerVisibilityHint,
-}
-
-impl LayerAccessStatsLocked {
-    fn iter_mut(&mut self) -> impl Iterator<Item = &mut LayerAccessStatsInner> {
-        [&mut self.for_scraping_api, &mut self.for_eviction_policy].into_iter()
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-struct LayerAccessStatsInner {
-    first_access: Option<LayerAccessStatFullDetails>,
-    count_by_access_kind: EnumMap<LayerAccessKind, u64>,
-    task_kind_flag: EnumSet<TaskKind>,
-    last_accesses: HistoryBufferWithDropCounter<LayerAccessStatFullDetails, 16>,
-    last_residence_changes: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct LayerAccessStatFullDetails {
-    pub(crate) when: SystemTime,
-    pub(crate) task_kind: TaskKind,
-    pub(crate) access_kind: LayerAccessKind,
-}
+pub(crate) struct LayerAccessStats(std::sync::atomic::AtomicU64);
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
 pub enum LayerAccessStatsReset {
@@ -521,52 +477,64 @@ pub enum LayerAccessStatsReset {
     AllStats,
 }
 
-fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u64 {
-    ts.duration_since(UNIX_EPOCH)
-        .expect("better to die in this unlikely case than report false stats")
-        .as_millis()
-        .try_into()
-        .expect("64 bits is enough for few more years")
-}
+impl Default for LayerAccessStats {
+    fn default() -> Self {
+        // Default value is to assume resident since creation time, and visible.
+        let (_mask, mut value) = Self::to_low_res_timestamp(Self::RTIME_SHIFT, SystemTime::now());
+        value |= 0x1 << Self::VISIBILITY_SHIFT;
 
-impl LayerAccessStatFullDetails {
-    fn as_api_model(&self) -> pageserver_api::models::LayerAccessStatFullDetails {
-        let Self {
-            when,
-            task_kind,
-            access_kind,
-        } = self;
-        pageserver_api::models::LayerAccessStatFullDetails {
-            when_millis_since_epoch: system_time_to_millis_since_epoch(when),
-            task_kind: Cow::Borrowed(task_kind.into()), // into static str, powered by strum_macros
-            access_kind: *access_kind,
-        }
+        Self(std::sync::atomic::AtomicU64::new(value))
     }
 }
 
+// Efficient store of two very-low-resolution timestamps and some bits.  Used for storing last access time and
+// last residence change time.
 impl LayerAccessStats {
-    /// Create an empty stats object.
-    ///
-    /// The caller is responsible for recording a residence event
-    /// using [`record_residence_event`] before calling `latest_activity`.
-    /// If they don't, [`latest_activity`] will return `None`.
-    ///
-    /// [`record_residence_event`]: Self::record_residence_event
-    /// [`latest_activity`]: Self::latest_activity
-    pub(crate) fn empty_will_record_residence_event_later() -> Self {
-        LayerAccessStats(Mutex::default())
+    // How many high bits to drop from a u32 timestamp?
+    // - Only storing up to a u32 timestamp will work fine until 2038 (if this code is still in use
+    //   after that, this software has been very successful!)
+    // - Dropping the top bit is implicitly safe because unix timestamps are meant to be
+    // stored in an i32, so they never used it.
+    // - Dropping the next two bits is safe because this code is only running on systems in
+    // years >= 2024, and these bits have been 1 since 2021
+    //
+    // Therefore we may store only 28 bits for a timestamp with one second resolution.  We do
+    // this truncation to make space for some flags in the high bits of our u64.
+    const TS_DROP_HIGH_BITS: u32 = u32::count_ones(Self::TS_ONES) + 1;
+    const TS_MASK: u32 = 0x1fffffff;
+    const TS_ONES: u32 = 0x60000000;
+
+    const ATIME_SHIFT: u32 = 0;
+    const RTIME_SHIFT: u32 = 32 - Self::TS_DROP_HIGH_BITS;
+    const VISIBILITY_SHIFT: u32 = 64 - 2 * Self::TS_DROP_HIGH_BITS;
+
+    fn write_bits(&self, mask: u64, value: u64) -> u64 {
+        self.0
+            .fetch_update(
+                // TODO: decide what orderings are correct
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |v| Some((v & !mask) | (value & mask)),
+            )
+            .expect("Inner function is infallible")
     }
 
-    /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
-    ///
-    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    ///
-    /// [`LayerLoad`]: LayerResidenceEventReason::LayerLoad
-    /// [`record_residence_event`]: Self::record_residence_event
-    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
-        let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
-        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
-        new
+    fn to_low_res_timestamp(shift: u32, time: SystemTime) -> (u64, u64) {
+        // Drop the low three bits of the timestamp, for an ~8s accuracy
+        let timestamp = time.duration_since(UNIX_EPOCH).unwrap().as_secs() & (Self::TS_MASK as u64);
+
+        ((Self::TS_MASK as u64) << shift, timestamp << shift)
+    }
+
+    fn read_low_res_timestamp(&self, shift: u32) -> Option<SystemTime> {
+        let read = self.0.load(std::sync::atomic::Ordering::Relaxed);
+
+        let ts_bits = (read & ((Self::TS_MASK as u64) << shift)) >> shift;
+        if ts_bits == 0 {
+            None
+        } else {
+            Some(UNIX_EPOCH + Duration::from_secs(ts_bits | (Self::TS_ONES as u64)))
+        }
     }
 
     /// Record a change in layer residency.
@@ -582,123 +550,90 @@ impl LayerAccessStats {
     /// - Eviction: imitate access logical size calculation. This accesses the L0 layers because the L1 layer is not yet in the layer map.
     /// - Compact: Grab layer map lock, add the new L1 to layer map and remove the L0s, release layer map lock.
     /// - Eviction: observes the new L1 layer whose only activity timestamp is the LayerCreate event.
-    ///
-    pub(crate) fn record_residence_event(
-        &self,
-        status: LayerResidenceStatus,
-        reason: LayerResidenceEventReason,
-    ) {
-        let mut locked = self.0.lock().unwrap();
-        locked.iter_mut().for_each(|inner| {
-            inner
-                .last_residence_changes
-                .write(LayerResidenceEvent::new(status, reason))
-        });
+    pub fn record_residence_event_at(&self, now: SystemTime) {
+        let (mask, value) = Self::to_low_res_timestamp(Self::RTIME_SHIFT, now);
+        self.write_bits(mask, value);
     }
 
-    fn record_access(&self, access_kind: LayerAccessKind, ctx: &RequestContext) {
+    pub(crate) fn record_residence_event(
+        &self,
+        _status: LayerResidenceStatus,
+        _reason: LayerResidenceEventReason,
+    ) {
+        self.record_residence_event_at(SystemTime::now())
+    }
+
+    pub(crate) fn record_access_at(&self, now: SystemTime) {
+        let (mut mask, mut value) = Self::to_low_res_timestamp(Self::ATIME_SHIFT, now);
+
+        // A layer which is accessed must be visible.
+        mask |= 0x1 << Self::VISIBILITY_SHIFT;
+        value |= 0x1 << Self::VISIBILITY_SHIFT;
+
+        self.write_bits(mask, value);
+    }
+
+    pub(crate) fn record_access(&self, _access_kind: LayerAccessKind, ctx: &RequestContext) {
         if ctx.access_stats_behavior() == AccessStatsBehavior::Skip {
             return;
         }
 
-        let this_access = LayerAccessStatFullDetails {
-            when: SystemTime::now(),
-            task_kind: ctx.task_kind(),
-            access_kind,
-        };
+        self.record_access_at(SystemTime::now())
+    }
 
-        let mut locked = self.0.lock().unwrap();
-        locked.iter_mut().for_each(|inner| {
-            inner.first_access.get_or_insert(this_access);
-            inner.count_by_access_kind[access_kind] += 1;
-            inner.task_kind_flag |= ctx.task_kind();
-            inner.last_accesses.write(this_access);
-        });
+    /// Create an empty stats object.
+    ///
+    /// The caller is responsible for recording a residence event
+    /// using [`record_residence_event`] before calling `latest_activity`.
+    /// If they don't, [`latest_activity`] will return `None`.
+    ///
+    /// [`record_residence_event`]: Self::record_residence_event
+    /// [`latest_activity`]: Self::latest_activity
+    pub(crate) fn empty_will_record_residence_event_later() -> Self {
+        Self(Default::default())
+    }
 
-        // We may access a layer marked as Covered, if a new branch was created that depends on
-        // this layer, and background updates to layer visibility didn't notice it yet
-        if !matches!(locked.visibility, LayerVisibilityHint::Visible) {
-            locked.visibility = LayerVisibilityHint::Visible;
-        }
+    /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
+    ///
+    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
+    ///
+    /// [`LayerLoad`]: LayerResidenceEventReason::LayerLoad
+    /// [`record_residence_event`]: Self::record_residence_event
+    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
+        let new = Self::default();
+        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
+        new
     }
 
     fn as_api_model(
         &self,
         reset: LayerAccessStatsReset,
     ) -> pageserver_api::models::LayerAccessStats {
-        let mut locked = self.0.lock().unwrap();
-        let inner = &mut locked.for_scraping_api;
-        let LayerAccessStatsInner {
-            first_access,
-            count_by_access_kind,
-            task_kind_flag,
-            last_accesses,
-            last_residence_changes,
-        } = inner;
         let ret = pageserver_api::models::LayerAccessStats {
-            access_count_by_access_kind: count_by_access_kind
-                .iter()
-                .map(|(kind, count)| (kind, *count))
-                .collect(),
-            task_kind_access_flag: task_kind_flag
-                .iter()
-                .map(|task_kind| Cow::Borrowed(task_kind.into())) // into static str, powered by strum_macros
-                .collect(),
-            first: first_access.as_ref().map(|a| a.as_api_model()),
-            accesses_history: last_accesses.map(|m| m.as_api_model()),
-            residence_events_history: last_residence_changes.clone(),
+            access_count_by_access_kind: Default::default(),
+            task_kind_access_flag: Default::default(),
+            first: None,
+            accesses_history: Default::default(),
+            residence_events_history: Default::default(),
         };
         match reset {
-            LayerAccessStatsReset::NoReset => (),
-            LayerAccessStatsReset::JustTaskKindFlags => {
-                inner.task_kind_flag.clear();
-            }
+            LayerAccessStatsReset::NoReset | LayerAccessStatsReset::JustTaskKindFlags => (),
             LayerAccessStatsReset::AllStats => {
-                *inner = LayerAccessStatsInner::default();
+                self.write_bits((Self::TS_MASK as u64) << Self::ATIME_SHIFT, 0x0);
+                self.write_bits((Self::TS_MASK as u64) << Self::RTIME_SHIFT, 0x0);
             }
         }
         ret
     }
 
-    /// Get the latest access timestamp, falling back to latest residence event, further falling
-    /// back to `SystemTime::now` for a usable timestamp for eviction.
-    pub(crate) fn latest_activity_or_now(&self) -> SystemTime {
-        self.latest_activity().unwrap_or_else(SystemTime::now)
-    }
-
-    /// Get the latest access timestamp, falling back to latest residence event.
-    ///
-    /// This function can only return `None` if there has not yet been a call to the
-    /// [`record_residence_event`] method. That would generally be considered an
-    /// implementation error. This function logs a rate-limited warning in that case.
-    ///
-    /// TODO: use type system to avoid the need for `fallback`.
-    /// The approach in <https://github.com/neondatabase/neon/pull/3775>
-    /// could be used to enforce that a residence event is recorded
-    /// before a layer is added to the layer map. We could also have
-    /// a layer wrapper type that holds the LayerAccessStats, and ensure
-    /// that that type can only be produced by inserting into the layer map.
-    ///
-    /// [`record_residence_event`]: Self::record_residence_event
-    fn latest_activity(&self) -> Option<SystemTime> {
-        let locked = self.0.lock().unwrap();
-        let inner = &locked.for_eviction_policy;
-        match inner.last_accesses.recent() {
-            Some(a) => Some(a.when),
-            None => match inner.last_residence_changes.recent() {
-                Some(e) => Some(e.timestamp),
-                None => {
-                    static WARN_RATE_LIMIT: Lazy<Mutex<(usize, RateLimit)>> =
-                        Lazy::new(|| Mutex::new((0, RateLimit::new(Duration::from_secs(10)))));
-                    let mut guard = WARN_RATE_LIMIT.lock().unwrap();
-                    guard.0 += 1;
-                    let occurences = guard.0;
-                    guard.1.call(move || {
-                        warn!(parent: None, occurences, "latest_activity not available, this is an implementation bug, using fallback value");
-                    });
-                    None
-                }
-            },
+    /// Get the latest access timestamp, falling back to latest residence event.  The latest residence event
+    /// will be this Layer's construction time, if its residence hasn't changed since then.
+    pub(crate) fn latest_activity(&self) -> SystemTime {
+        if let Some(t) = self.read_low_res_timestamp(Self::ATIME_SHIFT) {
+            t
+        } else {
+            self.read_low_res_timestamp(Self::RTIME_SHIFT)
+                .expect("Residence time is set on construction")
         }
     }
 
@@ -707,27 +642,34 @@ impl LayerAccessStats {
     /// This indicates whether the layer has been used for some purpose that would motivate
     /// us to keep it on disk, such as for serving a getpage request.
     fn accessed(&self) -> bool {
-        let locked = self.0.lock().unwrap();
-        let inner = &locked.for_eviction_policy;
-
         // Consider it accessed if the most recent access is more recent than
         // the most recent change in residence status.
         match (
-            inner.last_accesses.recent(),
-            inner.last_residence_changes.recent(),
+            self.read_low_res_timestamp(Self::ATIME_SHIFT),
+            self.read_low_res_timestamp(Self::RTIME_SHIFT),
         ) {
             (None, _) => false,
             (Some(_), None) => true,
-            (Some(a), Some(r)) => a.when >= r.timestamp,
+            (Some(a), Some(r)) => a >= r,
         }
     }
 
     pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) {
-        self.0.lock().unwrap().visibility = visibility;
+        let value = match visibility {
+            LayerVisibilityHint::Visible => 0x1 << Self::VISIBILITY_SHIFT,
+            LayerVisibilityHint::Covered | LayerVisibilityHint::Uninitialized => 0x0,
+        };
+
+        self.write_bits(0x1 << Self::VISIBILITY_SHIFT, value);
     }
 
     pub(crate) fn visibility(&self) -> LayerVisibilityHint {
-        self.0.lock().unwrap().visibility.clone()
+        let read = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        match (read >> Self::VISIBILITY_SHIFT) & 0x1 {
+            1 => LayerVisibilityHint::Visible,
+            0 => LayerVisibilityHint::Covered,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -739,6 +681,7 @@ pub trait AsLayerDesc {
 
 pub mod tests {
     use pageserver_api::shard::TenantShardId;
+    use utils::id::TimelineId;
 
     use super::*;
 
