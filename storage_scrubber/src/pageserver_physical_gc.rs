@@ -162,11 +162,13 @@ impl TenantRefAccumulator {
                 .max()
                 .expect("Always at least one shard");
 
-            let (latest_shards, ancestor_shards) = {
+            let (mut latest_shards, ancestor_shards) = {
                 let at =
                     itertools::partition(&mut shard_indices, |i| i.shard_count == latest_count);
-                (&shard_indices[0..at], &shard_indices[at..])
+                (shard_indices[0..at].to_owned(), &shard_indices[at..])
             };
+            // Sort shards, as we will later compare them with a sorted list from the controller
+            latest_shards.sort();
 
             // Check that we have a complete view of the latest shard count: this should always be the case unless we happened
             // to scan the S3 bucket halfway through a shard split.
@@ -204,9 +206,14 @@ impl TenantRefAccumulator {
                 Ok(desc) => {
                     // We expect to see that the latest shard count matches the one we saw in S3, and that none
                     // of the shards indicate splitting in progress.
-                    if desc.shards.len() != latest_count.0 as usize {
-                        tracing::info!(%tenant_id, "Shard count seen in S3 ({latest_count:?}) doesn't match controller state ({})",
-                        desc.shards.len());
+
+                    let controller_indices: Vec<ShardIndex> = desc
+                        .shards
+                        .iter()
+                        .map(|s| s.tenant_shard_id.to_index())
+                        .collect();
+                    if controller_indices != latest_shards {
+                        tracing::info!(%tenant_id, "Latest shards seen in S3 ({latest_shards:?}) don't match controller state ({controller_indices:?})");
                         continue;
                     }
 
@@ -241,8 +248,8 @@ async fn is_old_enough(
     key: &str,
     summary: &mut GcSummary,
 ) -> bool {
-    // Validation: we will only delete indices after one week, so that during incidents we will have
-    // easy access to recent indices.
+    // Validation: we will only GC indices & layers after a time threshold (e.g. one week) so that during an incident
+    // it is easier to read old data for analysis, and easier to roll back shard splits without having to un-delete any objects.
     let age: Duration = match s3_client
         .head_object()
         .bucket(&bucket_config.bucket)
