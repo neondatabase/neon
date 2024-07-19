@@ -390,30 +390,23 @@ impl SharedStateInner {
     }
 
     fn validate(&self, attempt: &Attempt) {
-        match self.latest.as_ref() {
-            Some((ExistingAttempt::ContinuedOverRestart(x), _)) if x == &attempt.timeline_id => {}
-            Some((ExistingAttempt::Actual(x, barrier), _))
-                if x == &attempt.timeline_id && attempt._guard.blocks(barrier) => {}
-            other => unreachable!("unexpected: {other:?} for {attempt:?}"),
-        }
+        let (latest, _) = self
+            .latest
+            .as_ref()
+            .expect("to validate there has to be an attempt");
+
+        assert_eq!(latest, attempt);
 
         assert!(self.known_ongoing.contains(&attempt.timeline_id));
     }
 
     fn complete(&mut self, attempt: Attempt) {
-        let witnessed = match self.latest.as_ref() {
-            Some((ExistingAttempt::ContinuedOverRestart(x), witnessed))
-                if x == &attempt.timeline_id =>
-            {
-                *witnessed
-            }
-            Some((ExistingAttempt::Actual(x, barrier), witnessed))
-                if x == &attempt.timeline_id && attempt._guard.blocks(barrier) =>
-            {
-                *witnessed
-            }
-            other => unreachable!("unexpected: {other:?}"),
-        };
+        let (latest, witnessed) = self
+            .latest
+            .as_ref()
+            .expect("there has to be a latest attempt to complete");
+        assert_eq!(latest, attempt);
+        let witnessed = *witnessed;
 
         assert!(self.known_ongoing.remove(&attempt.timeline_id));
 
@@ -430,42 +423,41 @@ impl SharedStateInner {
     }
 
     fn cancel(&mut self, attempt: Attempt) {
-        let witnessed = match self.latest.as_ref() {
-            Some((ExistingAttempt::ContinuedOverRestart(x), witnessed))
-                if x == &attempt.timeline_id =>
-            {
-                *witnessed
-            }
-            Some((ExistingAttempt::Actual(x, barrier), witnessed))
-                if x == &attempt.timeline_id && attempt._guard.blocks(barrier) =>
-            {
-                *witnessed
-            }
-            other => unreachable!("unexpected: {other:?}"),
-        };
+        let (latest, witnessed) = self
+            .latest
+            .as_ref()
+            .expect("there has to be a latest to cancel");
+        assert_eq!(latest, attempt);
+        let witnessed = *witnessed;
+
         assert!(!self.known_ongoing.is_empty());
         self.latest = Some((ExistingAttempt::ReadFromIndexPart, witnessed));
     }
 
     fn on_delete(&mut self, timeline_id: &TimelineId) {
-        let witnessed = match self.latest.as_ref() {
-            Some((ExistingAttempt::Actual(x, barrier), witnessed)) if x == timeline_id => {
+        let Some((attempt, witnessed)) = self.latest.as_ref() else {
+            return;
+        };
+
+        if !self.known_ongoing.contains(timeline_id) {
+            assert_ne!(attempt, timeline_id);
+            return;
+        }
+
+        if let ExistingAttempt::ReadFromIndexPart = attempt {
+            // ReadFromIndexPart is not equal to any attempt
+        } else {
+            assert_eq!(attempt, timeline_id);
+
+            if let ExistingAttempt::Actual(_, barrier) = attempt {
                 assert!(
                     barrier.is_ready(),
                     "the attempt is still ongoing; is this call happening before closing the gate?"
                 );
-                *witnessed
             }
-            Some((ExistingAttempt::ContinuedOverRestart(x), witnessed)) if x == timeline_id => {
-                *witnessed
-            }
-            Some((ExistingAttempt::ReadFromIndexPart, witnessed))
-                if self.known_ongoing.contains(timeline_id) =>
-            {
-                *witnessed
-            }
-            _ => return,
-        };
+        }
+
+        let witnessed = *witnessed;
 
         assert!(self.known_ongoing.remove(timeline_id));
 
@@ -479,8 +471,6 @@ impl SharedStateInner {
                 "gc is still blocked for remaining ongoing detaches"
             );
         }
-
-        todo!("there should be a test for this.")
     }
 }
 
@@ -494,6 +484,35 @@ enum ExistingAttempt {
 
     /// Exclusive while barrier shows the task running
     Actual(TimelineId, completion::Barrier),
+}
+
+impl PartialEq<Attempt> for &'_ ExistingAttempt {
+    fn eq(&self, other: &Attempt) -> bool {
+        use ExistingAttempt::*;
+        match self {
+            ReadFromIndexPart => false,
+            ContinuedOverRestart(x) if x == &other.timeline_id => true,
+            Actual(x, barrier) if x == &other.timeline_id && other._guard.blocks(barrier) => true,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<&'_ Attempt> for &'_ ExistingAttempt {
+    fn eq(&self, other: &&Attempt) -> bool {
+        self == *other
+    }
+}
+
+impl PartialEq<&'_ TimelineId> for &'_ ExistingAttempt {
+    fn eq(&self, other: &&TimelineId) -> bool {
+        use ExistingAttempt::*;
+        match self {
+            ReadFromIndexPart => false,
+            ContinuedOverRestart(x) | Actual(x, _) if x == *other => true,
+            _ => false,
+        }
+    }
 }
 
 impl ExistingAttempt {
