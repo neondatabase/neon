@@ -13,7 +13,6 @@ from fixtures.utils import wait_until
 # running.
 def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
 
     env = neon_env_builder.init_start()
 
@@ -157,7 +156,6 @@ def test_pageserver_chaos(
         pytest.skip("times out in debug builds")
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
 

@@ -523,7 +523,7 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
-        self.scrub_on_exit = False
+        self.enable_scrub_on_exit = True
         self.test_output_dir = test_output_dir
         self.test_overlay_dir = test_overlay_dir
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
@@ -852,6 +852,13 @@ class NeonEnvBuilder:
         )
         ident_state_dir.rmdir()  # should be empty since we moved `upper` out
 
+    def disable_scrub_on_exit(self):
+        """
+        Some tests intentionally leave the remote storage contents empty or corrupt,
+        so it doesn't make sense to do the usual scrub at the end of the test.
+        """
+        self.enable_scrub_on_exit = False
+
     def overlay_cleanup_teardown(self):
         """
         Unmount the overlayfs mounts created by `self.overlay_mount()`.
@@ -876,23 +883,6 @@ class NeonEnvBuilder:
 
         # assert all overlayfs mounts in our test directory are gone
         assert [] == list(overlayfs.iter_mounts_beneath(self.test_overlay_dir))
-
-    def enable_scrub_on_exit(self):
-        """
-        Call this if you would like the fixture to automatically run
-        storage_scrubber at the end of the test, as a bidirectional test
-        that the scrubber is working properly, and that the code within
-        the test didn't produce any invalid remote state.
-        """
-
-        if not isinstance(self.pageserver_remote_storage, S3Storage):
-            # The scrubber can't talk to e.g. LocalFS -- it needs
-            # an HTTP endpoint (mock is fine) to connect to.
-            raise RuntimeError(
-                "Cannot scrub with remote_storage={self.pageserver_remote_storage}, require an S3 endpoint"
-            )
-
-        self.scrub_on_exit = True
 
     def enable_pageserver_remote_storage(
         self,
@@ -995,7 +985,12 @@ class NeonEnvBuilder:
             )
             cleanup_error = None
 
-            if self.scrub_on_exit:
+            # If we are running with S3Storage (required by the scrubber), check that whatever the test
+            # did does not generate any corruption
+            if (
+                isinstance(self.env.pageserver_remote_storage, S3Storage)
+                and self.enable_scrub_on_exit
+            ):
                 try:
                     self.env.storage_scrubber.scan_metadata()
                 except Exception as e:
