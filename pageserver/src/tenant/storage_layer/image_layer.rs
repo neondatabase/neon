@@ -1111,6 +1111,7 @@ mod test {
             ShardIdentity::unsharded(),
             get_next_gen(),
         )
+        .await
         .unwrap();
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
@@ -1177,6 +1178,7 @@ mod test {
                 // But here, all we care about is that the gen number is unique.
                 get_next_gen(),
             )
+            .await
             .unwrap();
             let (tenant, ctx) = harness.load().await;
             let timeline = tenant

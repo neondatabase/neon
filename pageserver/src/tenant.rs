@@ -3788,7 +3788,7 @@ pub(crate) mod harness {
     }
 
     impl TenantHarness {
-        pub fn create_custom(
+        pub async fn create_custom(
             test_name: &'static str,
             tenant_conf: TenantConf,
             tenant_id: TenantId,
@@ -3824,7 +3824,7 @@ pub(crate) mod harness {
                 },
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             };
-            let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
+            let remote_storage = GenericRemoteStorage::from_config(&config).await.unwrap();
             let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));
 
             Ok(Self {
@@ -3839,7 +3839,7 @@ pub(crate) mod harness {
             })
         }
 
-        pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
+        pub async fn create(test_name: &'static str) -> anyhow::Result<Self> {
             // Disable automatic GC and compaction to make the unit tests more deterministic.
             // The tests perform them manually if needed.
             let tenant_conf = TenantConf {
@@ -3856,6 +3856,7 @@ pub(crate) mod harness {
                 shard,
                 Generation::new(0xdeadbeef),
             )
+            .await
         }
 
         pub fn span(&self) -> tracing::Span {
@@ -4891,7 +4892,8 @@ mod tests {
             TenantId::generate(),
             ShardIdentity::unsharded(),
             Generation::new(0xdeadbeef),
-        )?;
+        )
+        .await?;
         let (tenant, ctx) = harness.load().await;
 
         let mut current_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
@@ -5545,7 +5547,7 @@ mod tests {
         name: &'static str,
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
-        let mut harness = TenantHarness::create(name)?;
+        let mut harness = TenantHarness::create(name).await?;
         harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
             kind: compaction_algorithm,
         };
