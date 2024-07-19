@@ -30,21 +30,12 @@ applies to the single timeline.
 
 ### Definitions
 
-A SafekeeperId is
-```
-struct SafekeeperId {
-    node_id: NodeId,
-    // Not strictly required for this RFC but useful for asserts and potentially other purposes in the future
-    hostname: String,
-}
-```
-
 A configuration is
 
 ```
 struct Configuration {
     generation: Generation, // a number uniquely identifying configuration
-    sk_set: Vec<SafekeeperId>, // current safekeeper set
+    sk_set: Vec<NodeId>, // current safekeeper set
     new_sk_set: Optional<Vec<SafekeeperId>>,
 }
 ```
@@ -76,7 +67,13 @@ case of sk->wp message.
 ### Safekeeper changes
 
 Basic rule: once safekeeper observes configuration higher than his own it
-immediately switches to it.
+immediately switches to it. It must refuse all messages with lower generation
+that his. It also refuses messages if it is not member of the current
+generation, though it is likely not unsafe to process them (walproposer should
+ignore them anyway).
+
+If there is non null configuration in `ProposerGreeting` and it is higher than
+current safekeeper one, safekeeper switches to it.
 
 Safekeeper sends its current configuration in its first message to walproposer
 `AcceptorGreeting`. It refuses all other walproposer messages if the
@@ -122,7 +119,7 @@ refusal to accept due to configuration change) it simply restarts.
 The following algorithm can be executed anywhere having access to configuration
 storage and safekeepers. It is safe to interrupt / restart it and run multiple
 instances of it concurrently, though likely one of them won't make
-progress then. It accepts `desired_set: Vec<SafekeeperId>` as input. 
+progress then. It accepts `desired_set: Vec<NodeId>` as input. 
 
 Algorithm will refuse to make the change if it encounters previous interrupted
 change attempt, but in this case it will try to finish it.
@@ -150,10 +147,10 @@ storage are reachable.
    of the new set catches up to this position because data before it 
    could be committed without ack from the new set.
 4) Initialize timeline on safekeeper(s) from `new_sk_set` where it 
-   doesn't exist yet by doing `pull_timeline` from current set. Doing 
-   that on majority of `new_sk_set` is enough to proceed, but it is 
-   reasonable to ensure that all `new_sk_set` members are initialized 
-   -- if some of them are down why are we migrating there?
+   doesn't exist yet by doing `pull_timeline` from the majority of the 
+   current set. Doing  that on majority of `new_sk_set` is enough to
+   proceed, but it is reasonable to ensure that all `new_sk_set` members
+   are initialized -- if some of them are down why are we migrating there?
 5) Call `PUT` `configuration` on safekeepers from the new set,
    delivering them `joint_conf` and collecting their positions. This will
    switch them to the `joint_conf` which generally won't be needed 
@@ -179,8 +176,8 @@ Description above focuses on safety. To make the flow practical and live, here a
 considerations.
 1) It makes sense to ping new set to ensure it we are migrating to live node(s) before 
   step 3.
-2) If e.g. accidentally wrong new sk set has been specified, before CAS in step `6` is completed we
-   can rollback to the old conf with one more CAS.
+2) If e.g. accidentally wrong new sk set has been specified, before CAS in step `6` is completed 
+   it is safe to rollback to the old conf with one more CAS.
 3) On step 4 timeline might be already created on members of the new set for various reasons; 
    the simplest is the procedure restart. There are more complicated scenarious like mentioned
    in step 5. Deleting and re-doing `pull_timeline` is generally unsafe without involving 
@@ -188,8 +185,11 @@ considerations.
    has a disadvantage: you might imagine an surpassingly unlikely schedule where condition in
    the step 5 is never reached until compute is (re)awaken up to synchronize new member(s).
    I don't think we'll observe this in practice, but can add waking up compute if needed.
-4) To do step 7 in case of failure immediately after completion of CAS in step 6, 
-   configuration storage should also have `delivered_to_majority` flag for non join configurations.
+4) In the end timeline should be locally deleted on the safekeeper(s) which are
+   in the old set but not in the new one, unless they are unreachable. To be
+   safe this also should be done under generation number.
+5) If current conf fetched on step 1 is already not joint and members equal to `desired_set`,
+   jump to step 7, using it as `new_conf`.
 
 ## Implementation
 
@@ -251,25 +251,37 @@ to make these request reality; this ensures one instance of storage_controller
 won't do several migrations on the same timeline concurrently. In the first
 version it is simpler to have more manual control and no retries, i.e. migration
 failure removes the request. Later we can build retries and automatic
-scheduling/migration.
+scheduling/migration. `MigrationRequest` is
+```
+enum MigrationRequest {
+    To(Vec<NodeId>),
+    FinishPending,
+}
+```
+
+`FinishPending` requests to run the procedure to ensure state is clean: current
+configuration is not joint and majority of safekeepers are aware of it, but do
+not attempt to migrate anywhere. If current configuration fetched on step 1 is
+not joint it jumps to step 7. It should be run at startup for all timelines (but
+similarly, in the first version it is ok to trigger it manually).
 
 #### Schema
 
 `safekeepers` table mirroring current `nodes` should be added, except that for
-`scheduling_policy` field (maybe better name it `status`?) it is enough to have
-at least in the beginning only 3 fields: 1) `active` 2) `scheduling_disabled` 3)
+`scheduling_policy` field (seems like `status` is a better name for it): it is enough
+to have at least in the beginning only 3 fields: 1) `active` 2) `unavailable` 3)
 `decomissioned`.
 
 `timelines` table:
 ```
 table! {
-    timelines {
+    // timeline_id is primary key
+    timelines (timeline_id) {
         timeline_id -> Varchar,
         tenant_id -> Varchar,
         generation -> Int4,
         sk_set -> Jsonb, // list of safekeeper ids
         new_sk_set -> Nullable<Jsonb>, // list of safekeeper ids, null if not join conf
-        delivered_to_majority -> Nullable<Bool>, // null if joint conf
         cplane_notified_generation -> Int4,
     }
 }
@@ -277,15 +289,117 @@ table! {
 
 #### API
 
+Node management is similar to pageserver:
+1) POST `/control/v1/safekeepers` upserts safekeeper.
+2) GET `/control/v1/safekeepers` lists safekeepers.
+3) GET `/control/v1/safekeepers/:node_id` gets safekeeper.
+4) PUT `/control/v1/safekepers/:node_id/status` changes status to e.g.
+   `unavailable` or `decomissioned`. Initially it is simpler not to schedule any
+    migrations here.
 
+Safekeeper deploy scripts should register safekeeper at storage_contorller as
+they currently do with cplane, under the same id.
+
+Timeline creation/deletion: already existing POST `tenant/:tenant_id/timeline`
+would 1) choose initial set of safekeepers; 2) write to the db initial
+`Configuration` with `INSERT ON CONFLICT DO NOTHING` returning existing row in
+case of conflict; 3) create timeline on the majority of safekeepers (already
+created is ok).
+
+We don't want to block timeline creation when one safekeeper is down. Currently
+this is solved by compute implicitly creating timeline on any safekeeper it is
+connected to. This creates ugly timeline state on safekeeper when timeline is
+created, but start LSN is not defined yet. It would be nice to remove this; to
+do that, controller can in the background retry to create timeline on
+safekeeper(s) which missed that during initial creation call. It can do that
+through `pull_timeline` from majority so it doesn't need to remember
+`parent_lsn` in its db.
+
+Timeline deletion removes the row from the db and forwards deletion to the
+current configuration members. Without additional actions deletions might leak,
+see below on this; initially let's ignore these, reporting to cplane success if
+at least one safekeeper deleted the timeline (this will remove s3 data).
+
+Tenant deletion repeats timeline deletion for all timelines.
+
+Migration API: the first version is the simplest and the most imperative:
+1) PUT `/control/v1/safekeepers/migrate` schedules `MigrationRequest`s to move
+all timelines from one safekeeper to another. It accepts json
+```
+{
+    "src_sk": u32,
+    "dst_sk": u32,
+    "limit": Optional<u32>,
+}
+```
+
+Returns list of scheduled requests.
+
+2) PUT `/control/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate` schedules `MigrationRequest`
+   to move single timeline to given set of safekeepers:
+{
+    "desired_set": Vec<u32>,
+}
+
+Returns scheduled request.
+
+Similar call should be added for the tenant.
+
+It would be great to have some way of subscribing to the results (appart from
+looking at logs/metrics).
+
+Migration is executed as described above. One subtlety is that (local) deletion on
+source safekeeper might fail, which is not a problem if we are going to
+decomission the node but leaves garbage otherwise. I'd propose in the first version
+1) Don't attempt deletion at all if node status is `unavailable`.
+2) If it failed, just issue warning.
+And add PUT `/control/v1/safekeepers/:node_id/scrub` endpoint which would find and 
+remove garbage timelines for manual use. It will 1) list all timelines on the 
+safekeeper 2) compare each one against configuration storage: if timeline 
+doesn't exist at all (had been deleted), it can be deleted. Otherwise, it can 
+be deleted under generation number if node is not member of current generation.
+
+Automating this is untrivial; we'd need to register all potential missing
+deletions <tenant_id, timeline_id, generation, node_id> in the same transaction
+which switches configurations. Similarly when timeline is fully deleted to
+prevent cplane operation from blocking when some safekeeper is not available
+deletion should be also registered.
+
+3) GET `/control/v1/tenant/:tenant_id/timeline/:timeline_id/` should return
+   current in memory state of the timeline and pending `MigrationRequest`,
+   if any.
+
+4) PUT `/control/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate_abort` tries to abort the
+   migration by switching configuration from the joint to the one with (previous) `sk_set` under CAS
+   (incrementing generation as always).
 
 #### Dealing with multiple instances of storage_controller
 
-neon_local, pytest
+Operations described above executed concurrently might create some errors but do
+not prevent progress, so while we normally don't want to run multiple instances
+of storage_controller it is fine to have it temporarily, e.g. during redeploy.
+
+Any interactions with db update in-memory controller state, e.g. if migration
+request failed because different one is in progress, controller remembers that
+and tries to finish it.
 
 ## Testing
 
-## Integration with evicted timeline
+`neon_local` should be switched to use storage_controller, playing role of
+control plane.
+
+There should be following layers of tests:
+1) Model checked TLA+ spec specifies the algorithm and verifies its basic safety.
+
+2) To cover real code and at the same time test many schedules we should have
+   simulation tests. For that, configuration storage, storage_controller <->
+   safekeeper communication and pull_timeline need to be mocked and main switch
+   procedure wrapped to as a node (thread) in simulation tests, using these
+   mocks. Test would inject migrations like it currently injects
+   safekeeper/walproposer restars. Main assert is the same -- committed WAL must
+   not be lost.
+
+3) Additionally it would be good to have basic tests covering the whole system.
 
 ## Order of implementation and rollout
 
@@ -293,6 +407,8 @@ note that
 - core can be developed ignoring cplane integration (neon_local will use storcon, but prod not)
 - there is a lot of infra work and it woud be great to separate its rollout from the core
 - wp could ignore joint consensus for some time
+
+TimelineCreateRequest should get optional safekeepers field with safekeepers chosen by cplane.
 
 rough order:
 - add sk infra, but not enforce confs
@@ -313,6 +429,7 @@ rough order:
   also only at this point wp will always use generations and
   so we can drop 'tli creation on connect'.
 
+## Integration with evicted timelines
 
 ## Possible optimizations
 
