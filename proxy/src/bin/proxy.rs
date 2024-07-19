@@ -354,7 +354,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let redis_notifications_client = if let Some(url) = &args.redis_notifications {
-        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
+        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string()))
     } else {
         regional_redis_client.clone()
     };
