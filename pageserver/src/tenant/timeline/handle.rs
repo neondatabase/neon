@@ -20,19 +20,11 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::Weak;
 
-use either::Either;
-use pageserver_api::key::rel_block_to_key;
-use pageserver_api::key::Key;
-use tracing::info;
 use tracing::instrument;
 use tracing::trace;
-use utils::id::TenantId;
-use utils::id::TenantShardTimelineId;
 use utils::id::TimelineId;
 use utils::shard::ShardIndex;
 use utils::shard::ShardNumber;
-use utils::shard::TenantShardId;
-use utils::sync::gate::GateGuard;
 
 use crate::tenant::mgr::ShardSelector;
 
@@ -87,7 +79,7 @@ pub(crate) trait TenantManager {
     type Error;
     /// Invoked by [`Cache::gt`] to resolve a [`TenantShardTimelineId`] to a [`Timeline`].
     /// Errors are returned as [`GetError::TenantManager`].
-    fn resolve(
+    async fn resolve(
         &self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
@@ -122,17 +114,17 @@ impl Cache {
     /// and if so, return an error that causes the page service to
     /// close the connection.
     #[instrument(level = "trace", skip_all)]
-    pub(crate) fn get<M, E>(
-        &mut self,
+    pub(crate) async fn get<M, E>(
+        &self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-        tenant_manager: M,
+        tenant_manager: &M,
     ) -> Result<Handle, GetError<E>>
     where
         M: TenantManager<Error = E>,
     {
         let mut map = self.0.map.lock().expect("mutex poisoned");
-        let mut routing_state = self.shard_routing(&mut map, timeline_id, shard_selector);
+        let routing_state = self.shard_routing(&mut map, timeline_id, shard_selector);
         match routing_state {
             RoutingResult::FastPath(handle) => return Ok(handle),
             RoutingResult::Index(shard_index) => {
@@ -141,30 +133,35 @@ impl Cache {
                     timeline_id,
                 };
                 let Some(lookup_result) = map.get(&key) else {
-                    return self.get_miss(
-                        &mut map,
-                        timeline_id,
-                        ShardSelector::Known(shard_index),
-                        tenant_manager,
-                    );
+                    return self
+                        .get_miss(
+                            &mut map,
+                            timeline_id,
+                            ShardSelector::Known(shard_index),
+                            tenant_manager,
+                        )
+                        .await;
                 };
                 let upgraded = match lookup_result.upgrade() {
                     Some(upgraded) => upgraded,
                     None => {
                         trace!("handle cache stale");
                         map.remove(&key).unwrap();
-                        return self.get_miss(
-                            &mut map,
-                            timeline_id,
-                            ShardSelector::Known(shard_index),
-                            tenant_manager,
-                        );
+                        return self
+                            .get_miss(
+                                &mut map,
+                                timeline_id,
+                                ShardSelector::Known(shard_index),
+                                tenant_manager,
+                            )
+                            .await;
                     }
                 };
                 Ok(Handle(upgraded))
             }
             RoutingResult::NeedConsultTenantManager => {
                 self.get_miss(&mut map, timeline_id, shard_selector, tenant_manager)
+                    .await
             }
         }
     }
@@ -214,17 +211,17 @@ impl Cache {
     }
 
     #[instrument(level = "trace", skip_all)]
-    fn get_miss<M, E>(
+    async fn get_miss<M, E>(
         &self,
         map: &mut Map,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-        tenant_manager: M,
+        tenant_manager: &M,
     ) -> Result<Handle, GetError<E>>
     where
         M: TenantManager<Error = E>,
     {
-        match tenant_manager.resolve(timeline_id, shard_selector) {
+        match tenant_manager.resolve(timeline_id, shard_selector).await {
             Ok(timeline) => {
                 let key = timeline.shard_timeline_id();
                 match &shard_selector {
@@ -329,9 +326,9 @@ impl Drop for PerTimelineState {
 /// When the page service connection closes and drops its instance of [`Cache`],
 /// we have to clean up the [`PerTimelineState`] to break the strong-reference
 /// cycle between the [`HandleInner::timeline`] and the [`Timeline::handlers`].
-impl Drop for Cache {
+impl Drop for CacheInner {
     fn drop(&mut self) {
-        let mut map = self.0.map.lock().expect("mutex poisoned");
+        let mut map = self.map.get_mut().expect("mutex poisoned");
         for (_, weak_handler) in map.drain() {
             if let Some(strong_handler) = weak_handler.upgrade() {
                 let per_timeline_state: &PerTimelineState = &strong_handler.timeline.handlers;

@@ -31,7 +31,7 @@ use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use utils::fs_ext;
-use utils::id::{TenantId, TenantShardTimelineId, TimelineId};
+use utils::id::{TenantId, TenantShardTimelineId};
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";

@@ -4,10 +4,8 @@
 use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
 use once_cell::sync::OnceCell;
-use pageserver_api::key::Key;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -16,28 +14,23 @@ use pageserver_api::models::{
     PagestreamGetSlruSegmentRequest, PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest,
     PagestreamNblocksResponse, PagestreamProtocolVersion,
 };
-use pageserver_api::shard::ShardIndex;
-use pageserver_api::shard::ShardNumber;
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{is_expected_io_error, AuthType, PostgresBackend, QueryError};
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::io;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 use std::time::SystemTime;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::sync::gate::GateGuard;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
     id::{TenantId, TimelineId},
@@ -50,6 +43,7 @@ use crate::basebackup;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics;
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
@@ -57,24 +51,17 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::task_mgr::TaskKind;
 use crate::task_mgr::{self, COMPUTE_REQUEST_RUNTIME};
-use crate::tenant::mgr::GetActiveTenantError;
-use crate::tenant::mgr::GetTenantError;
-use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
+use crate::tenant::mgr::{GetActiveTenantError, GetTenantError, ShardResolveResult};
 use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
-use crate::tenant::Tenant;
 use crate::tenant::Timeline;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
-
-// How long we may wait for a [`TenantSlot::InProgress`]` and/or a [`Tenant`] which
-// is not yet in state [`TenantState::Active`].
-const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -324,7 +311,7 @@ impl TimelineHandles {
             handles: Default::default(),
         }
     }
-    fn get(
+    async fn get(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -335,7 +322,73 @@ impl TimelineHandles {
                 GetActiveTenantError::SwitchedTenant,
             ));
         }
-        todo!("get timeline handle"); // TODO: reimplement wait_for_active
+        self.handles
+            .get(timeline_id, shard_selector, self)
+            .await
+            .map_err(|e| match e {
+                timeline::handle::GetError::TenantManager(e) => e,
+                timeline::handle::GetError::TimelineGateClosed => {
+                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
+                }
+                timeline::handle::GetError::PerTimelineStateShutDown => {
+                    GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
+                }
+            })
+    }
+}
+
+impl timeline::handle::TenantManager for TimelineHandles {
+    type Error = GetActiveTimelineError;
+
+    async fn resolve(
+        &self,
+        timeline_id: TimelineId,
+        shard_selector: ShardSelector,
+    ) -> Result<Arc<Timeline>, Self::Error> {
+        let tenant_id = self.tenant_id.get().expect("we set this in get()");
+        let timeout = ACTIVE_TENANT_TIMEOUT;
+        let wait_start = Instant::now();
+        let deadline = wait_start + timeout;
+        let tenant_shard = loop {
+            let resolved = self
+                .tenant_manager
+                .resolve_attached_shard(tenant_id, shard_selector);
+            match resolved {
+                ShardResolveResult::Found(tenant_shard) => break tenant_shard,
+                ShardResolveResult::NotFound => {
+                    return Err(GetActiveTimelineError::Tenant(
+                        GetActiveTenantError::NotFound(GetTenantError::NotFound(*tenant_id)),
+                    ));
+                }
+                ShardResolveResult::InProgress(barrier) => {
+                    // We can't authoritatively answer right now: wait for InProgress state
+                    // to end, then try again
+                    tokio::select! {
+                        _  = barrier.wait() => {
+                            // The barrier completed: proceed around the loop to try looking up again
+                        },
+                        _ = tokio::time::sleep(deadline.duration_since(Instant::now())) => {
+                            return Err(GetActiveTimelineError::Tenant(GetActiveTenantError::WaitForActiveTimeout {
+                                latest_state: None,
+                                wait_time: timeout,
+                            }));
+                        }
+                    }
+                }
+            };
+        };
+
+        tracing::debug!("Waiting for tenant to enter active state...");
+        tenant_shard
+            .wait_to_become_active(deadline.duration_since(Instant::now()))
+            .await
+            .map_err(GetActiveTimelineError::Tenant)?;
+
+        let timeline = tenant_shard
+            .get_timeline(timeline_id, true)
+            .map_err(GetActiveTimelineError::Timeline)?;
+        set_tracing_field_shard_id(&timeline);
+        Ok(timeline)
     }
 }
 
@@ -708,11 +761,14 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
-        let timeline = self.timeline_handles.get(
-            tenant_shard_id.tenant_id,
-            timeline_id,
-            ShardSelector::Known(tenant_shard_id.to_index()),
-        )?;
+        let timeline = self
+            .timeline_handles
+            .get(
+                tenant_shard_id.tenant_id,
+                timeline_id,
+                ShardSelector::Known(tenant_shard_id.to_index()),
+            )
+            .await?;
         set_tracing_field_shard_id(&timeline);
 
         let lease = timeline.make_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)?;
@@ -742,7 +798,8 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)
+            .await?;
         let _timer = timeline
             .query_metrics
             .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
@@ -776,7 +833,8 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)
+            .await?;
 
         let _timer = timeline
             .query_metrics
@@ -811,7 +869,8 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)
+            .await?;
 
         let _timer = timeline
             .query_metrics
@@ -845,15 +904,16 @@ impl PageServerHandler {
         req: &PagestreamGetPageRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = match self.timeline_handles.get(
-            tenant_id,
-            timeline_id,
-            ShardSelector::Page(rel_block_to_key(req.rel, req.blkno)),
-        ) {
-            Ok(tl) => {
-                set_tracing_field_shard_id(&tl);
-                tl
-            }
+        let timeline = match self
+            .timeline_handles
+            .get(
+                tenant_id,
+                timeline_id,
+                ShardSelector::Page(rel_block_to_key(req.rel, req.blkno)),
+            )
+            .await
+        {
+            Ok(tl) => tl,
             Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
                 // We already know this tenant exists in general, because we resolved it at
                 // start of connection.  Getting a NotFound here indicates that the shard containing
@@ -903,7 +963,8 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)
+            .await?;
 
         let _timer = timeline
             .query_metrics
@@ -968,8 +1029,7 @@ impl PageServerHandler {
 
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
-        set_tracing_field_shard_id(&timeline);
+            .get(tenant_id, timeline_id, ShardSelector::Zero).await?;
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
@@ -1085,24 +1145,24 @@ impl PageServerHandler {
     }
 
     /// Shorthand for getting a reference to a Timeline of an Active tenant.
-    fn get_active_tenant_timeline(
+    async fn get_active_tenant_timeline(
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         selector: ShardSelector,
     ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
-        let res = self.timeline_handles.get(
-            tenant_id,
-            timeline_id,
-            match selector {
-                ShardSelector::Zero => ShardSelector::Zero,
-                ShardSelector::Page(k) => ShardSelector::Page(k),
-                ShardSelector::Known(idx) => ShardSelector::Known(idx),
-            },
-        );
-        if let Ok(tl) = &res {
-            set_tracing_field_shard_id(&tl);
-        }
+        let res = self
+            .timeline_handles
+            .get(
+                tenant_id,
+                timeline_id,
+                match selector {
+                    ShardSelector::Zero => ShardSelector::Zero,
+                    ShardSelector::Page(k) => ShardSelector::Page(k),
+                    ShardSelector::Known(idx) => ShardSelector::Known(idx),
+                },
+            )
+            .await;
         res
     }
 }
