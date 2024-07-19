@@ -971,8 +971,8 @@ async fn remote_copy(
         .map_err(CopyFailed)
 }
 
-/// See [`Timeline::complete_detaching_timeline_ancestor`].
-pub(super) async fn complete(
+/// See [`Timeline::detach_from_ancestor_and_reparent`].
+pub(super) async fn detach_and_reparent(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
@@ -992,7 +992,11 @@ pub(super) async fn complete(
 
         (
             latest.lineage.detached_previous_ancestor(),
-            latest.ongoing_detach_ancestor.is_some(),
+            latest.gc_blocking.as_ref().is_some_and(|b| {
+                b.blocked_by(
+                    crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
+                )
+            }),
         )
     };
 
