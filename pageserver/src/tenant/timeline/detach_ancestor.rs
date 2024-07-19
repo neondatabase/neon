@@ -527,65 +527,63 @@ pub(super) async fn prepare(
         .as_ref()
         .map(|tl| (tl.clone(), detached.ancestor_lsn))
     else {
-        let (can_still_reparent, detached_ancestor, detached_ancestor_lsn) = {
+        let still_in_progress = {
             let accessor = detached.remote_client.initialized_upload_queue()?;
 
             // we are safe to inspect the latest uploaded, because we can only witness this after
             // restart is complete and ancestor is no more.
             let latest = accessor.latest_uploaded_index_part();
-            let Some((detached_ancestor, detached_ancestor_lsn)) =
-                latest.lineage.detached_previous_ancestor()
-            else {
+            if latest.lineage.detached_previous_ancestor().is_none() {
                 return Err(NoAncestor);
             };
 
-            let can_still_reparent = latest.ongoing_detach_ancestor.is_some();
-
-            (can_still_reparent, detached_ancestor, detached_ancestor_lsn)
+            latest.ongoing_detach_ancestor.is_some()
         };
+
+        if still_in_progress {
+            // gc is still blocked, we can still reparent and complete.
+            //
+            // this of course represents a challenge: how to *not* reparent branches which were not
+            // there when we started? cannot, unfortunately, if not recorded to the ongoing_detach_ancestor.
+            //
+            // FIXME: if a new timeline had been created on ancestor which was reparentable between
+            // the attempts, we could end up with it having different ancestry across shards. Fix
+            // this by locking the parentable timelines before the operation starts, and storing
+            // them in index_part.json.
+            //
+            // because the ancestor of detached is already set to none, we have published all
+            // of the layers.
+            let attempt = tenant
+                .ongoing_timeline_detach
+                .start_new_attempt(detached)
+                .await?;
+            return Ok(Progress::Prepared(
+                attempt,
+                PreparedTimelineDetach { layers: Vec::new() },
+            ));
+        }
 
         // `detached` has previously been detached; let's inspect each of the current timelines and
         // report back the timelines which have been reparented by our detach, or which are still
         // reparentable
-        let mut all_direct_children = Vec::new();
-        let mut reparenting_candidates = Vec::new();
 
-        tenant
+        let mut all_direct_children = tenant
             .timelines
             .lock()
             .unwrap()
             .values()
-            .for_each(|tl| {
-                // Collect to avoid lock taking order problem with Tenant::timelines and
-                // Timeline::remote_client
-
+            .filter_map(|tl| {
                 let is_direct_child = matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached));
 
                 if is_direct_child {
-                    all_direct_children.push((tl.ancestor_lsn, tl.clone()));
-                    return;
+                    Some((tl.ancestor_lsn, tl.clone()))
+                } else {
+                    None
                 }
-
-                let shared_detached_ancestor = tl.ancestor_timeline.as_ref().is_some_and(|x| x.timeline_id == detached_ancestor);
-                let branchpoint_in_range = tl.ancestor_lsn <= detached_ancestor_lsn;
-
-                if shared_detached_ancestor && branchpoint_in_range {
-                    reparenting_candidates.push(tl.clone());
-                    return;
-                }
-            });
-
-        if can_still_reparent {
-            // gc is still blocked, we can still reparent.
-            //
-            // this of course represents a challenge: how to *not* reparent branches which were not
-            // there when we started? cannot, unfortunately, if not recorded to the ongoing_detach_ancestor.
-            if !reparenting_candidates.is_empty() {
-                todo!("reparent the candidates by acquiring a lock, then jumping into completion?")
-            } else {
-                todo!("we must complete the attempt, note these timelines in the response")
-            }
-        }
+            })
+                // Collect to avoid lock taking order problem with Tenant::timelines and
+                // Timeline::remote_client
+            .collect::<Vec<_>>();
 
         let mut any_shutdown = false;
 
@@ -608,11 +606,6 @@ pub(super) async fn prepare(
             // it could be one or many being deleted; have client retry
             return Err(Error::ShuttingDown);
         }
-
-        // FIXME: reparent the reparentable (return Progress::Prepared if there were any) -- we
-        // will need to acquire the lock as well..? so it would make sense that at load time we
-        // would detect the in-progress ness and "soft-acquire it for us".
-        // FIXME: otherwise release gc blocking if it still is there, and wait for upload
 
         let mut reparented = all_direct_children;
         // why this instead of hashset? there is a reason, but I've forgotten it many times.
