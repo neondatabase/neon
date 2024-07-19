@@ -18,14 +18,17 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
+use pageserver_api::models::LocationConfigMode;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::LsnLeaseRequest;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
+use pageserver_api::models::TenantLocationConfigRequest;
 use pageserver_api::models::TenantLocationConfigResponse;
 use pageserver_api::models::TenantScanRemoteStorageResponse;
 use pageserver_api::models::TenantScanRemoteStorageShard;
@@ -33,12 +36,10 @@ use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
+use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
-use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantLocationConfigRequest,
-};
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
@@ -663,6 +664,39 @@ async fn timeline_preserve_initdb_handler(
     .instrument(info_span!("timeline_preserve_initdb_archive",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug(),
+                %timeline_id))
+    .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn timeline_archival_config_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let request_data: TimelineArchivalConfigRequest = json_request(&mut request).await?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        tenant
+            .apply_timeline_archival_config(timeline_id, request_data.state)
+            .await
+            .context("applying archival config")
+            .map_err(ApiError::InternalServerError)?;
+        Ok::<_, ApiError>(())
+    }
+    .instrument(info_span!("timeline_archival_config",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug(),
+                state = ?request_data.state,
                 %timeline_id))
     .await?;
 
@@ -2793,6 +2827,10 @@ pub fn make_router(
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
             |r| api_handler(r, timeline_preserve_initdb_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
+            |r| api_handler(r, timeline_archival_config_handler),
         )
         .get("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)

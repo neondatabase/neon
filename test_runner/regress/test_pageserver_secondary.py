@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import pytest
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, StorageScrubber
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
@@ -234,7 +234,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
     # Having done a bunch of attach/detach cycles, we will have generated some index garbage: check
     # that the scrubber sees it and cleans it up.  We do this before the final attach+validate pass,
     # to also validate that the scrubber isn't breaking anything.
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=1)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] > 0
 
@@ -555,7 +555,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # Scrub the remote storage
     # ========================
     # This confirms that the scrubber isn't upset by the presence of the heatmap
-    StorageScrubber(neon_env_builder).scan_metadata()
+    env.storage_scrubber.scan_metadata()
 
     # Detach secondary and delete tenant
     # ===================================

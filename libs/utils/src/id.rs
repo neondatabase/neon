@@ -8,8 +8,6 @@ use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::shard::TenantShardId;
-
 #[derive(Error, Debug)]
 pub enum IdError {
     #[error("invalid id length {0}")]
@@ -351,31 +349,6 @@ impl FromStr for TenantTimelineId {
             anyhow::bail!("TenantTimelineId must contain only tenant_id and timeline_id");
         }
         Ok(TenantTimelineId::new(tenant_id, timeline_id))
-    }
-}
-
-/// Convenience for referring to timelines within a particular shard: more ergonomic
-/// than using a 2-tuple.
-///
-/// This is the shard-aware equivalent of TenantTimelineId.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct TenantShardTimelineId {
-    pub tenant_shard_id: TenantShardId,
-    pub timeline_id: TimelineId,
-}
-
-impl TenantShardTimelineId {
-    pub fn new(tenant_shard_id: TenantShardId, timeline_id: TimelineId) -> Self {
-        Self {
-            tenant_shard_id,
-            timeline_id,
-        }
-    }
-}
-
-impl fmt::Display for TenantShardTimelineId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.tenant_shard_id, self.timeline_id)
     }
 }
 

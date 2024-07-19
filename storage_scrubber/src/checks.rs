@@ -6,11 +6,11 @@ use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use tracing::{error, info, warn};
 use utils::generation::Generation;
-use utils::id::{TenantShardTimelineId, TimelineId};
+use utils::id::TimelineId;
 
 use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
-use crate::{download_object_with_retries, RootTarget};
+use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::StreamExt;
 use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
 use pageserver::tenant::storage_layer::LayerName;

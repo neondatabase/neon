@@ -2127,7 +2127,7 @@ mod tests {
     impl TestSetup {
         async fn new(test_name: &str) -> anyhow::Result<Self> {
             let test_name = Box::leak(Box::new(format!("remote_timeline_client__{test_name}")));
-            let harness = TenantHarness::create(test_name)?;
+            let harness = TenantHarness::create(test_name).await?;
             let (tenant, ctx) = harness.load().await;
 
             let timeline = tenant

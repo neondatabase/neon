@@ -33,6 +33,10 @@ pub enum Scope {
     GenerationsApi,
     // Allows access to control plane managment API and some storage controller endpoints.
     Admin,
+
+    /// Allows access to storage controller APIs used by the scrubber, to interrogate the state
+    /// of a tenant & post scrub results.
+    Scrubber,
 }
 
 /// JWT payload. See docs/authentication.md for the format

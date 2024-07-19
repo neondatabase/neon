@@ -16,13 +16,13 @@ use futures_util::TryStreamExt;
 use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
-use utils::id::{TenantId, TenantShardTimelineId};
+use utils::id::TenantId;
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
     init_remote,
     metadata_stream::{stream_listing, stream_tenant_timelines, stream_tenants},
-    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TraversingDepth,
+    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId, TraversingDepth,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
