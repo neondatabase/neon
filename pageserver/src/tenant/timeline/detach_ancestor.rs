@@ -1074,7 +1074,7 @@ pub(super) async fn detach_and_reparent(
         "to detach and reparent, gc must still be blocked"
     );
 
-    let (ancestor, ancestor_lsn) = match ancestor {
+    let (ancestor, ancestor_lsn, was_detached) = match ancestor {
         Ancestor::NotDetached(ancestor, ancestor_lsn) => {
             // this has to complete before any reparentings because otherwise they would not have
             // layers on the new parent.
@@ -1087,9 +1087,9 @@ pub(super) async fn detach_and_reparent(
                 .await
                 .context("publish layers and detach ancestor")?;
 
-            (ancestor, ancestor_lsn)
+            (ancestor, ancestor_lsn, true)
         }
-        Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn),
+        Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn, false),
     };
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -1217,7 +1217,7 @@ pub(super) async fn detach_and_reparent(
         );
 
         Ok(DetachingAndReparenting::SomeReparentingFailed {
-            must_restart: reparented.is_empty(),
+            must_restart: !reparented.is_empty() || was_detached,
         })
     }
 }
