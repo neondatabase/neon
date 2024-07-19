@@ -451,6 +451,42 @@ impl SharedStateInner {
         assert!(!self.known_ongoing.is_empty());
         self.latest = Some((ExistingAttempt::ReadFromIndexPart, witnessed));
     }
+
+    fn on_delete(&mut self, timeline_id: &TimelineId) {
+        let witnessed = match self.latest.as_ref() {
+            Some((ExistingAttempt::Actual(x, barrier), witnessed)) if x == timeline_id => {
+                assert!(
+                    barrier.is_ready(),
+                    "the attempt is still ongoing; is this call happening before closing the gate?"
+                );
+                *witnessed
+            }
+            Some((ExistingAttempt::ContinuedOverRestart(x), witnessed)) if x == timeline_id => {
+                *witnessed
+            }
+            Some((ExistingAttempt::ReadFromIndexPart, witnessed))
+                if self.known_ongoing.contains(timeline_id) =>
+            {
+                *witnessed
+            }
+            _ => return,
+        };
+
+        assert!(self.known_ongoing.remove(timeline_id));
+
+        if self.known_ongoing.is_empty() {
+            self.latest = None;
+            tracing::info!("gc is now unblocked following timeline deletion");
+        } else {
+            self.latest = Some((ExistingAttempt::ReadFromIndexPart, witnessed));
+            tracing::info!(
+                n = self.known_ongoing.len(),
+                "gc is still blocked for remaining ongoing detaches"
+            );
+        }
+
+        todo!("there should be a test for this.")
+    }
 }
 
 #[derive(Debug)]
