@@ -985,7 +985,6 @@ pub(super) async fn complete(
     enum Ancestor {
         NotDetached(Arc<Timeline>, Lsn),
         Detached(Arc<Timeline>, Lsn),
-        Deleted(TimelineId, Lsn),
     }
 
     let (recorded_branchpoint, detach_is_ongoing) = {
@@ -1019,7 +1018,7 @@ pub(super) async fn complete(
         if let Some(ancestor) = existing {
             Ancestor::Detached(ancestor, ancestor_lsn)
         } else {
-            Ancestor::Deleted(ancestor_id, ancestor_lsn)
+            return Ok((reparented_direct_children(detached, tenant)?, true));
         }
     } else {
         panic!("bug: complete called on a timeline which has not been detached or which has no live ancestor");
@@ -1037,6 +1036,8 @@ pub(super) async fn complete(
 
     let (ancestor, ancestor_lsn) = match ancestor {
         Ancestor::NotDetached(ancestor, ancestor_lsn) => {
+            // this has to complete before any reparentings because otherwise they would not have
+            // layers on the new parent.
             detached
                 .remote_client
                 .schedule_adding_existing_layers_to_index_detach_and_wait(
@@ -1049,9 +1050,6 @@ pub(super) async fn complete(
             (ancestor, ancestor_lsn)
         }
         Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn),
-        Ancestor::Deleted(..) => {
-            return Ok((reparented_direct_children(detached, tenant)?, true));
-        }
     };
 
     assert!(detach_is_ongoing, "to reparent, gc must still be blocked");
