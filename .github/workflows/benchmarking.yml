@@ -81,7 +81,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init 
+      options: --init
 
     steps:
     - uses: actions/checkout@v4
@@ -159,7 +159,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init 
+      options: --init
 
     steps:
     - uses: actions/checkout@v4
@@ -323,7 +323,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init 
+      options: --init
 
     # Increase timeout to 8h, default timeout is 6h
     timeout-minutes: 480
@@ -460,7 +460,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init 
+      options: --init
 
     steps:
     - uses: actions/checkout@v4
@@ -542,8 +542,6 @@ jobs:
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
-    
-
   clickbench-compare:
     # ClichBench DB for rds-aurora and rds-Postgres deployed to the same clusters
     # we use for performance testing in pgbench-compare.
@@ -572,7 +570,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init 
+      options: --init
 
     steps:
     - uses: actions/checkout@v4
@@ -660,7 +658,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init 
+      options: --init
 
     steps:
     - uses: actions/checkout@v4
@@ -746,7 +744,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init 
+      options: --init
 
     steps:
     - uses: actions/checkout@v4
