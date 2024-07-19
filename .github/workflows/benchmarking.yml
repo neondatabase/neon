@@ -533,6 +533,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
     # until https://github.com/neondatabase/neon/issues/8275 is fixed we temporarily install postgresql-16 and thus run this job as root user
     - name: temporarily clean up files created with root permissions that other job steps running as non-root cannot delete
+      if: ${{ !cancelled() }}
       run: |
         rm -rf /__w/neon/neon
 
