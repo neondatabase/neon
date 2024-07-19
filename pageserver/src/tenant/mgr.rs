@@ -2024,61 +2024,66 @@ impl TenantManager {
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
-        let (resp, reparented_all) = timeline
+        let resp = timeline
             .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
             .await?;
 
         let mut slot_guard = slot_guard.into_inner();
 
-        attempt.before_shutdown();
+        let tenant = if resp.reset_tenant_required() {
+            attempt.before_shutdown();
 
-        let (_guard, progress) = utils::completion::channel();
-        match tenant.shutdown(progress, ShutdownMode::Hard).await {
-            Ok(()) => {
-                slot_guard.drop_old_value()?;
+            let (_guard, progress) = utils::completion::channel();
+            match tenant.shutdown(progress, ShutdownMode::Hard).await {
+                Ok(()) => {
+                    slot_guard.drop_old_value()?;
+                }
+                Err(_barrier) => {
+                    slot_guard.revert();
+                    // this really should not happen, at all, unless shutdown was already going?
+                    anyhow::bail!("Cannot restart Tenant, already shutting down");
+                }
             }
-            Err(_barrier) => {
-                slot_guard.revert();
-                // this really should not happen, at all, unless shutdown was already going?
-                anyhow::bail!("Cannot restart Tenant, already shutting down");
-            }
-        }
 
-        let tenant_path = self.conf.tenant_path(&tenant_shard_id);
-        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+            let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+            let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
 
-        let shard_identity = config.shard;
-        let tenant = tenant_spawn(
-            self.conf,
-            tenant_shard_id,
-            &tenant_path,
-            self.resources.clone(),
-            AttachedTenantConf::try_from(config)?,
-            shard_identity,
-            None,
-            SpawnMode::Eager,
-            Some(&attempt),
-            ctx,
-        );
+            let shard_identity = config.shard;
+            let tenant = tenant_spawn(
+                self.conf,
+                tenant_shard_id,
+                &tenant_path,
+                self.resources.clone(),
+                AttachedTenantConf::try_from(config)?,
+                shard_identity,
+                None,
+                SpawnMode::Eager,
+                Some(&attempt),
+                ctx,
+            );
 
-        slot_guard.upsert(TenantSlot::Attached(tenant.clone()))?;
+            slot_guard.upsert(TenantSlot::Attached(tenant.clone()))?;
+            tenant
+        } else {
+            tracing::info!("skipping tenant_reset as no changes made required it");
+            tenant
+        };
 
-        if reparented_all {
+        if let Some(reparented) = resp.completed() {
             // finally ask the restarted tenant to complete the detach
             tenant
                 .ongoing_timeline_detach
                 .complete(attempt, &tenant)
                 .await?;
+            Ok(reparented)
         } else {
             // at least the latest versions have now been downloaded and refreshed; be ready to
             // retry another time.
             tenant.ongoing_timeline_detach.cancel(attempt);
-            return Err(anyhow::anyhow!(
+            Err(anyhow::anyhow!(
                 "failed to reparent all candidate timelines, please retry"
-            ));
+            ))
         }
-
-        Ok(resp)
     }
 
     /// A page service client sends a TenantId, and to look up the correct Tenant we must
