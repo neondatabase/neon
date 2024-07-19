@@ -22,7 +22,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    StorageScrubber,
     generate_uploads_and_deletions,
 )
 from fixtures.pageserver.common_types import parse_layer_file_name
@@ -215,7 +214,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     # Having written a mixture of generation-aware and legacy index_part.json,
     # ensure the scrubber handles the situation as expected.
-    metadata_summary = StorageScrubber(neon_env_builder).scan_metadata()
+    metadata_summary = env.storage_scrubber.scan_metadata()
     assert metadata_summary["tenant_count"] == 1  # Scrubber should have seen our timeline
     assert metadata_summary["timeline_count"] == 1
     assert metadata_summary["timeline_shard_count"] == 1

@@ -16,16 +16,10 @@ use std::{
 
 use anyhow::{anyhow, Context as _};
 use aws_config::{
-    environment::credentials::EnvironmentVariableCredentialsProvider,
-    imds::credentials::ImdsCredentialsProvider,
-    meta::credentials::CredentialsProviderChain,
-    profile::ProfileFileCredentialsProvider,
-    provider_config::ProviderConfig,
+    default_provider::credentials::DefaultCredentialsChain,
     retry::{RetryConfigBuilder, RetryMode},
-    web_identity_token::WebIdentityTokenCredentialsProvider,
     BehaviorVersion,
 };
-use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_sdk_s3::{
     config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
@@ -76,40 +70,27 @@ struct GetObjectRequest {
 }
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
-    pub fn new(remote_storage_config: &S3Config, timeout: Duration) -> anyhow::Result<Self> {
+    pub async fn new(remote_storage_config: &S3Config, timeout: Duration) -> anyhow::Result<Self> {
         tracing::debug!(
             "Creating s3 remote storage for S3 bucket {}",
             remote_storage_config.bucket_name
         );
 
-        let region = Some(Region::new(remote_storage_config.bucket_region.clone()));
+        let region = Region::new(remote_storage_config.bucket_region.clone());
+        let region_opt = Some(region.clone());
 
-        let provider_conf = ProviderConfig::without_region().with_region(region.clone());
-
-        let credentials_provider = {
-            // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-            CredentialsProviderChain::first_try(
-                "env",
-                EnvironmentVariableCredentialsProvider::new(),
-            )
-            // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
-            .or_else(
-                "profile-sso",
-                ProfileFileCredentialsProvider::builder()
-                    .configure(&provider_conf)
-                    .build(),
-            )
-            // uses "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
-            // needed to access remote extensions bucket
-            .or_else(
-                "token",
-                WebIdentityTokenCredentialsProvider::builder()
-                    .configure(&provider_conf)
-                    .build(),
-            )
-            // uses imds v2
-            .or_else("imds", ImdsCredentialsProvider::builder().build())
-        };
+        // https://docs.aws.amazon.com/sdkref/latest/guide/standardized-credentials.html
+        // https://docs.rs/aws-config/latest/aws_config/default_provider/credentials/struct.DefaultCredentialsChain.html
+        // Incomplete list of auth methods used by this:
+        // * "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
+        // * "AWS_PROFILE" / `aws sso login --profile <profile>`
+        // * "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME"
+        // * http (ECS/EKS) container credentials
+        // * imds v2
+        let credentials_provider = DefaultCredentialsChain::builder()
+            .region(region)
+            .build()
+            .await;
 
         // AWS SDK requires us to specify how the RetryConfig should sleep when it wants to back off
         let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
@@ -118,9 +99,9 @@ impl S3Bucket {
             #[allow(deprecated)] /* TODO: https://github.com/neondatabase/neon/issues/7665 */
             BehaviorVersion::v2023_11_09(),
         )
-        .region(region)
+        .region(region_opt)
         .identity_cache(IdentityCache::lazy().build())
-        .credentials_provider(SharedCredentialsProvider::new(credentials_provider))
+        .credentials_provider(credentials_provider)
         .sleep_impl(SharedAsyncSleep::from(sleep_impl));
 
         let sdk_config: aws_config::SdkConfig = std::thread::scope(|s| {
@@ -1045,8 +1026,8 @@ mod tests {
 
     use crate::{RemotePath, S3Bucket, S3Config};
 
-    #[test]
-    fn relative_path() {
+    #[tokio::test]
+    async fn relative_path() {
         let all_paths = ["", "some/path", "some/path/"];
         let all_paths: Vec<RemotePath> = all_paths
             .iter()
@@ -1089,8 +1070,9 @@ mod tests {
                 max_keys_per_list_response: Some(5),
                 upload_storage_class: None,
             };
-            let storage =
-                S3Bucket::new(&config, std::time::Duration::ZERO).expect("remote storage init");
+            let storage = S3Bucket::new(&config, std::time::Duration::ZERO)
+                .await
+                .expect("remote storage init");
             for (test_path_idx, test_path) in all_paths.iter().enumerate() {
                 let result = storage.relative_path_to_s3_object(test_path);
                 let expected = expected_outputs[prefix_idx][test_path_idx];

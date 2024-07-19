@@ -46,6 +46,21 @@ void		_PG_init(void);
 
 static int	logical_replication_max_snap_files = 300;
 
+static int  running_xacts_overflow_policy;
+
+enum RunningXactsOverflowPolicies {
+	OP_IGNORE,
+	OP_SKIP,
+	OP_WAIT
+};
+
+static const struct config_enum_entry running_xacts_overflow_policies[] = {
+	{"ignore", OP_IGNORE, false},
+	{"skip", OP_SKIP, false},
+	{"wait", OP_WAIT, false},
+	{NULL, 0, false}
+};
+
 static void
 InitLogicalReplicationMonitor(void)
 {
@@ -414,6 +429,7 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 	restored_xids = (TransactionId *) palloc(max_xcnt * sizeof(TransactionId));
 	n_restored_xids = 0;
 	next_prepared_idx = 0;
+
 	for (TransactionId xid = from; xid != till;)
 	{
 		XLogRecPtr	xidlsn;
@@ -424,7 +440,7 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		/*
 		 * "Merge" the prepared transactions into the restored_xids array as
 		 * we go.  The prepared transactions array is sorted. This is mostly
-		 * a sanity check to ensure that all the prpeared transactions are
+		 * a sanity check to ensure that all the prepared transactions are
 		 * seen as in-progress. (There is a check after the loop that we didn't
 		 * miss any.)
 		 */
@@ -522,14 +538,23 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 			elog(LOG, "too many running xacts to restore from the CLOG; oldestXid=%u oldestActiveXid=%u nextXid %u",
 				 checkpoint->oldestXid, checkpoint->oldestActiveXid,
 				 XidFromFullTransactionId(checkpoint->nextXid));
-			goto fail;
+
+			switch (running_xacts_overflow_policy)
+			{
+				case OP_WAIT:
+					goto fail;
+				case OP_IGNORE:
+					goto success;
+				case OP_SKIP:
+					n_restored_xids = 0;
+					goto success;
+			}
 		}
 
 		restored_xids[n_restored_xids++] = xid;
 
 	skip:
 		TransactionIdAdvance(xid);
-		continue;
 	}
 
 	/* sanity check */
@@ -540,11 +565,13 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		Assert(false);
 		goto fail;
 	}
-
+   success:
 	elog(LOG, "restored %d running xacts by scanning the CLOG; oldestXid=%u oldestActiveXid=%u nextXid %u",
 		 n_restored_xids, checkpoint->oldestXid, checkpoint->oldestActiveXid, XidFromFullTransactionId(checkpoint->nextXid));
 	*nxids = n_restored_xids;
 	*xids = restored_xids;
+	if (prepared_xids)
+		pfree(prepared_xids);
 	return true;
 
  fail:
@@ -580,6 +607,18 @@ _PG_init(void)
 	pg_init_extension_server();
 
 	restore_running_xacts_callback = RestoreRunningXactsFromClog;
+
+
+	DefineCustomEnumVariable(
+							"neon.running_xacts_overflow_policy",
+							"Action performed on snapshot overflow when restoring runnings xacts from CLOG",
+							NULL,
+							&running_xacts_overflow_policy,
+							OP_IGNORE,
+							running_xacts_overflow_policies,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
 
 	/*
 	 * Important: This must happen after other parts of the extension are
