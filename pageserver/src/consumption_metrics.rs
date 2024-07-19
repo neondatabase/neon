@@ -96,7 +96,7 @@ pub async fn collect_metrics(
         .expect("Failed to create http client with timeout");
 
     let bucket_client = if let Some(bucket_config) = metric_collection_bucket {
-        match GenericRemoteStorage::from_config(bucket_config) {
+        match GenericRemoteStorage::from_config(bucket_config).await {
             Ok(client) => Some(client),
             Err(e) => {
                 // Non-fatal error: if we were given an invalid config, we will proceed
