@@ -185,7 +185,10 @@ impl Cache {
             let Some(first_handle) = first_handle.upgrade() else {
                 // TODO: dedup with get_impl
                 trace!("handle cache stale");
-                map.remove(first_key).unwrap();
+                let first_key_owned = *first_key;
+                drop(first_handle);
+                drop(first_key);
+                map.remove(&first_key_owned).unwrap();
                 continue;
             };
 
