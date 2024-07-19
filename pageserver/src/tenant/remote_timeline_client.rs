@@ -710,8 +710,6 @@ impl RemoteTimelineClient {
 
                 if modified {
                     self.schedule_index_upload(upload_queue)?;
-                } else {
-                    // the modifications are already being uploaded
                 }
 
                 Some(self.schedule_barrier0(upload_queue))
