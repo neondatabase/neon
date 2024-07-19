@@ -8,9 +8,7 @@ use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use aws_sdk_s3::Client;
 use futures_util::{StreamExt, TryStreamExt};
-use histogram::Histogram;
 use pageserver::tenant::remote_timeline_client::remote_layer_path;
-use pageserver::tenant::IndexPart;
 use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use utils::id::TenantId;
@@ -24,66 +22,6 @@ pub struct MetadataSummary {
     with_warnings: HashSet<TenantShardTimelineId>,
     with_orphans: HashSet<TenantShardTimelineId>,
     indices_by_version: HashMap<usize, usize>,
-
-    layer_count: MinMaxHisto,
-    timeline_size_bytes: MinMaxHisto,
-    layer_size_bytes: MinMaxHisto,
-}
-
-/// A histogram plus minimum and maximum tracking
-#[derive(Serialize)]
-struct MinMaxHisto {
-    #[serde(skip)]
-    histo: Histogram,
-    min: u64,
-    max: u64,
-}
-
-impl MinMaxHisto {
-    fn new() -> Self {
-        Self {
-            histo: histogram::Histogram::builder()
-                .build()
-                .expect("Bad histogram params"),
-            min: u64::MAX,
-            max: 0,
-        }
-    }
-
-    fn sample(&mut self, v: u64) -> Result<(), histogram::Error> {
-        self.min = std::cmp::min(self.min, v);
-        self.max = std::cmp::max(self.max, v);
-        let r = self.histo.increment(v, 1);
-
-        if r.is_err() {
-            tracing::warn!("Bad histogram sample: {v}");
-        }
-
-        r
-    }
-
-    fn oneline(&self) -> String {
-        let percentiles = match self.histo.percentiles(&[1.0, 10.0, 50.0, 90.0, 99.0]) {
-            Ok(p) => p,
-            Err(e) => return format!("No data: {}", e),
-        };
-
-        let percentiles: Vec<u64> = percentiles
-            .iter()
-            .map(|p| p.bucket().low() + p.bucket().high() / 2)
-            .collect();
-
-        format!(
-            "min {}, 1% {}, 10% {}, 50% {}, 90% {}, 99% {}, max {}",
-            self.min,
-            percentiles[0],
-            percentiles[1],
-            percentiles[2],
-            percentiles[3],
-            percentiles[4],
-            self.max,
-        )
-    }
 }
 
 impl MetadataSummary {
@@ -96,23 +34,7 @@ impl MetadataSummary {
             with_warnings: HashSet::new(),
             with_orphans: HashSet::new(),
             indices_by_version: HashMap::new(),
-            layer_count: MinMaxHisto::new(),
-            timeline_size_bytes: MinMaxHisto::new(),
-            layer_size_bytes: MinMaxHisto::new(),
         }
-    }
-
-    fn update_histograms(&mut self, index_part: &IndexPart) -> Result<(), histogram::Error> {
-        self.layer_count
-            .sample(index_part.layer_metadata.len() as u64)?;
-        let mut total_size: u64 = 0;
-        for meta in index_part.layer_metadata.values() {
-            total_size += meta.file_size;
-            self.layer_size_bytes.sample(meta.file_size)?;
-        }
-        self.timeline_size_bytes.sample(total_size)?;
-
-        Ok(())
     }
 
     fn update_data(&mut self, data: &S3TimelineBlobData) {
@@ -127,14 +49,6 @@ impl MetadataSummary {
                 .indices_by_version
                 .entry(index_part.version())
                 .or_insert(0) += 1;
-
-            if let Err(e) = self.update_histograms(index_part) {
-                // Value out of range?  Warn that the results are untrustworthy
-                tracing::warn!(
-                    "Error updating histograms, summary stats may be wrong: {}",
-                    e
-                );
-            }
         }
     }
 
@@ -169,9 +83,6 @@ With errors: {}
 With warnings: {}
 With orphan layers: {}
 Index versions: {version_summary}
-Timeline size bytes: {}
-Layer size bytes: {}
-Timeline layer count: {}
 ",
             self.tenant_count,
             self.timeline_count,
@@ -179,9 +90,6 @@ Timeline layer count: {}
             self.with_errors.len(),
             self.with_warnings.len(),
             self.with_orphans.len(),
-            self.timeline_size_bytes.oneline(),
-            self.layer_size_bytes.oneline(),
-            self.layer_count.oneline(),
         )
     }
 

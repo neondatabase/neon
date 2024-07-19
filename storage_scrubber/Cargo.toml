@@ -48,6 +48,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 tracing-appender = "0.2"
-histogram = "0.7"
 
 futures.workspace = true
