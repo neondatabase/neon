@@ -5,7 +5,6 @@ pub mod utilization;
 pub use utilization::PageserverUtilization;
 
 use std::{
-    borrow::Cow,
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
@@ -734,31 +733,6 @@ pub enum LayerAccessKind {
     Dump,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayerAccessStatFullDetails {
-    pub when_millis_since_epoch: u64,
-    pub task_kind: Cow<'static, str>,
-    pub access_kind: LayerAccessKind,
-}
-
-/// An event that impacts the layer's residence status.
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayerResidenceEvent {
-    /// The time when the event occurred.
-    /// NB: this timestamp is captured while the residence status changes.
-    /// So, it might be behind/ahead of the actual residence change by a short amount of time.
-    ///
-    #[serde(rename = "timestamp_millis_since_epoch")]
-    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
-    pub timestamp: SystemTime,
-    /// The new residence status of the layer.
-    pub status: LayerResidenceStatus,
-    /// The reason why we had to record this event.
-    pub reason: LayerResidenceEventReason,
-}
-
-/// The reason for recording a given [`LayerResidenceEvent`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LayerResidenceEventReason {
     /// The layer map is being populated, e.g. during timeline load or attach.
@@ -776,7 +750,7 @@ pub enum LayerResidenceEventReason {
     ResidenceChange,
 }
 
-/// The residence status of the layer, after the given [`LayerResidenceEvent`].
+/// The residence status of a layer
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LayerResidenceStatus {
     /// Residence status for a layer file that exists locally.
@@ -784,16 +758,6 @@ pub enum LayerResidenceStatus {
     Resident,
     /// Residence status for a layer file that only exists on the remote.
     Evicted,
-}
-
-impl LayerResidenceEvent {
-    pub fn new(status: LayerResidenceStatus, reason: LayerResidenceEventReason) -> Self {
-        Self {
-            status,
-            reason,
-            timestamp: SystemTime::now(),
-        }
-    }
 }
 
 #[serde_as]
