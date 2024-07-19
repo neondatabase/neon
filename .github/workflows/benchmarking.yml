@@ -479,6 +479,7 @@ jobs:
         mkdir -p /tmp/neon/pg_install/v16/bin
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench  
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql /tmp/neon/pg_install/v16/bin/psql  
+        ln -s /home/nonroot/pg/usr/lib/x86_64-linux-gnu /tmp/neon/pg_install/v16/lib 
         /tmp/neon/pg_install/v16/bin/pgbench --version
         /tmp/neon/pg_install/v16/bin/psql --version
 
@@ -513,8 +514,7 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-        LD_LIBRARY_PATH: ${{ env.LD_LIBRARY_PATH }}
-
+        
     - name: Benchmark pgvector queries
       uses: ./.github/actions/run-python-test-set
       with:
@@ -528,7 +528,6 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-        LD_LIBRARY_PATH: ${{ env.LD_LIBRARY_PATH }}
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
