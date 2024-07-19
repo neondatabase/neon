@@ -2316,6 +2316,11 @@ impl Timeline {
             )
         };
 
+        if let Some(ancestor) = &ancestor {
+            let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
+            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn());
+        }
+
         Arc::new_cyclic(|myself| {
             let metrics = TimelineMetrics::new(
                 &tenant_shard_id,
@@ -4762,6 +4767,18 @@ impl Timeline {
         self.remote_client
             .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
         Ok(())
+    }
+}
+
+impl Drop for Timeline {
+    fn drop(&mut self) {
+        if let Some(ancestor) = &self.ancestor_timeline {
+            ancestor
+                .gc_info
+                .write()
+                .unwrap()
+                .remove_child(self.timeline_id);
+        }
     }
 }
 

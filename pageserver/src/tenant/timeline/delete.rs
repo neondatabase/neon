@@ -163,12 +163,6 @@ async fn remove_timeline_from_tenant(
         panic!("Timeline grew children while we removed layer files");
     }
 
-    // Unlink from parent
-    if let Some(ancestor) = timeline.get_ancestor_timeline() {
-        let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
-        ancestor_gc_info.remove_child(timeline.timeline_id);
-    }
-
     timelines
         .remove(&timeline.timeline_id)
         .expect("timeline that we were deleting was concurrently removed from 'timelines' map");
@@ -301,9 +295,6 @@ impl DeleteTimelineFlow {
         {
             let mut locked = tenant.timelines.lock().unwrap();
             locked.insert(timeline_id, Arc::clone(&timeline));
-
-            // Note that we do not insert this into the parent branch's GcInfo: the parent is not obliged to retain
-            // any data for child timelines being deleted.
         }
 
         guard.mark_in_progress()?;
