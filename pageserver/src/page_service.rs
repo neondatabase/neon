@@ -62,7 +62,6 @@ use crate::tenant::mgr::GetTenantError;
 use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
-use crate::tenant::timeline::handle::GetArg;
 use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
@@ -329,7 +328,7 @@ impl TimelineHandles {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        get_arg: GetArg,
+        shard_selector: ShardSelector,
     ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
         if *self.tenant_id.get_or_init(|| tenant_id) != tenant_id {
             return Err(GetActiveTimelineError::Tenant(
@@ -712,7 +711,7 @@ impl PageServerHandler {
         let timeline = self.timeline_handles.get(
             tenant_shard_id.tenant_id,
             timeline_id,
-            GetArg::Known(tenant_shard_id.to_index()),
+            ShardSelector::Known(tenant_shard_id.to_index()),
         )?;
         set_tracing_field_shard_id(&timeline);
 
@@ -743,7 +742,7 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
         let _timer = timeline
             .query_metrics
             .start_timer(metrics::SmgrQueryType::GetRelExists, ctx);
@@ -777,7 +776,7 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
 
         let _timer = timeline
             .query_metrics
@@ -812,7 +811,7 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
 
         let _timer = timeline
             .query_metrics
@@ -849,7 +848,7 @@ impl PageServerHandler {
         let timeline = match self.timeline_handles.get(
             tenant_id,
             timeline_id,
-            GetArg::Key(rel_block_to_key(req.rel, req.blkno)),
+            ShardSelector::Page(rel_block_to_key(req.rel, req.blkno)),
         ) {
             Ok(tl) => {
                 set_tracing_field_shard_id(&tl);
@@ -904,7 +903,7 @@ impl PageServerHandler {
     ) -> Result<PagestreamBeMessage, PageStreamError> {
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
 
         let _timer = timeline
             .query_metrics
@@ -969,7 +968,7 @@ impl PageServerHandler {
 
         let timeline = self
             .timeline_handles
-            .get(tenant_id, timeline_id, GetArg::ShardZero)?;
+            .get(tenant_id, timeline_id, ShardSelector::Zero)?;
         set_tracing_field_shard_id(&timeline);
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
@@ -1096,9 +1095,9 @@ impl PageServerHandler {
             tenant_id,
             timeline_id,
             match selector {
-                ShardSelector::Zero => GetArg::ShardZero,
-                ShardSelector::Page(k) => GetArg::Key(k),
-                ShardSelector::Known(idx) => GetArg::Known(idx),
+                ShardSelector::Zero => ShardSelector::Zero,
+                ShardSelector::Page(k) => ShardSelector::Page(k),
+                ShardSelector::Known(idx) => ShardSelector::Known(idx),
             },
         );
         if let Ok(tl) = &res {

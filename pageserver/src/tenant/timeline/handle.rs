@@ -90,7 +90,7 @@ pub(crate) trait TenantManager {
     fn resolve(
         &self,
         timeline_id: TimelineId,
-        get_arg: GetArg,
+        shard_selector: ShardSelector,
     ) -> Result<Arc<Timeline>, Self::Error>;
 }
 
@@ -99,13 +99,6 @@ pub(crate) enum GetError<M> {
     TenantManager(M),
     TimelineGateClosed,
     PerTimelineStateShutDown,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum GetArg {
-    ShardZero,
-    Key(Key),
-    Known(ShardIndex),
 }
 
 enum RoutingResult {
@@ -132,14 +125,14 @@ impl Cache {
     pub(crate) fn get<M, E>(
         &mut self,
         timeline_id: TimelineId,
-        get_arg: GetArg,
+        shard_selector: ShardSelector,
         tenant_manager: M,
     ) -> Result<Handle, GetError<E>>
     where
         M: TenantManager<Error = E>,
     {
         let mut map = self.0.map.lock().expect("mutex poisoned");
-        let mut routing_state = self.shard_routing(&mut map, timeline_id, get_arg);
+        let mut routing_state = self.shard_routing(&mut map, timeline_id, shard_selector);
         match routing_state {
             RoutingResult::FastPath(handle) => return Ok(handle),
             RoutingResult::Index(shard_index) => {
@@ -151,7 +144,7 @@ impl Cache {
                     return self.get_miss(
                         &mut map,
                         timeline_id,
-                        GetArg::Known(shard_index),
+                        ShardSelector::Known(shard_index),
                         tenant_manager,
                     );
                 };
@@ -163,7 +156,7 @@ impl Cache {
                         return self.get_miss(
                             &mut map,
                             timeline_id,
-                            GetArg::Known(shard_index),
+                            ShardSelector::Known(shard_index),
                             tenant_manager,
                         );
                     }
@@ -171,7 +164,7 @@ impl Cache {
                 Ok(Handle(upgraded))
             }
             RoutingResult::NeedConsultTenantManager => {
-                self.get_miss(&mut map, timeline_id, get_arg, tenant_manager)
+                self.get_miss(&mut map, timeline_id, shard_selector, tenant_manager)
             }
         }
     }
@@ -181,7 +174,7 @@ impl Cache {
         &self,
         map: &mut Map,
         timeline_id: TimelineId,
-        get_arg: GetArg,
+        shard_selector: ShardSelector,
     ) -> RoutingResult {
         loop {
             // terminates because when every iteration we remove an element from the map
@@ -204,12 +197,12 @@ impl Cache {
                 shard_count: first_handle_shard_identity.count,
             };
 
-            let idx = match get_arg {
-                GetArg::Key(key) => {
+            let idx = match shard_selector {
+                ShardSelector::Page(key) => {
                     make_shard_index(first_handle_shard_identity.get_shard_number(&key))
                 }
-                GetArg::ShardZero => make_shard_index(ShardNumber(0)),
-                GetArg::Known(shard_idx) => shard_idx,
+                ShardSelector::Zero => make_shard_index(ShardNumber(0)),
+                ShardSelector::Known(shard_idx) => shard_idx,
             };
 
             if first_key.shard_index == idx {
@@ -225,19 +218,19 @@ impl Cache {
         &self,
         map: &mut Map,
         timeline_id: TimelineId,
-        get_arg: GetArg,
+        shard_selector: ShardSelector,
         tenant_manager: M,
     ) -> Result<Handle, GetError<E>>
     where
         M: TenantManager<Error = E>,
     {
-        match tenant_manager.resolve(timeline_id, get_arg) {
+        match tenant_manager.resolve(timeline_id, shard_selector) {
             Ok(timeline) => {
                 let key = timeline.shard_timeline_id();
-                match &get_arg {
-                    GetArg::ShardZero => assert_eq!(key.shard_index.shard_number, ShardNumber(0)),
-                    GetArg::Key(_) => (), // gotta trust tenant_manager
-                    GetArg::Known(idx) => assert_eq!(idx, &key.shard_index),
+                match &shard_selector {
+                    ShardSelector::Zero => assert_eq!(key.shard_index.shard_number, ShardNumber(0)),
+                    ShardSelector::Page(_) => (), // gotta trust tenant_manager
+                    ShardSelector::Known(idx) => assert_eq!(idx, &key.shard_index),
                 }
 
                 let gate_guard = match timeline.gate.enter() {
