@@ -151,6 +151,7 @@ impl SharedState {
             .lock()
             .unwrap()
             .continue_existing_attempt(attempt);
+        self.gc_waiting.notify_one();
     }
 
     /// Only GC must be paused while a detach ancestor is ongoing. Compaction can happen, to aid
@@ -518,6 +519,7 @@ impl SharedStateBuilder {
         g.known_ongoing.extend(self.inprogress);
         if g.latest.is_none() && !g.known_ongoing.is_empty() {
             g.latest = Some((ExistingAttempt::ReadFromIndexPart, false));
+            target.gc_waiting.notify_one();
         }
     }
 }
