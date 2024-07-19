@@ -1022,8 +1022,8 @@ mod tests {
 
     use crate::{RemotePath, S3Bucket, S3Config};
 
-    #[test]
-    fn relative_path() {
+    #[tokio::test]
+    async fn relative_path() {
         let all_paths = ["", "some/path", "some/path/"];
         let all_paths: Vec<RemotePath> = all_paths
             .iter()
@@ -1066,8 +1066,9 @@ mod tests {
                 max_keys_per_list_response: Some(5),
                 upload_storage_class: None,
             };
-            let storage =
-                S3Bucket::new(&config, std::time::Duration::ZERO).expect("remote storage init");
+            let storage = S3Bucket::new(&config, std::time::Duration::ZERO)
+                .await
+                .expect("remote storage init");
             for (test_path_idx, test_path) in all_paths.iter().enumerate() {
                 let result = storage.relative_path_to_s3_object(test_path);
                 let expected = expected_outputs[prefix_idx][test_path_idx];

@@ -547,7 +547,9 @@ mod tests {
             },
             timeout: std::time::Duration::from_secs(120),
         };
-        let storage = GenericRemoteStorage::from_config(&remote_storage_config).unwrap();
+        let storage = GenericRemoteStorage::from_config(&remote_storage_config)
+            .await
+            .unwrap();
 
         worker_inner(storage, rx, config).await.unwrap();
 
