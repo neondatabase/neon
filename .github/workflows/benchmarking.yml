@@ -81,7 +81,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init --user root
+      options: --init 
 
     steps:
     - uses: actions/checkout@v4
@@ -159,7 +159,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init --user root
+      options: --init 
 
     steps:
     - uses: actions/checkout@v4
@@ -323,16 +323,12 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init --user root
+      options: --init 
 
     # Increase timeout to 8h, default timeout is 6h
     timeout-minutes: 480
 
     steps:
-    - name: Reset permissions before checkout
-      run: |
-        chmod -R 777 /__w/neon/neon
-
     - uses: actions/checkout@v4
 
     - name: Download Neon artifact
@@ -457,13 +453,14 @@ jobs:
       DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
+      LD_LIBRARY_PATH:/home/nonroot/pg/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init --user root
+      options: --init 
 
     steps:
     - uses: actions/checkout@v4
@@ -472,12 +469,16 @@ jobs:
     # instead of using Neon artifacts containing pgbench
     - name: Install postgresql-16 where pytest expects it
       run: |
-        apt-get update && apt-get install -y postgresql-common
-        /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-        apt-get -y install postgresql-16
+        cd /home/nonroot
+        wget  https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/libpq5_16.3-1.pgdg110%2B1_amd64.deb
+        wget https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.3-1.pgdg110%2B1_amd64.deb
+        wget https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.3-1.pgdg110%2B1_amd64.deb 
+        dpkg -x libpq5_16.3-1.pgdg110+1_amd64.deb pg
+        dpkg -x postgresql-client-16_16.3-1.pgdg110+1_amd64.deb pg
+        dpkg -x postgresql-16_16.3-1.pgdg110+1_amd64.deb pg
         mkdir -p /tmp/neon/pg_install/v16/bin
-        ln -s /usr/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench
-        ln -s /usr/bin/psql /tmp/neon/pg_install/v16/bin/psql
+        ln -s /usr/bin/pgbench /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench 
+        ln -s /usr/bin/psql /home/nonroot/pg/usr/lib/postgresql/16/bin/psql 
 
     - name: Set up Connection String
       id: set-up-connstr
@@ -568,7 +569,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init --user root
+      options: --init 
 
     steps:
     - uses: actions/checkout@v4
@@ -656,7 +657,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init --user root
+      options: --init 
 
     steps:
     - uses: actions/checkout@v4
@@ -742,7 +743,7 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init --user root
+      options: --init 
 
     steps:
     - uses: actions/checkout@v4
