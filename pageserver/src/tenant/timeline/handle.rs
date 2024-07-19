@@ -6,18 +6,16 @@
 //! We do this so the hot path need only do one, uncontended, atomic increment,
 //! the [`Cache::get`]'s [`Weak<HandleInner>::upgrade`]` call.
 //!
-//! We must break the reference cyle when either the [`Cache`] or the [`Timeline`]
-//! is supposed to shut down:
-//!
-//! - [`Cache`]: [`Cache::drop`] removes the long-lived strong ref [`Timeline::handlers`].
-//! - [`Timeline::handlers`]: [`PerTimelineState::drop`] breaks the reference cycle.
-//!
-//! Conn shutdown removes the Arc<HandlerTimeline> from Timeline::handlers.
+//! The reference cycle breaks when the [`HandleInner`] gets dropped.
+//! The expectation is that [`HandleInner`]s are short-lived.
+//! See [`PerTimelineState::shutdown`] for more details on this expectation.
 
+use std::collections::hash_map;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::MutexGuard;
 use std::sync::Weak;
 
 use tracing::instrument;
@@ -59,6 +57,7 @@ struct CacheInner {
 /// the handle.
 pub(crate) struct Handle(Arc<HandleInner>);
 struct HandleInner {
+    shut_down: AtomicBool,
     key: ShardTimelineId,
     timeline: Arc<Timeline>,
     cache: Weak<CacheInner>,
@@ -71,7 +70,7 @@ struct HandleInner {
 #[derive(Default)]
 pub(super) struct PerTimelineState {
     // None = shutting down
-    handlers: Mutex<Option<Vec<Arc<HandleInner>>>>,
+    handles: Mutex<Option<Vec<Arc<HandleInner>>>>,
 }
 
 /// We're abstract over the [`crate::tenant::mgr`] so we can test this module.
@@ -123,47 +122,51 @@ impl Cache {
     where
         M: TenantManager<Error = E>,
     {
-        let mut map = self.0.map.lock().expect("mutex poisoned");
-        let routing_state = self.shard_routing(&mut map, timeline_id, shard_selector);
-        match routing_state {
-            RoutingResult::FastPath(handle) => return Ok(handle),
-            RoutingResult::Index(shard_index) => {
-                let key = ShardTimelineId {
-                    shard_index,
-                    timeline_id,
-                };
-                let Some(lookup_result) = map.get(&key) else {
-                    return self
-                        .get_miss(
-                            &mut map,
-                            timeline_id,
-                            ShardSelector::Known(shard_index),
-                            tenant_manager,
-                        )
-                        .await;
-                };
-                let upgraded = match lookup_result.upgrade() {
-                    Some(upgraded) => upgraded,
-                    None => {
-                        trace!("handle cache stale");
-                        map.remove(&key).unwrap();
-                        return self
-                            .get_miss(
-                                &mut map,
-                                timeline_id,
-                                ShardSelector::Known(shard_index),
-                                tenant_manager,
-                            )
-                            .await;
-                    }
-                };
-                Ok(Handle(upgraded))
-            }
-            RoutingResult::NeedConsultTenantManager => {
-                self.get_miss(&mut map, timeline_id, shard_selector, tenant_manager)
-                    .await
-            }
+        let handle = self
+            .get_impl(timeline_id, shard_selector, tenant_manager)
+            .await?;
+        if handle.0.shut_down.load(Ordering::Relaxed) {
+            return Err(GetError::PerTimelineStateShutDown);
         }
+        Ok(handle)
+    }
+
+    #[instrument(level = "trace", skip_all)]
+    async fn get_impl<M, E>(
+        &self,
+        timeline_id: TimelineId,
+        shard_selector: ShardSelector,
+        tenant_manager: &M,
+    ) -> Result<Handle, GetError<E>>
+    where
+        M: TenantManager<Error = E>,
+    {
+        let miss: ShardSelector = {
+            let mut map = self.0.map.lock().expect("mutex poisoned");
+            let routing_state = self.shard_routing(&mut map, timeline_id, shard_selector);
+            match routing_state {
+                RoutingResult::FastPath(handle) => return Ok(handle),
+                RoutingResult::Index(shard_index) => {
+                    let key = ShardTimelineId {
+                        shard_index,
+                        timeline_id,
+                    };
+                    match map.get(&key) {
+                        Some(cached) => match cached.upgrade() {
+                            Some(upgraded) => return Ok(Handle(upgraded)),
+                            None => {
+                                trace!("handle cache stale");
+                                map.remove(&key).unwrap();
+                                ShardSelector::Known(shard_index)
+                            }
+                        },
+                        None => ShardSelector::Known(shard_index),
+                    }
+                }
+                RoutingResult::NeedConsultTenantManager => shard_selector,
+            }
+        };
+        self.get_miss(timeline_id, miss, tenant_manager).await
     }
 
     #[inline(always)]
@@ -182,8 +185,6 @@ impl Cache {
                 // TODO: dedup with get()
                 trace!("handle cache stale");
                 let first_key_owned = *first_key;
-                drop(first_handle);
-                drop(first_key);
                 map.remove(&first_key_owned).unwrap();
                 continue;
             };
@@ -211,9 +212,8 @@ impl Cache {
     }
 
     #[instrument(level = "trace", skip_all)]
-    async fn get_miss<M, E>(
+    async fn get_miss<'a, M, E>(
         &self,
-        map: &mut Map,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
         tenant_manager: &M,
@@ -240,27 +240,46 @@ impl Cache {
                     // TODO: global metric that keeps track of the number of live HandlerTimeline instances
                     // so we can identify reference cycle bugs.
                     HandleInner {
+                        shut_down: AtomicBool::new(false),
                         key,
                         _gate_guard: gate_guard,
                         cache: Arc::downgrade(&self.0),
                         timeline: timeline.clone(),
                     },
                 );
-                {
-                    let mut lock_guard = timeline.handlers.handlers.lock().expect("mutex poisoned");
+                let handle = {
+                    let mut lock_guard = timeline.handlers.handles.lock().expect("mutex poisoned");
                     match &mut *lock_guard {
                         Some(timeline_handlers_list) => {
                             for handler in timeline_handlers_list.iter() {
                                 assert!(!Arc::ptr_eq(handler, &handle));
                             }
                             timeline_handlers_list.push(Arc::clone(&handle));
-                            map.insert(key, Arc::downgrade(&handle));
+                            let mut map = self.0.map.lock().unwrap();
+                            match map.entry(key) {
+                                hash_map::Entry::Occupied(mut o) => {
+                                    // This should not happen in practice because the page_service
+                                    // isn't calling get() concurrently(). Yet, let's deal with
+                                    // this condition here so this module is a truly generic cache.
+                                    if let Some(existing) = o.get().upgrade() {
+                                        // Reuse to minimize the number of handles per timeline that are alive in the system.
+                                        existing
+                                    } else {
+                                        o.insert(Arc::downgrade(&handle));
+                                        handle
+                                    }
+                                }
+                                hash_map::Entry::Vacant(v) => {
+                                    v.insert(Arc::downgrade(&handle));
+                                    handle
+                                }
+                            }
                         }
                         None => {
                             return Err(GetError::PerTimelineStateShutDown);
                         }
                     }
-                }
+                };
                 Ok(Handle(handle))
             }
             Err(e) => Err(GetError::TenantManager(e)),
@@ -273,12 +292,6 @@ impl PerTimelineState {
     /// to this Timeline object, even if [`TenantManager::resolve`] would still resolve
     /// to this Timeline object.
     ///
-    /// For a shard split that's transparent to the page_service client, use this like so:
-    /// - Add the child shards to [`TenantManager`].
-    ///   So that [`TenantManager::resolve`] will resolve to those child shards'
-    ///   Timeline objects.
-    /// - Call this method on the parent shard(s)'s Timeline objects.
-    ///
     /// Already-alive [`Handle`]s for this Timeline will remain open
     /// and keep the `Arc<Timeline>` allocation alive.
     /// The expectation is that
@@ -287,57 +300,25 @@ impl PerTimelineState {
     ///    to [`Timeline::cancel`] and [`Timeline::is_stopping`].
     /// Thus, the [`Arc<Timeline>`] allocation's lifetime will only be minimally
     /// extended by the already-alive [`Handle`]s.
+    #[instrument(level = "trace", skip_all)]
     pub(super) fn shutdown(&self) {
-        let mut handlers = self.handlers.lock().expect("mutex poisoned");
-        Self::shutdown_impl(&mut handlers);
-    }
-    fn shutdown_impl(locked: &mut MutexGuard<Option<Vec<Arc<HandleInner>>>>) {
-        // NB: this .take() sets locked to None. That's what makes future `Cache::get` calls fail.
-        let Some(handles) = locked.take() else {
-            trace!("PerTimelineState already shut down");
+        let mut handles = self
+            .handles
+            .lock()
+            .expect("mutex poisoned")
+            // NB: this .take() sets locked to None.
+            // That's what makes future `Cache::get` misses fail.
+            // Cache hits are taken care of below.
+            .take();
+        let Some(handles) = handles else {
+            trace!("already shut down");
             return;
         };
         for handle in handles {
-            let Some(cache) = handle.cache.upgrade() else {
-                trace!("cache already dropped");
-                continue;
-            };
-            let mut map = cache
-                // This cannot dead-lock because Cache::get() doesn't call this method
-                // and we don't call Cache::get().
-                .map
-                .lock()
-                .expect("mutex poisoned");
-            map.remove(&handle.key);
+            // Make hits fail.
+            handle.shut_down.store(true, Ordering::Relaxed);
         }
-    }
-}
-
-impl Drop for PerTimelineState {
-    fn drop(&mut self) {
-        let mut handlers = self
-            .handlers
-            .try_lock()
-            .expect("cannot be locked when drop handler runs");
-        Self::shutdown_impl(&mut handlers);
-    }
-}
-
-/// When the page service connection closes and drops its instance of [`Cache`],
-/// we have to clean up the [`PerTimelineState`] to break the strong-reference
-/// cycle between the [`HandleInner::timeline`] and the [`Timeline::handlers`].
-impl Drop for CacheInner {
-    fn drop(&mut self) {
-        let mut map = self.map.get_mut().expect("mutex poisoned");
-        for (_, weak_handler) in map.drain() {
-            if let Some(strong_handler) = weak_handler.upgrade() {
-                let per_timeline_state: &PerTimelineState = &strong_handler.timeline.handlers;
-                let mut lock_guard = per_timeline_state.handlers.lock().expect("mutex poisoned");
-                if let Some(handlers) = &mut *lock_guard {
-                    handlers.retain(|handler| !Arc::ptr_eq(handler, &strong_handler));
-                }
-            }
-        }
+        drop(handles);
     }
 }
 

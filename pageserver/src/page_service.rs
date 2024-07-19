@@ -277,7 +277,6 @@ struct PageServerHandler {
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
 
-    tenant_manager: Arc<TenantManager>,
 
     /// The context created for the lifetime of the connection
     /// services by this PageServerHandler.
@@ -468,7 +467,6 @@ impl PageServerHandler {
         cancel: CancellationToken,
     ) -> Self {
         PageServerHandler {
-            tenant_manager: tenant_manager.clone(),
             auth,
             claims: None,
             connection_ctx,
