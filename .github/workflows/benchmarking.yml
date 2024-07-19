@@ -453,7 +453,7 @@ jobs:
       DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      LD_LIBRARY_PATH:/home/nonroot/pg/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+      LD_LIBRARY_PATH: /home/nonroot/pg/usr/lib/x86_64-linux-gnu
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
