@@ -2031,6 +2031,7 @@ impl TenantManager {
         } else {
             // at least the latest versions have now been downloaded and refreshed; be ready to
             // retry another time.
+            tenant.ongoing_timeline_detach.cancel(attempt);
             return Err(anyhow::anyhow!(
                 "failed to reparent all candidate timelines, please retry"
             ));
