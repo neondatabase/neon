@@ -337,6 +337,11 @@ impl SharedState {
         g.cancel(attempt);
         tracing::info!("keeping the gc blocking for retried detach_ancestor");
     }
+
+    pub(crate) fn on_delete(&self, timeline: &Arc<Timeline>) {
+        let mut g = self.inner.lock().unwrap();
+        g.on_delete(&timeline.timeline_id);
+    }
 }
 
 #[derive(Default)]
@@ -386,43 +391,60 @@ impl SharedStateInner {
 
     fn validate(&self, attempt: &Attempt) {
         match self.latest.as_ref() {
-            Some((ExistingAttempt::ContinuedOverRestart(x), _)) if x == &attempt.timeline_id => {
-                assert!(self.known_ongoing.contains(&attempt.timeline_id));
-            }
-            other => unreachable!("unexpected: {other:?}"),
+            Some((ExistingAttempt::ContinuedOverRestart(x), _)) if x == &attempt.timeline_id => {}
+            Some((ExistingAttempt::Actual(x, barrier), _))
+                if x == &attempt.timeline_id && attempt._guard.blocks(barrier) => {}
+            other => unreachable!("unexpected: {other:?} for {attempt:?}"),
         }
+
+        assert!(self.known_ongoing.contains(&attempt.timeline_id));
     }
 
     fn complete(&mut self, attempt: Attempt) {
-        match self.latest.as_ref() {
+        let witnessed = match self.latest.as_ref() {
             Some((ExistingAttempt::ContinuedOverRestart(x), witnessed))
                 if x == &attempt.timeline_id =>
             {
-                let witnessed = *witnessed;
-                assert!(self.known_ongoing.remove(&attempt.timeline_id));
-
-                if self.known_ongoing.is_empty() {
-                    self.latest = None;
-                    tracing::info!("gc is now unblocked");
-                } else {
-                    self.latest = Some((ExistingAttempt::ReadFromIndexPart, witnessed));
-                }
+                *witnessed
+            }
+            Some((ExistingAttempt::Actual(x, barrier), witnessed))
+                if x == &attempt.timeline_id && attempt._guard.blocks(barrier) =>
+            {
+                *witnessed
             }
             other => unreachable!("unexpected: {other:?}"),
+        };
+
+        assert!(self.known_ongoing.remove(&attempt.timeline_id));
+
+        if self.known_ongoing.is_empty() {
+            self.latest = None;
+            tracing::info!("gc is now unblocked following completion");
+        } else {
+            self.latest = Some((ExistingAttempt::ReadFromIndexPart, witnessed));
+            tracing::info!(
+                n = self.known_ongoing.len(),
+                "gc is still blocked for remaining ongoing detaches"
+            );
         }
     }
 
     fn cancel(&mut self, attempt: Attempt) {
-        match self.latest.as_ref() {
+        let witnessed = match self.latest.as_ref() {
             Some((ExistingAttempt::ContinuedOverRestart(x), witnessed))
                 if x == &attempt.timeline_id =>
             {
-                let witnessed = *witnessed;
-                assert!(!self.known_ongoing.is_empty());
-                self.latest = Some((ExistingAttempt::ReadFromIndexPart, witnessed));
+                *witnessed
+            }
+            Some((ExistingAttempt::Actual(x, barrier), witnessed))
+                if x == &attempt.timeline_id && attempt._guard.blocks(barrier) =>
+            {
+                *witnessed
             }
             other => unreachable!("unexpected: {other:?}"),
-        }
+        };
+        assert!(!self.known_ongoing.is_empty());
+        self.latest = Some((ExistingAttempt::ReadFromIndexPart, witnessed));
     }
 }
 
@@ -465,6 +487,7 @@ impl ExistingAttempt {
 }
 
 /// Represents an across tenant reset exclusive single attempt to detach ancestor.
+#[derive(Debug)]
 pub(crate) struct Attempt {
     timeline_id: TimelineId,
 
