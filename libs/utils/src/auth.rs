@@ -14,11 +14,14 @@ use jsonwebtoken::{
 use pem::Pem;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
+use oid_registry::OID_PKCS1_RSAENCRYPTION;
+use rustls_pki_types::CertificateDer;
 
 use crate::id::TenantId;
 
-/// Algorithm to use. We require EdDSA.
+/// Signature algorithms to use. We allow EdDSA and RSA/SHA-256.
 const STORAGE_TOKEN_ALGORITHM: Algorithm = Algorithm::EdDSA;
+const HADRON_STORAGE_TOKEN_ALGORITHM: Algorithm = Algorithm::RS256;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -183,6 +186,94 @@ impl JwtAuth {
         Ok(Self::new(decoding_keys))
     }
 
+    // Helper function to parse a X509 certificate file and extract the RSA public keys from it as `DecodingKey`s.
+    // - `ceritificate_file_path`: the path to the certificate file. It must be a file, not a directory or anything else.
+    // Returns the successfully extracted decoding keys. Non-RSA keys and non-X509-parsable certificates are skipped.
+    // Multuple keys may be returned because a single file can contain multiple certificates.
+    fn extract_rsa_decoding_keys_from_certificate<P: AsRef<Path>>(
+        certificate_file_path: P,
+    ) -> Result<Vec<DecodingKey>> {
+        let certs: io::Result<Vec<CertificateDer<'static>>> = rustls_pemfile::certs(
+            &mut io::BufReader::new(fs::File::open(certificate_file_path)?),
+        )
+        .collect();
+
+        Ok(certs?
+            .iter()
+            .filter_map(
+                |cert| match x509_parser::parse_x509_certificate(cert) {
+                    Ok((_, cert)) => {
+                        let public_key = cert.public_key();
+                        // Note that we are just extracting the public key from the certificate, not the signature.
+                        // So the algorithm is just the asymmetric crypto such as RSA, no hashes of or anything like
+                        // that.
+                        if *public_key.algorithm.oid() == OID_PKCS1_RSAENCRYPTION {
+                            Some(DecodingKey::from_rsa_der(&public_key.subject_public_key.data))
+                        } else {
+                            tracing::warn!(
+                                "Unsupported public key algorithm: {:?} found in certificate. Skipping.",
+                                public_key.algorithm
+                            );
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Error parsing certificate: {}. Skipping.", e);
+                        None
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Create a `JwtAuth` that can decode tokens using RSA public keys in X509 certificates from the given path.
+    /// - `cert_path`: the path to a directory or a file containing X509 certificates. If it is a directory, all files
+    ///                under the first level of the directory will be inspected for certificates.
+    /// Returns the `JwtAuth` with the decoding keys extracted from the certificates, or error.
+    /// Used by Hadron.
+    pub fn from_cert_path(cert_path: &Utf8Path) -> Result<Self> {
+        tracing::info!(
+            "Loading public keys in certificates from path: {}",
+            cert_path
+        );
+
+        let mut decoding_keys = Vec::new();
+
+        let metadata = cert_path.metadata()?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(cert_path)? {
+                let path = entry?.path();
+                if !path.is_file() {
+                    // Ignore directories (don't recurse)
+                    continue;
+                }
+                decoding_keys.extend(
+                    Self::extract_rsa_decoding_keys_from_certificate(path).unwrap_or_default(),
+                );
+            }
+        } else if metadata.is_file() {
+            decoding_keys.extend(
+                Self::extract_rsa_decoding_keys_from_certificate(cert_path).unwrap_or_default(),
+            );
+        } else {
+            anyhow::bail!("{cert_path} is neither a directory or a file")
+        }
+        if decoding_keys.is_empty() {
+            anyhow::bail!("Configured for JWT auth with zero decoding keys. All JWT gated requests would be rejected.");
+        }
+
+        // Note that we need to create a `JwtAuth` with a different `validation` from the default one created by `new()` in this case
+        // because the `jsonwebtoken` crate requires that all algorithms in `validation.algorithms` belong to the same algorithm family
+        // (all RSA or all EdDSA).
+        let mut validation = Validation::default();
+        validation.algorithms = vec![HADRON_STORAGE_TOKEN_ALGORITHM];
+        validation.required_spec_claims = [].into();
+        Ok(Self {
+            validation,
+            decoding_keys,
+        })
+    }
+
     pub fn from_key(key: String) -> Result<Self> {
         Ok(Self::new(vec![DecodingKey::from_ed_pem(key.as_bytes())?]))
     }
@@ -246,6 +337,7 @@ pub fn encode_hadron_token_with_encoding_key(
 
 #[cfg(test)]
 mod tests {
+    use io::Write;
     use std::str::FromStr;
 
     use super::*;
