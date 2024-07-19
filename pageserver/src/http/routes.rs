@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use enumset::EnumSet;
+use futures::StreamExt;
 use futures::TryFutureExt;
 use humantime::format_rfc3339;
 use hyper::header;
@@ -44,12 +45,14 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeTravelError;
 use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
+use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::auth::JwtAuth;
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::prometheus_metrics_handler;
 use utils::http::endpoint::request_span;
+use utils::http::request::must_parse_query_param;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use crate::context::{DownloadBehavior, RequestContext};
@@ -1718,7 +1721,9 @@ async fn timeline_detach_ancestor_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    use crate::tenant::timeline::detach_ancestor::Options;
+    use crate::tenant::timeline::detach_ancestor;
+    use pageserver_api::models::detach_ancestor::AncestorDetached;
+
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1726,7 +1731,7 @@ async fn timeline_detach_ancestor_handler(
     let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
 
     async move {
-        let mut options = Options::default();
+        let mut options = detach_ancestor::Options::default();
 
         let rewrite_concurrency =
             parse_query_param::<_, std::num::NonZeroUsize>(&request, "rewrite_concurrency")?;
@@ -1754,27 +1759,36 @@ async fn timeline_detach_ancestor_handler(
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
-        let (_guard, prepared) = timeline
+        let progress = timeline
             .prepare_to_detach_from_ancestor(&tenant, options, ctx)
             .await?;
 
-        let res = state
-            .tenant_manager
-            .complete_detaching_timeline_ancestor(tenant_shard_id, timeline_id, prepared, ctx)
-            .await;
+        // uncomment to allow early as possible Tenant::drop
+        // drop(tenant);
 
-        match res {
-            Ok(reparented_timelines) => {
-                let resp = pageserver_api::models::detach_ancestor::AncestorDetached {
+        let resp = match progress {
+            detach_ancestor::Progress::Prepared(_guard, prepared) => {
+                // it would be great to tag the guard on to the tenant activation future
+                let reparented_timelines = state
+                    .tenant_manager
+                    .complete_detaching_timeline_ancestor(
+                        tenant_shard_id,
+                        timeline_id,
+                        prepared,
+                        ctx,
+                    )
+                    .await
+                    .context("timeline detach ancestor completion")
+                    .map_err(ApiError::InternalServerError)?;
+
+                AncestorDetached {
                     reparented_timelines,
-                };
-
-                json_response(StatusCode::OK, resp)
+                }
             }
-            Err(e) => Err(ApiError::InternalServerError(
-                e.context("timeline detach completion"),
-            )),
-        }
+            detach_ancestor::Progress::Done(resp) => resp,
+        };
+
+        json_response(StatusCode::OK, resp)
     }
     .instrument(span)
     .await
@@ -2404,6 +2418,189 @@ async fn post_top_tenants(
     )
 }
 
+async fn put_tenant_timeline_import_basebackup(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let base_lsn: Lsn = must_parse_query_param(&request, "base_lsn")?;
+    let end_lsn: Lsn = must_parse_query_param(&request, "end_lsn")?;
+    let pg_version: u32 = must_parse_query_param(&request, "pg_version")?;
+
+    check_permission(&request, Some(tenant_id))?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
+    let span = info_span!("import_basebackup", tenant_id=%tenant_id, timeline_id=%timeline_id, base_lsn=%base_lsn, end_lsn=%end_lsn, pg_version=%pg_version);
+    async move {
+        let state = get_state(&request);
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(TenantShardId::unsharded(tenant_id))?;
+
+        let broker_client = state.broker_client.clone();
+
+        let mut body = StreamReader::new(request.into_body().map(|res| {
+            res.map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!(error))
+            })
+        }));
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+        let timeline = tenant
+            .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
+            .map_err(ApiError::InternalServerError)
+            .await?;
+
+        // TODO mark timeline as not ready until it reaches end_lsn.
+        // We might have some wal to import as well, and we should prevent compute
+        // from connecting before that and writing conflicting wal.
+        //
+        // This is not relevant for pageserver->pageserver migrations, since there's
+        // no wal to import. But should be fixed if we want to import from postgres.
+
+        // TODO leave clean state on error. For now you can use detach to clean
+        // up broken state from a failed import.
+
+        // Import basebackup provided via CopyData
+        info!("importing basebackup");
+
+        timeline
+            .import_basebackup_from_tar(tenant.clone(), &mut body, base_lsn, broker_client, &ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        // Read the end of the tar archive.
+        read_tar_eof(body)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        // TODO check checksum
+        // Meanwhile you can verify client-side by taking fullbackup
+        // and checking that it matches in size with what was imported.
+        // It wouldn't work if base came from vanilla postgres though,
+        // since we discard some log files.
+
+        info!("done");
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(span)
+    .await
+}
+
+async fn put_tenant_timeline_import_wal(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let start_lsn: Lsn = must_parse_query_param(&request, "start_lsn")?;
+    let end_lsn: Lsn = must_parse_query_param(&request, "end_lsn")?;
+
+    check_permission(&request, Some(tenant_id))?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
+    let span = info_span!("import_wal", tenant_id=%tenant_id, timeline_id=%timeline_id, start_lsn=%start_lsn, end_lsn=%end_lsn);
+    async move {
+        let state = get_state(&request);
+
+        let timeline = active_timeline_of_active_tenant(&state.tenant_manager, TenantShardId::unsharded(tenant_id), timeline_id).await?;
+
+        let mut body = StreamReader::new(request.into_body().map(|res| {
+            res.map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!(error))
+            })
+        }));
+
+        let last_record_lsn = timeline.get_last_record_lsn();
+        if last_record_lsn != start_lsn {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!("Cannot import WAL from Lsn {start_lsn} because timeline does not start from the same lsn: {last_record_lsn}")));
+        }
+
+        // TODO leave clean state on error. For now you can use detach to clean
+        // up broken state from a failed import.
+
+        // Import wal provided via CopyData
+        info!("importing wal");
+        crate::import_datadir::import_wal_from_tar(&timeline, &mut body, start_lsn, end_lsn, &ctx).await.map_err(ApiError::InternalServerError)?;
+        info!("wal import complete");
+
+        // Read the end of the tar archive.
+        read_tar_eof(body).await.map_err(ApiError::InternalServerError)?;
+
+        // TODO Does it make sense to overshoot?
+        if timeline.get_last_record_lsn() < end_lsn {
+            return Err(ApiError::InternalServerError(anyhow::anyhow!("Cannot import WAL from Lsn {start_lsn} because timeline does not start from the same lsn: {last_record_lsn}")));
+        }
+
+        // Flush data to disk, then upload to s3. No need for a forced checkpoint.
+        // We only want to persist the data, and it doesn't matter if it's in the
+        // shape of deltas or images.
+        info!("flushing layers");
+        timeline.freeze_and_flush().await.map_err(|e| match e {
+            tenant::timeline::FlushLayerError::Cancelled => ApiError::ShuttingDown,
+            other => ApiError::InternalServerError(anyhow::anyhow!(other)),
+        })?;
+
+        info!("done");
+
+        json_response(StatusCode::OK, ())
+    }.instrument(span).await
+}
+
+/// Read the end of a tar archive.
+///
+/// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
+/// `tokio_tar` already read the first such block. Read the second all-zeros block,
+/// and check that there is no more data after the EOF marker.
+///
+/// 'tar' command can also write extra blocks of zeros, up to a record
+/// size, controlled by the --record-size argument. Ignore them too.
+async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 512];
+
+    // Read the all-zeros block, and verify it
+    let mut total_bytes = 0;
+    while total_bytes < 512 {
+        let nbytes = reader.read(&mut buf[total_bytes..]).await?;
+        total_bytes += nbytes;
+        if nbytes == 0 {
+            break;
+        }
+    }
+    if total_bytes < 512 {
+        anyhow::bail!("incomplete or invalid tar EOF marker");
+    }
+    if !buf.iter().all(|&x| x == 0) {
+        anyhow::bail!("invalid tar EOF marker");
+    }
+
+    // Drain any extra zero-blocks after the EOF marker
+    let mut trailing_bytes = 0;
+    let mut seen_nonzero_bytes = false;
+    loop {
+        let nbytes = reader.read(&mut buf).await?;
+        trailing_bytes += nbytes;
+        if !buf.iter().all(|&x| x == 0) {
+            seen_nonzero_bytes = true;
+        }
+        if nbytes == 0 {
+            break;
+        }
+    }
+    if seen_nonzero_bytes {
+        anyhow::bail!("unexpected non-zero bytes after the tar archive");
+    }
+    if trailing_bytes % 512 != 0 {
+        anyhow::bail!("unexpected number of zeros ({trailing_bytes}), not divisible by tar block size (512 bytes), after the tar archive");
+    }
+    Ok(())
+}
+
 /// Common functionality of all the HTTP API handlers.
 ///
 /// - Adds a tracing span to each request (by `request_span`)
@@ -2697,6 +2894,14 @@ pub fn make_router(
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/perf_info",
             |r| testing_api_handler("perf_info", r, perf_info),
+        )
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/import_basebackup",
+            |r| api_handler(r, put_tenant_timeline_import_basebackup),
+        )
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/import_wal",
+            |r| api_handler(r, put_tenant_timeline_import_wal),
         )
         .any(handler_404))
 }

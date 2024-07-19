@@ -106,7 +106,7 @@ impl RedisPublisherClient {
             cancel_key_data,
             session_id,
         }))?;
-        self.client.publish(PROXY_CHANNEL_NAME, payload).await?;
+        let _: () = self.client.publish(PROXY_CHANNEL_NAME, payload).await?;
         Ok(())
     }
     pub async fn try_connect(&mut self) -> anyhow::Result<()> {

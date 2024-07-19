@@ -178,7 +178,7 @@ impl ConnectionWithCredentialsProvider {
         credentials_provider: Arc<CredentialsProvider>,
     ) -> anyhow::Result<()> {
         let (user, password) = credentials_provider.provide_credentials().await?;
-        redis::cmd("AUTH")
+        let _: () = redis::cmd("AUTH")
             .arg(user)
             .arg(password)
             .query_async(con)

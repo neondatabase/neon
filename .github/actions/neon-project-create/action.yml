@@ -9,8 +9,8 @@ inputs:
     description: 'Region ID, if not set the project will be created in the default region'
     default: aws-us-east-2
   postgres_version:
-    description: 'Postgres version; default is 15'
-    default: '15'
+    description: 'Postgres version; default is 16'
+    default: '16'
   api_host:
     description: 'Neon API host'
     default: console-stage.neon.build

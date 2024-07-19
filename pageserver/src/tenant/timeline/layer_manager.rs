@@ -339,6 +339,10 @@ impl LayerManager {
         self.layer_fmgr.contains(layer)
     }
 
+    pub(crate) fn contains_key(&self, key: &PersistentLayerKey) -> bool {
+        self.layer_fmgr.contains_key(key)
+    }
+
     pub(crate) fn all_persistent_layers(&self) -> Vec<PersistentLayerKey> {
         self.layer_fmgr.0.keys().cloned().collect_vec()
     }
@@ -361,6 +365,10 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
             .with_context(|| format!("get layer from desc: {}", desc.layer_name()))
             .expect("not found")
             .clone()
+    }
+
+    fn contains_key(&self, key: &PersistentLayerKey) -> bool {
+        self.0.contains_key(key)
     }
 
     pub(crate) fn insert(&mut self, layer: T) {
