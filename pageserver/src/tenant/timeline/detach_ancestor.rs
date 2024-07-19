@@ -542,7 +542,7 @@ pub(super) async fn prepare(
                 return Err(NoAncestor);
             };
 
-            latest.gc_blocking.is_some_and(|b| {
+            latest.gc_blocking.as_ref().is_some_and(|b| {
                 b.blocked_by(
                     crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
                 )
