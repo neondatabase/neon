@@ -1166,7 +1166,7 @@ pub(super) async fn complete(
     let reparented_all = reparenting_candidates == reparented.len();
 
     if !reparented_all {
-        // FIXME: we must return 503 kind of response in the end; do the restart anyways because
+        // FIXME: we must return 503 kind of response in the end and do the restart anyways because
         // otherwise the runtime state remains diverged
         tracing::info!(
             reparented = reparented.len(),
