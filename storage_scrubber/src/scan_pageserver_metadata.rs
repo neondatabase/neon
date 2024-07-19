@@ -12,6 +12,7 @@ use pageserver::tenant::remote_timeline_client::remote_layer_path;
 use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use utils::id::TenantId;
+use utils::shard::ShardCount;
 
 #[derive(Serialize)]
 pub struct MetadataSummary {
@@ -150,36 +151,53 @@ pub async fn scan_metadata(
         summary: &mut MetadataSummary,
         mut tenant_objects: TenantObjectListing,
         timelines: Vec<(TenantShardTimelineId, S3TimelineBlobData)>,
+        highest_shard_count: ShardCount,
     ) {
         summary.tenant_count += 1;
 
         let mut timeline_ids = HashSet::new();
         let mut timeline_generations = HashMap::new();
         for (ttid, data) in timelines {
-            timeline_ids.insert(ttid.timeline_id);
-            // Stash the generation of each timeline, for later use identifying orphan layers
-            if let BlobDataParseResult::Parsed {
-                index_part: _index_part,
-                index_part_generation,
-                s3_layers: _s3_layers,
-            } = &data.blob_data
-            {
-                timeline_generations.insert(ttid, *index_part_generation);
-            }
+            if ttid.tenant_shard_id.shard_count == highest_shard_count {
+                // Only analyze `TenantShardId`s with highest shard count.
 
-            // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
-            // reference counts for layers across the tenant.
-            let analysis = branch_cleanup_and_check_errors(
-                s3_client,
-                target,
-                &ttid,
-                &mut tenant_objects,
-                None,
-                None,
-                Some(data),
-            )
-            .await;
-            summary.update_analysis(&ttid, &analysis);
+                // Stash the generation of each timeline, for later use identifying orphan layers
+                if let BlobDataParseResult::Parsed {
+                    index_part,
+                    index_part_generation,
+                    s3_layers: _s3_layers,
+                } = &data.blob_data
+                {
+                    if index_part.deleted_at.is_some() {
+                        // skip deleted timeline.
+                        tracing::info!("Skip analysis of {} b/c timeline is already deleted", ttid);
+                        continue;
+                    }
+                    timeline_generations.insert(ttid, *index_part_generation);
+                }
+
+                // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
+                // reference counts for layers across the tenant.
+                let analysis = branch_cleanup_and_check_errors(
+                    s3_client,
+                    target,
+                    &ttid,
+                    &mut tenant_objects,
+                    None,
+                    None,
+                    Some(data),
+                )
+                .await;
+                summary.update_analysis(&ttid, &analysis);
+
+                timeline_ids.insert(ttid.timeline_id);
+            } else {
+                tracing::info!(
+                    "Skip analysis of {} b/c a lower shard count than {}",
+                    ttid,
+                    highest_shard_count.0,
+                );
+            }
         }
 
         summary.timeline_count += timeline_ids.len();
@@ -227,12 +245,16 @@ pub async fn scan_metadata(
     // all results for the same tenant will be adjacent.  We accumulate these,
     // and then call `analyze_tenant` to flush, when we see the next tenant ID.
     let mut summary = MetadataSummary::new();
+    let mut highest_shard_count = ShardCount::MIN;
     while let Some(i) = timelines.next().await {
         let (ttid, data) = i?;
         summary.update_data(&data);
 
         match tenant_id {
-            None => tenant_id = Some(ttid.tenant_shard_id.tenant_id),
+            None => {
+                tenant_id = Some(ttid.tenant_shard_id.tenant_id);
+                highest_shard_count = highest_shard_count.max(ttid.tenant_shard_id.shard_count);
+            }
             Some(prev_tenant_id) => {
                 if prev_tenant_id != ttid.tenant_shard_id.tenant_id {
                     // New tenant: analyze this tenant's timelines, clear accumulated tenant_timeline_results
@@ -245,9 +267,13 @@ pub async fn scan_metadata(
                         &mut summary,
                         tenant_objects,
                         timelines,
+                        highest_shard_count,
                     )
                     .await;
                     tenant_id = Some(ttid.tenant_shard_id.tenant_id);
+                    highest_shard_count = ttid.tenant_shard_id.shard_count;
+                } else {
+                    highest_shard_count = highest_shard_count.max(ttid.tenant_shard_id.shard_count);
                 }
             }
         }
@@ -271,6 +297,7 @@ pub async fn scan_metadata(
             &mut summary,
             tenant_objects,
             tenant_timeline_results,
+            highest_shard_count,
         )
         .await;
     }
