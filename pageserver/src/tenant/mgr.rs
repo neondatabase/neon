@@ -2025,7 +2025,7 @@ impl TenantManager {
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
         let (resp, reparented_all) = timeline
-            .complete_detaching_timeline_ancestor(&tenant, prepared, ctx)
+            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
             .await?;
 
         let mut slot_guard = slot_guard.into_inner();

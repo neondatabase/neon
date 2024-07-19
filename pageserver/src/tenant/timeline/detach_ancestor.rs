@@ -970,8 +970,8 @@ async fn remote_copy(
         .map_err(CopyFailed)
 }
 
-/// See [`Timeline::complete_detaching_timeline_ancestor`].
-pub(super) async fn complete(
+/// See [`Timeline::detach_from_ancestor_and_reparent`].
+pub(super) async fn detach_and_reparent(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
