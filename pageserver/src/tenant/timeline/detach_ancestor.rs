@@ -141,50 +141,13 @@ pub(super) async fn prepare(
             }
         }
 
-        // detached has previously been detached; let's inspect each of the current timelines and
-        // report back the timelines which have been reparented by our detach
-        let mut all_direct_children = tenant
-            .timelines
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|tl| matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached)))
-            .map(|tl| (tl.ancestor_lsn, tl.clone()))
-            .collect::<Vec<_>>();
+        // `detached` has previously been detached; let's inspect each of the current timelines and
+        // report back the timelines which have been reparented by our detach, or which are still
+        // reparentable
 
-        let mut any_shutdown = false;
-
-        all_direct_children.retain(
-            |(_, tl)| match tl.remote_client.initialized_upload_queue() {
-                Ok(accessor) => accessor
-                    .latest_uploaded_index_part()
-                    .lineage
-                    .is_reparented(),
-                Err(_shutdownalike) => {
-                    // not 100% a shutdown, but let's bail early not to give inconsistent results in
-                    // sharded enviroment.
-                    any_shutdown = true;
-                    true
-                }
-            },
-        );
-
-        if any_shutdown {
-            // it could be one or many being deleted; have client retry
-            return Err(Error::ShuttingDown);
-        }
-
-        let mut reparented = all_direct_children;
-        // why this instead of hashset? there is a reason, but I've forgotten it many times.
-        //
-        // maybe if this was a hashset we would not be able to distinguish some race condition.
-        reparented.sort_unstable_by_key(|(lsn, tl)| (*lsn, tl.timeline_id));
-
+        let reparented_timelines = reparented_direct_children(detached, tenant)?;
         return Ok(Progress::Done(AncestorDetached {
-            reparented_timelines: reparented
-                .into_iter()
-                .map(|(_, tl)| tl.timeline_id)
-                .collect(),
+            reparented_timelines,
         }));
     };
 
@@ -381,6 +344,64 @@ pub(super) async fn prepare(
     Ok(Progress::Prepared(guard, prepared))
 }
 
+fn reparented_direct_children(
+    detached: &Arc<Timeline>,
+    tenant: &Tenant,
+) -> Result<Vec<TimelineId>, Error> {
+    let mut all_direct_children = tenant
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|tl| {
+                let is_direct_child = matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached));
+
+                if is_direct_child {
+                    Some((tl.ancestor_lsn, tl.clone()))
+                } else {
+                    if let Some(timeline) = tl.ancestor_timeline.as_ref() {
+                        assert_ne!(timeline.timeline_id, detached.timeline_id);
+                    }
+                    None
+                }
+            })
+                // Collect to avoid lock taking order problem with Tenant::timelines and
+                // Timeline::remote_client
+            .collect::<Vec<_>>();
+
+    let mut any_shutdown = false;
+
+    all_direct_children.retain(
+        |(_, tl)| match tl.remote_client.initialized_upload_queue() {
+            Ok(accessor) => accessor
+                .latest_uploaded_index_part()
+                .lineage
+                .is_reparented(),
+            Err(_shutdownalike) => {
+                // not 100% a shutdown, but let's bail early not to give inconsistent results in
+                // sharded enviroment.
+                any_shutdown = true;
+                true
+            }
+        },
+    );
+
+    if any_shutdown {
+        // it could be one or many being deleted; have client retry
+        return Err(Error::ShuttingDown);
+    }
+
+    let mut reparented = all_direct_children;
+    // why this instead of hashset? there is a reason, but I've forgotten it many times.
+    //
+    // maybe if this was a hashset we would not be able to distinguish some race condition.
+    reparented.sort_unstable_by_key(|(lsn, tl)| (*lsn, tl.timeline_id));
+    Ok(reparented
+        .into_iter()
+        .map(|(_, tl)| tl.timeline_id)
+        .collect())
+}
+
 fn partition_work(
     ancestor_lsn: Lsn,
     source_layermap: &LayerManager,
@@ -543,7 +564,8 @@ pub(super) async fn complete(
     let PreparedTimelineDetach { layers } = prepared;
 
     let ancestor = detached
-        .get_ancestor_timeline()
+        .ancestor_timeline
+        .as_ref()
         .expect("must still have a ancestor");
     let ancestor_lsn = detached.get_ancestor_lsn();
 
@@ -583,7 +605,7 @@ pub(super) async fn complete(
             }
 
             let tl_ancestor = tl.ancestor_timeline.as_ref()?;
-            let is_same = Arc::ptr_eq(&ancestor, tl_ancestor);
+            let is_same = Arc::ptr_eq(ancestor, tl_ancestor);
             let is_earlier = tl.get_ancestor_lsn() <= ancestor_lsn;
 
             let is_deleting = tl
