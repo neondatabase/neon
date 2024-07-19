@@ -479,7 +479,7 @@ jobs:
         mkdir -p /tmp/neon/pg_install/v16/bin
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench  
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql /tmp/neon/pg_install/v16/bin/psql  
-        /tmp/neon/pg_install/v16/bin/pgbenc --version
+        /tmp/neon/pg_install/v16/bin/pgbench --version
         /tmp/neon/pg_install/v16/bin/psql --version
 
     - name: Set up Connection String
