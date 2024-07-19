@@ -724,32 +724,6 @@ pub struct LayerMapInfo {
     pub historic_layers: Vec<HistoricLayerInfo>,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, enum_map::Enum)]
-#[repr(usize)]
-pub enum LayerAccessKind {
-    GetValueReconstructData,
-    Iter,
-    KeyIter,
-    Dump,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum LayerResidenceEventReason {
-    /// The layer map is being populated, e.g. during timeline load or attach.
-    /// This includes [`RemoteLayer`] objects created in [`reconcile_with_remote`].
-    /// We need to record such events because there is no persistent storage for the events.
-    ///
-    // https://github.com/rust-lang/rust/issues/74481
-    /// [`RemoteLayer`]: ../../tenant/storage_layer/struct.RemoteLayer.html
-    /// [`reconcile_with_remote`]: ../../tenant/struct.Timeline.html#method.reconcile_with_remote
-    LayerLoad,
-    /// We just created the layer (e.g., freeze_and_flush or compaction).
-    /// Such layers are always [`LayerResidenceStatus::Resident`].
-    LayerCreate,
-    /// We on-demand downloaded or evicted the given layer.
-    ResidenceChange,
-}
-
 /// The residence status of a layer
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LayerResidenceStatus {
