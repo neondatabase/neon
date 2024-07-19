@@ -13,6 +13,7 @@ use crate::{
 };
 use anyhow::Context;
 use pageserver_api::models::detach_ancestor::AncestorDetached;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
@@ -1055,16 +1056,15 @@ pub(super) async fn complete(
     assert!(detach_is_ongoing, "to reparent, gc must still be blocked");
     let mut tasks = tokio::task::JoinSet::new();
 
-    fn fail_all_but_one() -> bool {
-        fail::fail_point!("timeline-detach-ancestor::allow_one_reparented", |_| true);
-        false
-    }
-
-    let failpoint_sem = if fail_all_but_one() {
-        Some(Arc::new(tokio::sync::Semaphore::new(1)))
-    } else {
+    // Returns a single permit semaphore which will be used to make one reparenting succeed,
+    // others will fail as if those timelines had been stopped for whatever reason.
+    #[cfg(feature = "testing")]
+    let failpoint_sem = || -> Option<Arc<Semaphore>> {
+        fail::fail_point!("timeline-detach-ancestor::allow_one_reparented", |_| Some(
+            Arc::new(tokio::sync::Semaphore::new(1))
+        ));
         None
-    };
+    }();
 
     // because we are now keeping the slot in progress, it is unlikely that there will be any
     // timeline deletions during this time. if we raced one, then we'll just ignore it.
@@ -1098,18 +1098,19 @@ pub(super) async fn complete(
             // important in this scope: we are holding the Tenant::timelines lock
             let span = tracing::info_span!("reparent", reparented=%timeline.timeline_id);
             let new_parent = detached.timeline_id;
+            #[cfg(feature = "testing")]
             let failpoint_sem = failpoint_sem.clone();
 
             tasks.spawn(
                 async move {
                     let res = async {
+                        #[cfg(feature = "testing")]
                         if let Some(failpoint_sem) = failpoint_sem {
-                            let permit = failpoint_sem.acquire().await.map_err(|_| {
+                            let _permit = failpoint_sem.acquire().await.map_err(|_| {
                                 anyhow::anyhow!(
                                     "failpoint: timeline-detach-ancestor::allow_one_reparented",
                                 )
                             })?;
-                            permit.forget();
                             failpoint_sem.close();
                         }
 
