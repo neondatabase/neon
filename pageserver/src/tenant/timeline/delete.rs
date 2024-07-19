@@ -182,13 +182,15 @@ async fn remove_timeline_from_tenant(
 /// 5. Delete index part
 /// 6. Delete meta, timeline directory
 /// 7. Delete mark file
+///
 /// It is resumable from any step in case a crash/restart occurs.
 /// There are three entrypoints to the process:
 /// 1. [`DeleteTimelineFlow::run`] this is the main one called by a management api handler.
 /// 2. [`DeleteTimelineFlow::resume_deletion`] is called during restarts when local metadata is still present
-/// and we possibly neeed to continue deletion of remote files.
+///    and we possibly neeed to continue deletion of remote files.
 /// 3. [`DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces`] is used when we deleted remote
-/// index but still have local metadata, timeline directory and delete mark.
+///    index but still have local metadata, timeline directory and delete mark.
+///
 /// Note the only other place that messes around timeline delete mark is the logic that scans directory with timelines during tenant load.
 #[derive(Default)]
 pub enum DeleteTimelineFlow {

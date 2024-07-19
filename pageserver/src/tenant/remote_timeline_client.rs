@@ -241,7 +241,7 @@ use self::index::IndexPart;
 
 use super::metadata::MetadataUpdate;
 use super::storage_layer::{Layer, LayerName, ResidentLayer};
-use super::upload_queue::SetDeletedFlagProgress;
+use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
 use super::Generation;
 
 pub(crate) use download::{
@@ -1926,6 +1926,31 @@ impl RemoteTimelineClient {
                     // which is exactly what we want to happen.
                     drop(op);
                 }
+            }
+        }
+    }
+
+    /// Returns an accessor which will hold the UploadQueue mutex for accessing the upload queue
+    /// externally to RemoteTimelineClient.
+    pub(crate) fn initialized_upload_queue(
+        &self,
+    ) -> Result<UploadQueueAccessor<'_>, NotInitialized> {
+        let mut inner = self.upload_queue.lock().unwrap();
+        inner.initialized_mut()?;
+        Ok(UploadQueueAccessor { inner })
+    }
+}
+
+pub(crate) struct UploadQueueAccessor<'a> {
+    inner: std::sync::MutexGuard<'a, UploadQueue>,
+}
+
+impl<'a> UploadQueueAccessor<'a> {
+    pub(crate) fn latest_uploaded_index_part(&self) -> &IndexPart {
+        match &*self.inner {
+            UploadQueue::Initialized(x) => &x.clean.0,
+            UploadQueue::Uninitialized | UploadQueue::Stopped(_) => {
+                unreachable!("checked before constructing")
             }
         }
     }

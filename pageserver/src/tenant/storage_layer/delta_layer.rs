@@ -1180,9 +1180,7 @@ impl DeltaLayerInner {
                     let delta_key = DeltaKey::from_slice(key);
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
-                        reader: BlockCursor::new(crate::tenant::block_io::BlockReaderRef::Adapter(
-                            Adapter(self),
-                        )),
+                        layer: self,
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
@@ -1321,7 +1319,7 @@ impl DeltaLayerInner {
                         offsets.start.pos(),
                         offsets.end.pos(),
                         meta,
-                        Some(max_read_size),
+                        max_read_size,
                     ))
                 }
             } else {
@@ -1426,7 +1424,7 @@ impl DeltaLayerInner {
         let keys = self.load_keys(ctx).await?;
 
         async fn dump_blob(val: &ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
-            let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
+            let buf = val.load_raw(ctx).await?;
             let val = Value::des(&buf)?;
             let desc = match val {
                 Value::Image(img) => {
@@ -1461,8 +1459,7 @@ impl DeltaLayerInner {
             use pageserver_api::key::CHECKPOINT_KEY;
             use postgres_ffi::CheckPoint;
             if key == CHECKPOINT_KEY {
-                let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
-                let val = Value::des(&buf)?;
+                let val = val.load(ctx).await?;
                 match val {
                     Value::Image(img) => {
                         let checkpoint = CheckPoint::decode(&img)?;
@@ -1547,16 +1544,23 @@ pub struct DeltaEntry<'a> {
 /// Reference to an on-disk value
 pub struct ValueRef<'a> {
     blob_ref: BlobRef,
-    reader: BlockCursor<'a>,
+    layer: &'a DeltaLayerInner,
 }
 
 impl<'a> ValueRef<'a> {
     /// Loads the value from disk
     pub async fn load(&self, ctx: &RequestContext) -> Result<Value> {
-        // theoretically we *could* record an access time for each, but it does not really matter
-        let buf = self.reader.read_blob(self.blob_ref.pos(), ctx).await?;
+        let buf = self.load_raw(ctx).await?;
         let val = Value::des(&buf)?;
         Ok(val)
+    }
+
+    async fn load_raw(&self, ctx: &RequestContext) -> Result<Vec<u8>> {
+        let reader = BlockCursor::new(crate::tenant::block_io::BlockReaderRef::Adapter(Adapter(
+            self.layer,
+        )));
+        let buf = reader.read_blob(self.blob_ref.pos(), ctx).await?;
+        Ok(buf)
     }
 }
 
@@ -1615,13 +1619,17 @@ impl<'a> DeltaLayerIterator<'a> {
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
                 let offset = blob_ref.pos();
-                if let Some(batch_plan) = self.planner.handle(key, lsn, offset, BlobFlag::None) {
+                if let Some(batch_plan) = self.planner.handle(key, lsn, offset) {
                     break batch_plan;
                 }
             } else {
                 self.is_end = true;
                 let data_end_offset = self.delta_layer.index_start_offset();
-                break self.planner.handle_range_end(data_end_offset);
+                if let Some(item) = self.planner.handle_range_end(data_end_offset) {
+                    break item;
+                } else {
+                    return Ok(()); // TODO: test empty iterator
+                }
             }
         };
         let vectored_blob_reader = VectoredBlobReader::new(&self.delta_layer.file);
