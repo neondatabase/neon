@@ -313,9 +313,12 @@ impl SharedState {
         };
 
         // the gate being antered does not matter much, but lets be strict
-        assert!(attempt.gate_entered.is_none());
-        let entered = timeline.gate.enter().map_err(|_| Error::ShuttingDown)?;
-        attempt.gate_entered = Some(entered);
+        if attempt.gate_entered.is_none() {
+            let entered = timeline.gate.enter().map_err(|_| Error::ShuttingDown)?;
+            attempt.gate_entered = Some(entered);
+        } else {
+            // Some(gate_entered) means the tenant was not restarted, as is not required
+        }
 
         // this should be an 503 at least...?
         fail::fail_point!(
@@ -971,13 +974,48 @@ async fn remote_copy(
         .map_err(CopyFailed)
 }
 
+pub(crate) enum DetachingAndReparenting {
+    /// All of the following timeline ids were reparented and the timeline ancestor detach must be
+    /// marked as completed.
+    Reparented(HashSet<TimelineId>),
+
+    /// Some of the reparentings failed. The timeline ancestor detach must **not** be marked as
+    /// completed.
+    ///
+    /// Nested `must_restart` is set to true when any restart requiring changes were made.
+    SomeReparentingFailed { must_restart: bool },
+
+    /// Detaching and reparentings were completed in a previous attempt. Timeline ancestor detach
+    /// must be marked as completed.
+    AlreadyDone(HashSet<TimelineId>),
+}
+
+impl DetachingAndReparenting {
+    pub(crate) fn reset_tenant_required(&self) -> bool {
+        use DetachingAndReparenting::*;
+        match self {
+            Reparented(_) => true,
+            SomeReparentingFailed { must_restart } => *must_restart,
+            AlreadyDone(_) => false,
+        }
+    }
+
+    pub(crate) fn completed(self) -> Option<Vec<TimelineId>> {
+        use DetachingAndReparenting::*;
+        match self {
+            Reparented(x) | AlreadyDone(x) => Some(x),
+            SomeReparentingFailed { .. } => None,
+        }
+    }
+}
+
 /// See [`Timeline::detach_from_ancestor_and_reparent`].
 pub(super) async fn detach_and_reparent(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
     _ctx: &RequestContext,
-) -> Result<(HashSet<TimelineId>, bool), anyhow::Error> {
+) -> Result<DetachingAndReparenting, anyhow::Error> {
     let PreparedTimelineDetach { layers } = prepared;
 
     #[derive(Debug)]
@@ -1021,21 +1059,24 @@ pub(super) async fn detach_and_reparent(
         if let Some(ancestor) = existing {
             Ancestor::Detached(ancestor, ancestor_lsn)
         } else {
-            return Ok((reparented_direct_children(detached, tenant)?, true));
+            let direct_children = reparented_direct_children(detached, tenant)?;
+            return Ok(DetachingAndReparenting::AlreadyDone(direct_children));
         }
     } else {
+        // TODO: make sure there are no `?` before tenant_reset from after a questionmark from
+        // here.
         panic!("bug: complete called on a timeline which has not been detached or which has no live ancestor");
     };
 
     // publish the prepared layers before we reparent any of the timelines, so that on restart
     // reparented timelines find layers. also do the actual detaching.
     //
-    // if we crash after this operation, we will at least come up having detached a timeline, but
-    // we cannot go back and reparent the timelines which would had been reparented in normal
-    // execution.
-    //
-    // this is not perfect, but it avoids us a retry happening after a compaction or gc on restart
-    // which could give us a completely wrong layer combination.
+    // if we crash after this operation, a retry will allow reparenting the remaining timelines as
+    // gc is blocked.
+    assert!(
+        detach_is_ongoing,
+        "to detach and reparent, gc must still be blocked"
+    );
 
     let (ancestor, ancestor_lsn) = match ancestor {
         Ancestor::NotDetached(ancestor, ancestor_lsn) => {
@@ -1055,7 +1096,6 @@ pub(super) async fn detach_and_reparent(
         Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn),
     };
 
-    assert!(detach_is_ongoing, "to reparent, gc must still be blocked");
     let mut tasks = tokio::task::JoinSet::new();
 
     // Returns a single permit semaphore which will be used to make one reparenting succeed,
@@ -1129,8 +1169,8 @@ pub(super) async fn detach_and_reparent(
                             Some(timeline)
                         }
                         Err(e) => {
-                            // with the use of tenant slot, timeline deletion is the most likely
-                            // reason.
+                            // with the use of tenant slot, raced timeline deletion is the most
+                            // likely reason.
                             tracing::warn!("reparenting failed: {e:#}");
                             None
                         }
@@ -1169,7 +1209,9 @@ pub(super) async fn detach_and_reparent(
 
     let reparented_all = reparenting_candidates == reparented.len();
 
-    if !reparented_all {
+    if reparented_all {
+        Ok(DetachingAndReparenting::Reparented(reparented))
+    } else {
         // FIXME: we must return 503 kind of response in the end and do the restart anyways because
         // otherwise the runtime state remains diverged
         tracing::info!(
@@ -1178,9 +1220,8 @@ pub(super) async fn detach_and_reparent(
             "failed to reparent all candidates; they will be retried after the restart",
         );
 
-        Ok((reparented, false))
-    } else {
-        // TODO: two-state Ok(return_value)?
-        Ok((reparented, true))
+        Ok(DetachingAndReparenting::SomeReparentingFailed {
+            must_restart: reparented.is_empty(),
+        })
     }
 }
