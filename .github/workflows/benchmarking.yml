@@ -514,7 +514,7 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
-        
+
     - name: Benchmark pgvector queries
       uses: ./.github/actions/run-python-test-set
       with:
