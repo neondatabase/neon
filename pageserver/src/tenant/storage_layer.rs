@@ -14,7 +14,6 @@ use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
-use pageserver_api::models::{LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus};
 use std::cmp::{Ordering, Reverse};
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
@@ -555,11 +554,7 @@ impl LayerAccessStats {
         self.write_bits(mask, value);
     }
 
-    pub(crate) fn record_residence_event(
-        &self,
-        _status: LayerResidenceStatus,
-        _reason: LayerResidenceEventReason,
-    ) {
+    pub(crate) fn record_residence_event(&self) {
         self.record_residence_event_at(SystemTime::now())
     }
 
@@ -573,36 +568,12 @@ impl LayerAccessStats {
         self.write_bits(mask, value);
     }
 
-    pub(crate) fn record_access(&self, _access_kind: LayerAccessKind, ctx: &RequestContext) {
+    pub(crate) fn record_access(&self, ctx: &RequestContext) {
         if ctx.access_stats_behavior() == AccessStatsBehavior::Skip {
             return;
         }
 
         self.record_access_at(SystemTime::now())
-    }
-
-    /// Create an empty stats object.
-    ///
-    /// The caller is responsible for recording a residence event
-    /// using [`record_residence_event`] before calling `latest_activity`.
-    /// If they don't, [`latest_activity`] will return `None`.
-    ///
-    /// [`record_residence_event`]: Self::record_residence_event
-    /// [`latest_activity`]: Self::latest_activity
-    pub(crate) fn empty_will_record_residence_event_later() -> Self {
-        Self(Default::default())
-    }
-
-    /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
-    ///
-    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    ///
-    /// [`LayerLoad`]: LayerResidenceEventReason::LayerLoad
-    /// [`record_residence_event`]: Self::record_residence_event
-    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
-        let new = Self::default();
-        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
-        new
     }
 
     fn as_api_model(
