@@ -29,7 +29,7 @@ use crate::tenant::mgr::ShardSelector;
 use super::Timeline;
 
 /// [`crate::page_service`] uses this to repeatedly, cheaply, get [`Handle`]s to
-/// the right [`Timeline`] for a given [`TenantShardTimelineId`].
+/// the right [`Timeline`] for a given [`ShardTimelineId`].
 ///
 /// Without this, we'd have to go through the [`crate::tenant::mgr`] for each
 /// getpage request.
@@ -71,7 +71,7 @@ pub(super) struct PerTimelineState {
 /// We're abstract over the [`crate::tenant::mgr`] so we can test this module.
 pub(crate) trait TenantManager {
     type Error;
-    /// Invoked by [`Cache::gt`] to resolve a [`TenantShardTimelineId`] to a [`Timeline`].
+    /// Invoked by [`Cache::get`] to resolve a [`ShardTimelineId`] to a [`Timeline`].
     /// Errors are returned as [`GetError::TenantManager`].
     async fn resolve(
         &self,
