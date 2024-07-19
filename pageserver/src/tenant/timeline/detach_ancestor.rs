@@ -207,28 +207,23 @@ impl SharedState {
 
         let completion = {
             let mut guard = self.inner.lock().unwrap();
-
             let completion = guard.start_new(&detached.timeline_id)?;
-
             // now that we changed the contents, notify any long-sleeping gc
             self.gc_waiting.notify_one();
-
             completion
         };
 
         let started_at = std::time::Instant::now();
-
         let mut cancelled = std::pin::pin!(detached.cancel.cancelled());
 
         loop {
             tokio::select! {
                 _ = &mut cancelled => { return Err(Error::ShuttingDown); },
-                _ = self.attempt_waiting.notified() => {
-                    // reading a notification which was not intended for us is not a problem,
-                    // because we check if *our* progress has been witnessed by gc.
-                },
+                _ = self.attempt_waiting.notified() => {},
             };
 
+            // reading a notification which was not intended for us is not a problem,
+            // because we check if *our* progress has been witnessed by gc.
             let g = self.inner.lock().unwrap();
             if g.is_gc_paused(&detached.timeline_id) {
                 break;
@@ -237,7 +232,6 @@ impl SharedState {
 
         // finally
         let gate_entered = detached.gate.enter().map_err(|_| Error::ShuttingDown)?;
-
         let synced_in = started_at.elapsed();
 
         detached
