@@ -507,7 +507,7 @@ impl SharedStateBuilder {
 
         assert_eq!(g.latest.is_none(), g.known_ongoing.is_empty());
 
-        g.known_ongoing.extend(self.inprogress.into_iter());
+        g.known_ongoing.extend(self.inprogress);
         if g.latest.is_none() && !g.known_ongoing.is_empty() {
             g.latest = Some((ExistingAttempt::ReadFromIndexPart, false));
         }
