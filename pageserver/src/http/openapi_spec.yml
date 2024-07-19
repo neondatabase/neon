@@ -377,7 +377,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConflictError"
 
-  /v1/tenant/{tenant_id}/{timeline_id}/preserve_initdb_archive:
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/preserve_initdb_archive:
     parameters:
       - name: tenant_id
         in: path
@@ -429,7 +429,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/SyntheticSizeResponse"
             text/html:
-              description: SVG representation of the tenant and it's timelines.
+              schema:
+                type: string
+                description: SVG representation of the tenant and its timelines.
         "401":
           description: Unauthorized Error
           content:
@@ -568,7 +570,7 @@ paths:
           type: string
       - name: timeline_id
         in: path
-        ŕequired: true
+        required: true
         schema:
           type: string
 
@@ -774,15 +776,13 @@ components:
     TenantCreateRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
+        - $ref: '#/components/schemas/TenantLoadRequest'
         - type: object
           required:
             - new_tenant_id
           properties:
             new_tenant_id:
               type: string
-            generation:
-              type: integer
-              description: Attachment generation number.
     TenantLoadRequest:
       type: object
       properties:
@@ -1106,7 +1106,7 @@ components:
         reparented_timelines:
           type: array
           description: Set of reparented timeline ids
-          properties:
+          items:
             type: string
             format: hex
             description: TimelineId
