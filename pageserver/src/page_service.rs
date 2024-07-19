@@ -6,6 +6,7 @@ use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
+use once_cell::sync::OnceCell;
 use pageserver_api::key::Key;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
@@ -61,7 +62,8 @@ use crate::tenant::mgr::GetTenantError;
 use crate::tenant::mgr::ShardResolveResult;
 use crate::tenant::mgr::ShardSelector;
 use crate::tenant::mgr::TenantManager;
-use crate::tenant::timeline::WaitLsnError;
+use crate::tenant::timeline::handle::GetArg;
+use crate::tenant::timeline::{self, WaitLsnError};
 use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Tenant;
@@ -285,13 +287,6 @@ async fn page_service_conn_main(
     }
 }
 
-/// While a handler holds a reference to a Timeline, it also holds a the
-/// timeline's Gate open.
-struct HandlerTimeline {
-    timeline: Arc<Timeline>,
-    _guard: GateGuard,
-}
-
 struct PageServerHandler {
     auth: Option<Arc<SwappableJwtAuth>>,
     claims: Option<Claims>,
@@ -304,15 +299,45 @@ struct PageServerHandler {
     /// `process_query` creates a child context from this one.
     connection_ctx: RequestContext,
 
-    /// See [`Self::cache_timeline`] for usage.
-    ///
+    cancel: CancellationToken,
+
+    timeline_handles: TimelineHandles,
+}
+
+struct TimelineHandles {
+    tenant_manager: Arc<TenantManager>,
+    // We do not support switching tenant_id on a connection at this point.
+    // We can can add support for this later if needed without changing
+    // the protocol.
+    tenant_id: once_cell::sync::OnceCell<TenantId>,
     /// Note on size: the typical size of this map is 1.  The largest size we expect
     /// to see is the number of shards divided by the number of pageservers (typically < 2),
     /// or the ratio used when splitting shards (i.e. how many children created from one)
     /// parent shard, where a "large" number might be ~8.
-    shard_timelines: HashMap<ShardIndex, HandlerTimeline>,
+    handles: timeline::handle::Cache,
+}
 
-    cancel: CancellationToken,
+impl TimelineHandles {
+    fn new(tenant_manager: Arc<TenantManager>) -> Self {
+        Self {
+            tenant_manager,
+            tenant_id: OnceCell::new(),
+            handles: Default::default(),
+        }
+    }
+    fn get(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        get_arg: GetArg,
+    ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
+        if *self.tenant_id.get_or_init(|| tenant_id) != tenant_id {
+            return Err(GetActiveTimelineError::Tenant(
+                GetActiveTenantError::SwitchedTenant,
+            ));
+        }
+        todo!("get timeline handle"); // TODO: reimplement wait_for_active
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -391,52 +416,13 @@ impl PageServerHandler {
         cancel: CancellationToken,
     ) -> Self {
         PageServerHandler {
-            tenant_manager,
+            tenant_manager: tenant_manager.clone(),
             auth,
             claims: None,
             connection_ctx,
-            shard_timelines: HashMap::new(),
+            timeline_handles: TimelineHandles::new(tenant_manager),
             cancel,
         }
-    }
-
-    /// Future that completes when we need to shut down the connection.
-    ///
-    /// We currently need to shut down when any of the following happens:
-    /// 1. any of the timelines we hold GateGuards for in `shard_timelines` is cancelled
-    /// 2. connection shutdown is requested via `Self::cancel`
-    ///
-    /// NB on (1): the connection's lifecycle is not actually tied to any of the
-    /// `shard_timelines`s' lifecycles. But it's _necessary_ in the current
-    /// implementation to be responsive to timeline cancellation because
-    /// the connection holds their `GateGuards` open (sored in `shard_timelines`).
-    /// We currently do the easy thing and terminate the connection if any of the
-    /// shard_timelines gets cancelled. But really, we cuold spend more effort
-    /// and simply remove the cancelled timeline from the `shard_timelines`, thereby
-    /// dropping the guard.
-    ///
-    /// NB: keep in sync with [`Self::is_connection_cancelled`]
-    async fn await_connection_cancelled(&self) {
-        // A short wait before we expend the cycles to walk our timeline map.  This avoids incurring
-        // that cost every time we check for cancellation.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // This function is never called concurrently with code that adds timelines to shard_timelines,
-        // which is enforced by the borrow checker (the future returned by this function carries the
-        // immutable &self).  So it's fine to evaluate shard_timelines after the sleep, we don't risk
-        // missing any inserts to the map.
-
-        let mut cancellation_sources = Vec::with_capacity(1 + self.shard_timelines.len());
-        use futures::future::Either;
-        cancellation_sources.push(Either::Left(self.cancel.cancelled()));
-        cancellation_sources.extend(
-            self.shard_timelines
-                .values()
-                .map(|ht| Either::Right(ht.timeline.cancel.cancelled())),
-        );
-        FuturesUnordered::from_iter(cancellation_sources)
-            .next()
-            .await;
     }
 
     /// This function always respects cancellation of any timeline in `[Self::shard_timelines]`.  Pass in
@@ -457,9 +443,6 @@ impl PageServerHandler {
             flush_r = pgb.flush() => {
                 Ok(flush_r?)
             },
-            _ = self.await_connection_cancelled() => {
-                Err(QueryError::Shutdown)
-            }
             _ = cancel.cancelled() => {
                 Err(QueryError::Shutdown)
             }
@@ -762,7 +745,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            timeline,
+            &timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -795,7 +778,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            timeline,
+            &timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -828,7 +811,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            timeline,
+            &timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -846,120 +829,13 @@ impl PageServerHandler {
         }))
     }
 
-    /// For most getpage requests, we will already have a Timeline to serve the request: this function
-    /// looks up such a Timeline synchronously and without touching any global state.
-    fn get_cached_timeline_for_page(
-        &mut self,
-        req: &PagestreamGetPageRequest,
-    ) -> Result<&Arc<Timeline>, Key> {
-        let key = if let Some((first_idx, first_timeline)) = self.shard_timelines.iter().next() {
-            // Fastest path: single sharded case
-            if first_idx.shard_count.count() == 1 {
-                return Ok(&first_timeline.timeline);
-            }
-
-            let key = rel_block_to_key(req.rel, req.blkno);
-            let shard_num = first_timeline
-                .timeline
-                .get_shard_identity()
-                .get_shard_number(&key);
-
-            // Fast path: matched the first timeline in our local handler map.  This case is common if
-            // only one shard per tenant is attached to this pageserver.
-            if first_timeline.timeline.get_shard_identity().number == shard_num {
-                return Ok(&first_timeline.timeline);
-            }
-
-            let shard_index = ShardIndex {
-                shard_number: shard_num,
-                shard_count: first_timeline.timeline.get_shard_identity().count,
-            };
-
-            // Fast-ish path: timeline is in the connection handler's local cache
-            if let Some(found) = self.shard_timelines.get(&shard_index) {
-                return Ok(&found.timeline);
-            }
-
-            key
-        } else {
-            rel_block_to_key(req.rel, req.blkno)
-        };
-
-        Err(key)
-    }
-
-    /// Having looked up the [`Timeline`] instance for a particular shard, cache it to enable
-    /// use in future requests without having to traverse [`crate::tenant::mgr::TenantManager`]
-    /// again.
-    ///
-    /// Note that all the Timelines in this cache are for the same timeline_id: they're differ
-    /// in which shard they belong to.  When we serve a getpage@lsn request, we choose a shard
-    /// based on key.
-    ///
-    /// The typical size of this cache is 1, as we generally create shards to distribute work
-    /// across pageservers, so don't tend to have multiple shards for the same tenant on the
-    /// same pageserver.
-    fn cache_timeline(
-        &mut self,
-        timeline: Arc<Timeline>,
-    ) -> Result<&Arc<Timeline>, GetActiveTimelineError> {
-        let gate_guard = timeline
-            .gate
-            .enter()
-            .map_err(|_| GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled))?;
-
-        let shard_index = timeline.tenant_shard_id.to_index();
-        let entry = self
-            .shard_timelines
-            .entry(shard_index)
-            .or_insert(HandlerTimeline {
-                timeline,
-                _guard: gate_guard,
-            });
-
-        Ok(&entry.timeline)
-    }
-
-    /// If [`Self::get_cached_timeline_for_page`] missed, then this function is used to populate the cache with
-    /// a Timeline to serve requests for this key, if such a Timeline is present on this pageserver.  If no such
-    /// Timeline is found, then we will return an error (this indicates that the client is talking to the wrong node).
-    async fn load_timeline_for_page(
-        &mut self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        key: Key,
-    ) -> anyhow::Result<&Arc<Timeline>, GetActiveTimelineError> {
-        // Slow path: we must call out to the TenantManager to find the timeline for this Key
-        let timeline = self
-            .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Page(key))
-            .await?;
-
-        self.cache_timeline(timeline)
-    }
-
     async fn get_timeline_shard_zero(
         &mut self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> anyhow::Result<&Arc<Timeline>, GetActiveTimelineError> {
-        // This is a borrow-checker workaround: we can't return from inside of the  `if let Some` because
-        // that would be an immutable-borrow-self return, whereas later in the function we will use a mutable
-        // ref to salf.  So instead, we first build a bool, and then return while not borrowing self.
-        let have_cached = if let Some((idx, _tl)) = self.shard_timelines.iter().next() {
-            idx.shard_number == ShardNumber(0)
-        } else {
-            false
-        };
-
-        if have_cached {
-            let entry = self.shard_timelines.iter().next().unwrap();
-            Ok(&entry.1.timeline)
-        } else {
-            let timeline = self
-                .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
-                .await?;
-            Ok(self.cache_timeline(timeline)?)
-        }
+    ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
+        self.timeline_handles
+            .get(tenant_id, timeline_id, GetArg::ShardZero)
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -970,33 +846,29 @@ impl PageServerHandler {
         req: &PagestreamGetPageRequest,
         ctx: &RequestContext,
     ) -> Result<PagestreamBeMessage, PageStreamError> {
-        let timeline = match self.get_cached_timeline_for_page(req) {
+        let timeline = match self.timeline_handles.get(
+            tenant_id,
+            timeline_id,
+            GetArg::Key(rel_block_to_key(req.rel, req.blkno)),
+        ) {
             Ok(tl) => {
-                set_tracing_field_shard_id(tl);
+                set_tracing_field_shard_id(&tl);
                 tl
             }
-            Err(key) => {
-                match self
-                    .load_timeline_for_page(tenant_id, timeline_id, key)
-                    .await
-                {
-                    Ok(t) => t,
-                    Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
-                        // We already know this tenant exists in general, because we resolved it at
-                        // start of connection.  Getting a NotFound here indicates that the shard containing
-                        // the requested page is not present on this node: the client's knowledge of shard->pageserver
-                        // mapping is out of date.
-                        //
-                        // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
-                        // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
-                        // and talk to a different pageserver.
-                        return Err(PageStreamError::Reconnect(
-                            "getpage@lsn request routed to wrong shard".into(),
-                        ));
-                    }
-                    Err(e) => return Err(e.into()),
-                }
+            Err(GetActiveTimelineError::Tenant(GetActiveTenantError::NotFound(_))) => {
+                // We already know this tenant exists in general, because we resolved it at
+                // start of connection.  Getting a NotFound here indicates that the shard containing
+                // the requested page is not present on this node: the client's knowledge of shard->pageserver
+                // mapping is out of date.
+                //
+                // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
+                // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
+                // and talk to a different pageserver.
+                return Err(PageStreamError::Reconnect(
+                    "getpage@lsn request routed to wrong shard".into(),
+                ));
             }
+            Err(e) => return Err(e.into()),
         };
 
         let _timer = timeline
@@ -1005,7 +877,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            timeline,
+            &timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -1038,7 +910,7 @@ impl PageServerHandler {
 
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         let lsn = Self::wait_or_get_last_lsn(
-            timeline,
+            &timeline,
             req.request_lsn,
             req.not_modified_since,
             &latest_gc_cutoff_lsn,
@@ -1059,6 +931,15 @@ impl PageServerHandler {
     /// Full basebackups should only be used for debugging purposes.
     /// Originally, it was introduced to enable breaking storage format changes,
     /// but that is not applicable anymore.
+    ///
+    /// # Coding Discipline
+    ///
+    /// Coding discipline within this function: all interaction with the `pgb` connection
+    /// needs to be sensitive to connection shutdown, currently signalled via [`Self::cancel`].
+    /// This is so that we can shutdown page_service quickly.
+    ///
+    /// TODO: wrap the pgb that we pass to the basebackup handler so that it's sensitive
+    /// to connection cancellation.
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(shard_id, ?lsn, ?prev_lsn, %full_backup))]
     async fn handle_basebackup_request<IO>(
@@ -1109,7 +990,7 @@ impl PageServerHandler {
         // switch client to COPYOUT
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)
             .map_err(QueryError::Disconnected)?;
-        self.flush_cancellable(pgb, &timeline.cancel).await?;
+        self.flush_cancellable(pgb, &self.cancel).await?;
 
         // Send a tarball of the latest layer on the timeline. Compress if not
         // fullbackup. TODO Compress in that case too (tests need to be updated)
@@ -1207,69 +1088,20 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         selector: ShardSelector,
-    ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
-        let tenant = self
-            .get_active_tenant_with_timeout(tenant_id, selector, ACTIVE_TENANT_TIMEOUT)
-            .await
-            .map_err(GetActiveTimelineError::Tenant)?;
-        let timeline = tenant.get_timeline(timeline_id, true)?;
-        set_tracing_field_shard_id(&timeline);
-        Ok(timeline)
-    }
-
-    /// Get a shard's [`Tenant`] in its active state, if present.  If we don't find the shard and some
-    /// slots for this tenant are `InProgress` then we will wait.
-    /// If we find the [`Tenant`] and it's not yet in state [`TenantState::Active`], we will wait.
-    ///
-    /// `timeout` is used as a total timeout for the whole wait operation.
-    async fn get_active_tenant_with_timeout(
-        &self,
-        tenant_id: TenantId,
-        shard_selector: ShardSelector,
-        timeout: Duration,
-    ) -> Result<Arc<Tenant>, GetActiveTenantError> {
-        let wait_start = Instant::now();
-        let deadline = wait_start + timeout;
-
-        // Resolve TenantId to TenantShardId.  This is usually a quick one-shot thing, the loop is
-        // for handling the rare case that the slot we're accessing is InProgress.
-        let tenant_shard = loop {
-            let resolved = self
-                .tenant_manager
-                .resolve_attached_shard(&tenant_id, shard_selector);
-            match resolved {
-                ShardResolveResult::Found(tenant_shard) => break tenant_shard,
-                ShardResolveResult::NotFound => {
-                    return Err(GetActiveTenantError::NotFound(GetTenantError::NotFound(
-                        tenant_id,
-                    )));
-                }
-                ShardResolveResult::InProgress(barrier) => {
-                    // We can't authoritatively answer right now: wait for InProgress state
-                    // to end, then try again
-                    tokio::select! {
-                        _ = self.await_connection_cancelled() => {
-                            return Err(GetActiveTenantError::Cancelled)
-                        },
-                        _  = barrier.wait() => {
-                            // The barrier completed: proceed around the loop to try looking up again
-                        },
-                        _ = tokio::time::sleep(deadline.duration_since(Instant::now())) => {
-                            return Err(GetActiveTenantError::WaitForActiveTimeout {
-                                latest_state: None,
-                                wait_time: timeout,
-                            });
-                        }
-                    }
-                }
-            };
-        };
-
-        tracing::debug!("Waiting for tenant to enter active state...");
-        tenant_shard
-            .wait_to_become_active(deadline.duration_since(Instant::now()))
-            .await?;
-        Ok(tenant_shard)
+    ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
+        let res = self.timeline_handles.get(
+            tenant_id,
+            timeline_id,
+            match selector {
+                ShardSelector::Zero => GetArg::ShardZero,
+                ShardSelector::Page(k) => GetArg::Key(k),
+                ShardSelector::Known(idx) => GetArg::Known(idx),
+            },
+        );
+        if let Ok(tl) = &res {
+            set_tracing_field_shard_id(&tl);
+        }
+        res
     }
 }
 

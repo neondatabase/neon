@@ -22,6 +22,7 @@ use std::sync::Weak;
 
 use either::Either;
 use pageserver_api::key::rel_block_to_key;
+use pageserver_api::key::Key;
 use tracing::info;
 use tracing::instrument;
 use tracing::trace;
@@ -29,6 +30,7 @@ use utils::id::TenantId;
 use utils::id::TenantShardTimelineId;
 use utils::id::TimelineId;
 use utils::shard::ShardIndex;
+use utils::shard::ShardNumber;
 use utils::shard::TenantShardId;
 use utils::sync::gate::GateGuard;
 
@@ -85,7 +87,11 @@ pub(crate) trait TenantManager {
     type Error;
     /// Invoked by [`Cache::gt`] to resolve a [`TenantShardTimelineId`] to a [`Timeline`].
     /// Errors are returned as [`GetError::TenantManager`].
-    fn resolve(&self, arg: ResolveArg) -> Result<Arc<Timeline>, Self::Error>;
+    fn resolve(
+        &self,
+        timeline_id: TimelineId,
+        get_arg: GetArg,
+    ) -> Result<Arc<Timeline>, Self::Error>;
 }
 
 /// Errors returned by [`Cache::get`].
@@ -95,28 +101,17 @@ pub(crate) enum GetError<M> {
     PerTimelineStateShutDown,
 }
 
-pub(crate) enum ResolveArg {
-    GetPageRequest {
-        timeline_id: TimelineId,
-        rel_tag: pageserver_api::reltag::RelTag,
-        blkno: u32,
-    },
-    ShardTimelineId(ShardTimelineId),
-}
-
+#[derive(Clone, Copy)]
 pub(crate) enum GetArg {
-    GetPageRequest {
-        rel_tag: pageserver_api::reltag::RelTag,
-        blkno: u32,
-    },
+    ShardZero,
+    Key(Key),
+    Known(ShardIndex),
 }
 
 enum RoutingResult {
-    // Requires insertion into the map
-    FullMiss(Arc<Timeline>),
-    FastPath(Arc<HandleInner>),
-    SuperFastPath(Arc<HandleInner>),
-    GetImpl(Handle),
+    FastPath(Handle),
+    Index(ShardIndex),
+    NeedConsultTenantManager,
 }
 
 impl Cache {
@@ -144,46 +139,57 @@ impl Cache {
         M: TenantManager<Error = E>,
     {
         let mut map = self.0.map.lock().expect("mutex poisoned");
-        let res = self.shard_routing(&mut map, timeline_id, get_arg, tenant_manager)?;
-        match res {
-            RoutingResult::SuperFastPath(arc_timeline) | RoutingResult::FastPath(arc_timeline) => {
-                return Ok(Handle(arc_timeline));
+        let mut routing_state = self.shard_routing(&mut map, timeline_id, get_arg);
+        match routing_state {
+            RoutingResult::FastPath(handle) => return Ok(handle),
+            RoutingResult::Index(shard_index) => {
+                let key = ShardTimelineId {
+                    shard_index,
+                    timeline_id,
+                };
+                let Some(lookup_result) = map.get(&key) else {
+                    return self.get_miss(
+                        &mut map,
+                        timeline_id,
+                        GetArg::Known(shard_index),
+                        tenant_manager,
+                    );
+                };
+                let upgraded = match lookup_result.upgrade() {
+                    Some(upgraded) => upgraded,
+                    None => {
+                        trace!("handle cache stale");
+                        map.remove(&key).unwrap();
+                        return self.get_miss(
+                            &mut map,
+                            timeline_id,
+                            GetArg::Known(shard_index),
+                            tenant_manager,
+                        );
+                    }
+                };
+                Ok(Handle(upgraded))
             }
-            RoutingResult::GetImpl(handle) => return Ok(handle),
-            RoutingResult::FullMiss(_) => todo!("patch up map, dedupe code with get_impl"),
+            RoutingResult::NeedConsultTenantManager => {
+                self.get_miss(&mut map, timeline_id, get_arg, tenant_manager)
+            }
         }
     }
 
-    fn shard_routing<M, E>(
+    #[inline(always)]
+    fn shard_routing(
         &self,
         map: &mut Map,
         timeline_id: TimelineId,
         get_arg: GetArg,
-        tenant_manager: M,
-    ) -> Result<RoutingResult, GetError<E>>
-    where
-        M: TenantManager<Error = E>,
-    {
+    ) -> RoutingResult {
         loop {
+            // terminates because when every iteration we remove an element from the map
             let Some((first_key, first_handle)) = map.iter().next() else {
-                trace!("cache empty");
-                let timeline = tenant_manager
-                    .resolve({
-                        match get_arg {
-                            GetArg::GetPageRequest { rel_tag, blkno } => {
-                                ResolveArg::GetPageRequest {
-                                    timeline_id,
-                                    rel_tag,
-                                    blkno,
-                                }
-                            }
-                        }
-                    })
-                    .map_err(GetError::TenantManager)?;
-                return Ok(RoutingResult::FullMiss(timeline));
+                return RoutingResult::NeedConsultTenantManager;
             };
             let Some(first_handle) = first_handle.upgrade() else {
-                // TODO: dedup with get_impl
+                // TODO: dedup with get()
                 trace!("handle cache stale");
                 let first_key_owned = *first_key;
                 drop(first_handle);
@@ -192,113 +198,82 @@ impl Cache {
                 continue;
             };
 
-            // Fastest path: single sharded case
-            if first_key.shard_index.shard_count.count() == 1 {
-                return Ok(RoutingResult::SuperFastPath(first_handle));
-            }
-
             let first_handle_shard_identity = first_handle.timeline.get_shard_identity();
-            let shard_num = match get_arg {
-                GetArg::GetPageRequest { rel_tag, blkno } => {
-                    let timeline_key = rel_block_to_key(rel_tag, blkno); // TODO: avoid re-computing this later
-                                                                         // Any shard can be used for routing.
-                    first_handle_shard_identity.get_shard_number(&timeline_key)
-                }
-            };
-
-            // Fast path: matched the first timeline in our local handler map.  This case is common if
-            // only one shard per tenant is attached to this pageserver.
-            if first_handle_shard_identity.number == shard_num {
-                return Ok(RoutingResult::FastPath(first_handle));
-            }
-
-            let shard_index = ShardIndex {
+            let make_shard_index = |shard_num: ShardNumber| ShardIndex {
                 shard_number: shard_num,
-                shard_count: first_handle.timeline.get_shard_identity().count,
+                shard_count: first_handle_shard_identity.count,
             };
-            let key = ShardTimelineId {
-                shard_index,
-                timeline_id,
+
+            let idx = match get_arg {
+                GetArg::Key(key) => {
+                    make_shard_index(first_handle_shard_identity.get_shard_number(&key))
+                }
+                GetArg::ShardZero => make_shard_index(ShardNumber(0)),
+                GetArg::Known(shard_idx) => shard_idx,
             };
-            return self
-                .get_impl(map, key, tenant_manager)
-                .map(RoutingResult::GetImpl);
+
+            if first_key.shard_index == idx {
+                return RoutingResult::FastPath(Handle(first_handle));
+            } else {
+                return RoutingResult::Index(idx);
+            }
         }
     }
 
     #[instrument(level = "trace", skip_all)]
-    fn get_impl<M, E>(
+    fn get_miss<M, E>(
         &self,
         map: &mut Map,
-        key: ShardTimelineId,
+        timeline_id: TimelineId,
+        get_arg: GetArg,
         tenant_manager: M,
     ) -> Result<Handle, GetError<E>>
     where
         M: TenantManager<Error = E>,
     {
-        let cached: Option<_> = match map.get(&key) {
-            None => {
-                trace!("cache miss, never seen");
-                None
-            }
-            Some(weak) => match weak.upgrade() {
-                None => {
-                    trace!("handle cache stale");
-                    // clean up cache
-                    map.remove(&key).unwrap();
-                    None
+        match tenant_manager.resolve(timeline_id, get_arg) {
+            Ok(timeline) => {
+                let key = timeline.shard_timeline_id();
+                match &get_arg {
+                    GetArg::ShardZero => assert_eq!(key.shard_index.shard_number, ShardNumber(0)),
+                    GetArg::Key(_) => (), // gotta trust tenant_manager
+                    GetArg::Known(idx) => assert_eq!(idx, &key.shard_index),
                 }
-                Some(timeline) => {
-                    trace!("handle cache hit");
-                    Some(timeline)
-                }
-            },
-        };
-        match cached {
-            Some(handle) => Ok(Handle(handle)),
-            None => match tenant_manager.resolve(ResolveArg::ShardTimelineId(key)) {
-                Ok(timeline) => {
-                    assert_eq!(
-                        timeline.shard_timeline_id(),
+
+                let gate_guard = match timeline.gate.enter() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        return Err(GetError::TimelineGateClosed);
+                    }
+                };
+                let handle = Arc::new(
+                    // TODO: global metric that keeps track of the number of live HandlerTimeline instances
+                    // so we can identify reference cycle bugs.
+                    HandleInner {
                         key,
-                        "broken tenant_mnager implementation"
-                    );
-                    let gate_guard = match timeline.gate.enter() {
-                        Ok(guard) => guard,
-                        Err(_) => {
-                            return Err(GetError::TimelineGateClosed);
+                        _gate_guard: gate_guard,
+                        cache: Arc::downgrade(&self.0),
+                        timeline: timeline.clone(),
+                    },
+                );
+                {
+                    let mut lock_guard = timeline.handlers.handlers.lock().expect("mutex poisoned");
+                    match &mut *lock_guard {
+                        Some(timeline_handlers_list) => {
+                            for handler in timeline_handlers_list.iter() {
+                                assert!(!Arc::ptr_eq(handler, &handle));
+                            }
+                            timeline_handlers_list.push(Arc::clone(&handle));
+                            map.insert(key, Arc::downgrade(&handle));
                         }
-                    };
-                    let handle = Arc::new(
-                        // TODO: global metric that keeps track of the number of live HandlerTimeline instances
-                        // so we can identify reference cycle bugs.
-                        HandleInner {
-                            key,
-                            _gate_guard: gate_guard,
-                            cache: Arc::downgrade(&self.0),
-                            timeline: timeline.clone(),
-                        },
-                    );
-                    {
-                        let mut lock_guard =
-                            timeline.handlers.handlers.lock().expect("mutex poisoned");
-                        match &mut *lock_guard {
-                            Some(timeline_handlers_list) => {
-                                for handler in timeline_handlers_list.iter() {
-                                    assert!(!Arc::ptr_eq(handler, &handle));
-                                }
-                                timeline_handlers_list.push(Arc::clone(&handle));
-                                map.insert(key, Arc::downgrade(&handle));
-                            }
-                            None => {
-                                return Err(GetError::PerTimelineStateShutDown);
-                            }
+                        None => {
+                            return Err(GetError::PerTimelineStateShutDown);
                         }
                     }
-                    Ok(Handle(handle))
                 }
-                Err(e) => Err(GetError::TenantManager(e)),
-            },
+                Ok(Handle(handle))
+            }
+            Err(e) => Err(GetError::TenantManager(e)),
         }
     }
 }

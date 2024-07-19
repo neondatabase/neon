@@ -2168,6 +2168,9 @@ pub(crate) enum GetActiveTenantError {
     /// never happen.
     #[error("Tenant is broken: {0}")]
     Broken(String),
+
+    #[error("reconnect to switch tenant id")]
+    SwitchedTenant,
 }
 
 #[derive(Debug, thiserror::Error)]
