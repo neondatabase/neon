@@ -322,16 +322,16 @@ async fn main() -> anyhow::Result<()> {
         ),
         aws_credentials_provider,
     ));
-    let regional_redis_client = match args.redis_auth_type.as_str() {
-        "plain" => {
-            match args.redis_notifications {
+    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
+        ("plain", redis_url) => {
+            match redis_url {
                 None => {
                     bail!("plain auth requires redis_notifications to be set");
                 },
-                Some(url) => Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url)),
+                Some(url) => Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string())),
             }
         }
-        "irsa" => {
+        ("irsa", _) => {
             match (&args.redis_host, args.redis_port) {
                 (Some(host), Some(port)) => Some(
                     ConnectionWithCredentialsProvider::new_with_credentials_provider(
@@ -353,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let redis_notifications_client = if let Some(url) = &args.redis_notifications {
+    let redis_notifications_client = if let Some(url) = args.redis_notifications {
         Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string()))
     } else {
         regional_redis_client.clone()
