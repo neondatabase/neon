@@ -323,31 +323,29 @@ async fn main() -> anyhow::Result<()> {
         aws_credentials_provider,
     ));
     let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
-        ("plain", redis_url) => {
-            match redis_url {
-                None => {
-                    bail!("plain auth requires redis_notifications to be set");
-                },
-                Some(url) => Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string())),
+        ("plain", redis_url) => match redis_url {
+            None => {
+                bail!("plain auth requires redis_notifications to be set");
             }
-        }
-        ("irsa", _) => {
-            match (&args.redis_host, args.redis_port) {
-                (Some(host), Some(port)) => Some(
-                    ConnectionWithCredentialsProvider::new_with_credentials_provider(
-                        host.to_string(),
-                        port,
-                        elasticache_credentials_provider.clone(),
-                    ),
+            Some(url) => Some(
+                ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string()),
+            ),
+        },
+        ("irsa", _) => match (&args.redis_host, args.redis_port) {
+            (Some(host), Some(port)) => Some(
+                ConnectionWithCredentialsProvider::new_with_credentials_provider(
+                    host.to_string(),
+                    port,
+                    elasticache_credentials_provider.clone(),
                 ),
-                (None, None) => {
-                    bail!("irsa auth requires redis-host and redis-port to be set");
-                }
-                _ => {
-                    bail!("redis-host and redis-port must be specified together");
-                }
+            ),
+            (None, None) => {
+                bail!("irsa auth requires redis-host and redis-port to be set");
             }
-        }
+            _ => {
+                bail!("redis-host and redis-port must be specified together");
+            }
+        },
         _ => {
             bail!("unknown auth type given");
         }
