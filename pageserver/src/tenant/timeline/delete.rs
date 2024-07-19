@@ -221,6 +221,8 @@ impl DeleteTimelineFlow {
         // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
         timeline.shutdown(super::ShutdownMode::Hard).await;
 
+        tenant.ongoing_timeline_detach.on_delete(&timeline);
+
         fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
             Err(anyhow::anyhow!(
                 "failpoint: timeline-delete-before-index-deleted-at"
