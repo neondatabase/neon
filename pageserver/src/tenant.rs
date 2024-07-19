@@ -1231,8 +1231,8 @@ impl Tenant {
 
     pub async fn apply_timeline_archival_config(
         &self,
-        timeline_id: TimelineId,
-        config: TimelineArchivalState,
+        _timeline_id: TimelineId,
+        _config: TimelineArchivalState,
     ) -> anyhow::Result<()> {
         Ok(())
     }

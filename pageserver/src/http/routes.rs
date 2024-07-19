@@ -666,7 +666,7 @@ async fn timeline_preserve_initdb_handler(
 }
 
 async fn timeline_archival_config_handler(
-    request: Request<Body>,
+    mut request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
