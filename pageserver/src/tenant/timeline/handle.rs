@@ -58,9 +58,7 @@ struct CacheInner {
 pub(crate) struct Handle(Arc<HandleInner>);
 struct HandleInner {
     shut_down: AtomicBool,
-    key: ShardTimelineId,
     timeline: Arc<Timeline>,
-    cache: Weak<CacheInner>,
     // The timeline's gate held open.
     _gate_guard: utils::sync::gate::GateGuard,
 }
@@ -241,9 +239,7 @@ impl Cache {
                     // so we can identify reference cycle bugs.
                     HandleInner {
                         shut_down: AtomicBool::new(false),
-                        key,
                         _gate_guard: gate_guard,
-                        cache: Arc::downgrade(&self.0),
                         timeline: timeline.clone(),
                     },
                 );
@@ -302,7 +298,7 @@ impl PerTimelineState {
     /// extended by the already-alive [`Handle`]s.
     #[instrument(level = "trace", skip_all)]
     pub(super) fn shutdown(&self) {
-        let mut handles = self
+        let handles = self
             .handles
             .lock()
             .expect("mutex poisoned")
@@ -318,7 +314,6 @@ impl PerTimelineState {
             // Make hits fail.
             handle.shut_down.store(true, Ordering::Relaxed);
         }
-        drop(handles);
     }
 }
 

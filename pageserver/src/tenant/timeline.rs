@@ -3709,10 +3709,6 @@ impl Timeline {
     }
 
     #[inline(always)]
-    pub(crate) fn tenant_shard_timeline_id(&self) -> TenantShardTimelineId {
-        TenantShardTimelineId::new(self.tenant_shard_id, self.timeline_id)
-    }
-
     pub(crate) fn shard_timeline_id(&self) -> ShardTimelineId {
         ShardTimelineId {
             shard_index: ShardIndex {
