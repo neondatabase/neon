@@ -1,11 +1,12 @@
 import datetime
 import enum
+import itertools
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from threading import Barrier
-from typing import List, Tuple
+from typing import List, Set, Tuple
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
@@ -1066,6 +1067,13 @@ def test_retried_detach_ancestor_after_failed_reparenting(
         }
     )
 
+    env.pageserver.allowed_errors.extend(
+        [
+            ".* reparenting failed: failpoint: timeline-detach-ancestor::allow_one_reparented",
+            ".* Error processing HTTP request: InternalServerError\\(timeline detach ancestor completion",
+        ]
+    )
+
     http = env.pageserver.http_client()
 
     # main ------A-----B-----C-----D-----E> lsn
@@ -1094,29 +1102,42 @@ def test_retried_detach_ancestor_after_failed_reparenting(
     remote_storage = env.pageserver_remote_storage
     assert isinstance(remote_storage, S3Storage)
 
+    not_reparented: Set[TimelineId] = set()
+
     for round in range(len(timelines) - 1):
+        log.info(f"{round} round")
         if action == "return":
+            # raises fails if no exception was raised
             with pytest.raises(PageserverApiException) as exc:
                 http.detach_ancestor(env.initial_tenant, detached)
             assert exc.value.status_code in [
                 500,
                 503,
             ], f"its retryable, should be 500 or 503? {exc.value}"
+            log.info(exc.value)
+            # FIXME: assert the message
         else:
             raise RuntimeError("not implemented {action}")
 
         # now the tenant should be restarted, but because it has already detached in the remote storage, we dont expect any remote copies from attempt N+1
         # FIXME: validate using remote storage metrics
 
+        time.sleep(1)
+
         env.pageserver.quiesce_tenants()
 
         assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
         reparented = 0
+        not_reparented = set()
         for timeline in timelines:
             detail = http.timeline_detail(env.initial_tenant, timeline)
             ancestor = TimelineId(detail["ancestor_timeline_id"])
             if ancestor == detached:
+                log.info(f"{timeline} has been reparented")
                 reparented += 1
+            else:
+                not_reparented.add(timeline)
+                log.info(f"{timeline} still has original parent")
 
         assert reparented == round + 1
 
@@ -1124,14 +1145,37 @@ def test_retried_detach_ancestor_after_failed_reparenting(
             time.sleep(1)
             # find the error log line, find the gc paused log line after It
 
-    # final round, the failpoint is hit no longer, and everything completes
+    assert len(not_reparented) == 1
+
+    http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "return"))
+
+    # almost final round, the failpoint is hit no longer, and everything completes
+    with pytest.raises(PageserverApiException) as exc:
+        http.detach_ancestor(env.initial_tenant, detached)
+
+    # delete the remaining and previous ancestor to take a different path to
+    # completion (all other tests take the "detach? reparent complete", but
+    # this is only "complete".
+    #
+    # TODO: it should not actually restart the tenant, but does right now.
+    # luckily it also waits it to activate.
+    for timeline in itertools.chain(not_reparented, [env.initial_timeline]):
+        http.timeline_delete(env.initial_tenant, timeline)
+        wait_timeline_detail_404(http, env.initial_tenant, timeline, 20)
+
+    http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "off"))
     reparented_resp = http.detach_ancestor(env.initial_tenant, detached)
+    timelines = [x for x in timelines if x not in not_reparented]
     assert reparented_resp == timelines
     # no need to quiesce_tenants anymore, because completion does that
 
     reparented = 0
     for timeline in timelines:
-        if http.timeline_detail(env.initial_tenant, timeline)["ancestor_timeline_id"] is None:
+        if timeline in not_reparented:
+            continue
+        detail = http.timeline_detail(env.initial_tenant, timeline)
+        ancestor = TimelineId(detail["ancestor_timeline_id"])
+        if ancestor == detached:
             reparented += 1
     assert reparented == len(timelines)
 
