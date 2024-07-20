@@ -64,7 +64,7 @@ pub mod defaults {
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
 
-    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
+    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 1000;
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
