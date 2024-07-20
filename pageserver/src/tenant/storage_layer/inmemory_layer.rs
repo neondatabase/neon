@@ -528,10 +528,22 @@ impl InMemoryLayer {
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
+        let mut index_updates = Vec::with_capacity(values.len());
         for (lsn, key, buf) in values {
-            self.put_value_locked(&mut inner, key, lsn, &buf, ctx)
-                .await?;
+            let off = self.put_value_locked2(&mut inner, &buf, ctx).await?;
+            index_updates.push((lsn, key, off));
         }
+
+        for (lsn, key, off) in index_updates {
+            let vec_map = inner.index.entry(key).or_default();
+            let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
+            debug_assert!(old.is_none());
+
+            // TODO: the vec map append has some kind of instrument() in it that probably isn't super fast
+        }
+
+        let size = inner.file.len();
+        inner.resource_units.maybe_publish_size(size);
 
         Ok(())
     }
@@ -569,6 +581,27 @@ impl InMemoryLayer {
         locked_inner.resource_units.maybe_publish_size(size);
 
         Ok(())
+    }
+
+    async fn put_value_locked2(
+        &self,
+        locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
+        buf: &[u8],
+        ctx: &RequestContext,
+    ) -> Result<u64> {
+        let off = {
+            locked_inner
+                .file
+                .write_blob(
+                    buf,
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::InMemoryLayer)
+                        .build(),
+                )
+                .await?
+        };
+
+        Ok(off)
     }
 
     pub(crate) fn get_opened_at(&self) -> Instant {
