@@ -344,7 +344,7 @@ async fn init_remote(
     Ok((s3_client, s3_root))
 }
 
-fn init_remote_generic(
+async fn init_remote_generic(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
 ) -> anyhow::Result<GenericRemoteStorage> {
@@ -366,7 +366,7 @@ fn init_remote_generic(
         storage: RemoteStorageKind::AwsS3(storage),
         timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
     };
-    GenericRemoteStorage::from_config(&storage_config)
+    GenericRemoteStorage::from_config(&storage_config).await
 }
 
 async fn list_objects_with_retries(
