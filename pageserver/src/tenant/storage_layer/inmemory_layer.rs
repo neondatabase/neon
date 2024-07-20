@@ -534,10 +534,9 @@ impl InMemoryLayer {
 
         for (lsn, key, _buf, off) in values.into_iter() {
             let vec_map = inner.index.entry(key).or_default();
-            let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
-            debug_assert!(old.is_none());
 
-            // TODO: the vec map append has some kind of instrument() in it that probably isn't super fast
+            // Use fast version of append, since we know our LSNs are already sorted
+            vec_map.append2(lsn, off);
         }
 
         let size = inner.file.len();
