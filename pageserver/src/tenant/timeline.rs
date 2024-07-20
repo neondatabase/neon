@@ -6018,9 +6018,7 @@ impl<'a> TimelineWriter<'a> {
             .handle_open_layer_action(first_lsn, action, ctx)
             .await?;
 
-        for (lsn, key, buf) in serialized {
-            layer.put_value(key, lsn, &buf, ctx).await?;
-        }
+        layer.put_values(serialized, ctx).await?;
 
         // Update the current size only when the entire write was ok.
         // In case of failures, we may have had partial writes which

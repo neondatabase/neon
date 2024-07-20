@@ -521,6 +521,21 @@ impl InMemoryLayer {
         self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
     }
 
+    pub(crate) async fn put_values(
+        &self,
+        values: Vec<(Lsn, Key, smallvec::SmallVec<[u8; 256]>)>,
+        ctx: &RequestContext,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        self.assert_writable();
+        for (lsn, key, buf) in values {
+            self.put_value_locked(&mut inner, key, lsn, &buf, ctx)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     async fn put_value_locked(
         &self,
         locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
