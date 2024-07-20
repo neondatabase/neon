@@ -16,7 +16,7 @@ use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
-use pageserver::task_mgr::WALRECEIVER_RUNTIME;
+use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
 use pageserver::tenant::{secondary, TenantSharedResources};
 use pageserver::{CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener};
 use remote_storage::GenericRemoteStorage;
@@ -608,6 +608,7 @@ fn start_pageserver(
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
     let page_service = page_service::spawn(conf, tenant_manager.clone(), pg_auth, {
+        let _entered = COMPUTE_REQUEST_RUNTIME.enter(); // TcpListener::from_std requires it
         pageserver_listener
             .set_nonblocking(true)
             .context("set listener to nonblocking")?;
