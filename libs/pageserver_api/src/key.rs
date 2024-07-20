@@ -12,7 +12,7 @@ use crate::reltag::{BlockNumber, RelTag, SlruKind};
 ///
 /// The Repository treats this as an opaque struct, but see the code in pgdatadir_mapping.rs
 /// for what we actually store in these fields.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, Serialize, Deserialize)]
 pub struct Key {
     pub field1: u8,
     pub field2: u32,
@@ -20,6 +20,41 @@ pub struct Key {
     pub field4: u32,
     pub field5: u8,
     pub field6: u32,
+}
+
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.field1 == other.field1
+            && self.field2 == other.field2
+            && self.field3 == other.field3
+            && self.field4 == other.field4
+            && self.field5 == other.field5
+        {
+            self.field6.partial_cmp(&other.field6)
+        } else {
+            match self.field1.partial_cmp(&other.field1) {
+                Some(core::cmp::Ordering::Equal) => {}
+                ord => return ord,
+            }
+            match self.field2.partial_cmp(&other.field2) {
+                Some(core::cmp::Ordering::Equal) => {}
+                ord => return ord,
+            }
+            match self.field3.partial_cmp(&other.field3) {
+                Some(core::cmp::Ordering::Equal) => {}
+                ord => return ord,
+            }
+            match self.field4.partial_cmp(&other.field4) {
+                Some(core::cmp::Ordering::Equal) => {}
+                ord => return ord,
+            }
+            match self.field5.partial_cmp(&other.field5) {
+                Some(core::cmp::Ordering::Equal) => {}
+                ord => return ord,
+            }
+            self.field6.partial_cmp(&other.field6)
+        }
+    }
 }
 
 /// The storage key size.
