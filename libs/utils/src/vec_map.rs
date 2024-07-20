@@ -42,6 +42,10 @@ impl<K: Ord, V> VecMap<K, V> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
     pub fn with_capacity(capacity: usize, ordering: VecMapOrdering) -> Self {
         Self {
             data: Vec::with_capacity(capacity),
@@ -117,6 +121,11 @@ impl<K: Ord, V> VecMap<K, V> {
 
         let delta_size = self.instrument_vec_op(|vec| vec.push((key, value)));
         Ok((None, delta_size))
+    }
+
+    /// Where the key is known to be unique, and we don't want any instrumentation
+    pub fn append2(&mut self, key: K, value: V) {
+        self.data.push((key, value));
     }
 
     /// Split the map into two.
