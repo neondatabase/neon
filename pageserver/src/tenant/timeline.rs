@@ -5990,9 +5990,48 @@ impl<'a> TimelineWriter<'a> {
         batch: VecMap<Lsn, (Key, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for (lsn, (key, val)) in batch {
-            self.put(key, lsn, &val, ctx).await?
+        if batch.is_empty() {
+            return Ok(());
         }
+
+        let first_lsn = batch.as_slice().first().unwrap().0;
+        let last_lsn = batch.as_slice().last().unwrap().0;
+        let mut total_serialized_size = 0;
+
+        let serialized = batch
+            .into_iter()
+            .map(|(l, (k, v))| {
+                // Avoid doing allocations for "small" values.
+                // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
+                // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
+                let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
+                v.ser_into(&mut buf)
+                    .expect("Serialization of Value is infallible");
+                let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
+                total_serialized_size += buf_size;
+                (l, k, buf)
+            })
+            .collect::<Vec<_>>();
+
+        let action = self.get_open_layer_action(first_lsn, total_serialized_size);
+        let layer = self
+            .handle_open_layer_action(first_lsn, action, ctx)
+            .await?;
+
+        for (lsn, key, buf) in serialized {
+            layer.put_value(key, lsn, &buf, ctx).await?;
+        }
+
+        // Update the current size only when the entire write was ok.
+        // In case of failures, we may have had partial writes which
+        // render the size tracking out of sync. That's ok because
+        // the checkpoint distance should be significantly smaller
+        // than the S3 single shot upload limit of 5GiB.
+        let state = self.write_guard.as_mut().unwrap();
+
+        state.current_size += total_serialized_size;
+        state.prev_lsn = Some(last_lsn);
+        state.max_lsn = std::cmp::max(state.max_lsn, Some(last_lsn));
 
         Ok(())
     }
