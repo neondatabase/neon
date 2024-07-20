@@ -1,8 +1,10 @@
+import time
 from contextlib import closing
 
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.log_helper import log
 from fixtures.pg_version import PgVersion
 
 
@@ -26,10 +28,15 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
             cur.execute("create table huge (i int, j int);")
 
             # Run INSERT, recording the time and I/O it takes
+            log.info("Writing...")
             with env.record_pageserver_writes("pageserver_writes"):
                 with env.record_duration("insert"):
-                    cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
-                    env.flush()
+                    cur.execute("insert into huge values (generate_series(1, 20000000), 0);")
+                    env.flush1()
+
+            log.info("Finished writing")
+
+            env.flush2()
 
             env.report_peak_memory_use()
             env.report_size()
@@ -68,8 +75,12 @@ def measure_recovery_time(env: NeonCompare):
     env.env.pageserver.tenant_create(tenant_id=env.tenant, generation=attach_gen)
 
     # Measure recovery time
-    with env.record_duration("wal_recovery"):
-        client.timeline_create(pg_version, env.tenant, env.timeline)
+    client.timeline_create(pg_version, env.tenant, env.timeline)
 
+    log.info("Recovering...")
+    with env.record_duration("wal_recovery"):
         # Flush, which will also wait for lsn to catch up
-        env.flush()
+        env.flush1()
+
+    log.info("Finished recovering")
+    time.sleep(5)

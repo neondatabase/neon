@@ -45,6 +45,12 @@ class PgCompare(ABC):
     def flush(self):
         pass
 
+    def flush1(self):
+        _x = 1 + 2
+
+    def flush2(self):
+        _x = 1 + 2
+
     @abstractmethod
     def report_peak_memory_use(self):
         pass
@@ -130,7 +136,13 @@ class NeonCompare(PgCompare):
         return self._pg_bin
 
     def flush(self):
+        self.flush1()
+        self.flush2()
+
+    def flush1(self):
         wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
+
+    def flush2(self):
         self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline)
         self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 
