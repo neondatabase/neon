@@ -523,18 +523,16 @@ impl InMemoryLayer {
 
     pub(crate) async fn put_values(
         &self,
-        values: Vec<(Lsn, Key, smallvec::SmallVec<[u8; 256]>)>,
+        mut values: Vec<(Lsn, Key, smallvec::SmallVec<[u8; 256]>, u64)>,
         ctx: &RequestContext,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
-        let mut index_updates = Vec::with_capacity(values.len());
-        for (lsn, key, buf) in values {
-            let off = self.put_value_locked2(&mut inner, &buf, ctx).await?;
-            index_updates.push((lsn, key, off));
+        for (_lsn, _key, buf, off) in &mut values {
+            *off = self.put_value_locked2(&mut inner, &buf, ctx).await?;
         }
 
-        for (lsn, key, off) in index_updates {
+        for (lsn, key, _buf, off) in values.into_iter() {
             let vec_map = inner.index.entry(key).or_default();
             let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
             debug_assert!(old.is_none());

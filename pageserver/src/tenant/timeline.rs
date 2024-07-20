@@ -5998,20 +5998,18 @@ impl<'a> TimelineWriter<'a> {
         let last_lsn = batch.as_slice().last().unwrap().0;
         let mut total_serialized_size = 0;
 
-        let serialized = batch
-            .into_iter()
-            .map(|(l, (k, v))| {
-                // Avoid doing allocations for "small" values.
-                // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
-                // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
-                let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
-                v.ser_into(&mut buf)
-                    .expect("Serialization of Value is infallible");
-                let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
-                total_serialized_size += buf_size;
-                (l, k, buf)
-            })
-            .collect::<Vec<_>>();
+        let mut serialized = Vec::with_capacity(batch.len());
+        for (l, (k, v)) in batch.into_iter() {
+            // Avoid doing allocations for "small" values.
+            // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
+            // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
+            let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
+            v.ser_into(&mut buf)
+                .expect("Serialization of Value is infallible");
+            let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
+            total_serialized_size += buf_size;
+            serialized.push((l, k, buf, 0));
+        }
 
         let action = self.get_open_layer_action(first_lsn, total_serialized_size);
         let layer = self
