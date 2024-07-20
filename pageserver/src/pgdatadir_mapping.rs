@@ -174,6 +174,7 @@ impl Timeline {
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
             pending_directory_entries: Vec::new(),
+            latest_rel_sizes: Default::default(),
             lsn,
         }
     }
@@ -1045,6 +1046,11 @@ pub struct DatadirModification<'a> {
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
 
+    // We update relation sizes when appending.  Since writing is single threaded, once we
+    // have updated a relation size we may be sure that its size is unchanged within the
+    // same DatadirModification
+    latest_rel_sizes: HashMap<RelTag, u32>,
+
     /// For special "directory" keys that store key-value maps, track the size of the map
     /// if it was updated in this modification.
     pending_directory_entries: Vec<(DirectoryKind, usize)>,
@@ -1407,7 +1413,10 @@ impl<'a> DatadirModification<'a> {
 
         // Put size
         let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key, ctx).await?.get_u32_le();
+        let old_size = match self.latest_rel_sizes.get(&rel) {
+            Some(s) => *s,
+            None => self.get(size_key, ctx).await?.get_u32_le(),
+        };
 
         // only extend relation here. never decrease the size
         if nblocks > old_size {
@@ -1418,6 +1427,8 @@ impl<'a> DatadirModification<'a> {
             self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
             self.pending_nblocks += nblocks as i64 - old_size as i64;
+
+            self.latest_rel_sizes.insert(rel, nblocks);
         }
         Ok(())
     }
