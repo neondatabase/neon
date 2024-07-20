@@ -456,7 +456,7 @@ impl SafekeeperPostgresHandler {
         // not synchronized with sends, so this avoids deadlocks.
         let reader = pgb.split().context("START_REPLICATION split")?;
 
-        let mut sender = WalSender {
+        let mut sender = Box::new(WalSender {
             pgb,
             // should succeed since we're already holding another guard
             tli: tli.wal_residence_guard().await?,
@@ -468,7 +468,7 @@ impl SafekeeperPostgresHandler {
             ws_guard: ws_guard.clone(),
             wal_reader,
             send_buf: [0; MAX_SEND_SIZE],
-        };
+        });
         let mut reply_reader = ReplyReader {
             reader,
             ws_guard: ws_guard.clone(),
@@ -586,6 +586,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             }
             let send_size = (chunk_end_pos.0 - self.start_pos.0) as usize;
             let send_buf = &mut self.send_buf[..send_size];
+
             let send_size: usize;
             {
                 // If uncommitted part is being pulled, check that the term is

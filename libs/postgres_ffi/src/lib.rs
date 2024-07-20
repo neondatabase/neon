@@ -132,7 +132,7 @@ pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 pub const XLOG_BLCKSZ: usize = 8192;
 pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 
-pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
+pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 128;
 
 // Export some version independent functions that are used outside of this mod
 pub use v14::xlog_utils::encode_logical_message;
