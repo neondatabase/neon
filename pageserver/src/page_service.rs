@@ -324,9 +324,11 @@ impl TimelineHandles {
             .map_err(|e| match e {
                 timeline::handle::GetError::TenantManager(e) => e,
                 timeline::handle::GetError::TimelineGateClosed => {
+                    trace!("timeline gate closed");
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
                 }
                 timeline::handle::GetError::PerTimelineStateShutDown => {
+                    trace!("per-timeline state shut down");
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
                 }
             })

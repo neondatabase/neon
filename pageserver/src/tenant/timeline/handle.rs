@@ -62,10 +62,17 @@ struct HandleInner {
 
 /// This struct embedded into each [`Timeline`] object to keep the [`Cache`]'s
 /// [`Weak<HandleInner>`] alive while the [`Timeline`] is alive.
-#[derive(Default)]
 pub(super) struct PerTimelineState {
     // None = shutting down
     handles: Mutex<Option<Vec<Arc<HandleInner>>>>,
+}
+
+impl Default for PerTimelineState {
+    fn default() -> Self {
+        Self {
+            handles: Mutex::new(Some(Vec::default())),
+        }
+    }
 }
 
 /// We're abstract over the [`crate::tenant::mgr`] so we can test this module.
