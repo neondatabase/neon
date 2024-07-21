@@ -33,7 +33,10 @@ pub mod walredo;
 use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
-use tenant::mgr::{BackgroundPurges, TenantManager};
+use tenant::{
+    mgr::{BackgroundPurges, TenantManager},
+    secondary,
+};
 use tracing::info;
 
 /// Current storage format version
@@ -80,6 +83,7 @@ pub async fn shutdown_pageserver(
     tenant_manager: &TenantManager,
     background_purges: BackgroundPurges,
     mut deletion_queue: DeletionQueue,
+    secondary_controller_tasks: secondary::GlobalTasks,
     exit_code: i32,
 ) {
     use std::time::Duration;
@@ -140,6 +144,13 @@ pub async fn shutdown_pageserver(
     timed(
         http_listener.0.shutdown(),
         "shutdown http",
+        Duration::from_secs(1),
+    )
+    .await;
+
+    timed(
+        secondary_controller_tasks.wait(), // cancellation happened in caller
+        "secondary controller wait",
         Duration::from_secs(1),
     )
     .await;

@@ -529,7 +529,7 @@ fn start_pageserver(
         }
     });
 
-    let secondary_controller = secondary::spawn_tasks(
+    let (secondary_controller, secondary_controller_tasks) = secondary::spawn_tasks(
         tenant_manager.clone(),
         remote_storage.clone(),
         background_jobs_barrier.clone(),
@@ -668,6 +668,7 @@ fn start_pageserver(
                 &tenant_manager,
                 background_purges,
                 deletion_queue.clone(),
+                secondary_controller_tasks,
                 0,
             )
             .await;
