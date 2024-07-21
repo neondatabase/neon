@@ -293,7 +293,9 @@ mod tests {
         use crate::repository::Value;
         use bytes::Bytes;
 
-        let harness = TenantHarness::create("merge_iterator_merge_in_between").unwrap();
+        let harness = TenantHarness::create("merge_iterator_merge_in_between")
+            .await
+            .unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let tline = tenant
@@ -356,7 +358,9 @@ mod tests {
         use crate::repository::Value;
         use bytes::Bytes;
 
-        let harness = TenantHarness::create("merge_iterator_delta_merge").unwrap();
+        let harness = TenantHarness::create("merge_iterator_delta_merge")
+            .await
+            .unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let tline = tenant
@@ -430,7 +434,9 @@ mod tests {
         use crate::repository::Value;
         use bytes::Bytes;
 
-        let harness = TenantHarness::create("merge_iterator_delta_image_mixed_merge").unwrap();
+        let harness = TenantHarness::create("merge_iterator_delta_image_mixed_merge")
+            .await
+            .unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let tline = tenant

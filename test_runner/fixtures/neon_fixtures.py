@@ -997,7 +997,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    StorageScrubber(self).scan_metadata()
+                    self.env.storage_scrubber.scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -1158,6 +1158,7 @@ class NeonEnv:
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
+                "image_compression": "zstd",
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -1223,6 +1224,9 @@ class NeonEnv:
                 Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
             )
             cfg["safekeepers"].append(sk_cfg)
+
+        # Scrubber instance for tests that use it, and for use during teardown checks
+        self.storage_scrubber = StorageScrubber(self, log_dir=config.test_output_dir)
 
         log.info(f"Config: {cfg}")
         self.neon_cli.init(
@@ -4264,9 +4268,9 @@ class Safekeeper(LogUtils):
 
 
 class StorageScrubber:
-    def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
+    def __init__(self, env: NeonEnv, log_dir: Path):
         self.env = env
-        self.log_dir = log_dir or env.test_output_dir
+        self.log_dir = log_dir
 
     def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
@@ -4283,11 +4287,14 @@ class StorageScrubber:
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
 
-        base_args = [str(self.env.neon_binpath / "storage_scrubber")]
+        base_args = [
+            str(self.env.neon_binpath / "storage_scrubber"),
+            f"--controller-api={self.env.storage_controller_api}",
+        ]
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(
-            self.env.test_output_dir,
+            self.log_dir,
             args,
             echo_stderr=True,
             echo_stdout=True,
@@ -4326,7 +4333,10 @@ class StorageScrubber:
         log.info(f"tenant-snapshot output: {stdout}")
 
     def pageserver_physical_gc(
-        self, min_age_secs: int, tenant_ids: Optional[list[TenantId]] = None
+        self,
+        min_age_secs: int,
+        tenant_ids: Optional[list[TenantId]] = None,
+        mode: Optional[str] = None,
     ):
         args = ["pageserver-physical-gc", "--min-age", f"{min_age_secs}s"]
 
@@ -4335,6 +4345,9 @@ class StorageScrubber:
 
         for tenant_id in tenant_ids:
             args.extend(["--tenant-id", str(tenant_id)])
+
+        if mode is not None:
+            args.extend(["--mode", mode])
 
         stdout = self.scrubber_cli(
             args,

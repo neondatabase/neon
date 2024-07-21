@@ -24,6 +24,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use pageserver_api::shard::TenantShardId;
+use remote_storage::RemotePath;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -31,7 +32,7 @@ use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use utils::fs_ext;
-use utils::id::{TenantId, TimelineId};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
@@ -54,7 +55,7 @@ pub struct S3Target {
 /// in the pageserver, as all timeline objects existing in the scope of a particular
 /// tenant: the scrubber is different in that it handles collections of data referring to many
 /// TenantShardTimelineIds in on place.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TenantShardTimelineId {
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
@@ -66,6 +67,10 @@ impl TenantShardTimelineId {
             tenant_shard_id,
             timeline_id,
         }
+    }
+
+    fn as_tenant_timeline_id(&self) -> TenantTimelineId {
+        TenantTimelineId::new(self.tenant_shard_id.tenant_id, self.timeline_id)
     }
 }
 
@@ -179,6 +184,22 @@ impl RootTarget {
             .with_sub_segment(&id.timeline_id.to_string())
     }
 
+    /// Given RemotePath "tenants/foo/timelines/bar/layerxyz", prefix it to a literal
+    /// key in the S3 bucket.
+    pub fn absolute_key(&self, key: &RemotePath) -> String {
+        let root = match self {
+            Self::Pageserver(root) => root,
+            Self::Safekeeper(root) => root,
+        };
+
+        let prefix = &root.prefix_in_bucket;
+        if prefix.ends_with('/') {
+            format!("{prefix}{key}")
+        } else {
+            format!("{prefix}/{key}")
+        }
+    }
+
     pub fn bucket_name(&self) -> &str {
         match self {
             Self::Pageserver(root) => &root.bucket_name,
@@ -214,6 +235,14 @@ impl BucketConfig {
             prefix_in_bucket,
         })
     }
+}
+
+pub struct ControllerClientConfig {
+    /// URL to storage controller.  e.g. http://127.0.0.1:1234 when using `neon_local`
+    pub controller_api: Url,
+
+    /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
+    pub controller_jwt: String,
 }
 
 pub struct ConsoleConfig {
