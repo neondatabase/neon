@@ -388,7 +388,7 @@ impl DeleteTimelineFlow {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
-            Some(tenant_shard_id),
+            tenant_shard_id,
             Some(timeline_id),
             "timeline_delete",
             async move {
