@@ -440,6 +440,9 @@ impl From<GetActiveTimelineError> for PageStreamError {
     fn from(value: GetActiveTimelineError) -> Self {
         match value {
             GetActiveTimelineError::Tenant(GetActiveTenantError::Cancelled) => Self::Shutdown,
+            GetActiveTimelineError::Tenant(GetActiveTenantError::WillNotBecomeActive(
+                TenantState::Stopping { .. },
+            )) => Self::Shutdown,
             GetActiveTimelineError::Tenant(e) => Self::NotFound(format!("{e}").into()),
             GetActiveTimelineError::Timeline(e) => Self::NotFound(format!("{e}").into()),
         }
