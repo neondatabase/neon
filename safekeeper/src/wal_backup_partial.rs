@@ -28,7 +28,7 @@ use utils::lsn::Lsn;
 
 use crate::{
     metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
-    rate_limit::RateLimiter,
+    rate_limit::{rand_duration, RateLimiter},
     safekeeper::Term,
     timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
@@ -327,6 +327,7 @@ pub async fn main_task(
 ) -> Option<PartialRemoteSegment> {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
+    let mut first_iteration = true;
 
     let (_, persistent_state) = tli.get_state().await;
     let mut commit_lsn_rx = tli.get_commit_lsn_watch_rx();
@@ -393,6 +394,15 @@ pub async fn main_task(
                 _ = flush_lsn_rx.changed() => {}
             }
         }
+
+        // smoothing the load after restart, by sleeping for a random time.
+        // if this is not the first iteration, we will wait for the full await_duration
+        let await_duration = if first_iteration {
+            first_iteration = false;
+            rand_duration(&await_duration)
+        } else {
+            await_duration
+        };
 
         // fixing the segno and waiting some time to prevent reuploading the same segment too often
         let pending_segno = backup.segno(flush_lsn_rx.borrow().lsn);
