@@ -106,6 +106,21 @@ impl From<FlushLayerError> for Error {
     }
 }
 
+impl From<GetActiveTenantError> for Error {
+    fn from(value: GetActiveTenantError) -> Self {
+        use pageserver_api::models::TenantState;
+        use GetActiveTenantError::*;
+
+        match value {
+            Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => Error::ShuttingDown,
+            WaitForActiveTimeout { .. } | NotFound(_) | Broken(_) | WillNotBecomeActive(_) => {
+                // NotFound seems out-of-place
+                Error::WaitToActivate(value)
+            }
+        }
+    }
+}
+
 pub(crate) enum Progress {
     Prepared(Attempt, PreparedTimelineDetach),
     Done(AncestorDetached),
@@ -197,23 +212,45 @@ impl SharedState {
     }
 
     /// Acquire the exclusive lock for a new detach ancestor attempt and ensure that GC task has
-    /// been persistently paused via [`crate::tenant::IndexPart`], awaiting for completion.
+    /// been transiently paused.
     ///
     /// Cancellation safe.
     async fn start_new_attempt(&self, detached: &Arc<Timeline>) -> Result<Attempt, Error> {
+        let started_at = std::time::Instant::now();
+
+        let completion = self.obtain_exclusive_permit(detached)?;
+
+        let gate_entered = detached.gate.enter().map_err(|_| Error::ShuttingDown)?;
+
+        self.wait_until_gc_is_paused(detached).await?;
+
+        let ready_in = started_at.elapsed();
+
+        tracing::info!(elapsed_ms = ready_in.as_millis(), "gc paused, gate entered");
+
+        Ok(Attempt {
+            timeline_id: detached.timeline_id,
+            _guard: completion,
+            gate_entered: Some(gate_entered),
+        })
+    }
+
+    fn obtain_exclusive_permit(
+        &self,
+        detached: &Arc<Timeline>,
+    ) -> Result<completion::Completion, Error> {
         if detached.cancel.is_cancelled() {
             return Err(Error::ShuttingDown);
         }
 
-        let completion = {
-            let mut guard = self.inner.lock().unwrap();
-            let completion = guard.start_new(&detached.timeline_id)?;
-            // now that we changed the contents, notify any long-sleeping gc
-            self.gc_waiting.notify_one();
-            completion
-        };
+        let mut guard = self.inner.lock().unwrap();
+        let completion = guard.start_new(&detached.timeline_id)?;
+        // now that we changed the contents, notify any long-sleeping gc
+        self.gc_waiting.notify_one();
+        Ok(completion)
+    }
 
-        let started_at = std::time::Instant::now();
+    async fn wait_until_gc_is_paused(&self, detached: &Arc<Timeline>) -> Result<(), Error> {
         let mut cancelled = std::pin::pin!(detached.cancel.cancelled());
 
         loop {
@@ -226,35 +263,9 @@ impl SharedState {
             // because we check if *our* progress has been witnessed by gc.
             let g = self.inner.lock().unwrap();
             if g.is_gc_paused(&detached.timeline_id) {
-                break;
+                return Ok(());
             }
         }
-
-        // finally
-        let gate_entered = detached.gate.enter().map_err(|_| Error::ShuttingDown)?;
-        let synced_in = started_at.elapsed();
-
-        detached
-            .remote_client
-            .schedule_started_detach_ancestor_mark_and_wait()
-            .await
-            // FIXME: aaaargh
-            .map_err(|_| Error::ShuttingDown)?;
-
-        let uploaded_in = started_at.elapsed() - synced_in;
-
-        // FIXME: get rid of this logging or make it a metric or two
-        tracing::info!(
-            sync_ms = synced_in.as_millis(),
-            upload_ms = uploaded_in.as_millis(),
-            "gc paused, gate entered, and uploaded"
-        );
-
-        Ok(Attempt {
-            timeline_id: detached.timeline_id,
-            _guard: completion,
-            gate_entered: Some(gate_entered),
-        })
     }
 
     /// Completes a previously started detach ancestor attempt. To be called *after* the operation
@@ -275,12 +286,9 @@ impl SharedState {
         // find the timeline the attempt represents
         // using the timelines remote client, upload an index part with completion information
 
-        {
-            let g = self.inner.lock().unwrap();
+        self.inner.lock().unwrap().validate(&attempt);
 
-            // TODO: cover the case where retry completes?
-            g.validate(&attempt);
-        }
+        // FIXME: could check more preconditions, like that the timeline has been detached?
 
         let mut attempt = scopeguard::guard(attempt, |attempt| {
             // our attempt will no longer be valid, so release it
@@ -289,8 +297,7 @@ impl SharedState {
 
         tenant
             .wait_to_become_active(std::time::Duration::from_secs(9999))
-            .await
-            .map_err(Error::WaitToActivate)?;
+            .await?;
 
         // TODO: pause failpoint here to catch the situation where detached timeline is deleted...?
         // we are not yet holding the gate so it could advance to the point of removing from
@@ -307,7 +314,7 @@ impl SharedState {
             unreachable!("unsure if there is an ordering, but perhaps this is possible?");
         };
 
-        // the gate being antered does not matter much, but lets be strict
+        // the gate being entered does not matter much, but lets be strict
         if attempt.gate_entered.is_none() {
             let entered = timeline.gate.enter().map_err(|_| Error::ShuttingDown)?;
             attempt.gate_entered = Some(entered);
@@ -629,21 +636,14 @@ pub(super) async fn prepare(
 
         if still_in_progress {
             // gc is still blocked, we can still reparent and complete.
-            //
-            // this of course represents a challenge: how to *not* reparent branches which were not
-            // there when we started? cannot, unfortunately, if not recorded to the ongoing_detach_ancestor.
-            //
-            // FIXME: if a new timeline had been created on ancestor which was reparentable between
-            // the attempts, we could end up with it having different ancestry across shards. Fix
-            // this by locking the parentable timelines before the operation starts, and storing
-            // them in index_part.json.
-            //
-            // because the ancestor of detached is already set to none, we have published all
-            // of the layers.
+            // we are safe to reparent remaining, because they were locked in in the beginning.
             let attempt = tenant
                 .ongoing_timeline_detach
                 .start_new_attempt(detached)
                 .await?;
+
+            // because the ancestor of detached is already set to none, we have published all
+            // of the layers, so we are still "prepared."
             return Ok(Progress::Prepared(
                 attempt,
                 PreparedTimelineDetach { layers: Vec::new() },
@@ -676,6 +676,17 @@ pub(super) async fn prepare(
         .ongoing_timeline_detach
         .start_new_attempt(detached)
         .await?;
+
+    // FIXME: is the assumption that no one else is making these changes except us strong
+    // enough...? need a witness in the RemoteTimelineClient api?
+    //
+    // if it wasn't persistently started already, mark the ancestor detach persistently started.
+    detached
+        .remote_client
+        .schedule_started_detach_ancestor_mark_and_wait()
+        .await
+        // FIXME: aaaargh
+        .map_err(|_| Error::ShuttingDown)?;
 
     utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable");
 
@@ -741,7 +752,8 @@ pub(super) async fn prepare(
     };
 
     // TODO: layers are already sorted by something: use that to determine how much of remote
-    // copies are already done.
+    // copies are already done -- gc is blocked, but a compaction could had happened on ancestor,
+    // which is something to keep in mind if copy skipping is implemented.
     tracing::info!(filtered=%filtered_layers, to_rewrite = straddling_branchpoint.len(), historic=%rest_of_historic.len(), "collected layers");
 
     // TODO: copying and lsn prefix copying could be done at the same time with a single fsync after
@@ -1098,7 +1110,7 @@ pub(super) async fn detach_and_reparent(
         Detached(Arc<Timeline>, Lsn),
     }
 
-    let (recorded_branchpoint, detach_is_ongoing) = {
+    let (recorded_branchpoint, still_ongoing) = {
         let access = detached.remote_client.initialized_upload_queue()?;
         let latest = access.latest_uploaded_index_part();
 
@@ -1133,7 +1145,8 @@ pub(super) async fn detach_and_reparent(
         if let Some(ancestor) = existing {
             Ancestor::Detached(ancestor, ancestor_lsn)
         } else {
-            let direct_children = reparented_direct_children(detached, tenant)?;
+            let direct_children =
+                reparented_direct_children(detached, tenant).map_err(Error::from)?;
             return Ok(DetachingAndReparenting::AlreadyDone(direct_children));
         }
     } else {
@@ -1148,8 +1161,8 @@ pub(super) async fn detach_and_reparent(
     // if we crash after this operation, a retry will allow reparenting the remaining timelines as
     // gc is blocked.
     assert!(
-        detach_is_ongoing,
-        "to detach and reparent, gc must still be blocked"
+        still_ongoing,
+        "to detach or reparent, gc must still be blocked"
     );
 
     let (ancestor, ancestor_lsn, was_detached) = match ancestor {
