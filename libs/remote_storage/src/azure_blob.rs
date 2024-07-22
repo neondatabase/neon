@@ -261,91 +261,95 @@ fn to_download_error(error: azure_core::Error) -> DownloadError {
 }
 
 impl RemoteStorage for AzureBlobStorage {
-    async fn list(
+    async fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<Listing, DownloadError> {
-        let _permit = self.permit(RequestKind::List, cancel).await?;
-
-        let op = async {
-            // get the passed prefix or if it is not set use prefix_in_bucket value
-            let list_prefix = prefix
-                .map(|p| self.relative_path_to_name(p))
-                .or_else(|| self.prefix_in_container.clone())
-                .map(|mut p| {
-                    // required to end with a separator
-                    // otherwise request will return only the entry of a prefix
-                    if matches!(mode, ListingMode::WithDelimiter)
-                        && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
-                    {
-                        p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
-                    }
-                    p
-                });
-
-            let mut builder = self.client.list_blobs();
-
-            if let ListingMode::WithDelimiter = mode {
-                builder = builder.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
-            }
-
-            if let Some(prefix) = list_prefix {
-                builder = builder.prefix(Cow::from(prefix.to_owned()));
-            }
-
-            if let Some(limit) = self.max_keys_per_list_response {
-                builder = builder.max_results(MaxResults::new(limit));
-            }
-
-            let response = builder.into_stream();
-            let response = response.into_stream().map_err(to_download_error);
-            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
-            let response = response.map(|res| match res {
-                Ok(res) => res,
-                Err(_elapsed) => Err(DownloadError::Timeout),
+    ) -> impl Stream<Item = anyhow::Result<Listing, DownloadError>> {
+        // get the passed prefix or if it is not set use prefix_in_bucket value
+        let list_prefix = prefix
+            .map(|p| self.relative_path_to_name(p))
+            .or_else(|| self.prefix_in_container.clone())
+            .map(|mut p| {
+                // required to end with a separator
+                // otherwise request will return only the entry of a prefix
+                if matches!(mode, ListingMode::WithDelimiter)
+                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
+                {
+                    p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
+                }
+                p
             });
 
-            let mut response = std::pin::pin!(response);
+        async_stream::stream! {
+            let _permit = self.permit(RequestKind::List, cancel).await?;
 
-            let mut res = Listing::default();
+            /*let op = async*/ {
+                let mut builder = self.client.list_blobs();
 
-            let mut max_keys = max_keys.map(|mk| mk.get());
-            while let Some(entry) = response.next().await {
-                let entry = entry?;
-                let prefix_iter = entry
-                    .blobs
-                    .prefixes()
-                    .map(|prefix| self.name_to_relative_path(&prefix.name));
-                res.prefixes.extend(prefix_iter);
-
-                let blob_iter = entry
-                    .blobs
-                    .blobs()
-                    .map(|k| self.name_to_relative_path(&k.name));
-
-                for key in blob_iter {
-                    res.keys.push(key);
-
-                    if let Some(mut mk) = max_keys {
-                        assert!(mk > 0);
-                        mk -= 1;
-                        if mk == 0 {
-                            return Ok(res); // limit reached
-                        }
-                        max_keys = Some(mk);
-                    }
+                if let ListingMode::WithDelimiter = mode {
+                    builder = builder.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
                 }
-            }
 
-            Ok(res)
-        };
+                if let Some(prefix) = list_prefix {
+                    builder = builder.prefix(Cow::from(prefix.to_owned()));
+                }
 
-        tokio::select! {
-            res = op => res,
-            _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                if let Some(limit) = self.max_keys_per_list_response {
+                    builder = builder.max_results(MaxResults::new(limit));
+                }
+
+                let response = builder.into_stream();
+                let response = response.into_stream().map_err(to_download_error);
+                let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+                let response = response.map(|res| match res {
+                    Ok(res) => res,
+                    Err(_elapsed) => Err(DownloadError::Timeout),
+                });
+
+                let mut response = std::pin::pin!(response);
+
+                let mut max_keys = max_keys.map(|mk| mk.get());
+                'outer: while let Some(entry) = tokio::select! {
+                    op = response.next() => Ok(op),
+                    _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                }? {
+                    let mut res = Listing::default();
+                    let entry = entry?;
+                    let prefix_iter = entry
+                        .blobs
+                        .prefixes()
+                        .map(|prefix| self.name_to_relative_path(&prefix.name));
+                    res.prefixes.extend(prefix_iter);
+
+                    let blob_iter = entry
+                        .blobs
+                        .blobs()
+                        .map(|k| self.name_to_relative_path(&k.name));
+
+                    for key in blob_iter {
+                        res.keys.push(key);
+
+                        if let Some(mut mk) = max_keys {
+                            assert!(mk > 0);
+                            mk -= 1;
+                            if mk == 0 {
+                                yield Ok(res); // limit reached
+                                break 'outer;
+                            }
+                            max_keys = Some(mk);
+                        }
+                    }
+                    yield Ok(res);
+                }
+            }/*;
+
+            tokio::select! {
+                res = op => Ok(()),
+                _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+            }?;*/
         }
     }
 
