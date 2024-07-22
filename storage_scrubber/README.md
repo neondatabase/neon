@@ -65,7 +65,7 @@ to pass them on the command line
 
 Example:
 
-`env AWS_PROFILE=dev cargo run --release -- purge-garbage --node-kind=pageserver --depth=tenant --input-path=eu-west-1-garbage.json`
+`env AWS_PROFILE=dev cargo run --release -- purge-garbage --input-path=eu-west-1-garbage.json`
 
 Add the `--delete` argument before `purge-garbage` to enable deletion.  This is intentionally
 not provided inline in the example above to avoid accidents.  Without the `--delete` flag
