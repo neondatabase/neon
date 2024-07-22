@@ -34,12 +34,30 @@ pub(crate) trait Types: Sized + std::fmt::Debug {
     type Timeline: ArcTimeline<Self> + Sized;
 }
 
+/// Uniquely identifies a [`Cache`] instance over the lifetime of the process.
+/// Required so [`Cache::drop`] can take out the handles from the [`PerTimelineState`].
+/// Alternative to this would be to allocate [`Cache`] in a `Box` and identify it by the pointer.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+struct CacheId(u64);
+
+impl CacheId {
+    fn next() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if id == 0 {
+            panic!("CacheId::new() returned 0, overflow");
+        }
+        Self(id)
+    }
+}
+
 /// [`crate::page_service`] uses this to repeatedly, cheaply, get [`Handle`]s to
 /// the right [`Timeline`] for a given [`ShardTimelineId`].
 ///
 /// Without this, we'd have to go through the [`crate::tenant::mgr`] for each
 /// getpage request.
 pub(crate) struct Cache<T: Types> {
+    id: CacheId,
     map: Map<T>,
 }
 
@@ -48,6 +66,7 @@ type Map<T> = HashMap<ShardTimelineId, Weak<HandleInner<T>>>;
 impl<T: Types> Default for Cache<T> {
     fn default() -> Self {
         Self {
+            id: CacheId::next(),
             map: Default::default(),
         }
     }
@@ -77,13 +96,13 @@ struct HandleInner<T: Types> {
 /// [`Weak<HandleInner>`] alive while the [`Timeline`] is alive.
 pub struct PerTimelineState<T: Types> {
     // None = shutting down
-    handles: Mutex<Option<Vec<Arc<HandleInner<T>>>>>,
+    handles: Mutex<Option<HashMap<CacheId, Arc<HandleInner<T>>>>>,
 }
 
 impl<T: Types> Default for PerTimelineState<T> {
     fn default() -> Self {
         Self {
-            handles: Mutex::new(Some(Vec::default())),
+            handles: Mutex::new(Some(Default::default())),
         }
     }
 }
@@ -278,23 +297,16 @@ impl<T: Types> Cache<T> {
                         .lock()
                         .expect("mutex poisoned");
                     match &mut *lock_guard {
-                        Some(timeline_handlers_list) => {
-                            for handler in timeline_handlers_list.iter() {
-                                assert!(!Arc::ptr_eq(handler, &handle));
-                            }
-                            timeline_handlers_list.push(Arc::clone(&handle));
+                        Some(per_timeline_state) => {
+                            let replaced = per_timeline_state.insert(self.id, Arc::clone(&handle));
+                            assert!(replaced.is_none(), "some earlier code left a stale handle");
                             match self.map.entry(key) {
-                                hash_map::Entry::Occupied(mut o) => {
-                                    // This should not happen in practice because the page_service
-                                    // isn't calling get() concurrently(). Yet, let's deal with
-                                    // this condition here so this module is a truly generic cache.
-                                    if let Some(existing) = o.get().upgrade() {
-                                        // Reuse to minimize the number of handles per timeline that are alive in the system.
-                                        existing
-                                    } else {
-                                        o.insert(Arc::downgrade(&handle));
-                                        handle
-                                    }
+                                hash_map::Entry::Occupied(_o) => {
+                                    // This cannot not happen because
+                                    // 1. we're the _miss_ handle, i.e., `self.map` didn't contain an entry and
+                                    // 2. we were holding &mut self during .resolve().await above, so, no other thread can have inserted a handle
+                                    //    while we were waiting for the tenant manager.
+                                    unreachable!()
                                 }
                                 hash_map::Entry::Vacant(v) => {
                                     v.insert(Arc::downgrade(&handle));
@@ -341,7 +353,7 @@ impl<T: Types> PerTimelineState<T> {
             trace!("already shut down");
             return;
         };
-        for handle in &handles {
+        for (_, handle) in &handles {
             // Make hits fail.
             handle.shut_down.store(true, Ordering::Relaxed);
         }
@@ -367,13 +379,16 @@ impl<T: Types> Drop for HandleInner<T> {
 impl<T: Types> Drop for Cache<T> {
     fn drop(&mut self) {
         for (_, weak) in self.map.drain() {
-            if let Some(handle) = weak.upgrade() {
-                // handle kept alive in PerTimelineState
-                let timeline = handle.timeline.per_timeline_state();
+            if let Some(strong) = weak.upgrade() {
+                // handle is still being kept alive in PerTimelineState
+                let timeline = strong.timeline.per_timeline_state();
                 let mut handles = timeline.handles.lock().expect("mutex poisoned");
                 if let Some(handles) = &mut *handles {
-                    // handles aren't shared across Cache's
-                    handles.retain(|h| !Arc::ptr_eq(h, &handle)); // TODO: use hashmap instead of vec retain
+                    let Some(removed) = handles.remove(&self.id) else {
+                        // There could have been a shutdown inbetween us upgrading the weak and locking the mutex.
+                        continue;
+                    };
+                    assert!(Arc::ptr_eq(&removed, &strong));
                 }
             }
         }
