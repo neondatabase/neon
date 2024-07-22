@@ -767,6 +767,15 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Marks timeline detach ancestor started for this timeline if it has not been marked as
+    /// started.
+    ///
+    /// A retryable step o ftimeline detach ancestor.
+    ///
+    /// Does not overwrite or even error if the set of reparentable timelines differes. Those can
+    /// be inspected later.
+    ///
+    /// Waits until the completion of the upload.
     pub(crate) async fn schedule_started_detach_ancestor_mark_and_wait(
         self: &Arc<Self>,
     ) -> anyhow::Result<()> {
@@ -774,18 +783,16 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            match upload_queue.dirty.ongoing_detach_ancestor {
-                Some(_) if upload_queue.clean.0.ongoing_detach_ancestor.is_some() => {
-                    // we don't need to upload anything
-                    None
-                }
-                Some(_) => {
-                    // we need to wait until current uploads
-                    Some(self.schedule_barrier0(upload_queue))
-                }
+            match upload_queue.dirty.ongoing_detach_ancestor.as_ref() {
+                Some(_) if upload_queue.clean.0.ongoing_detach_ancestor.is_some() => None,
+                Some(_) => Some(self.schedule_barrier0(upload_queue)),
                 None => {
+                    // at this point, the metadata must always show that there is a parent
+                    if upload_queue.dirty.metadata.ancestor_timeline().is_none() {
+                        panic!("cannot start detach ancestor if there is nothing to detach from");
+                    }
                     upload_queue.dirty.ongoing_detach_ancestor =
-                        Some(chrono::Utc::now().naive_utc().into());
+                        Some(index::OngoingDetachAncestor::started_now());
                     self.schedule_index_upload(upload_queue)?;
                     Some(self.schedule_barrier0(upload_queue))
                 }
@@ -798,6 +805,12 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Marks timeline detach ancestor completed for this timeline if it has not been marked as
+    /// such already.
+    ///
+    /// ## Panics
+    ///
+    /// If the timeline has not been detached from ancestor already.
     pub(crate) async fn schedule_completed_detach_ancestor_mark_and_wait(
         self: &Arc<Self>,
     ) -> anyhow::Result<()> {

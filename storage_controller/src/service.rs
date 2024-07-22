@@ -2842,6 +2842,7 @@ impl Service {
             );
 
             let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+
             client
                 .timeline_detach_ancestor(tenant_shard_id, timeline_id)
                 .await

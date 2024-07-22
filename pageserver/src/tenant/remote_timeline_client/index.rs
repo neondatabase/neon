@@ -275,16 +275,16 @@ impl Lineage {
     }
 }
 
+// FIXME: restructure and rename this as a generic method of gc blocking
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OngoingDetachAncestor {
-    first_started_at: NaiveDateTime,
-    // FIXME: include last start, number of restarts?
+    pub(crate) first_started_at: NaiveDateTime,
 }
 
-impl From<NaiveDateTime> for OngoingDetachAncestor {
-    fn from(value: NaiveDateTime) -> Self {
+impl OngoingDetachAncestor {
+    pub(super) fn started_now() -> Self {
         OngoingDetachAncestor {
-            first_started_at: value,
+            first_started_at: chrono::Utc::now().naive_utc(),
         }
     }
 }
@@ -682,7 +682,7 @@ mod tests {
                 "pg_version": 14
             },
             "ongoing_detach_ancestor": {
-                "first_started_at": "2024-07-19T09:00:00.123"
+                "started_at": "2024-07-19T09:00:00.123"
             }
         }"#;
 
@@ -712,7 +712,9 @@ mod tests {
             ).with_recalculated_checksum().unwrap(),
             deleted_at: None,
             lineage: Default::default(),
-            ongoing_detach_ancestor: Some(OngoingDetachAncestor { first_started_at: parse_naive_datetime("2024-07-19T09:00:00.123000000") }),
+            ongoing_detach_ancestor: Some(OngoingDetachAncestor {
+                started_at: parse_naive_datetime("2024-07-19T09:00:00.123000000"),
+            }),
             last_aux_file_policy: Default::default(),
         };
 
