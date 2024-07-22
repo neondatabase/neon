@@ -26,7 +26,7 @@ use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
-use futures::stream::Stream;
+use futures::{stream::Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -162,6 +162,9 @@ pub struct Listing {
 pub trait RemoteStorage: Send + Sync + 'static {
     /// List objects in remote storage, with semantics matching AWS S3's [`ListObjectsV2`].
     ///
+    /// The stream is guaranteed to return at least one element, even in the case of errors
+    /// (in that case it's an `Err()`), or an empty `Listing`.
+    ///
     /// Note that the prefix is relative to any `prefix_in_bucket` configured for the client, not
     /// from the absolute root of the bucket.
     ///
@@ -188,10 +191,19 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
-        _mode: ListingMode,
+        mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> Result<Listing, DownloadError>;
+    ) -> Result<Listing, DownloadError> {
+        let mut stream = std::pin::pin!(self.list_streaming(prefix, mode, max_keys, cancel).await);
+        let mut combined = stream.next().await.expect("At least one item required")?;
+        while let Some(list) = stream.next().await {
+            let list = list?;
+            combined.keys.extend_from_slice(&list.keys);
+            combined.prefixes.extend_from_slice(&list.prefixes);
+        }
+        Ok(combined)
+    }
 
     /// Streams the local file contents into remote into the remote storage entry.
     ///
