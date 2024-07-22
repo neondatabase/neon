@@ -4355,13 +4355,11 @@ impl Timeline {
     /// Second step of detach from ancestor; detaches the `self` from it's current ancestor and
     /// reparents any reparentable children of previous ancestor.
     ///
-    /// This method is to be called while
-    /// holding the TenantManager's tenant slot, so during this method we cannot be deleted nor can
-    /// any timeline be deleted. After this method returns successfully, tenant must be reloaded.
+    /// This method is to be called while holding the TenantManager's tenant slot, so during this
+    /// method we cannot be deleted nor can any timeline be deleted. After this method returns
+    /// successfully, tenant must be reloaded.
     ///
     /// Final step will be to complete after optionally resetting the tenant.
-    ///
-    /// Pageserver receiving a SIGKILL during this operation is not supported (yet).
     pub(crate) async fn detach_from_ancestor_and_reparent(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
