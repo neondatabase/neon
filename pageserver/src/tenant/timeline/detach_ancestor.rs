@@ -678,9 +678,7 @@ pub(super) async fn prepare(
 
         let mut wrote_any = false;
 
-        let limiter = Arc::new(tokio::sync::Semaphore::new(
-            options.rewrite_concurrency.get(),
-        ));
+        let limiter = Arc::new(Semaphore::new(options.rewrite_concurrency.get()));
 
         for layer in straddling_branchpoint {
             let limiter = limiter.clone();
@@ -733,7 +731,7 @@ pub(super) async fn prepare(
     }
 
     let mut tasks = tokio::task::JoinSet::new();
-    let limiter = Arc::new(tokio::sync::Semaphore::new(options.copy_concurrency.get()));
+    let limiter = Arc::new(Semaphore::new(options.copy_concurrency.get()));
 
     for adopted in rest_of_historic {
         let limiter = limiter.clone();
@@ -1061,7 +1059,7 @@ pub(super) async fn complete(
     #[cfg(feature = "testing")]
     let failpoint_sem = || -> Option<Arc<Semaphore>> {
         fail::fail_point!("timeline-detach-ancestor::allow_one_reparented", |_| Some(
-            Arc::new(tokio::sync::Semaphore::new(1))
+            Arc::new(Semaphore::new(1))
         ));
         None
     }();
