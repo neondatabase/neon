@@ -1601,7 +1601,7 @@ threshold = "20m"
                 period: Duration::from_secs(10),
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
-                eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
+                eviction_order: Default::default(),
             })
         );
 

@@ -62,7 +62,6 @@ pub struct CancellableTask {
     pub cancel: CancellationToken,
 }
 pub struct HttpEndpointListener(pub CancellableTask);
-pub struct LibpqEndpointListener(pub CancellableTask);
 pub struct ConsumptionMetricsTasks(pub CancellableTask);
 pub struct DiskUsageEvictionTask(pub CancellableTask);
 impl CancellableTask {

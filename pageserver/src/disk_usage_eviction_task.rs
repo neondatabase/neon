@@ -84,17 +84,9 @@ pub struct DiskUsageEvictionTaskConfig {
 
 /// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
 /// partitioning.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "args")]
 pub enum EvictionOrder {
-    /// Order the layers to be evicted by how recently they have been accessed in absolute
-    /// time.
-    ///
-    /// This strategy is unfair when some tenants grow faster than others towards the slower
-    /// growing.
-    #[default]
-    AbsoluteAccessed,
-
     /// Order the layers to be evicted by how recently they have been accessed relatively within
     /// the set of resident layers of a tenant.
     RelativeAccessed {
@@ -109,6 +101,14 @@ pub enum EvictionOrder {
     },
 }
 
+impl Default for EvictionOrder {
+    fn default() -> Self {
+        Self::RelativeAccessed {
+            highest_layer_count_loses_first: true,
+        }
+    }
+}
+
 fn default_highest_layer_count_loses_first() -> bool {
     true
 }
@@ -118,11 +118,6 @@ impl EvictionOrder {
         use EvictionOrder::*;
 
         match self {
-            AbsoluteAccessed => {
-                candidates.sort_unstable_by_key(|(partition, candidate)| {
-                    (*partition, candidate.last_activity_ts)
-                });
-            }
             RelativeAccessed { .. } => candidates.sort_unstable_by_key(|(partition, candidate)| {
                 (*partition, candidate.relative_last_activity)
             }),
@@ -135,7 +130,6 @@ impl EvictionOrder {
         use EvictionOrder::*;
 
         match self {
-            AbsoluteAccessed => finite_f32::FiniteF32::ZERO,
             RelativeAccessed {
                 highest_layer_count_loses_first,
             } => {

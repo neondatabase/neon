@@ -1,4 +1,5 @@
 import os
+import pprint
 import shutil
 import threading
 import time
@@ -373,3 +374,76 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
         assert gc_output["ancestor_layers_deleted"] > 0
         assert gc_output["remote_storage_errors"] == 0
         assert gc_output["controller_api_errors"] == 0
+
+
+@pytest.mark.parametrize("shard_count", [None, 4])
+def test_scrubber_scan_pageserver_metadata(
+    neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]
+):
+    """
+    Create some layers. Delete an object listed in index. Run scrubber and see if it detects the defect.
+    """
+
+    # Use s3_storage so we could test out scrubber.
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.num_pageservers = shard_count if shard_count is not None else 1
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+
+    # Create some layers.
+
+    workload = Workload(env, env.initial_tenant, env.initial_timeline)
+    workload.init()
+
+    for _ in range(3):
+        workload.write_rows(128)
+
+    for pageserver in env.pageservers:
+        pageserver.stop()
+        pageserver.start()
+
+    for _ in range(3):
+        workload.write_rows(128)
+
+    # Get the latest index for a particular timeline.
+
+    tenant_shard_id = TenantShardId(env.initial_tenant, 0, shard_count if shard_count else 0)
+
+    assert isinstance(env.pageserver_remote_storage, S3Storage)
+    timeline_path = env.pageserver_remote_storage.timeline_path(
+        tenant_shard_id, env.initial_timeline
+    )
+
+    client = env.pageserver_remote_storage.client
+    bucket = env.pageserver_remote_storage.bucket_name
+    objects = client.list_objects_v2(Bucket=bucket, Prefix=f"{timeline_path}/", Delimiter="").get(
+        "Contents", []
+    )
+    keys = [obj["Key"] for obj in objects]
+    index_keys = list(filter(lambda s: s.startswith(f"{timeline_path}/index_part"), keys))
+    assert len(index_keys) > 0
+
+    latest_index_key = env.pageserver_remote_storage.get_latest_index_key(index_keys)
+    log.info(f"{latest_index_key=}")
+
+    index = env.pageserver_remote_storage.download_index_part(latest_index_key)
+
+    assert len(index.layer_metadata) > 0
+    it = iter(index.layer_metadata.items())
+
+    scan_summary = env.storage_scrubber.scan_metadata()
+    assert not scan_summary["with_warnings"]
+    assert not scan_summary["with_errors"]
+
+    # Delete a layer file that is listed in the index.
+    layer, metadata = next(it)
+    log.info(f"Deleting {timeline_path}/{layer.to_str()}")
+    delete_response = client.delete_object(
+        Bucket=bucket,
+        Key=f"{timeline_path}/{layer.to_str()}-{metadata.generation:08x}",
+    )
+    log.info(f"delete response: {delete_response}")
+
+    # Check scan summary. Expect it to be a L0 layer so only emit warnings.
+    scan_summary = env.storage_scrubber.scan_metadata()
+    log.info(f"{pprint.pformat(scan_summary)}")
+    assert len(scan_summary["with_warnings"]) > 0
