@@ -116,7 +116,7 @@ pub(crate) enum GetError<T: Types> {
 
 enum RoutingResult<T: Types> {
     FastPath(Handle<T>),
-    Index(ShardIndex),
+    SlowPath(ShardTimelineId),
     NeedConsultTenantManager,
 }
 
@@ -158,26 +158,20 @@ impl<T: Types> Cache<T> {
         tenant_manager: &T::TenantManager,
     ) -> Result<Handle<T>, GetError<T>> {
         let miss: ShardSelector = {
-            let routing_state = self.shard_routing(shard_selector);
+            let routing_state = self.shard_routing(timeline_id, shard_selector);
             match routing_state {
                 RoutingResult::FastPath(handle) => return Ok(handle),
-                RoutingResult::Index(shard_index) => {
-                    let key = ShardTimelineId {
-                        shard_index,
-                        timeline_id,
-                    };
-                    match self.map.get(&key) {
-                        Some(cached) => match cached.upgrade() {
-                            Some(upgraded) => return Ok(Handle(upgraded)),
-                            None => {
-                                trace!("handle cache stale");
-                                self.map.remove(&key).unwrap();
-                                ShardSelector::Known(shard_index)
-                            }
-                        },
-                        None => ShardSelector::Known(shard_index),
-                    }
-                }
+                RoutingResult::SlowPath(key) => match self.map.get(&key) {
+                    Some(cached) => match cached.upgrade() {
+                        Some(upgraded) => return Ok(Handle(upgraded)),
+                        None => {
+                            trace!("handle cache stale");
+                            self.map.remove(&key).unwrap();
+                            ShardSelector::Known(key.shard_index)
+                        }
+                    },
+                    None => ShardSelector::Known(key.shard_index),
+                },
                 RoutingResult::NeedConsultTenantManager => shard_selector,
             }
         };
@@ -185,7 +179,11 @@ impl<T: Types> Cache<T> {
     }
 
     #[inline(always)]
-    fn shard_routing(&mut self, shard_selector: ShardSelector) -> RoutingResult<T> {
+    fn shard_routing(
+        &mut self,
+        timeline_id: TimelineId,
+        shard_selector: ShardSelector,
+    ) -> RoutingResult<T> {
         loop {
             // terminates because when every iteration we remove an element from the map
             let Some((first_key, first_handle)) = self.map.iter().next() else {
@@ -205,18 +203,26 @@ impl<T: Types> Cache<T> {
                 shard_count: first_handle_shard_identity.count,
             };
 
-            let idx = match shard_selector {
+            let need_idx = match shard_selector {
                 ShardSelector::Page(key) => {
                     make_shard_index(first_handle_shard_identity.get_shard_number(&key))
                 }
                 ShardSelector::Zero => make_shard_index(ShardNumber(0)),
                 ShardSelector::Known(shard_idx) => shard_idx,
             };
+            let need_shard_timeline_id = ShardTimelineId {
+                shard_index: need_idx,
+                timeline_id,
+            };
+            let first_handle_shard_timeline_id = ShardTimelineId {
+                shard_index: first_handle_shard_identity.shard_index(),
+                timeline_id: first_handle.timeline.shard_timeline_id().timeline_id,
+            };
 
-            if first_key.shard_index == idx {
+            if need_shard_timeline_id == first_handle_shard_timeline_id {
                 return RoutingResult::FastPath(Handle(first_handle));
             } else {
-                return RoutingResult::Index(idx);
+                return RoutingResult::SlowPath(need_shard_timeline_id);
             }
         }
     }
@@ -573,12 +579,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_invalidation() {
-        todo!()
-    }
+    async fn test_multiple_timelines_and_deletion() {
+        crate::tenant::harness::setup_logging();
 
-    #[tokio::test]
-    async fn test_shard_routing() {
-        todo!()
+        let timeline_a = TimelineId::generate();
+        let timeline_b = TimelineId::generate();
+        assert_ne!(timeline_a, timeline_b);
+        let timeline_a = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_a,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let timeline_b = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_b,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let mut mgr = StubManager {
+            shards: vec![timeline_a.clone(), timeline_b.clone()],
+        };
+        let key = DBDIR_KEY;
+
+        let mut cache = Cache::<TestTypes>::default();
+
+        cache
+            .get(timeline_a.id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we have it");
+        cache
+            .get(timeline_b.id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we have it");
+        assert_eq!(cache.map.len(), 2);
+
+        // delete timeline A
+        timeline_a.per_timeline_state.shutdown();
+        mgr.shards.retain(|t| t.id != timeline_a.id);
+        assert!(
+            mgr.resolve(timeline_a.id, ShardSelector::Page(key))
+                .await
+                .is_err(),
+            "broken StubManager implementation"
+        );
+
+        assert_eq!(
+            cache.map.len(),
+            2,
+            "cache still has a Weak handle to Timeline A"
+        );
+        cache
+            .get(timeline_a.id, ShardSelector::Page(key), &mgr)
+            .await
+            .err()
+            .expect("documented behavior: can't get new handle after shutdown");
+        assert_eq!(cache.map.len(), 1, "next access cleans up the cache");
+
+        cache
+            .get(timeline_b.id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we still have it");
     }
 }
