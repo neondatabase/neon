@@ -141,13 +141,24 @@ impl<T: Types> Cache<T> {
         shard_selector: ShardSelector,
         tenant_manager: &T::TenantManager,
     ) -> Result<Handle<T>, GetError<T>> {
-        let handle = self
-            .get_impl(timeline_id, shard_selector, tenant_manager)
-            .await?;
-        if handle.0.shut_down.load(Ordering::Relaxed) {
-            return Err(GetError::PerTimelineStateShutDown);
+        // terminates because each iteration removes an element from the map
+        loop {
+            let handle = self
+                .get_impl(timeline_id, shard_selector, tenant_manager)
+                .await?;
+            if handle.0.shut_down.load(Ordering::Relaxed) {
+                let removed = self
+                    .map
+                    .remove(&handle.0.timeline.shard_timeline_id())
+                    .expect("invariant of get_impl is that the returned handle is in the map");
+                assert!(
+                    Weak::ptr_eq(&removed, &Arc::downgrade(&handle.0)),
+                    "shard_timeline_id() incorrect?"
+                );
+            } else {
+                return Ok(handle);
+            }
         }
-        Ok(handle)
     }
 
     #[instrument(level = "trace", skip_all)]
@@ -354,7 +365,13 @@ impl<T: Types> Drop for HandleInner<T> {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::key::DBDIR_KEY;
+    use pageserver_api::{
+        key::{rel_block_to_key, Key, DBDIR_KEY},
+        models::ShardParameters,
+        reltag::RelTag,
+        shard::ShardStripeSize,
+    };
+    use utils::shard::ShardCount;
 
     use super::*;
 
@@ -515,9 +532,14 @@ mod tests {
         shard0.per_timeline_state.shutdown(); // keeping handle alive across shutdown
 
         assert_eq!(
+            1,
+            Weak::strong_count(&handle_inner_weak),
+            "through local var handle"
+        );
+        assert_eq!(
             cache.map.len(),
             1,
-            "this is an implementation detail but worth pointing out: we can't clear the cache from shutdown()"
+            "this is an implementation detail but worth pointing out: we can't clear the cache from shutdown(), it's cleared on first access after"
         );
         assert_eq!(
             (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
@@ -533,7 +555,11 @@ mod tests {
             .await
             .err()
             .expect("documented behavior: can't get new handle after shutdown, even if there is an alive Handle");
-        assert_eq!(cache.map.len(), 1);
+        assert_eq!(
+            cache.map.len(),
+            0,
+            "first access after shutdown cleans up the Weak's from the cache"
+        );
 
         tokio::select! {
             _ = shard0.gate.close() => {
@@ -543,7 +569,6 @@ mod tests {
         }
 
         drop(handle);
-        assert_eq!(cache.map.len(), 1, "the weak is still in the map");
         assert_eq!(
             0,
             Weak::strong_count(&handle_inner_weak),
@@ -642,5 +667,146 @@ mod tests {
             .get(timeline_b.id, ShardSelector::Page(key), &mgr)
             .await
             .expect("we still have it");
+    }
+
+    fn make_relation_key_for_shard(shard: ShardNumber, params: &ShardParameters) -> Key {
+        rel_block_to_key(
+            RelTag {
+                spcnode: 1663,
+                dbnode: 208101,
+                relnode: 2620,
+                forknum: 0,
+            },
+            shard.0 as u32 * params.stripe_size.0,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shard_split() {
+        crate::tenant::harness::setup_logging();
+        let timeline_id = TimelineId::generate();
+        let parent = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let child_params = ShardParameters {
+            count: ShardCount(2),
+            stripe_size: ShardStripeSize::default(),
+        };
+        let child0 = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::from_params(ShardNumber(0), &child_params),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let child1 = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::from_params(ShardNumber(1), &child_params),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let child_shards_by_shard_number = vec![child0.clone(), child1.clone()];
+
+        let mut cache = Cache::<TestTypes>::default();
+
+        // fill the cache with the parent
+        for i in 0..2 {
+            let handle = cache
+                .get(
+                    timeline_id,
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    &StubManager {
+                        shards: vec![parent.clone()],
+                    },
+                )
+                .await
+                .expect("we have it");
+            assert!(
+                Weak::ptr_eq(&handle.myself, &parent.myself),
+                "mgr returns parent first"
+            );
+            drop(handle);
+        }
+
+        //
+        // SHARD SPLIT: tenant manager changes, but the cache isn't informed
+        //
+
+        // while we haven't shut down the parent, the cache will return the cached parent, even
+        // if the tenant manager returns the child
+        for i in 0..2 {
+            let handle = cache
+                .get(
+                    timeline_id,
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    &StubManager {
+                        shards: vec![], // doesn't matter what's in here, the cache is fully loaded
+                    },
+                )
+                .await
+                .expect("we have it");
+            assert!(
+                Weak::ptr_eq(&handle.myself, &parent.myself),
+                "mgr returns parent"
+            );
+            drop(handle);
+        }
+
+        let parent_handle = cache
+            .get(
+                timeline_id,
+                ShardSelector::Page(make_relation_key_for_shard(ShardNumber(0), &child_params)),
+                &StubManager {
+                    shards: vec![parent.clone()],
+                },
+            )
+            .await
+            .expect("we have it");
+        assert!(Weak::ptr_eq(&parent_handle.myself, &parent.myself));
+
+        // invalidate the cache
+        parent.per_timeline_state.shutdown();
+
+        // the cache will now return the child, even though the parent handle still exists
+        for i in 0..2 {
+            let handle = cache
+                .get(
+                    timeline_id,
+                    ShardSelector::Page(make_relation_key_for_shard(ShardNumber(i), &child_params)),
+                    &StubManager {
+                        shards: vec![child0.clone(), child1.clone()], // <====== this changed compared to previous loop
+                    },
+                )
+                .await
+                .expect("we have it");
+            assert!(
+                Weak::ptr_eq(
+                    &handle.myself,
+                    &child_shards_by_shard_number[i as usize].myself
+                ),
+                "mgr returns child"
+            );
+            drop(handle);
+        }
+
+        // all the while the parent handle kept the parent gate open
+        tokio::select! {
+            _ = parent_handle.gate.close() => {
+                panic!("parent handle is keeping gate open");
+            }
+            _ = tokio::time::sleep(FOREVER) => { }
+        }
+        drop(parent_handle);
+        tokio::select! {
+            _ = parent.gate.close() => { }
+            _ = tokio::time::sleep(FOREVER) => {
+                panic!("parent handle is dropped, no other gate holders exist")
+            }
+        }
     }
 }
