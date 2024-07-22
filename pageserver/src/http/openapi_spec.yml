@@ -414,7 +414,7 @@ paths:
         Either archives or unarchives the given timeline.
         An archived timeline may not have any non-archived children.
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
