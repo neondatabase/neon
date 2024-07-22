@@ -116,7 +116,9 @@ impl RemoteStorage for UnreliableWrapper {
     ) -> impl Stream<Item = anyhow::Result<Listing, DownloadError>> {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
-        self.inner.list_streaming(prefix, mode, max_keys, cancel).await
+        self.inner
+            .list_streaming(prefix, mode, max_keys, cancel)
+            .await
     }
     async fn list(
         &self,
