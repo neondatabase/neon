@@ -1286,16 +1286,14 @@ pub(super) async fn detach_and_reparent(
     if reparented_all {
         Ok(DetachingAndReparenting::Reparented(reparented))
     } else {
-        // FIXME: we must return 503 kind of response in the end and do the restart anyways because
-        // otherwise the runtime state remains diverged
         tracing::info!(
             reparented = reparented.len(),
             candidates = reparenting_candidates,
-            "failed to reparent all candidates; they will be retried after the restart",
+            "failed to reparent all candidates; they can be retried after the restart",
         );
 
-        Ok(DetachingAndReparenting::SomeReparentingFailed {
-            must_restart: !reparented.is_empty() || was_detached,
-        })
+        let must_restart = !reparented.is_empty() || was_detached;
+
+        Ok(DetachingAndReparenting::SomeReparentingFailed { must_restart })
     }
 }
