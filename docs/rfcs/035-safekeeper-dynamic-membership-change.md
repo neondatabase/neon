@@ -36,7 +36,7 @@ A configuration is
 struct Configuration {
     generation: Generation, // a number uniquely identifying configuration
     sk_set: Vec<NodeId>, // current safekeeper set
-    new_sk_set: Optional<Vec<SafekeeperId>>,
+    new_sk_set: Optional<Vec<NodeId>>,
 }
 ```
 
@@ -337,9 +337,11 @@ Returns list of scheduled requests.
 
 2) PUT `/control/v1/tenant/:tenant_id/timeline/:timeline_id/safekeeper_migrate` schedules `MigrationRequest`
    to move single timeline to given set of safekeepers:
+```
 {
     "desired_set": Vec<u32>,
 }
+```
 
 Returns scheduled request.
 
@@ -399,14 +401,22 @@ There should be following layers of tests:
    safekeeper/walproposer restars. Main assert is the same -- committed WAL must
    not be lost.
 
-3) Additionally it would be good to have basic tests covering the whole system.
+3) Since simulation testing injects at relatively high level points (not
+   syscalls), it omits some code, in particular `pull_timeline`. Thus it 
+   is better to have basic tests covering whole system. Extended 
+   version of `test_restarts_under_load` would do. TBD
+
+4) Basic e2e test should ensure that full flow including cplane notification works.
 
 ## Order of implementation and rollout
 
 note that 
-- core can be developed ignoring cplane integration (neon_local will use storcon, but prod not)
-- there is a lot of infra work and it woud be great to separate its rollout from the core
-- wp could ignore joint consensus for some time
+- Control plane parts and integration with it is fully independent from everything else
+  (tests would use simulation and neon_local).
+- There is a lot of infra work making storage_controller aware of timelines and safekeepers
+  and its impl/rollout should be separate from migration itself.
+- Initially walproposer can just stop working while it observers joint configuration.
+  Such window would be typically very short anyway.
 
 TimelineCreateRequest should get optional safekeepers field with safekeepers chosen by cplane.
 
@@ -435,12 +445,13 @@ rough order:
 
 `AcceptorRefusal` separate message
 
-Preserving connections (not neede)
+Preserving connections (not needed)
 
-multiple joint consensus (not neede)
+multiple joint consensus (not needed)
 
 ## Misc
 
 We should use Compute <-> safekeeper protocol change to include other (long
 yearned) modifications:
+- network order
 
