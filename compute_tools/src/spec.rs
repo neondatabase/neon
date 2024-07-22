@@ -777,21 +777,21 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
 
     // Add new migrations in numerical order.
     let migrations = [
-        include_str!("./migrations/0000-neon_superuser_bypass_rls.sql"),
-        include_str!("./migrations/0001-alter_roles.sql"),
-        include_str!("./migrations/0002-grant_pg_create_subscription_to_neon_superuser.sql"),
-        include_str!("./migrations/0003-grant_pg_monitor_to_neon_superuser.sql"),
-        include_str!("./migrations/0004-grant_all_on_tables_to_neon_superuser.sql"),
-        include_str!("./migrations/0005-grant_all_on_sequences_to_neon_superuser.sql"),
+        include_str!("./migrations/0001-neon_superuser_bypass_rls.sql"),
+        include_str!("./migrations/0002-alter_roles.sql"),
+        include_str!("./migrations/0003-grant_pg_create_subscription_to_neon_superuser.sql"),
+        include_str!("./migrations/0004-grant_pg_monitor_to_neon_superuser.sql"),
+        include_str!("./migrations/0005-grant_all_on_tables_to_neon_superuser.sql"),
+        include_str!("./migrations/0006-grant_all_on_sequences_to_neon_superuser.sql"),
         include_str!(
-            "./migrations/0006-grant_all_on_tables_to_neon_superuser_with_grant_option.sql"
+            "./migrations/0007-grant_all_on_tables_to_neon_superuser_with_grant_option.sql"
         ),
         include_str!(
-            "./migrations/0007-grant_all_on_sequences_to_neon_superuser_with_grant_option.sql"
+            "./migrations/0008-grant_all_on_sequences_to_neon_superuser_with_grant_option.sql"
         ),
-        include_str!("./migrations/0008-revoke_replication_for_previously_allowed_roles.sql"),
+        include_str!("./migrations/0009-revoke_replication_for_previously_allowed_roles.sql"),
         include_str!(
-            "./migrations/0009-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
+            "./migrations/0010-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
         ),
     ];
 
