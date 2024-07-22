@@ -176,6 +176,9 @@ struct ProxyCliArgs {
     /// redis url for notifications (if empty, redis_host:port will be used for both notifications and streaming connections)
     #[clap(long)]
     redis_notifications: Option<String>,
+    /// what from the available authentications type to use for the regional redis we have. Supported are "irsa" and "plain".
+    #[clap(long, default_value = "irsa")]
+    redis_auth_type: String,
     /// redis host for streaming connections (might be different from the notifications host)
     #[clap(long)]
     redis_host: Option<String>,
@@ -319,24 +322,38 @@ async fn main() -> anyhow::Result<()> {
         ),
         aws_credentials_provider,
     ));
-    let regional_redis_client = match (args.redis_host, args.redis_port) {
-        (Some(host), Some(port)) => Some(
-            ConnectionWithCredentialsProvider::new_with_credentials_provider(
-                host,
-                port,
-                elasticache_credentials_provider.clone(),
+    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
+        ("plain", redis_url) => match redis_url {
+            None => {
+                bail!("plain auth requires redis_notifications to be set");
+            }
+            Some(url) => Some(
+                ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string()),
             ),
-        ),
-        (None, None) => {
-            warn!("Redis events from console are disabled");
-            None
-        }
+        },
+        ("irsa", _) => match (&args.redis_host, args.redis_port) {
+            (Some(host), Some(port)) => Some(
+                ConnectionWithCredentialsProvider::new_with_credentials_provider(
+                    host.to_string(),
+                    port,
+                    elasticache_credentials_provider.clone(),
+                ),
+            ),
+            (None, None) => {
+                warn!("irsa auth requires redis-host and redis-port to be set, continuing without regional_redis_client");
+                None
+            }
+            _ => {
+                bail!("redis-host and redis-port must be specified together");
+            }
+        },
         _ => {
-            bail!("redis-host and redis-port must be specified together");
+            bail!("unknown auth type given");
         }
     };
+
     let redis_notifications_client = if let Some(url) = args.redis_notifications {
-        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
+        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string()))
     } else {
         regional_redis_client.clone()
     };
