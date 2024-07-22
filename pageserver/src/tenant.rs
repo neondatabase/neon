@@ -720,7 +720,7 @@ impl Tenant {
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::Attach,
-            tenant_shard_id,
+            Some(tenant_shard_id),
             None,
             "attach tenant",
             async move {

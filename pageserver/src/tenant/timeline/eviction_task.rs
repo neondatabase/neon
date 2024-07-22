@@ -59,7 +59,7 @@ impl Timeline {
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
-            self.tenant_shard_id,
+            Some(self.tenant_shard_id),
             Some(self.timeline_id),
             &format!(
                 "layer eviction for {}/{}",
