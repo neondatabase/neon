@@ -27,8 +27,9 @@ use utils::shard::ShardNumber;
 
 use crate::tenant::mgr::ShardSelector;
 
-pub(crate) trait Types: Sized {
-    type TenantManagerError: Sized;
+/// The requirement for Debug is so that #[derive(Debug)] works in some places.
+pub(crate) trait Types: Sized + std::fmt::Debug {
+    type TenantManagerError: Sized + std::fmt::Debug;
     type TenantManager: TenantManager<Self> + Sized;
     type Timeline: ArcTimeline<Self> + Sized;
 }
@@ -106,6 +107,7 @@ pub(crate) trait ArcTimeline<T: Types>: Clone {
 }
 
 /// Errors returned by [`Cache::get`].
+#[derive(Debug)]
 pub(crate) enum GetError<T: Types> {
     TenantManager(T::TenantManagerError),
     TimelineGateClosed,
@@ -242,6 +244,7 @@ impl<T: Types> Cache<T> {
                         return Err(GetError::TimelineGateClosed);
                     }
                 };
+                trace!("creating new HandleInner");
                 let handle = Arc::new(
                     // TODO: global metric that keeps track of the number of live HandlerTimeline instances
                     // so we can identify reference cycle bugs.
@@ -321,10 +324,11 @@ impl<T: Types> PerTimelineState<T> {
             trace!("already shut down");
             return;
         };
-        for handle in handles {
+        for handle in &handles {
             // Make hits fail.
             handle.shut_down.store(true, Ordering::Relaxed);
         }
+        drop(handles);
     }
 }
 
@@ -332,5 +336,249 @@ impl<T: Types> std::ops::Deref for Handle<T> {
     type Target = T::Timeline;
     fn deref(&self) -> &Self::Target {
         &self.0.timeline
+    }
+}
+
+#[cfg(test)]
+impl<T: Types> Drop for HandleInner<T> {
+    fn drop(&mut self) {
+        trace!("HandleInner dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pageserver_api::key::DBDIR_KEY;
+
+    use super::*;
+
+    const FOREVER: std::time::Duration = std::time::Duration::from_secs(u64::MAX);
+
+    #[derive(Debug)]
+    struct TestTypes;
+    impl Types for TestTypes {
+        type TenantManagerError = anyhow::Error;
+        type TenantManager = StubManager;
+        type Timeline = Arc<StubTimeline>;
+    }
+
+    struct StubManager {
+        shards: Vec<Arc<StubTimeline>>,
+    }
+
+    struct StubTimeline {
+        gate: utils::sync::gate::Gate,
+        id: TimelineId,
+        shard: ShardIdentity,
+        per_timeline_state: PerTimelineState<TestTypes>,
+        myself: Weak<StubTimeline>,
+    }
+
+    impl StubTimeline {
+        fn getpage(&self) {
+            // do nothing
+        }
+    }
+
+    impl ArcTimeline<TestTypes> for Arc<StubTimeline> {
+        fn gate(&self) -> &utils::sync::gate::Gate {
+            &self.gate
+        }
+
+        fn shard_timeline_id(&self) -> ShardTimelineId {
+            ShardTimelineId {
+                shard_index: self.shard.shard_index(),
+                timeline_id: self.id,
+            }
+        }
+
+        fn get_shard_identity(&self) -> &ShardIdentity {
+            &self.shard
+        }
+
+        fn per_timeline_state(&self) -> &PerTimelineState<TestTypes> {
+            &self.per_timeline_state
+        }
+    }
+
+    impl TenantManager<TestTypes> for StubManager {
+        async fn resolve(
+            &self,
+            timeline_id: TimelineId,
+            shard_selector: ShardSelector,
+        ) -> anyhow::Result<Arc<StubTimeline>> {
+            for timeline in &self.shards {
+                if timeline.id == timeline_id {
+                    match &shard_selector {
+                        ShardSelector::Zero if timeline.shard.is_shard_zero() => {
+                            return Ok(Arc::clone(&timeline));
+                        }
+                        ShardSelector::Zero => continue,
+                        ShardSelector::Page(key) if timeline.shard.is_key_local(key) => {
+                            return Ok(Arc::clone(&timeline));
+                        }
+                        ShardSelector::Page(_) => continue,
+                        ShardSelector::Known(idx) if idx == &timeline.shard.shard_index() => {
+                            return Ok(Arc::clone(&timeline));
+                        }
+                        ShardSelector::Known(_) => continue,
+                    }
+                }
+            }
+            anyhow::bail!("not found")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeline_shutdown() {
+        crate::tenant::harness::setup_logging();
+
+        let timeline_id = TimelineId::generate();
+        let shard0 = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let mgr = StubManager {
+            shards: vec![shard0.clone()],
+        };
+        let key = DBDIR_KEY;
+
+        let mut cache = Cache::<TestTypes>::default();
+
+        //
+        // fill the cache
+        //
+        assert_eq!(
+            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
+            (2, 1),
+            "strong: shard0, mgr; weak: myself"
+        );
+
+        let handle: Handle<_> = cache
+            .get(timeline_id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we have the timeline");
+        let handle_inner_weak = Arc::downgrade(&handle.0);
+        assert!(Weak::ptr_eq(&handle.myself, &shard0.myself));
+        assert_eq!(
+            (
+                Weak::strong_count(&handle_inner_weak),
+                Weak::weak_count(&handle_inner_weak)
+            ),
+            (2, 2),
+            "strong: handle, per_timeline_state, weak: handle_inner_weak, cache"
+        );
+        assert_eq!(cache.map.len(), 1);
+
+        assert_eq!(
+            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
+            (3, 1),
+            "strong: handleinner(per_timeline_state), shard0, mgr; weak: myself"
+        );
+        drop(handle);
+        assert_eq!(
+            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
+            (3, 1),
+            "strong: handleinner(per_timeline_state), shard0, mgr; weak: myself"
+        );
+
+        //
+        // demonstrate that Handle holds up gate closure
+        // but shutdown prevents new handles from being handed out
+        //
+
+        tokio::select! {
+            _ = shard0.gate.close() => {
+                panic!("cache and per-timeline handler state keep cache open");
+            }
+            _ = tokio::time::sleep(FOREVER) => {
+                // NB: first poll of close() makes it enter closing state
+            }
+        }
+
+        let handle = cache
+            .get(timeline_id, ShardSelector::Page(key), &mgr)
+            .await
+            .expect("we have the timeline");
+        assert!(Weak::ptr_eq(&handle.myself, &shard0.myself));
+
+        // SHUTDOWN
+        shard0.per_timeline_state.shutdown(); // keeping handle alive across shutdown
+
+        assert_eq!(
+            cache.map.len(),
+            1,
+            "this is an implementation detail but worth pointing out: we can't clear the cache from shutdown()"
+        );
+        assert_eq!(
+            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
+            (3, 1),
+            "strong: handleinner(via handle), shard0, mgr; weak: myself"
+        );
+
+        // this handle is perfectly usable
+        handle.getpage();
+
+        cache
+            .get(timeline_id, ShardSelector::Page(key), &mgr)
+            .await
+            .err()
+            .expect("documented behavior: can't get new handle after shutdown, even if there is an alive Handle");
+        assert_eq!(cache.map.len(), 1);
+
+        tokio::select! {
+            _ = shard0.gate.close() => {
+                panic!("handle is keeping gate open");
+            }
+            _ = tokio::time::sleep(FOREVER) => { }
+        }
+
+        drop(handle);
+        assert_eq!(cache.map.len(), 1, "the weak is still in the map");
+        assert_eq!(
+            0,
+            Weak::strong_count(&handle_inner_weak),
+            "the HandleInner destructor already ran"
+        );
+        assert_eq!(
+            (Arc::strong_count(&shard0), Arc::weak_count(&shard0)),
+            (2, 1),
+            "strong: shard0, mgr; weak: myself"
+        );
+
+        // closing gate succeeds after dropping handle
+        tokio::select! {
+            _ = shard0.gate.close() => { }
+            _ = tokio::time::sleep(FOREVER) => {
+                panic!("handle is dropped, no other gate holders exist")
+            }
+        }
+
+        // map gets cleaned on next lookup
+        cache
+            .get(timeline_id, ShardSelector::Page(key), &mgr)
+            .await
+            .err()
+            .expect("documented behavior: can't get new handle after shutdown");
+        assert_eq!(cache.map.len(), 0);
+
+        // ensure all refs to shard0 are gone and we're not leaking anything
+        let myself = Weak::clone(&shard0.myself);
+        drop(shard0);
+        drop(mgr);
+        assert_eq!(Weak::strong_count(&myself), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_invalidation() {
+        todo!()
+    }
+
+    #[tokio::test]
+    async fn test_shard_routing() {
+        todo!()
     }
 }
