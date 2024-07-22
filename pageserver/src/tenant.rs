@@ -1616,21 +1616,23 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
+    ///
+    /// Returns whether we have pending compaction task.
     async fn compaction_iteration(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<(), timeline::CompactionError> {
+    ) -> Result<bool, timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
-            return Ok(());
+            return Ok(false);
         }
 
         {
             let conf = self.tenant_conf.load();
             if !conf.location.may_delete_layers_hint() || !conf.location.may_upload_layers_hint() {
                 info!("Skipping compaction in location state {:?}", conf.location);
-                return Ok(());
+                return Ok(false);
             }
         }
 
@@ -1657,11 +1659,13 @@ impl Tenant {
         // Before doing any I/O work, check our circuit breaker
         if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
             info!("Skipping compaction due to previous failures");
-            return Ok(());
+            return Ok(false);
         }
 
+        let mut has_pending_task = false;
+
         for (timeline_id, timeline) in &timelines_to_compact {
-            timeline
+            has_pending_task |= timeline
                 .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await
@@ -1681,7 +1685,7 @@ impl Tenant {
             .unwrap()
             .success(&CIRCUIT_BREAKERS_UNBROKEN);
 
-        Ok(())
+        Ok(has_pending_task)
     }
 
     // Call through to all timelines to freeze ephemeral layers if needed.  Usually

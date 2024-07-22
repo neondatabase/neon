@@ -102,17 +102,20 @@ impl KeyHistoryRetention {
 
 impl Timeline {
     /// TODO: cancellation
+    ///
+    /// Returns whether the compaction has pending tasks.
     pub(crate) async fn compact_legacy(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         if flags.contains(CompactFlags::EnhancedGcBottomMostCompaction) {
-            return self
+            self
                 .compact_with_gc(cancel, ctx)
                 .await
-                .map_err(CompactionError::Other);
+                .map_err(CompactionError::Other)?;
+            return Ok(false);
         }
 
         // High level strategy for compaction / image creation:
@@ -160,7 +163,7 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // FIXME: the match should only cover repartitioning, not the next steps
-        let partition_count = match self
+        let (partition_count, has_pending_tasks) = match self
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
@@ -205,7 +208,7 @@ impl Timeline {
                 } else {
                     info!("skipping image layer generation due to L0 compaction did not include all layers.");
                 }
-                partitioning.parts.len()
+                (partitioning.parts.len(), !fully_compacted)
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -217,7 +220,7 @@ impl Timeline {
                 if !self.cancel.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
-                1
+                (1, false)
             }
         };
 
@@ -230,7 +233,7 @@ impl Timeline {
             self.compact_shard_ancestors(rewrite_max, ctx).await?;
         }
 
-        Ok(())
+        Ok(has_pending_tasks)
     }
 
     /// Check for layers that are elegible to be rewritten:
