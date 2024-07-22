@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use rand::Rng;
+
 use crate::metrics::MISC_OPERATION_SECONDS;
 
 /// Global rate limiter for background tasks.
@@ -38,4 +40,10 @@ impl RateLimiter {
     pub fn try_acquire_eviction(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.eviction.clone().try_acquire_owned().ok()
     }
+}
+
+/// Generate a random duration that is a fraction of the given duration.
+pub fn rand_duration(duration: &std::time::Duration) -> std::time::Duration {
+    let randf64 = rand::thread_rng().gen_range(0.0..1.0);
+    duration.mul_f64(randf64)
 }

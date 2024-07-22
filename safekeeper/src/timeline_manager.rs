@@ -23,7 +23,7 @@ use utils::lsn::Lsn;
 use crate::{
     control_file::{FileStorage, Storage},
     metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS},
-    rate_limit::RateLimiter,
+    rate_limit::{rand_duration, RateLimiter},
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
     safekeeper::Term,
@@ -190,7 +190,7 @@ pub(crate) struct Manager {
 
     // Anti-flapping state: we evict timelines eagerly if they are inactive, but should not
     // evict them if they go inactive very soon after being restored.
-    pub(crate) resident_since: std::time::Instant,
+    pub(crate) evict_not_before: Instant,
 }
 
 /// This task gets spawned alongside each timeline and is responsible for managing the timeline's
@@ -255,7 +255,16 @@ pub async fn main_task(
             mgr.set_status(Status::UpdatePartialBackup);
             mgr.update_partial_backup(&state_snapshot).await;
 
-            if mgr.conf.enable_offload && mgr.ready_for_eviction(&next_event, &state_snapshot) {
+            let now = Instant::now();
+            if mgr.evict_not_before > now {
+                // we should wait until evict_not_before
+                update_next_event(&mut next_event, mgr.evict_not_before);
+            }
+
+            if mgr.conf.enable_offload
+                && mgr.evict_not_before <= now
+                && mgr.ready_for_eviction(&next_event, &state_snapshot)
+            {
                 // check rate limiter and evict timeline if possible
                 match mgr.global_rate_limiter.try_acquire_eviction() {
                     Some(_permit) => {
@@ -264,7 +273,9 @@ pub async fn main_task(
                     }
                     None => {
                         // we can't evict timeline now, will try again later
-                        // TODO: sleep for a while
+                        mgr.evict_not_before =
+                            Instant::now() + rand_duration(&mgr.conf.eviction_min_resident);
+                        update_next_event(&mut next_event, mgr.evict_not_before);
                     }
                 }
             }
@@ -348,7 +359,6 @@ impl Manager {
     ) -> Manager {
         let (is_offloaded, partial_backup_uploaded) = tli.bootstrap_mgr().await;
         Manager {
-            conf,
             wal_seg_size: tli.get_wal_seg_size().await,
             walsenders: tli.get_walsenders().clone(),
             state_version_rx: tli.get_state_version_rx(),
@@ -364,7 +374,9 @@ impl Manager {
             access_service: AccessService::new(manager_tx),
             tli,
             global_rate_limiter,
-            resident_since: std::time::Instant::now(),
+            // to smooth out evictions spike after restart
+            evict_not_before: Instant::now() + rand_duration(&conf.eviction_min_resident),
+            conf,
         }
     }
 
