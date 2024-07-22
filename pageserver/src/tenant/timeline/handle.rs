@@ -363,6 +363,23 @@ impl<T: Types> Drop for HandleInner<T> {
     }
 }
 
+// When dropping a [`Cache`], prune its handles in the [`PerTimelineState`].
+impl<T: Types> Drop for Cache<T> {
+    fn drop(&mut self) {
+        for (_, weak) in self.map.drain() {
+            if let Some(handle) = weak.upgrade() {
+                // handle kept alive in PerTimelineState
+                let timeline = handle.timeline.per_timeline_state();
+                let mut handles = timeline.handles.lock().expect("mutex poisoned");
+                if let Some(handles) = &mut *handles {
+                    // handles aren't shared across Cache's
+                    handles.retain(|h| !Arc::ptr_eq(h, &handle)); // TODO: use hashmap instead of vec retain
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use pageserver_api::{
@@ -434,15 +451,15 @@ mod tests {
                 if timeline.id == timeline_id {
                     match &shard_selector {
                         ShardSelector::Zero if timeline.shard.is_shard_zero() => {
-                            return Ok(Arc::clone(&timeline));
+                            return Ok(Arc::clone(timeline));
                         }
                         ShardSelector::Zero => continue,
                         ShardSelector::Page(key) if timeline.shard.is_key_local(key) => {
-                            return Ok(Arc::clone(&timeline));
+                            return Ok(Arc::clone(timeline));
                         }
                         ShardSelector::Page(_) => continue,
                         ShardSelector::Known(idx) if idx == &timeline.shard.shard_index() => {
-                            return Ok(Arc::clone(&timeline));
+                            return Ok(Arc::clone(timeline));
                         }
                         ShardSelector::Known(_) => continue,
                     }
@@ -710,7 +727,7 @@ mod tests {
             per_timeline_state: PerTimelineState::default(),
             myself: myself.clone(),
         });
-        let child_shards_by_shard_number = vec![child0.clone(), child1.clone()];
+        let child_shards_by_shard_number = [child0.clone(), child1.clone()];
 
         let mut cache = Cache::<TestTypes>::default();
 
@@ -806,6 +823,52 @@ mod tests {
             _ = parent.gate.close() => { }
             _ = tokio::time::sleep(FOREVER) => {
                 panic!("parent handle is dropped, no other gate holders exist")
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_connection_handler_exit() {
+        crate::tenant::harness::setup_logging();
+        let timeline_id = TimelineId::generate();
+        let shard0 = Arc::new_cyclic(|myself| StubTimeline {
+            gate: Default::default(),
+            id: timeline_id,
+            shard: ShardIdentity::unsharded(),
+            per_timeline_state: PerTimelineState::default(),
+            myself: myself.clone(),
+        });
+        let mgr = StubManager {
+            shards: vec![shard0.clone()],
+        };
+        let key = DBDIR_KEY;
+
+        // Simulate 10 connections that's opened, used, and closed
+        let mut used_handles = vec![];
+        for _ in 0..10 {
+            let mut cache = Cache::<TestTypes>::default();
+            let handle = {
+                let handle = cache
+                    .get(timeline_id, ShardSelector::Page(key), &mgr)
+                    .await
+                    .expect("we have the timeline");
+                assert!(Weak::ptr_eq(&handle.myself, &shard0.myself));
+                handle
+            };
+            handle.getpage();
+            used_handles.push(Arc::downgrade(&handle.0));
+        }
+
+        // No handles exist, thus gates are closed and don't require shutdown
+        assert!(used_handles
+            .iter()
+            .all(|weak| Weak::strong_count(weak) == 0));
+
+        // ... thus the gate should close immediately, even without shutdown
+        tokio::select! {
+            _ = shard0.gate.close() => { }
+            _ = tokio::time::sleep(FOREVER) => {
+                panic!("handle is dropped, no other gate holders exist")
             }
         }
     }
