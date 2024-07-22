@@ -683,6 +683,9 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Reparent this timeline to a new parent.
+    ///
+    /// A retryable step of timeline ancestor detach.
     pub(crate) async fn schedule_reparenting_and_wait(
         self: &Arc<Self>,
         new_parent: &TimelineId,
