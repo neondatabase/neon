@@ -12,8 +12,9 @@ import boto3
 import toml
 from mypy_boto3_s3 import S3Client
 
-from fixtures.common_types import TenantId, TimelineId
+from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
+from fixtures.pageserver.common_types import IndexPartDump
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
 TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
@@ -265,8 +266,37 @@ class S3Storage:
     def tenants_path(self) -> str:
         return f"{self.prefix_in_bucket}/tenants"
 
-    def tenant_path(self, tenant_id: TenantId) -> str:
+    def tenant_path(self, tenant_id: Union[TenantShardId, TenantId]) -> str:
         return f"{self.tenants_path()}/{tenant_id}"
+
+    def timeline_path(
+        self, tenant_id: Union[TenantShardId, TenantId], timeline_id: TimelineId
+    ) -> str:
+        return f"{self.tenant_path(tenant_id)}/timelines/{timeline_id}"
+
+    def get_latest_index_key(self, index_keys: List[str]) -> str:
+        """
+        Gets the latest index file key.
+
+        @param index_keys: A list of index keys of different generations.
+        """
+
+        def parse_gen(index_key: str) -> int:
+            parts = index_key.split("index_part.json-")
+            return int(parts[-1], base=16) if len(parts) == 2 else -1
+
+        return max(index_keys, key=parse_gen)
+
+    def download_index_part(self, index_key: str) -> IndexPartDump:
+        """
+        Downloads the index content from remote storage.
+
+        @param index_key: index key in remote storage.
+        """
+        response = self.client.get_object(Bucket=self.bucket_name, Key=index_key)
+        body = response["Body"].read().decode("utf-8")
+        log.info(f"index_part.json: {body}")
+        return IndexPartDump.from_json(json.loads(body))
 
     def heatmap_key(self, tenant_id: TenantId) -> str:
         return f"{self.tenant_path(tenant_id)}/{TENANT_HEATMAP_FILE_NAME}"

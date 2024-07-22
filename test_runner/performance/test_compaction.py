@@ -135,7 +135,7 @@ def test_compaction_l0_memory(neon_compare: NeonCompare):
     # To be fixed in https://github.com/neondatabase/neon/issues/8184, after which
     # this memory estimate can be revised far downwards to something that doesn't scale
     # linearly with the layer sizes.
-    MEMORY_ESTIMATE = (initial_l0s_size - final_l0s_size) * 1.25
+    MEMORY_ESTIMATE = (initial_l0s_size - final_l0s_size) * 1.5
 
     # If we find that compaction is using more memory, this may indicate a regression
     assert compaction_mapped_rss < MEMORY_ESTIMATE

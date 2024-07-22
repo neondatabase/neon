@@ -721,7 +721,6 @@ impl Tenant {
             Some(tenant_shard_id),
             None,
             "attach tenant",
-            false,
             async move {
 
                 info!(

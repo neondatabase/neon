@@ -1298,7 +1298,7 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
-                l0: crate::tenant::layer_map::LayerMap::is_l0(self.layer_desc()),
+                l0: crate::tenant::layer_map::LayerMap::is_l0(&self.layer_desc().key_range),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
