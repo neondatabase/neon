@@ -294,7 +294,7 @@ struct TimelineHandles {
     /// to see is the number of shards divided by the number of pageservers (typically < 2),
     /// or the ratio used when splitting shards (i.e. how many children created from one)
     /// parent shard, where a "large" number might be ~8.
-    handles: timeline::handle::Cache,
+    handles: timeline::handle::Cache<TenantManagerTypes>,
 }
 
 impl TimelineHandles {
@@ -312,7 +312,7 @@ impl TimelineHandles {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<timeline::handle::Handle, GetActiveTimelineError> {
+    ) -> Result<timeline::handle::Handle<TenantManagerTypes>, GetActiveTimelineError> {
         if *self.wrapper.tenant_id.get_or_init(|| tenant_id) != tenant_id {
             return Err(GetActiveTimelineError::Tenant(
                 GetActiveTenantError::SwitchedTenant,
@@ -335,7 +335,7 @@ impl TimelineHandles {
     }
 }
 
-struct TenantManagerWrapper {
+pub(crate) struct TenantManagerWrapper {
     tenant_manager: Arc<TenantManager>,
     // We do not support switching tenant_id on a connection at this point.
     // We can can add support for this later if needed without changing
@@ -343,14 +343,38 @@ struct TenantManagerWrapper {
     tenant_id: once_cell::sync::OnceCell<TenantId>,
 }
 
-impl timeline::handle::TenantManager for TenantManagerWrapper {
-    type Error = GetActiveTimelineError;
+pub(crate) struct TenantManagerTypes;
 
+impl timeline::handle::Types for TenantManagerTypes {
+    type TenantManagerError = GetActiveTimelineError;
+    type TenantManager = TenantManagerWrapper;
+    type Timeline = Arc<Timeline>;
+}
+
+impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
+    fn gate(&self) -> &utils::sync::gate::Gate {
+        &self.gate
+    }
+
+    fn shard_timeline_id(&self) -> timeline::handle::ShardTimelineId {
+        Timeline::shard_timeline_id(self)
+    }
+
+    fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState<TenantManagerTypes> {
+        &self.handles
+    }
+
+    fn get_shard_identity(&self) -> &pageserver_api::shard::ShardIdentity {
+        Timeline::get_shard_identity(self)
+    }
+}
+
+impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrapper {
     async fn resolve(
         &self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<Arc<Timeline>, Self::Error> {
+    ) -> Result<Arc<Timeline>, GetActiveTimelineError> {
         let tenant_id = self.tenant_id.get().expect("we set this in get()");
         let timeout = ACTIVE_TENANT_TIMEOUT;
         let wait_start = Instant::now();
@@ -1459,7 +1483,7 @@ impl From<GetActiveTenantError> for QueryError {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum GetActiveTimelineError {
+pub(crate) enum GetActiveTimelineError {
     #[error(transparent)]
     Tenant(GetActiveTenantError),
     #[error(transparent)]
