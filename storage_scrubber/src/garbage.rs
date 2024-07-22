@@ -18,7 +18,7 @@ use utils::id::TenantId;
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
-    init_remote, init_remote_generic,
+    init_remote, init_remote_generic, list_objects_with_retries,
     metadata_stream::{stream_tenant_timelines, stream_tenants},
     BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth,
 };
@@ -27,6 +27,11 @@ use crate::{
 enum GarbageReason {
     DeletedInConsole,
     MissingInConsole,
+
+    // The remaining data relates to a known deletion issue, and we're sure that purging this
+    // will not delete any real data, for example https://github.com/neondatabase/neon/pull/7928 where
+    // there is nothing in a tenant path apart from a heatmap file.
+    KnownBug,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -70,6 +75,15 @@ impl GarbageList {
             node_kind,
             bucket_config,
         }
+    }
+
+    /// If an entity has been identified as requiring purge due to a known bug, e.g.
+    /// a particular type of object left behind after an incomplete deletion.
+    fn append_buggy(&mut self, entity: GarbageEntity) {
+        self.items.push(GarbageItem {
+            entity,
+            reason: GarbageReason::KnownBug,
+        });
     }
 
     /// Return true if appended, false if not.  False means the result was not garbage.
@@ -217,6 +231,72 @@ async fn find_garbage_inner(
         // Paranoia check
         if let Some(project) = &console_result {
             assert!(project.tenant == tenant_shard_id.tenant_id);
+        }
+
+        // Special case: If it's missing in console, check for known bugs that would enable us to conclusively
+        // identify it as purge-able anyway
+        if console_result.is_none() {
+            let timelines = stream_tenant_timelines(&s3_client, &target, tenant_shard_id)
+                .await?
+                .collect::<Vec<_>>()
+                .await;
+            if timelines.is_empty() {
+                // No timelines, but a heatmap: the deletion bug where we deleted everything but heatmaps
+                let tenant_objects = list_objects_with_retries(
+                    &s3_client,
+                    &target.tenant_root(&tenant_shard_id),
+                    None,
+                )
+                .await?;
+                // let contents_len = tenant_objects.contents.as_ref().map(|v| v.len()).unwrap_or(0);
+                let object = tenant_objects.contents.as_ref().unwrap().first().unwrap();
+                if object.key.as_ref().unwrap().ends_with("heatmap-v1.json") {
+                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
+                    garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
+                    continue;
+                } else {
+                    tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key.as_ref().unwrap());
+                }
+            } else {
+                // A console-unknown tenant with timelines: check if these timelines only contain initdb.tar.zst, from the initial
+                // rollout of WAL DR in which we never deleted these.
+                let mut any_non_initdb = false;
+
+                for timeline_r in timelines {
+                    let timeline = timeline_r?;
+                    let timeline_objects = list_objects_with_retries(
+                        &s3_client,
+                        &target.timeline_root(&timeline),
+                        None,
+                    )
+                    .await?;
+                    if timeline_objects
+                        .common_prefixes
+                        .as_ref()
+                        .map(|v| v.len())
+                        .unwrap_or(0)
+                        > 0
+                    {
+                        // Sub-paths?  Unexpected
+                        any_non_initdb = true;
+                    } else {
+                        let object = timeline_objects.contents.as_ref().unwrap().first().unwrap();
+                        if object.key.as_ref().unwrap().ends_with("initdb.tar.zst") {
+                            tracing::info!("Timeline {timeline} contains only initdb.tar.zst");
+                        } else {
+                            any_non_initdb = true;
+                        }
+                    }
+                }
+
+                if any_non_initdb {
+                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and contains timelines, one or more of which are more than just initdb");
+                } else {
+                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and contains only timelines that only contain initdb");
+                    garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
+                    continue;
+                }
+            }
         }
 
         if garbage.maybe_append(GarbageEntity::Tenant(tenant_shard_id), console_result) {
@@ -459,6 +539,7 @@ pub async fn purge_garbage(
         .filter(|i| match (&mode, &i.reason) {
             (PurgeMode::DeletedAndMissing, _) => true,
             (PurgeMode::DeletedOnly, GarbageReason::DeletedInConsole) => true,
+            (PurgeMode::DeletedOnly, GarbageReason::KnownBug) => true,
             (PurgeMode::DeletedOnly, GarbageReason::MissingInConsole) => false,
         });
 
