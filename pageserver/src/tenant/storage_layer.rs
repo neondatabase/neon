@@ -6,8 +6,6 @@ pub(crate) mod inmemory_layer;
 pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
-
-#[cfg(test)]
 pub mod merge_iterator;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
@@ -674,6 +672,26 @@ impl LayerAccessStats {
                     None
                 }
             },
+        }
+    }
+
+    /// Whether this layer has been accessed (excluding in [`AccessStatsBehavior::Skip`]).
+    ///
+    /// This indicates whether the layer has been used for some purpose that would motivate
+    /// us to keep it on disk, such as for serving a getpage request.
+    fn accessed(&self) -> bool {
+        let locked = self.0.lock().unwrap();
+        let inner = &locked.for_eviction_policy;
+
+        // Consider it accessed if the most recent access is more recent than
+        // the most recent change in residence status.
+        match (
+            inner.last_accesses.recent(),
+            inner.last_residence_changes.recent(),
+        ) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(a), Some(r)) => a.when >= r.timestamp,
         }
     }
 }

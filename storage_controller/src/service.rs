@@ -2830,9 +2830,10 @@ impl Service {
 
                     match e {
                         // no ancestor (ever)
-                        Error::ApiError(StatusCode::CONFLICT, msg) => {
-                            ApiError::Conflict(format!("{node}: {msg}"))
-                        }
+                        Error::ApiError(StatusCode::CONFLICT, msg) => ApiError::Conflict(format!(
+                            "{node}: {}",
+                            msg.strip_prefix("Conflict: ").unwrap_or(&msg)
+                        )),
                         // too many ancestors
                         Error::ApiError(StatusCode::BAD_REQUEST, msg) => {
                             ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
@@ -2859,8 +2860,6 @@ impl Service {
 
         let any = results.pop().expect("we must have at least one response");
 
-        // FIXME: the ordering is not stable yet on pageserver, should be (ancestor_lsn,
-        // TimelineId)
         let mismatching = results
             .iter()
             .filter(|(_, res)| res != &any.1)
@@ -3956,6 +3955,8 @@ impl Service {
             fail::fail_point!("shard-split-post-remote", |_| Err(ApiError::Conflict(
                 "failpoint".to_string()
             )));
+
+            failpoint_support::sleep_millis_async!("shard-split-post-remote-sleep", &self.cancel);
 
             tracing::info!(
                 "Split {} into {}",

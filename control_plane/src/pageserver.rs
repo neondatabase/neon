@@ -1,8 +1,10 @@
 //! Code to manage pageservers
 //!
-//! In the local test environment, the pageserver stores its data directly in
+//! In the local test environment, the data for each pageserver is stored in
 //!
-//!   .neon/
+//! ```text
+//!   .neon/pageserver_<pageserver_id>
+//! ```
 //!
 use std::collections::HashMap;
 
