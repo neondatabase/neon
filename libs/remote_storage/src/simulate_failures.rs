@@ -107,6 +107,17 @@ impl UnreliableWrapper {
 type VoidStorage = crate::LocalFs;
 
 impl RemoteStorage for UnreliableWrapper {
+    async fn list_streaming(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = anyhow::Result<Listing, DownloadError>> {
+        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
+            .map_err(DownloadError::Other)?;
+        self.inner.list_streaming(prefix, mode, max_keys, cancel).await
+    }
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
