@@ -1,7 +1,7 @@
 //! # Memory Management
 //!
 //! Before Timeline shutdown we have a reference cycle
-//! [`HandleInner::timeline`] => [`Timeline::handlers`] => [`HandleInner`]..
+//! [`HandleInner::timeline`] => [`Timeline::handles`] => [`HandleInner`]..
 //!
 //! We do this so the hot path need only do one, uncontended, atomic increment,
 //! the [`Cache::get`]'s [`Weak<HandleInner>::upgrade`]` call.
@@ -243,7 +243,7 @@ impl Cache {
                     },
                 );
                 let handle = {
-                    let mut lock_guard = timeline.handlers.handles.lock().expect("mutex poisoned");
+                    let mut lock_guard = timeline.handles.handles.lock().expect("mutex poisoned");
                     match &mut *lock_guard {
                         Some(timeline_handlers_list) => {
                             for handler in timeline_handlers_list.iter() {

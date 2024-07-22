@@ -446,7 +446,7 @@ pub struct Timeline {
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
 
-    handlers: handle::PerTimelineState,
+    handles: handle::PerTimelineState,
 }
 
 pub struct WalReceiverInfo {
@@ -1915,7 +1915,7 @@ impl Timeline {
         self.cancel.cancel();
 
         // Ensure Prevent new page service requests from starting.
-        self.handlers.shutdown();
+        self.handles.shutdown();
 
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
@@ -2433,7 +2433,7 @@ impl Timeline {
 
                 l0_flush_global_state: resources.l0_flush_global_state,
 
-                handlers: Default::default(),
+                handles: Default::default(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
