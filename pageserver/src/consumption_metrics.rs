@@ -51,10 +51,6 @@ pub async fn run(
 
     let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
 
-    //
-    // Start the metrics collection task
-    //
-
     let metrics_ctx = RequestContext::todo_child(
         TaskKind::MetricsCollection,
         // This task itself shouldn't download anything.
@@ -76,10 +72,6 @@ pub async fn run(
         )
         .instrument(info_span!("metrics_collection")),
     ));
-
-    //
-    // Start the synthetic size calculation worker
-    //
 
     let worker_ctx =
         RequestContext::todo_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);
