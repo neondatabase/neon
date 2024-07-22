@@ -36,7 +36,7 @@ use crate::control_plane_client::{
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics::{TENANT, TENANT_MANAGER as METRICS};
-use crate::task_mgr::{self, TaskKind};
+use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::config::{
     AttachedLocationConfig, AttachmentMode, LocationConf, LocationMode, SecondaryLocationConfig,
 };
@@ -225,26 +225,98 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
     Ok(tmp_path)
 }
 
-/// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
-/// the background, and thereby avoid blocking any API requests on this deletion completing.
-fn spawn_background_purge(tmp_path: Utf8PathBuf) {
-    // Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
-    // After a tenant is detached, there are no more task_mgr tasks for that tenant_id.
-    let task_tenant_id = None;
+/// See [`Self::spawn`].
+#[derive(Clone)]
+pub struct BackgroundPurges(Arc<std::sync::Mutex<BackgroundPurgesInner>>);
+enum BackgroundPurgesInner {
+    Open(tokio::task::JoinSet<()>),
+    // we use the async mutex for coalescing
+    ShuttingDown(Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>),
+}
 
-    task_mgr::spawn(
-        task_mgr::BACKGROUND_RUNTIME.handle(),
-        TaskKind::MgmtRequest,
-        task_tenant_id,
-        None,
-        "tenant_files_delete",
-        false,
-        async move {
-            fs::remove_dir_all(tmp_path.as_path())
-                .await
-                .with_context(|| format!("tenant directory {:?} deletion", tmp_path))
-        },
-    );
+impl Default for BackgroundPurges {
+    fn default() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(
+            BackgroundPurgesInner::Open(JoinSet::new()),
+        )))
+    }
+}
+
+impl BackgroundPurges {
+    /// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
+    /// the background, and thereby avoid blocking any API requests on this deletion completing.
+    ///
+    /// Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
+    /// Thus the [`BackgroundPurges`] type to keep track of these tasks.
+    pub fn spawn(&self, tmp_path: Utf8PathBuf) {
+        let mut guard = self.0.lock().unwrap();
+        let jset = match &mut *guard {
+            BackgroundPurgesInner::Open(ref mut jset) => jset,
+            BackgroundPurgesInner::ShuttingDown(_) => {
+                warn!("trying to spawn background purge during shutdown, ignoring");
+                return;
+            }
+        };
+        jset.spawn_on(
+            async move {
+                if let Err(error) = fs::remove_dir_all(tmp_path.as_path()).await {
+                    // should we fatal_io_error here?
+                    warn!(%error, path=%tmp_path, "failed to purge tenant directory");
+                }
+            }
+            .instrument(info_span!(parent: None, "background_purge")),
+            BACKGROUND_RUNTIME.handle(),
+        );
+    }
+
+    /// When this future completes, all background purges have completed.
+    /// The first poll of the future will already lock out new background purges spawned via [`Self::spawn`].
+    ///
+    /// Concurrent calls will coalesce.
+    ///
+    /// # Cancellation-Safety
+    ///
+    /// If this future is dropped before polled to completion, concurrent and subsequent
+    /// instances of this future will continue to be correct.
+    #[instrument(skip_all)]
+    pub async fn shutdown(&self) {
+        let jset = {
+            let mut guard = self.0.lock().unwrap();
+            match &mut *guard {
+                BackgroundPurgesInner::Open(jset) => {
+                    *guard = BackgroundPurgesInner::ShuttingDown(Arc::new(tokio::sync::Mutex::new(
+                        std::mem::take(jset),
+                    )))
+                }
+                BackgroundPurgesInner::ShuttingDown(_) => {
+                    // calling shutdown multiple times is most likely a bug in pageserver shutdown code
+                    warn!("already shutting down");
+                }
+            };
+            match &mut *guard {
+                BackgroundPurgesInner::ShuttingDown(ref mut jset) => jset.clone(),
+                BackgroundPurgesInner::Open(_) => {
+                    unreachable!("above code transitions into shut down state");
+                }
+            }
+        };
+        let mut jset = jset.lock().await; // concurrent callers coalesce here
+        while let Some(res) = jset.join_next().await {
+            match res {
+                Ok(()) => {}
+                Err(e) if e.is_panic() => {
+                    // If it panicked, the error is already logged by the panic hook.
+                }
+                Err(e) if e.is_cancelled() => {
+                    unreachable!("we don't cancel the joinset or runtime")
+                }
+                Err(e) => {
+                    // No idea when this can happen, but let's log it.
+                    warn!(%e, "background purge task failed or panicked");
+                }
+            }
+        }
+    }
 }
 
 static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
@@ -270,6 +342,8 @@ pub struct TenantManager {
     // tenants have their own cancellation tokens, which we fire individually in [`Self::shutdown`], or
     // when the tenant detaches.
     cancel: CancellationToken,
+
+    background_purges: BackgroundPurges,
 }
 
 fn emergency_generations(
@@ -447,6 +521,7 @@ pub(crate) enum DeleteTenantError {
 #[instrument(skip_all)]
 pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
+    background_purges: BackgroundPurges,
     resources: TenantSharedResources,
     init_order: InitializationOrder,
     cancel: CancellationToken,
@@ -512,7 +587,7 @@ pub async fn init_tenant_mgr(
 
                     match safe_rename_tenant_dir(&tenant_dir_path).await {
                         Ok(tmp_path) => {
-                            spawn_background_purge(tmp_path);
+                            background_purges.spawn(tmp_path);
                         }
                         Err(e) => {
                             error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
@@ -634,6 +709,7 @@ pub async fn init_tenant_mgr(
         tenants: &TENANTS,
         resources,
         cancel: CancellationToken::new(),
+        background_purges,
     })
 }
 
@@ -1353,6 +1429,7 @@ impl TenantManager {
 
         async fn delete_local(
             conf: &PageServerConf,
+            background_purges: &BackgroundPurges,
             tenant_shard_id: &TenantShardId,
         ) -> anyhow::Result<()> {
             let local_tenant_directory = conf.tenant_path(tenant_shard_id);
@@ -1361,7 +1438,7 @@ impl TenantManager {
                 .with_context(|| {
                     format!("local tenant directory {local_tenant_directory:?} rename")
                 })?;
-            spawn_background_purge(tmp_dir);
+            background_purges.spawn(tmp_dir);
             Ok(())
         }
 
@@ -1379,12 +1456,12 @@ impl TenantManager {
                         barrier.wait().await;
                     }
                 }
-                delete_local(self.conf, &tenant_shard_id).await?;
+                delete_local(self.conf, &self.background_purges, &tenant_shard_id).await?;
             }
             Some(TenantSlot::Secondary(secondary_tenant)) => {
                 secondary_tenant.shutdown().await;
 
-                delete_local(self.conf, &tenant_shard_id).await?;
+                delete_local(self.conf, &self.background_purges, &tenant_shard_id).await?;
             }
             Some(TenantSlot::InProgress(_)) => unreachable!(),
             None => {}
@@ -1655,7 +1732,7 @@ impl TenantManager {
         let tmp_path = safe_rename_tenant_dir(&local_tenant_directory)
             .await
             .with_context(|| format!("local tenant directory {local_tenant_directory:?} rename"))?;
-        spawn_background_purge(tmp_path);
+        self.background_purges.spawn(tmp_path);
 
         fail::fail_point!("shard-split-pre-finish", |_| Err(anyhow::anyhow!(
             "failpoint"
@@ -1831,7 +1908,7 @@ impl TenantManager {
         let tmp_path = self
             .detach_tenant0(conf, tenant_shard_id, deletion_queue_client)
             .await?;
-        spawn_background_purge(tmp_path);
+        self.background_purges.spawn(tmp_path);
 
         Ok(())
     }
