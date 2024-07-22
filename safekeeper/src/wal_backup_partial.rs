@@ -18,7 +18,6 @@
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
 
-use std::sync::Arc;
 
 use camino::Utf8PathBuf;
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
@@ -30,36 +29,13 @@ use utils::lsn::Lsn;
 
 use crate::{
     metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
+    rate_limit::RateLimiter,
     safekeeper::Term,
     timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
     wal_backup::{self, remote_timeline_path},
     SafeKeeperConf,
 };
-
-#[derive(Clone)]
-pub struct RateLimiter {
-    semaphore: Arc<tokio::sync::Semaphore>,
-}
-
-impl RateLimiter {
-    pub fn new(permits: usize) -> Self {
-        Self {
-            semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
-        }
-    }
-
-    async fn acquire_owned(&self) -> tokio::sync::OwnedSemaphorePermit {
-        let _timer = MISC_OPERATION_SECONDS
-            .with_label_values(&["partial_permit_acquire"])
-            .start_timer();
-        self.semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore is closed")
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UploadStatus {
@@ -454,7 +430,7 @@ pub async fn main_task(
         }
 
         // limit concurrent uploads
-        let _upload_permit = limiter.acquire_owned().await;
+        let _upload_permit = limiter.acquire_partial_backup().await;
 
         let prepared = backup.prepare_upload().await;
         if let Some(seg) = &uploaded_segment {

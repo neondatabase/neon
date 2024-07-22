@@ -23,6 +23,7 @@ use utils::lsn::Lsn;
 use crate::{
     control_file::{FileStorage, Storage},
     metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS},
+    rate_limit::RateLimiter,
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
     safekeeper::Term,
@@ -32,7 +33,7 @@ use crate::{
     timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
-    wal_backup_partial::{self, PartialRemoteSegment, RateLimiter},
+    wal_backup_partial::{self, PartialRemoteSegment},
     SafeKeeperConf,
 };
 
@@ -185,7 +186,7 @@ pub(crate) struct Manager {
 
     // misc
     pub(crate) access_service: AccessService,
-    pub(crate) partial_backup_rate_limiter: RateLimiter,
+    pub(crate) global_rate_limiter: RateLimiter,
 
     // Anti-flapping state: we evict timelines eagerly if they are inactive, but should not
     // evict them if they go inactive very soon after being restored.
@@ -202,7 +203,7 @@ pub async fn main_task(
     broker_active_set: Arc<TimelinesSet>,
     manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
     mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
-    partial_backup_rate_limiter: RateLimiter,
+    global_rate_limiter: RateLimiter,
 ) {
     tli.set_status(Status::Started);
 
@@ -220,7 +221,7 @@ pub async fn main_task(
         conf,
         broker_active_set,
         manager_tx,
-        partial_backup_rate_limiter,
+        global_rate_limiter,
     )
     .await;
 
@@ -255,8 +256,17 @@ pub async fn main_task(
             mgr.update_partial_backup(&state_snapshot).await;
 
             if mgr.conf.enable_offload && mgr.ready_for_eviction(&next_event, &state_snapshot) {
-                mgr.set_status(Status::EvictTimeline);
-                mgr.evict_timeline().await;
+                // check rate limiter and evict timeline if possible
+                match mgr.global_rate_limiter.try_acquire_eviction() {
+                    Some(_permit) => {
+                        mgr.set_status(Status::EvictTimeline);
+                        mgr.evict_timeline().await;
+                    }
+                    None => {
+                        // we can't evict timeline now, will try again later
+                        // TODO: sleep for a while
+                    }
+                }
             }
         }
 
@@ -334,7 +344,7 @@ impl Manager {
         conf: SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
         manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
-        partial_backup_rate_limiter: RateLimiter,
+        global_rate_limiter: RateLimiter,
     ) -> Manager {
         let (is_offloaded, partial_backup_uploaded) = tli.bootstrap_mgr().await;
         Manager {
@@ -353,7 +363,7 @@ impl Manager {
             partial_backup_uploaded,
             access_service: AccessService::new(manager_tx),
             tli,
-            partial_backup_rate_limiter,
+            global_rate_limiter,
             resident_since: std::time::Instant::now(),
         }
     }
@@ -541,7 +551,7 @@ impl Manager {
         self.partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
             self.wal_resident_timeline(),
             self.conf.clone(),
-            self.partial_backup_rate_limiter.clone(),
+            self.global_rate_limiter.clone(),
         )));
     }
 
