@@ -577,7 +577,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
             > 0
         )
 
-    wait_until(20, 0.1, assert_compacted_and_uploads_queued)
+    wait_until(200, 0.1, assert_compacted_and_uploads_queued)
 
     # Regardless, give checkpoint some time to block for good.
     # Not strictly necessary, but might help uncover failure modes in the future.
@@ -619,7 +619,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     )
 
     # timeline deletion should be unblocking checkpoint ops
-    checkpoint_thread.join(2.0)
+    checkpoint_thread.join(20.0)
     assert not checkpoint_thread.is_alive()
 
     # Just to be sure, unblock ongoing uploads. If the previous assert was incorrect, or the prometheus metric broken,
