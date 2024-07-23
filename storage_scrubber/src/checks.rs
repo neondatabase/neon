@@ -84,7 +84,12 @@ pub(crate) fn branch_cleanup_and_check_errors(
                             .push(format!("index_part.json version: {}", index_part.version()))
                     }
 
-                    if &index_part.version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
+                    let newest_versions = IndexPart::KNOWN_VERSIONS
+                        .iter()
+                        .rev()
+                        .take(2)
+                        .collect::<Vec<_>>();
+                    if !newest_versions.contains(&&index_part.version()) {
                         result.warnings.push(format!(
                             "index_part.json version is not latest: {}",
                             index_part.version()
