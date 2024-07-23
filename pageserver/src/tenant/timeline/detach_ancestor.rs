@@ -241,12 +241,24 @@ impl Attempt {
 }
 
 #[derive(Default)]
-pub(crate) struct SharedStateBuilder {}
+pub(crate) struct SharedStateBuilder {
+    inprogress: std::collections::HashSet<TimelineId>,
+}
 
 impl SharedStateBuilder {
     /// While loading, visit a timelines persistent [`crate::tenant::IndexPart`] and record if it is being
     /// detached.
-    pub(crate) fn record_loading_timeline(&mut self, _index_part: &crate::tenant::IndexPart) {}
+    pub(crate) fn record_loading_timeline(
+        &mut self,
+        timeline_id: &TimelineId,
+        index_part: &crate::tenant::IndexPart,
+    ) {
+        if index_part.ongoing_detach_ancestor.is_some() {
+            // if the loading a timeline fails, tenant loading must fail as it does right now, or
+            // something more elaborate needs to be done with this tracking
+            self.inprogress.insert(*timeline_id);
+        }
+    }
 
     /// Merge the loaded not yet deleting in-progress to the existing datastructure.
     pub(crate) fn build(self, _target: &SharedState) {}
