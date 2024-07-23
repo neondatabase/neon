@@ -5,6 +5,7 @@ use crate::{
     context::{DownloadBehavior, RequestContext},
     task_mgr::TaskKind,
     tenant::{
+        mgr::GetActiveTenantError,
         storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer},
         Tenant,
     },
@@ -38,6 +39,9 @@ pub(crate) enum Error {
     #[error("remote copying layer failed")]
     CopyFailed(#[source] anyhow::Error),
 
+    #[error("wait for tenant to activate after restarting")]
+    WaitToActivate(#[source] GetActiveTenantError),
+
     #[error("unexpected error")]
     Unexpected(#[source] anyhow::Error),
 
@@ -54,6 +58,10 @@ impl From<Error> for ApiError {
             Error::ShuttingDown => ApiError::ShuttingDown,
             Error::OtherTimelineDetachOngoing(_) => {
                 ApiError::ResourceUnavailable("other timeline detach is already ongoing".into())
+            }
+            e @ Error::WaitToActivate(_) => {
+                let s = utils::error::report_compact_sources(&e).to_string();
+                ApiError::ResourceUnavailable(s.into())
             }
             // All of these contain shutdown errors, in fact, it's the most common
             e @ Error::FlushAncestor(_)
