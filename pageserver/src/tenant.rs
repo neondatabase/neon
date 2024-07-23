@@ -2890,6 +2890,47 @@ impl Tenant {
         // because that will stall branch creation.
         let gc_cs = self.gc_cs.lock().await;
 
+        // Paranoia check: it is critical that GcInfo's list of child timelines is correct, to avoid incorrectly GC'ing data they
+        // depend on.  So although GcInfo is updated continuously by Timeline::new and Timeline::drop, we also calculate it here
+        // and fail out if it's inaccurate.
+        // (this can be removed later, it's a risk mitigation for https://github.com/neondatabase/neon/pull/8427)
+        {
+            let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> =
+                BTreeMap::new();
+            timelines.iter().for_each(|timeline| {
+                if let Some(ancestor_timeline_id) = &timeline.get_ancestor_timeline_id() {
+                    let ancestor_children =
+                        all_branchpoints.entry(*ancestor_timeline_id).or_default();
+                    ancestor_children.push((timeline.get_ancestor_lsn(), timeline.timeline_id));
+                }
+            });
+
+            for timeline in &timelines {
+                let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
+                    .remove(&timeline.timeline_id)
+                    .unwrap_or_default();
+
+                branchpoints.sort_by_key(|b| b.0);
+
+                let target = timeline.gc_info.write().unwrap();
+
+                if target.retain_lsns != branchpoints {
+                    tracing::error!(
+                        "Bug: `retain_lsns` is set incorrectly.  Should be {:?}, but found {:?}",
+                        branchpoints,
+                        target.retain_lsns
+                    );
+                    debug_assert!(false);
+                    // Do not GC based on bad information!
+                    // (ab-use an existing GcError type rather than adding a new one, since this is a
+                    // "should never happen" check that will be removed soon).
+                    return Err(GcError::Remote(anyhow::anyhow!(
+                        "retain_lsns failed validation!"
+                    )));
+                }
+            }
+        }
+
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
         let mut gc_timelines = Vec::with_capacity(timelines.len());
