@@ -1003,7 +1003,7 @@ impl Tenant {
                 .remove(&timeline_id)
                 .expect("just put it in above");
 
-            shared_state_builder.record_loading_timeline(&index_part);
+            shared_state_builder.record_loading_timeline(&timeline_id, &index_part);
 
             // TODO again handle early failure
             self.load_remote_timeline(
