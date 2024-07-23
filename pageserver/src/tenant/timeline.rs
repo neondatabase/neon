@@ -4773,11 +4773,11 @@ impl Timeline {
 impl Drop for Timeline {
     fn drop(&mut self) {
         if let Some(ancestor) = &self.ancestor_timeline {
-            ancestor
-                .gc_info
-                .write()
-                .unwrap()
-                .remove_child(self.timeline_id);
+            // This lock should never be poisoned, but in case it is we do a .map() instead of
+            // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
+            if let Ok(mut gc_info) = ancestor.gc_info.write() {
+                gc_info.remove_child(self.timeline_id)
+            }
         }
     }
 }
