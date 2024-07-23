@@ -64,9 +64,9 @@ where
 /// call, to collect more records.
 ///
 #[derive(Debug, Default)]
-pub struct ValueReconstructState {
-    pub records: Vec<(Lsn, NeonWalRecord)>,
-    pub img: Option<(Lsn, Bytes)>,
+pub(crate) struct ValueReconstructState {
+    pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
+    pub(crate) img: Option<(Lsn, Bytes)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -470,9 +470,8 @@ pub(crate) enum LayerVisibilityHint {
 pub(crate) struct LayerAccessStats(std::sync::atomic::AtomicU64);
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
-pub enum LayerAccessStatsReset {
+pub(crate) enum LayerAccessStatsReset {
     NoReset,
-    JustTaskKindFlags,
     AllStats,
 }
 
@@ -549,7 +548,7 @@ impl LayerAccessStats {
     /// - Eviction: imitate access logical size calculation. This accesses the L0 layers because the L1 layer is not yet in the layer map.
     /// - Compact: Grab layer map lock, add the new L1 to layer map and remove the L0s, release layer map lock.
     /// - Eviction: observes the new L1 layer whose only activity timestamp is the LayerCreate event.
-    pub fn record_residence_event_at(&self, now: SystemTime) {
+    pub(crate) fn record_residence_event_at(&self, now: SystemTime) {
         let (mask, value) = Self::to_low_res_timestamp(Self::RTIME_SHIFT, now);
         self.write_bits(mask, value);
     }
@@ -590,7 +589,7 @@ impl LayerAccessStats {
             visible: matches!(self.visibility(), LayerVisibilityHint::Visible),
         };
         match reset {
-            LayerAccessStatsReset::NoReset | LayerAccessStatsReset::JustTaskKindFlags => (),
+            LayerAccessStatsReset::NoReset => {}
             LayerAccessStatsReset::AllStats => {
                 self.write_bits((Self::TS_MASK as u64) << Self::ATIME_SHIFT, 0x0);
                 self.write_bits((Self::TS_MASK as u64) << Self::RTIME_SHIFT, 0x0);
@@ -647,7 +646,7 @@ impl LayerAccessStats {
 }
 
 /// Get a layer descriptor from a layer.
-pub trait AsLayerDesc {
+pub(crate) trait AsLayerDesc {
     /// Get the layer descriptor.
     fn layer_desc(&self) -> &PersistentLayerDesc;
 }
