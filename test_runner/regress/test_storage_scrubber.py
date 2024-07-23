@@ -209,9 +209,17 @@ def test_scrubber_physical_gc_ancestors(
     new_shard_count = 4
     assert shard_count is None or new_shard_count > shard_count
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
+    env.storage_controller.reconcile_until_idle()  # Move shards to their final locations immediately
 
-    # Make sure child shards have some layers
-    workload.write_rows(100)
+    # Make sure child shards have some layers.  Do not force upload, because the test helper calls checkpoint, which
+    # compacts, and we only want to do tha explicitly later in the test.
+    workload.write_rows(100, upload=False)
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
+        ps.http_client().timeline_checkpoint(
+            shard, timeline_id, compact=False, wait_until_uploaded=True
+        )
 
     # Flush deletion queue so that we don't leave any orphan layers in the parent that will confuse subsequent checks: once
     # a shard is split, any layers in its prefix that aren't referenced by a child will be considered GC'able, even
