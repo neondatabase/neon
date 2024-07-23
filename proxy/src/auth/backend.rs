@@ -68,6 +68,8 @@ pub enum BackendType<'a, T, D> {
     Console(MaybeOwned<'a, ConsoleBackend>, T),
     /// Authentication via a web browser.
     Link(MaybeOwned<'a, url::ApiUrl>, D),
+    /// Local proxy uses configured auth credentials and does not wake compute
+    Local,
 }
 
 pub trait TestBackend: Send + Sync + 'static {
