@@ -460,7 +460,12 @@ impl DeltaLayerWriterInner {
         will_init: bool,
         ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
-        assert!(self.lsn_range.start <= lsn);
+        assert!(
+            self.lsn_range.start <= lsn,
+            "lsn_start={}, lsn={}",
+            self.lsn_range.start,
+            lsn
+        );
         // We don't want to use compression in delta layer creation
         let compression = ImageCompressionAlgorithm::Disabled;
         let (val, res) = self
