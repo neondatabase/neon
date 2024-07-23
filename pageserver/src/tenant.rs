@@ -7218,7 +7218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_generate_key_retention() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_generate_key_retention")?;
+        let harness = TenantHarness::create("test_generate_key_retention").await?;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -7341,7 +7341,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_with_retain_lsns() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_simple_bottom_most_compaction_with_retain_lsns");
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_with_retain_lsns").await?;
         let (tenant, ctx) = harness.load().await;
 
         fn get_key(id: u32) -> Key {
