@@ -582,7 +582,8 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		pfree(restored_xids);
 	if (prepared_xids)
 		pfree(prepared_xids);
-	return false;}
+	return false;
+}
 
 
 /*
