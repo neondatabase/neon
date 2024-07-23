@@ -308,8 +308,8 @@ impl Debug for Download {
 
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
-#[derive(Clone)]
 // Require Clone for `Other` due to https://github.com/rust-lang/rust/issues/26925
+#[derive(Clone)]
 pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
