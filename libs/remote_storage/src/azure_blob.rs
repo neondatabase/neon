@@ -267,7 +267,7 @@ impl RemoteStorage for AzureBlobStorage {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> impl Stream<Item = anyhow::Result<Listing, DownloadError>> {
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
             .map(|p| self.relative_path_to_name(p))
