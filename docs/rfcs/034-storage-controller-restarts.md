@@ -93,8 +93,10 @@ for failure case handling: see [Previous Leader Crashes Before New Leader Readin
 Storage controllers will read the leader row at start-up and then update it to mark themselves as the leader
 at the end of the start-up sequence. We want compare-and-exchange semantics for the update: avoid the
 situation where two concurrent updates succeed and overwrite each other. The default Postgres isolation
-level is `READ COMMITTED`, which isn't strict enough here. This update transaction should use the `REPEATABLE
-READ` isolation level in order to [prevent lost updates](https://www.interdb.jp/pg/pgsql05/08.html):
+level is `READ COMMITTED`, which isn't strict enough here. This update transaction should use at least `REPEATABLE
+READ` isolation level in order to [prevent lost updates](https://www.interdb.jp/pg/pgsql05/08.html). Currently,
+the storage controller uses the stricter `SERIALIZABLE` isolation level for all transactions. This more than suits
+our needs here.
 
 ```
 START TRANSACTION ISOLATION LEVEL REPEATABLE READ
@@ -188,6 +190,36 @@ with the new pod.
 This feels very unlikely, but should be considered in any case. P2 (the new aspiring leader) fails the `/step_down`
 API call into P1 (the current leader). P2 proceeds with the pre-existing startup procedure and updates the `leader` table.
 Kubernetes will terminate P1, but there may be a brief period where both storage controller can drive reconciles.
+
+### Dealing With Split Brain Scenarios
+
+As we've seen in the previous section, we can end up with two storage controller running at the same time. The split brain
+duration is not bounded since the Kubernetes controller might become partitioned from the pods (unlikely though). While these
+scenarios are not fatal, they can cause tenant unavailability, so we'd like to reduce the chances of this happening.
+The rest of this section sketches some safety measure. It's likely overkill to implement all of them however.
+
+### Ensure Leadership Before Producing Side Effects
+
+The storage controller has two types of side effects: location config requests into pageservers and compute notifications into the control plane.
+Before issuing either, the storage controller could check that it is indeed still the leader by querying the database. Side effects might still be
+applied if they race with the database updatem, but the situation will eventually be detected. The storage controller process should terminate in these cases.
+
+### Leadership Lease
+
+Up until now, the leadership defined by this RFC is static. In order to bound the length of the split brain scenario, we could require the leadership
+to be renewed periodically. Two new columns would be added to the leaders table:
+1. `last_renewed` - timestamp indicating when the lease was last renewed
+2. `lease_duration` - duration indicating the amount of time after which the lease expires
+
+The leader periodically attempts to renew the lease by checking that it is in fact still the legitimate leader and updating `last_renewed` in the
+same transaction. If the update fails, the process exits. New storage controller instances wishing to become leaders must wait for the current lease
+to expire before acquiring leadership if they have not succesfully received a response to the `/step_down` request.
+
+### Notify Pageserver Of Storage Controller Term
+
+Each time that leadership changes, we can bump a `term` integer column in the `leader` table. This term uniquely identifies a leader.
+Location config requests and re-attach responses can include this term. On the pageserver side, keep the latest term in memory and refuse
+anything which contains a stale term (i.e. smaller than the current one).
 
 ### Observability
 
