@@ -61,3 +61,4 @@ class NeonBroker:
             else:
                 self.handle.terminate()
             self.handle.wait()
+            self.handle = None
