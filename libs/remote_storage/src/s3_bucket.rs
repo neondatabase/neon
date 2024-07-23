@@ -531,8 +531,7 @@ impl RemoteStorage for S3Bucket {
                 let response = response?;
 
                 let keys = response.contents();
-                let empty = Vec::new();
-                let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
+                let prefixes = response.common_prefixes.as_deref().unwrap_or_default();
 
                 tracing::debug!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
                 let mut result = Listing::default();
