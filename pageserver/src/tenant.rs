@@ -2912,7 +2912,7 @@ impl Tenant {
 
                 branchpoints.sort_by_key(|b| b.0);
 
-                let target = timeline.gc_info.write().unwrap();
+                let target = timeline.gc_info.read().unwrap();
 
                 if target.retain_lsns != branchpoints {
                     tracing::error!(
