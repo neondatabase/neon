@@ -104,8 +104,7 @@ use std::fmt::Display;
 use std::fs;
 use std::fs::File;
 use std::ops::Bound::Included;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{Ordering, AtomicU64};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -602,9 +601,9 @@ impl Tenant {
                 .last_aux_file_policy
                 .store(index_part.last_aux_file_policy());
 
-            {
-                *timeline.archived_at.lock().await = index_part.archived_at;
-            }
+            timeline
+                .is_archived
+                .store(index_part.archived_at.is_some(), Ordering::Relaxed);
         } else {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
@@ -1243,10 +1242,9 @@ impl Tenant {
             .get_timeline(timeline_id, false)
             .context("Cannot apply timeline archival config to inexistent timeline")?;
 
-        let mut archived_at = timeline.archived_at.lock().await;
-        let archived = archived_at.is_some();
+        let is_archived = timeline.is_archived();
 
-        let upload_needed = match (archived, state) {
+        let upload_needed = match (is_archived, state) {
             (true, TimelineArchivalState::Archived)
             | (false, TimelineArchivalState::Unarchived) => {
                 // Nothing to do
@@ -1260,7 +1258,7 @@ impl Tenant {
         if let Some(intended_archived_at) = upload_needed {
             timeline
                 .remote_client
-                .schedule_index_upload_for_archived_at_update(*archived_at)?;
+                .schedule_index_upload_for_archived_at_update(intended_archived_at)?;
             const MAX_WAIT: Duration = Duration::from_secs(10);
             tokio::select! {
                 v = timeline.remote_client.wait_completion() => {
@@ -1269,7 +1267,7 @@ impl Tenant {
                     // This way, on a retry we'll never be in the situation where we think that
                     // the state is already updated (instead we might think that the state is
                     // not updated yet while it already is).
-                    *archived_at = intended_archived_at;
+                    timeline.is_archived.store(intended_archived_at.is_some(), Ordering::Relaxed);
                 },
                 _ = tokio::time::sleep(MAX_WAIT) => {
                     tracing::warn!("reached timeout for waiting on upload queue");
