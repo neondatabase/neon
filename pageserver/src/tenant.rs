@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::detach_ancestor;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -678,6 +679,7 @@ impl Tenant {
         shard_identity: ShardIdentity,
         init_order: Option<InitializationOrder>,
         mode: SpawnMode,
+        existing_detach_attempt: Option<&detach_ancestor::Attempt>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
@@ -706,6 +708,10 @@ impl Tenant {
             deletion_queue_client,
             l0_flush_global_state,
         ));
+
+        if let Some(attempt) = existing_detach_attempt {
+            tenant.ongoing_timeline_detach.notify(attempt);
+        }
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
         // we shut down while attaching.
