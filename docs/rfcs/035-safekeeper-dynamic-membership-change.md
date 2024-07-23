@@ -347,7 +347,7 @@ Returns scheduled request.
 
 Similar call should be added for the tenant.
 
-It would be great to have some way of subscribing to the results (appart from
+It would be great to have some way of subscribing to the results (apart from
 looking at logs/metrics).
 
 Migration is executed as described above. One subtlety is that (local) deletion on
@@ -366,6 +366,9 @@ deletions <tenant_id, timeline_id, generation, node_id> in the same transaction
 which switches configurations. Similarly when timeline is fully deleted to
 prevent cplane operation from blocking when some safekeeper is not available
 deletion should be also registered.
+
+One more task pool should infinitely retry notifying control plane about changed
+safekeeper sets.
 
 3) GET `/control/v1/tenant/:tenant_id/timeline/:timeline_id/` should return
    current in memory state of the timeline and pending `MigrationRequest`,
@@ -402,15 +405,19 @@ There should be following layers of tests:
    not be lost.
 
 3) Since simulation testing injects at relatively high level points (not
-   syscalls), it omits some code, in particular `pull_timeline`. Thus it 
-   is better to have basic tests covering whole system. Extended 
-   version of `test_restarts_under_load` would do. TBD
+   syscalls), it omits some code, in particular `pull_timeline`. Thus it is
+   better to have basic tests covering whole system as well. Extended version of
+   `test_restarts_under_load` would do: start background load and do migration 
+   under it, then restart endpoint and check that no reported commits 
+   had been lost. I'd also add one more creating classic network split scenario, with
+   one compute talking to AC and another to BD while migration from nodes ABC to ABD
+   happens.
 
-4) Basic e2e test should ensure that full flow including cplane notification works.
+4) Simple e2e test should ensure that full flow including cplane notification works.
 
 ## Order of implementation and rollout
 
-note that 
+Note that 
 - Control plane parts and integration with it is fully independent from everything else
   (tests would use simulation and neon_local).
 - There is a lot of infra work making storage_controller aware of timelines and safekeepers
@@ -418,40 +425,63 @@ note that
 - Initially walproposer can just stop working while it observers joint configuration.
   Such window would be typically very short anyway.
 
-TimelineCreateRequest should get optional safekeepers field with safekeepers chosen by cplane.
+To rollout smoothly, both walproposer and safekeeper should have flag
+`configurations_enabled`; when set to false, they would work as currently, i.e.
+walproposer is able to commit on whatever safekeeper set it is provided. Until
+all timelines are managed by storcon we'd need to use current script to migrate
+and update/drop entries in the storage_controller database if it has any.
 
-rough order:
-- add sk infra, but not enforce confs
-- change proto
-- add wp proto, but not enforce confs
-- implement storconn. It will be used and tested by neon_local.
-- implement cplane/storcon integration. Route branch creation/deletion 
-  through storcon. Then we can test migration of these branches, hm.
-  In principle sk choice from cplane can be removed at this point. 
-  However, that would be bad because before import 1) 
-  storconn doesn't know about existing project so can't colocate tenants 
-  2) neither it knows about capacity. So we could instead allow to set sk 
-  set in the branch creation request.
-  These cplane -> storconn calls should be under feature flag; 
-  rollback is safe.
-- finally import existing branches. Then we can drop cplane 
-  sk selection code.
-  also only at this point wp will always use generations and
-  so we can drop 'tli creation on connect'.
+Safekeepers would need to be able to talk both current and new protocol version
+with compute to reduce number of computes restarted in prod once v2 protocol is
+deployed (though before completely switching we'd need to force this).
+
+Let's have the following rollout order:
+- storage_controller becomes aware of safekeepers;
+- storage_controller gets timeline creation for new timelines and deletion requests, but
+  doesn't manage all timelines yet. Migration can be tested on these new timelines.
+  To keep control plane and storage_controller databases in sync while control 
+  plane still chooses the safekeepers initially (until all timelines are imported
+  it can choose better), `TimelineCreateRequest` can get optional safekeepers
+  field with safekeepers chosen by cplane.
+- Then we can import all existing timelines from control plane to
+  storage_controller and gradually enable configurations region by region.
+
+
+Very rough implementation order:
+- Add concept of configurations to safekeepers (including control file),
+  implement v3 protocol.
+- Implement walproposer changes, including protocol.
+- Implement storconn part. Use it in neon_local (and pytest).
+- Make cplane store safekeepers per timeline instead of per tenant.
+- Implement cplane/storcon integration. Route branch creation/deletion 
+  through storcon. Then we can test migration of new branches.
+- Finally import existing branches. Then we can drop cplane 
+  safekeeper selection code. Gradually enable configurations at 
+  computes and safekeepers. Before that, all computes must talk only
+  v3 protocol version.
 
 ## Integration with evicted timelines
 
+Currently, `pull_timeline` doesn't work correctly with evicted timelines because
+copy would point to original partial file. To fix let's just do s3 copy of the
+file. It is a bit stupid as generally unnecessary work, but it makes sense to
+implement proper migration before doing smarter timeline archival.
+
 ## Possible optimizations
 
-`AcceptorRefusal` separate message
 
-Preserving connections (not needed)
+Algorithm suggested above forces walproposer re-election (technically restart)
+and thus reconnection to safekeepers; essentially we treat generation as part of
+term and don't allow leader to survive configuration change. It is possible to
+optimize this, but this is untrivial and I don't think needed. Reconnection is
+very fast and it is much more important to avoid compute restart than
+millisecond order of write stall.
 
-multiple joint consensus (not needed)
+Multiple joint consensus: algorithm above rejects attempt to change membership
+while another attempt is in progress. It is possible to overlay them and AFAIK
+Aurora does this but similarly I don't think this is needed.
 
 ## Misc
 
-We should use Compute <-> safekeeper protocol change to include other (long
-yearned) modifications:
-- network order
-
+We should use Compute <-> safekeeper protocol change to include another long
+yearned modifications: send data in network order to make arm work.
