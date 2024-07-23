@@ -463,7 +463,7 @@ impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
 }
 
 impl RemoteStorage for S3Bucket {
-    async fn list_streaming(
+    fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,

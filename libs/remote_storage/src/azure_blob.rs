@@ -261,7 +261,7 @@ fn to_download_error(error: azure_core::Error) -> DownloadError {
 }
 
 impl RemoteStorage for AzureBlobStorage {
-    async fn list_streaming(
+    fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,

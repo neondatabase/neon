@@ -108,7 +108,7 @@ impl UnreliableWrapper {
 type VoidStorage = crate::LocalFs;
 
 impl RemoteStorage for UnreliableWrapper {
-    async fn list_streaming(
+    fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
@@ -119,8 +119,7 @@ impl RemoteStorage for UnreliableWrapper {
             self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
                 .map_err(DownloadError::Other)?;
             let mut stream = self.inner
-                .list_streaming(prefix, mode, max_keys, cancel)
-                .await;
+                .list_streaming(prefix, mode, max_keys, cancel);
             while let Some(item) = stream.next().await {
                 yield item;
             }

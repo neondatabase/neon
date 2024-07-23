@@ -331,7 +331,7 @@ impl LocalFs {
 }
 
 impl RemoteStorage for LocalFs {
-    async fn list_streaming(
+    fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,

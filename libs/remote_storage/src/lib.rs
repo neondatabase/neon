@@ -178,7 +178,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// unlimted size buckets, as the full list of objects is allocated into a monolithic data structure.
     ///
     /// [`ListObjectsV2`]: <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>
-    async fn list_streaming(
+    fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
@@ -193,7 +193,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError> {
-        let mut stream = std::pin::pin!(self.list_streaming(prefix, mode, max_keys, cancel).await);
+        let mut stream = std::pin::pin!(self.list_streaming(prefix, mode, max_keys, cancel));
         let mut combined = stream.next().await.expect("At least one item required")?;
         while let Some(list) = stream.next().await {
             let list = list?;
@@ -335,7 +335,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
     }
 
     // See [`RemoteStorage::list_streaming`].
-    pub async fn list_streaming<'a>(
+    pub fn list_streaming<'a>(
         &'a self,
         prefix: Option<&'a RemotePath>,
         mode: ListingMode,
@@ -343,11 +343,11 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         cancel: &'a CancellationToken,
     ) -> impl Stream<Item = Result<Listing, DownloadError>> + 'a {
         match self {
-            Self::LocalFs(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await)
+            Self::LocalFs(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel))
                 as Pin<Box<dyn Stream<Item = Result<Listing, DownloadError>>>>,
-            Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
-            Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
-            Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
+            Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+            Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+            Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
         }
     }
 
