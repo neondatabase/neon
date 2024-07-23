@@ -104,7 +104,7 @@ use std::fmt::Display;
 use std::fs;
 use std::fs::File;
 use std::ops::Bound::Included;
-use std::sync::atomic::{Ordering, AtomicU64};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -1256,6 +1256,11 @@ impl Tenant {
         };
 
         if let Some(intended_archived_at) = upload_needed {
+            // We have to schedule this into the upload queue with the other operations,
+            // as if we side-step the upload queue and do it immediately, later operations
+            // without the `archived_at` field might override the file.
+            // Deletion addresses this by shutting down the upload queue. We cannot afford
+            // this here.
             timeline
                 .remote_client
                 .schedule_index_upload_for_archived_at_update(intended_archived_at)?;
