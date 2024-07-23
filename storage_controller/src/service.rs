@@ -828,6 +828,8 @@ impl Service {
                                 );
                             }
                             Err(err) => {
+                                // Transition to active involves reconciling: if a node responds to a heartbeat then
+                                // becomes unavailable again, we may get an error here.
                                 tracing::error!(
                                     "Failed to update node {} after heartbeat round: {}",
                                     node_id,
