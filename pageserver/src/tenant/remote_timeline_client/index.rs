@@ -57,7 +57,7 @@ pub struct IndexPart {
     pub(crate) lineage: Lineage,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub(crate) ongoing_detach_ancestor: Option<OngoingDetachAncestor>,
+    pub(crate) gc_blocking: Option<GcBlocking>,
 
     /// Describes the kind of aux files stored in the timeline.
     ///
@@ -83,7 +83,7 @@ impl IndexPart {
     /// - 5: lineage was added
     /// - 6: last_aux_file_policy is added.
     /// - 7: metadata_bytes is no longer written, but still read
-    /// - 8: +ongoing_timeline_detach
+    /// - 8: +gc_blocking
     const LATEST_VERSION: usize = 8;
 
     // Versions we may see when reading from a bucket.
@@ -99,7 +99,7 @@ impl IndexPart {
             metadata,
             deleted_at: None,
             lineage: Default::default(),
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: None,
         }
     }
@@ -275,17 +275,34 @@ impl Lineage {
     }
 }
 
-// FIXME: restructure and rename this as a generic method of gc blocking
+/// Right now, the only reason to block gc persistently is detach_ancestor. To use gc blocking more
+/// broadly, a reason set field needs to be added, and the shared state load time building be
+/// complicated to avoid detach_ancestor clearing out a manually configured gc blocking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct OngoingDetachAncestor {
-    pub(crate) first_started_at: NaiveDateTime,
+pub(crate) struct GcBlocking {
+    pub(crate) started_at: NaiveDateTime,
 }
 
-impl OngoingDetachAncestor {
-    pub(super) fn started_now() -> Self {
-        OngoingDetachAncestor {
-            first_started_at: chrono::Utc::now().naive_utc(),
+impl GcBlocking {
+    pub(super) fn started_now_for_detach_ancestor() -> Self {
+        GcBlocking {
+            started_at: chrono::Utc::now().naive_utc(),
         }
+    }
+
+    /// Returns true if detach_ancestor is one of the reasons why the gc is blocked.
+    pub(crate) fn blocked_by_detach_ancestor(&self) -> bool {
+        true
+    }
+
+    /// Returns a version of self with the reason of detach_ancestor.
+    pub(super) fn with_detach_ancestor(&self) -> Self {
+        self.clone()
+    }
+
+    /// Returns a version of self without the reason of detach_ancestor.
+    pub(super) fn without_detach_ancestor(&self) -> Option<Self> {
+        None
     }
 }
 
@@ -329,7 +346,7 @@ mod tests {
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: None,
             lineage: Lineage::default(),
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -372,7 +389,7 @@ mod tests {
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: None,
             lineage: Lineage::default(),
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -416,7 +433,7 @@ mod tests {
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             lineage: Lineage::default(),
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -463,7 +480,7 @@ mod tests {
             .unwrap(),
             deleted_at: None,
             lineage: Lineage::default(),
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -505,7 +522,7 @@ mod tests {
             metadata: TimelineMetadata::from_bytes(&[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).unwrap(),
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             lineage: Lineage::default(),
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -550,7 +567,7 @@ mod tests {
                 reparenting_history: vec![TimelineId::from_str("e1bfd8c633d713d279e6fcd2bcc15b6d").unwrap()],
                 original_ancestor: Some((TimelineId::from_str("e2bfd8c633d713d279e6fcd2bcc15b6d").unwrap(), Lsn::from_str("0/15A7618").unwrap(), parse_naive_datetime("2024-05-07T18:52:36.322426563"))),
             },
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -600,7 +617,7 @@ mod tests {
                 reparenting_history: vec![TimelineId::from_str("e1bfd8c633d713d279e6fcd2bcc15b6d").unwrap()],
                 original_ancestor: Some((TimelineId::from_str("e2bfd8c633d713d279e6fcd2bcc15b6d").unwrap(), Lsn::from_str("0/15A7618").unwrap(), parse_naive_datetime("2024-05-07T18:52:36.322426563"))),
             },
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: Some(AuxFilePolicy::V2),
         };
 
@@ -655,7 +672,7 @@ mod tests {
             ).with_recalculated_checksum().unwrap(),
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             lineage: Default::default(),
-            ongoing_detach_ancestor: None,
+            gc_blocking: None,
             last_aux_file_policy: Default::default(),
         };
 
@@ -681,7 +698,7 @@ mod tests {
                 "initdb_lsn": "0/1696070",
                 "pg_version": 14
             },
-            "ongoing_detach_ancestor": {
+            "gc_blocking": {
                 "started_at": "2024-07-19T09:00:00.123"
             }
         }"#;
@@ -712,7 +729,7 @@ mod tests {
             ).with_recalculated_checksum().unwrap(),
             deleted_at: None,
             lineage: Default::default(),
-            ongoing_detach_ancestor: Some(OngoingDetachAncestor {
+            gc_blocking: Some(GcBlocking {
                 started_at: parse_naive_datetime("2024-07-19T09:00:00.123000000"),
             }),
             last_aux_file_policy: Default::default(),

@@ -783,16 +783,24 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            match upload_queue.dirty.ongoing_detach_ancestor.as_ref() {
-                Some(_) if upload_queue.clean.0.ongoing_detach_ancestor.is_some() => None,
-                Some(_) => Some(self.schedule_barrier0(upload_queue)),
-                None => {
+            fn wanted(x: Option<&index::GcBlocking>) -> bool {
+                x.is_some_and(|b| b.blocked_by_detach_ancestor())
+            }
+
+            let current = upload_queue.dirty.gc_blocking.as_ref();
+            let uploaded = upload_queue.clean.0.gc_blocking.as_ref();
+
+            match (current, uploaded) {
+                (x, y) if wanted(x) && wanted(y) => None,
+                (x, y) if wanted(x) && !wanted(y) => Some(self.schedule_barrier0(upload_queue)),
+                _ => {
                     // at this point, the metadata must always show that there is a parent
                     if upload_queue.dirty.metadata.ancestor_timeline().is_none() {
                         panic!("cannot start detach ancestor if there is nothing to detach from");
                     }
-                    upload_queue.dirty.ongoing_detach_ancestor =
-                        Some(index::OngoingDetachAncestor::started_now());
+                    upload_queue.dirty.gc_blocking = current
+                        .map(|x| x.with_detach_ancestor())
+                        .or_else(|| Some(index::GcBlocking::started_now_for_detach_ancestor()));
                     self.schedule_index_upload(upload_queue)?;
                     Some(self.schedule_barrier0(upload_queue))
                 }
@@ -820,17 +828,24 @@ impl RemoteTimelineClient {
 
             assert!(upload_queue.clean.0.lineage.is_detached_from_ancestor());
 
-            match upload_queue.dirty.ongoing_detach_ancestor {
-                Some(_) => {
-                    upload_queue.dirty.ongoing_detach_ancestor = None;
+            fn wanted(x: Option<&index::GcBlocking>) -> bool {
+                x.is_none() || x.is_some_and(|b| !b.blocked_by_detach_ancestor())
+            }
+
+            let current = upload_queue.dirty.gc_blocking.as_ref();
+            let uploaded = upload_queue.clean.0.gc_blocking.as_ref();
+
+            match (current, uploaded) {
+                (x, y) if wanted(x) && wanted(y) => None,
+                (x, y) if wanted(x) && !wanted(y) => Some(self.schedule_barrier0(upload_queue)),
+                _ => {
+                    upload_queue.dirty.gc_blocking = current
+                        .expect("has to be Some because of wanted()")
+                        .without_detach_ancestor();
+                    assert!(wanted(upload_queue.dirty.gc_blocking.as_ref()));
                     self.schedule_index_upload(upload_queue)?;
                     Some(self.schedule_barrier0(upload_queue))
                 }
-                None if upload_queue.clean.0.ongoing_detach_ancestor.is_some() => {
-                    // the upload is already underway; avoid new upload
-                    Some(self.schedule_barrier0(upload_queue))
-                }
-                None => None,
             }
         };
 
