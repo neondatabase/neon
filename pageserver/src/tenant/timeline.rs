@@ -14,7 +14,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use camino::Utf8Path;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
 use once_cell::sync::Lazy;
@@ -48,7 +48,6 @@ use utils::{
     vec_map::VecMap,
 };
 
-use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -57,6 +56,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::atomic::AtomicU64,
 };
+use std::{borrow::Borrow, pin::pin};
 use std::{
     cmp::{max, min, Ordering},
     ops::ControlFlow,
@@ -388,6 +388,8 @@ pub struct Timeline {
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
     pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+
+    pub archived_at: tokio::sync::Mutex<Option<NaiveDateTime>>,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -1982,6 +1984,10 @@ impl Timeline {
         self.current_state() == TimelineState::Active
     }
 
+    pub(crate) fn is_archived(&self) -> bool {
+        self.archived_at.borrow().is_some()
+    }
+
     pub(crate) fn is_stopping(&self) -> bool {
         self.current_state() == TimelineState::Stopping
     }
@@ -2401,6 +2407,8 @@ impl Timeline {
                     EvictionTaskTimelineState::default(),
                 ),
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
+
+                archived_at: tokio::sync::Mutex::new(None),
 
                 cancel,
                 gate: Gate::default(),

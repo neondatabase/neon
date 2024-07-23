@@ -609,7 +609,7 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    /// Launch an index-file upload operation in the background, with only aux_file_policy flag updated.
+    /// Launch an index-file upload operation in the background, with only the `aux_file_policy` flag updated.
     pub(crate) fn schedule_index_upload_for_aux_file_policy_update(
         self: &Arc<Self>,
         last_aux_file_policy: Option<AuxFilePolicy>,
@@ -620,6 +620,19 @@ impl RemoteTimelineClient {
         self.schedule_index_upload(upload_queue)?;
         Ok(())
     }
+
+    /// Launch an index-file upload operation in the background, with only the `archived_at` field updated.
+    pub(crate) fn schedule_index_upload_for_archived_at_update(
+        self: &Arc<Self>,
+        archived_at: Option<NaiveDateTime>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        upload_queue.dirty.archived_at = archived_at;
+        self.schedule_index_upload(upload_queue)?;
+        Ok(())
+    }
+
     ///
     /// Launch an index-file upload operation in the background, if necessary.
     ///

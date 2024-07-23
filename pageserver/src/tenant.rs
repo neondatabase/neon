@@ -15,6 +15,7 @@ use anyhow::{bail, Context};
 use arc_swap::ArcSwap;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
+use chrono::Utc;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
@@ -600,6 +601,10 @@ impl Tenant {
             timeline
                 .last_aux_file_policy
                 .store(index_part.last_aux_file_policy());
+
+            {
+                *timeline.archived_at.lock().await = index_part.archived_at;
+            }
         } else {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
@@ -1231,9 +1236,47 @@ impl Tenant {
 
     pub async fn apply_timeline_archival_config(
         &self,
-        _timeline_id: TimelineId,
-        _config: TimelineArchivalState,
+        timeline_id: TimelineId,
+        state: TimelineArchivalState,
     ) -> anyhow::Result<()> {
+        let timeline = self
+            .get_timeline(timeline_id, false)
+            .context("Cannot apply timeline archival config to inexistent timeline")?;
+
+        let mut archived_at = timeline.archived_at.lock().await;
+        let archived = archived_at.is_some();
+
+        let upload_needed = match (archived, state) {
+            (true, TimelineArchivalState::Archived)
+            | (false, TimelineArchivalState::Unarchived) => {
+                // Nothing to do
+                tracing::info!("intended state matches present state");
+                None
+            }
+            (false, TimelineArchivalState::Archived) => Some(Some(Utc::now().naive_utc())),
+            (true, TimelineArchivalState::Unarchived) => Some(None),
+        };
+
+        if let Some(intended_archived_at) = upload_needed {
+            timeline
+                .remote_client
+                .schedule_index_upload_for_archived_at_update(*archived_at)?;
+            const MAX_WAIT: Duration = Duration::from_secs(10);
+            tokio::select! {
+                v = timeline.remote_client.wait_completion() => {
+                    v?;
+                    // Update the internal value after the remote operation succeeded.
+                    // This way, on a retry we'll never be in the situation where we think that
+                    // the state is already updated (instead we might think that the state is
+                    // not updated yet while it already is).
+                    *archived_at = intended_archived_at;
+                },
+                _ = tokio::time::sleep(MAX_WAIT) => {
+                    tracing::warn!("reached timeout for waiting on upload queue");
+                    bail!("reached timeout for upload queue flush");
+                },
+            }
+        }
         Ok(())
     }
 
