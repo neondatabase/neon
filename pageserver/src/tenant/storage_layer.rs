@@ -499,8 +499,8 @@ impl LayerAccessStats {
     // Therefore we may store only 28 bits for a timestamp with one second resolution.  We do
     // this truncation to make space for some flags in the high bits of our u64.
     const TS_DROP_HIGH_BITS: u32 = u32::count_ones(Self::TS_ONES) + 1;
-    const TS_MASK: u32 = 0x1fffffff;
-    const TS_ONES: u32 = 0x60000000;
+    const TS_MASK: u32 = 0x1f_ff_ff_ff;
+    const TS_ONES: u32 = 0x60_00_00_00;
 
     const ATIME_SHIFT: u32 = 0;
     const RTIME_SHIFT: u32 = 32 - Self::TS_DROP_HIGH_BITS;
