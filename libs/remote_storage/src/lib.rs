@@ -328,7 +328,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<Listing, DownloadError> {
+    ) -> Result<Listing, DownloadError> {
         match self {
             Self::LocalFs(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::AwsS3(s) => s.list(prefix, mode, max_keys, cancel).await,
@@ -344,10 +344,10 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &'a CancellationToken,
-    ) -> impl Stream<Item = anyhow::Result<Listing, DownloadError>> + 'a {
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + 'a {
         match self {
             Self::LocalFs(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await)
-                as Pin<Box<dyn Stream<Item = anyhow::Result<Listing, DownloadError>>>>,
+                as Pin<Box<dyn Stream<Item = Result<Listing, DownloadError>>>>,
             Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
             Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
             Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel).await),
