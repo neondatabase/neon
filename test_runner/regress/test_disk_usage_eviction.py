@@ -230,6 +230,9 @@ def _eviction_env(
     neon_env_builder.num_pageservers = num_pageservers
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
+    # Disable compression support for EvictionEnv to get larger layer sizes
+    neon_env_builder.pageserver_config_override = "image_compression='disabled'"
+
     # initial tenant will not be present on this pageserver
     env = neon_env_builder.init_configs()
     env.start()

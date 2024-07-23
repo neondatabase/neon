@@ -396,7 +396,6 @@ impl<'a> VectoredBlobReader<'a> {
 /// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`]. It provides a streaming API for
 /// getting read blobs. It returns a batch when `handle` gets called and when the current key would just exceed the read_size and
 /// max_cnt constraints.
-#[cfg(test)]
 pub struct StreamingVectoredReadPlanner {
     read_builder: Option<VectoredReadBuilder>,
     // Arguments for previous blob passed into [`StreamingVectoredReadPlanner::handle`]
@@ -410,7 +409,6 @@ pub struct StreamingVectoredReadPlanner {
     cnt: usize,
 }
 
-#[cfg(test)]
 impl StreamingVectoredReadPlanner {
     pub fn new(max_read_size: u64, max_cnt: usize) -> Self {
         assert!(max_cnt > 0);

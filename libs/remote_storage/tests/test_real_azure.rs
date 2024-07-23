@@ -31,6 +31,7 @@ struct EnabledAzure {
 impl EnabledAzure {
     async fn setup(max_keys_in_list_response: Option<i32>) -> Self {
         let client = create_azure_client(max_keys_in_list_response)
+            .await
             .context("Azure client creation")
             .expect("Azure client creation failed");
 
@@ -187,7 +188,7 @@ impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
     }
 }
 
-fn create_azure_client(
+async fn create_azure_client(
     max_keys_per_list_response: Option<i32>,
 ) -> anyhow::Result<Arc<GenericRemoteStorage>> {
     use rand::Rng;
@@ -221,6 +222,8 @@ fn create_azure_client(
         timeout: Duration::from_secs(120),
     };
     Ok(Arc::new(
-        GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,
+        GenericRemoteStorage::from_config(&remote_storage_config)
+            .await
+            .context("remote storage init")?,
     ))
 }

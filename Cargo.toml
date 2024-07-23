@@ -13,6 +13,7 @@ members = [
     "safekeeper",
     "storage_broker",
     "storage_controller",
+    "storage_controller/client",
     "storage_scrubber",
     "workspace_hack",
     "libs/compute_api",
@@ -182,7 +183,7 @@ tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.21.0"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 twox-hash = { version = "1.6.3", default-features = false }
 typed-json = "0.1"
 url = "2.2"
@@ -191,6 +192,7 @@ uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 rustls-native-certs = "0.7"
 x509-parser = "0.15"
+whoami = "1.5.1"
 
 ## TODO replace this with tracing
 env_logger = "0.10"
@@ -220,6 +222,7 @@ remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
 desim = { version = "0.1", path = "./libs/desim" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
+storage_controller_client = { path = "./storage_controller/client" }
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }

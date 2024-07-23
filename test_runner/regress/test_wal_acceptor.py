@@ -2242,6 +2242,8 @@ def test_s3_eviction(
 
     check_values = [0] * n_timelines
 
+    event_metrics_seen = False
+
     n_iters = 20
     for _ in range(n_iters):
         if log.isEnabledFor(logging.DEBUG):
@@ -2266,6 +2268,27 @@ def test_s3_eviction(
         # update remote_consistent_lsn on pageserver
         ps_client.timeline_checkpoint(env.initial_tenant, timelines[i], wait_until_uploaded=True)
 
+        # Do metrics check before restarts, since these will reset to zero across a restart
+        event_metrics_seen |= any(
+            sk.http_client().get_metric_value(
+                "safekeeper_eviction_events_started_total", {"kind": "evict"}
+            )
+            or 0 > 0
+            and sk.http_client().get_metric_value(
+                "safekeeper_eviction_events_completed_total", {"kind": "evict"}
+            )
+            or 0 > 0
+            and sk.http_client().get_metric_value(
+                "safekeeper_eviction_events_started_total", {"kind": "restore"}
+            )
+            or 0 > 0
+            and sk.http_client().get_metric_value(
+                "safekeeper_eviction_events_completed_total", {"kind": "restore"}
+            )
+            or 0 > 0
+            for sk in env.safekeepers
+        )
+
         # restarting random safekeepers
         for sk in env.safekeepers:
             if random.random() < restart_chance:
@@ -2280,22 +2303,4 @@ def test_s3_eviction(
         for sk in env.safekeepers
     )
 
-    assert any(
-        sk.http_client().get_metric_value(
-            "safekeeper_eviction_events_started_total", {"kind": "evict"}
-        )
-        or 0 > 0
-        and sk.http_client().get_metric_value(
-            "safekeeper_eviction_events_completed_total", {"kind": "evict"}
-        )
-        or 0 > 0
-        and sk.http_client().get_metric_value(
-            "safekeeper_eviction_events_started_total", {"kind": "restore"}
-        )
-        or 0 > 0
-        and sk.http_client().get_metric_value(
-            "safekeeper_eviction_events_completed_total", {"kind": "restore"}
-        )
-        or 0 > 0
-        for sk in env.safekeepers
-    )
+    assert event_metrics_seen

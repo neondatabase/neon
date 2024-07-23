@@ -385,6 +385,7 @@ impl Layer {
     }
 
     /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
+    #[allow(dead_code)]
     pub(crate) async fn load_key_values(
         &self,
         ctx: &RequestContext,
@@ -693,6 +694,18 @@ impl Drop for LayerInner {
             // and we could be delaying shutdown for nothing.
         }
 
+        if let Some(timeline) = self.timeline.upgrade() {
+            // Only need to decrement metrics if the timeline still exists: otherwise
+            // it will have already de-registered these metrics via TimelineMetrics::shutdown
+            if self.desc.is_delta() {
+                timeline.metrics.layer_count_delta.dec();
+                timeline.metrics.layer_size_delta.sub(self.desc.file_size);
+            } else {
+                timeline.metrics.layer_count_image.dec();
+                timeline.metrics.layer_size_image.sub(self.desc.file_size);
+            }
+        }
+
         if !*self.wanted_deleted.get_mut() {
             return;
         }
@@ -790,6 +803,15 @@ impl LayerInner {
         } else {
             (heavier_once_cell::OnceCell::default(), 0, Status::Evicted)
         };
+
+        // This object acts as a RAII guard on these metrics: increment on construction
+        if desc.is_delta() {
+            timeline.metrics.layer_count_delta.inc();
+            timeline.metrics.layer_size_delta.add(desc.file_size);
+        } else {
+            timeline.metrics.layer_count_image.inc();
+            timeline.metrics.layer_size_image.add(desc.file_size);
+        }
 
         LayerInner {
             conf,
@@ -1469,14 +1491,22 @@ impl LayerInner {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
                     Ok(elapsed) => {
-                        timeline
-                            .metrics
-                            .evictions_with_low_residence_duration
-                            .read()
-                            .unwrap()
-                            .observe(elapsed);
+                        let accessed = self.access_stats.accessed();
+                        if accessed {
+                            // Only layers used for reads contribute to our "low residence" metric that is used
+                            // to detect thrashing.  Layers promoted for other reasons (e.g. compaction) are allowed
+                            // to be rapidly evicted without contributing to this metric.
+                            timeline
+                                .metrics
+                                .evictions_with_low_residence_duration
+                                .read()
+                                .unwrap()
+                                .observe(elapsed);
+                        }
+
                         tracing::info!(
                             residence_millis = elapsed.as_millis(),
+                            accessed,
                             "evicted layer after known residence period"
                         );
                     }
@@ -1889,7 +1919,7 @@ impl ResidentLayer {
         self.owner.metadata()
     }
 
-    #[cfg(test)]
+    /// Cast the layer to a delta, return an error if it is an image layer.
     pub(crate) async fn get_as_delta(
         &self,
         ctx: &RequestContext,
@@ -1901,7 +1931,7 @@ impl ResidentLayer {
         }
     }
 
-    #[cfg(test)]
+    /// Cast the layer to an image, return an error if it is a delta layer.
     pub(crate) async fn get_as_image(
         &self,
         ctx: &RequestContext,

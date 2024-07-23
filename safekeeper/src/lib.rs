@@ -173,28 +173,10 @@ pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create broker runtime")
 });
 
-pub static WAL_REMOVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("WAL remover")
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
-});
-
 pub static WAL_BACKUP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("WAL backup worker")
         .enable_all()
         .build()
         .expect("Failed to create WAL backup runtime")
-});
-
-pub static METRICS_SHIFTER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("metric shifter")
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
 });
