@@ -490,7 +490,7 @@ impl GcInfo {
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
 /// is a single number (the oldest LSN which we must retain), but it internally distinguishes
 /// between time-based and space-based retention for observability and consumption metrics purposes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct GcCutoffs {
     /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.

@@ -2980,8 +2980,8 @@ impl Tenant {
                 // Apply the cutoffs we found to the Timeline's GcInfo.  Why might we _not_ have cutoffs for a timeline?
                 // - this timeline was created while we were finding cutoffs
                 // - lsn for timestamp search fails for this timeline repeatedly
-                if let Some(cutoffs) = gc_cutoffs.remove(&timeline.timeline_id) {
-                    target.cutoffs = cutoffs;
+                if let Some(cutoffs) = gc_cutoffs.get(&timeline.timeline_id) {
+                    target.cutoffs = cutoffs.clone();
                 }
             }
 
