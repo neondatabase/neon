@@ -7229,6 +7229,16 @@ mod tests {
                 Lsn(0x70),
                 Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
             ),
+            (
+                key,
+                Lsn(0x80),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x80")),
+            ),
+            (
+                key,
+                Lsn(0x90),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x90")),
+            ),
         ];
         let res = tline
             .generate_key_retention(
