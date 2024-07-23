@@ -1281,7 +1281,11 @@ impl Timeline {
         if cfg!(debug_assertions) {
             assert_eq!(
                 lowest_retain_lsn,
-                *retain_lsns_below_horizon.iter().min().unwrap()
+                retain_lsns_below_horizon
+                    .iter()
+                    .min()
+                    .copied()
+                    .unwrap_or(gc_cutoff)
             );
         }
         info!(
