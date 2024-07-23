@@ -1612,6 +1612,12 @@ pub(crate) enum DownloadError {
     Failpoint(failpoints::FailpointKind),
 }
 
+impl DownloadError {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self, DownloadError::DownloadCancelled)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum NeedsDownload {
     NotFound,
