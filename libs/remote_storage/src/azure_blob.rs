@@ -286,70 +286,63 @@ impl RemoteStorage for AzureBlobStorage {
         async_stream::stream! {
             let _permit = self.permit(RequestKind::List, cancel).await?;
 
-            /*let op = async*/ {
-                let mut builder = self.client.list_blobs();
+            let mut builder = self.client.list_blobs();
 
-                if let ListingMode::WithDelimiter = mode {
-                    builder = builder.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
-                }
+            if let ListingMode::WithDelimiter = mode {
+                builder = builder.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
+            }
 
-                if let Some(prefix) = list_prefix {
-                    builder = builder.prefix(Cow::from(prefix.to_owned()));
-                }
+            if let Some(prefix) = list_prefix {
+                builder = builder.prefix(Cow::from(prefix.to_owned()));
+            }
 
-                if let Some(limit) = self.max_keys_per_list_response {
-                    builder = builder.max_results(MaxResults::new(limit));
-                }
+            if let Some(limit) = self.max_keys_per_list_response {
+                builder = builder.max_results(MaxResults::new(limit));
+            }
 
-                let response = builder.into_stream();
-                let response = response.into_stream().map_err(to_download_error);
-                let response = tokio_stream::StreamExt::timeout(response, self.timeout);
-                let response = response.map(|res| match res {
-                    Ok(res) => res,
-                    Err(_elapsed) => Err(DownloadError::Timeout),
-                });
+            let response = builder.into_stream();
+            let response = response.into_stream().map_err(to_download_error);
+            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+            let response = response.map(|res| match res {
+                Ok(res) => res,
+                Err(_elapsed) => Err(DownloadError::Timeout),
+            });
 
-                let mut response = std::pin::pin!(response);
+            let mut response = std::pin::pin!(response);
 
-                let mut max_keys = max_keys.map(|mk| mk.get());
-                'outer: while let Some(entry) = tokio::select! {
-                    op = response.next() => Ok(op),
-                    _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-                }? {
-                    let mut res = Listing::default();
-                    let entry = entry?;
-                    let prefix_iter = entry
-                        .blobs
-                        .prefixes()
-                        .map(|prefix| self.name_to_relative_path(&prefix.name));
-                    res.prefixes.extend(prefix_iter);
-
-                    let blob_iter = entry
-                        .blobs
-                        .blobs()
-                        .map(|k| self.name_to_relative_path(&k.name));
-
-                    for key in blob_iter {
-                        res.keys.push(key);
-
-                        if let Some(mut mk) = max_keys {
-                            assert!(mk > 0);
-                            mk -= 1;
-                            if mk == 0 {
-                                yield Ok(res); // limit reached
-                                break 'outer;
-                            }
-                            max_keys = Some(mk);
-                        }
-                    }
-                    yield Ok(res);
-                }
-            }/*;
-
-            tokio::select! {
-                res = op => Ok(()),
+            let mut max_keys = max_keys.map(|mk| mk.get());
+            'outer: while let Some(entry) = tokio::select! {
+                op = response.next() => Ok(op),
                 _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-            }?;*/
+            }? {
+                let mut res = Listing::default();
+                let entry = entry?;
+                let prefix_iter = entry
+                    .blobs
+                    .prefixes()
+                    .map(|prefix| self.name_to_relative_path(&prefix.name));
+                res.prefixes.extend(prefix_iter);
+
+                let blob_iter = entry
+                    .blobs
+                    .blobs()
+                    .map(|k| self.name_to_relative_path(&k.name));
+
+                for key in blob_iter {
+                    res.keys.push(key);
+
+                    if let Some(mut mk) = max_keys {
+                        assert!(mk > 0);
+                        mk -= 1;
+                        if mk == 0 {
+                            yield Ok(res); // limit reached
+                            break 'outer;
+                        }
+                        max_keys = Some(mk);
+                    }
+                }
+                yield Ok(res);
+            }
         }
     }
 
