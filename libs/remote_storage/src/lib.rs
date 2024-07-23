@@ -184,10 +184,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> impl Stream<Item = anyhow::Result<Listing, DownloadError>> {
-        let listing = self.list(prefix, mode, max_keys, cancel);
-        futures::stream::once(listing)
-    }
+    ) -> impl Stream<Item = Result<Listing, DownloadError>>;
 
     async fn list(
         &self,

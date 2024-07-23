@@ -331,6 +331,17 @@ impl LocalFs {
 }
 
 impl RemoteStorage for LocalFs {
+    async fn list_streaming(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
+        let listing = self.list(prefix, mode, max_keys, cancel);
+        futures::stream::once(listing)
+    }
+
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
