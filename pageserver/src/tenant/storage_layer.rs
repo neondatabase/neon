@@ -462,7 +462,7 @@ pub enum ValueReconstructResult {
 /// than an authoritative value, so that we do not have to update it synchronously when changing the visibility
 /// of layers (for example when creating a branch that makes some previously covered layers visible).  It should
 /// be used for cache management but not for correctness-critical checks.
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub(crate) enum LayerVisibilityHint {
     /// A Visible layer might be read while serving a read, because there is not an image layer between it
     /// and a readable LSN (the tip of the branch or a child's branch point)
