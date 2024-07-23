@@ -586,33 +586,34 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 
 
 /*
- * Right now we only enable reporting of "search_path" to allow to use it
- * in pgbouncer track_extra_parameters
+ * pgbouncer is able to track GUCs reported by Postgres.
+ * But most parameters cannot be tracked this way. The only parameters that can be tracked are ones
+ * that Postgres reports to the client. Unfortunately `search_path` is not reported by Postgres:
+ * https://www.postgresql.org/message-id/flat/CAGECzQQ6xFcgrg%2Be0p9mCumtK362TiA6vTiiZKoYbS8OXggwuQ%40mail.gmail.com#be4bfd7a9cf1f0633bdb2d1790a0a1be
+ * This code sets GUC_REPORT flag for `search_path`making it possible to include it in
+ * pgbouncer's `track_extra_parameters` list.
+ *
+ * This code is inspired by how the Citus extension does this, see
+ * https://github.com/citusdata/citus/blob/2a263fe69a707d16ef24378f7650742386b0968f/src/backend/distributed/shared_library_init.c#L2694
  */
 static void
-OverridePostgresGUCs(void)
+ReportSearchPath(void)
 {
 #if PG_VERSION_NUM >= 160000
-	int gucCount = 0;
-	struct config_generic **guc_vars = get_guc_variables(&gucCount);
+	int nGucs = 0;
+	struct config_generic **gucs = get_guc_variables(&nGucs);
 #else
-	struct config_generic **guc_vars = get_guc_variables();
-	int gucCount = GetNumConfigOptions();
+	struct config_generic **gucs = get_guc_variables();
+	int nGucs = GetNumConfigOptions();
 #endif
 
-	for (int gucIndex = 0; gucIndex < gucCount; gucIndex++)
+	for (int i = 0; i < nGucs; i++)
 	{
-		struct config_generic *var = (struct config_generic *) guc_vars[gucIndex];
+		struct config_generic *guc = (struct config_generic *) gucs[i];
 
-		/*
-		 * Turn on GUC_REPORT for search_path. GUC_REPORT provides that an S (Parameter Status)
-		 * packet is appended after the C (Command Complete) packet sent from the server
-		 * for SET command. S packet contains the new value of the parameter
-		 * if its value has been changed.
-		 */
-		if (strcmp(var->name, "search_path") == 0)
+		if (strcmp(guc->name, "search_path") == 0)
 		{
-			var->flags |= GUC_REPORT;
+			guc->flags |= GUC_REPORT;
 		}
 	}
 }
@@ -660,7 +661,7 @@ _PG_init(void)
 	 */
 	EmitWarningsOnPlaceholders("neon");
 
-	OverridePostgresGUCs();
+	ReportSearchPath();
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
