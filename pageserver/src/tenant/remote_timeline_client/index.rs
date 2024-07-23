@@ -32,6 +32,10 @@ pub struct IndexPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<NaiveDateTime>,
 
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<NaiveDateTime>,
+
     /// Per layer file name metadata, which can be present for a present or missing layer file.
     ///
     /// Older versions of `IndexPart` will not have this property or have only a part of metadata
@@ -80,10 +84,11 @@ impl IndexPart {
     /// - 5: lineage was added
     /// - 6: last_aux_file_policy is added.
     /// - 7: metadata_bytes is no longer written, but still read
-    const LATEST_VERSION: usize = 7;
+    /// - 8: added `archived_at`
+    const LATEST_VERSION: usize = 8;
 
     // Versions we may see when reading from a bucket.
-    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7];
+    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8];
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
@@ -94,6 +99,7 @@ impl IndexPart {
             disk_consistent_lsn: metadata.disk_consistent_lsn(),
             metadata,
             deleted_at: None,
+            archived_at: None,
             lineage: Default::default(),
             last_aux_file_policy: None,
         }
