@@ -250,6 +250,8 @@ impl Layer {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
+            // Newly created layers are marked visible by default: the usual case is that they were created to be read.
+            access_stats.set_visibility(super::LayerVisibilityHint::Visible);
 
             let local_path = local_layer_path(
                 conf,
@@ -1298,7 +1300,7 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
-                l0: crate::tenant::layer_map::LayerMap::is_l0(self.layer_desc()),
+                l0: crate::tenant::layer_map::LayerMap::is_l0(&self.layer_desc().key_range),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();

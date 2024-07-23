@@ -22,8 +22,13 @@ use aws_sdk_s3::Client;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
+use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use pageserver_api::shard::TenantShardId;
+use remote_storage::{
+    GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
+    DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
@@ -31,7 +36,7 @@ use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use utils::fs_ext;
-use utils::id::{TenantId, TimelineId};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
@@ -54,7 +59,7 @@ pub struct S3Target {
 /// in the pageserver, as all timeline objects existing in the scope of a particular
 /// tenant: the scrubber is different in that it handles collections of data referring to many
 /// TenantShardTimelineIds in on place.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TenantShardTimelineId {
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
@@ -66,6 +71,10 @@ impl TenantShardTimelineId {
             tenant_shard_id,
             timeline_id,
         }
+    }
+
+    fn as_tenant_timeline_id(&self) -> TenantTimelineId {
+        TenantTimelineId::new(self.tenant_shard_id.tenant_id, self.timeline_id)
     }
 }
 
@@ -179,6 +188,22 @@ impl RootTarget {
             .with_sub_segment(&id.timeline_id.to_string())
     }
 
+    /// Given RemotePath "tenants/foo/timelines/bar/layerxyz", prefix it to a literal
+    /// key in the S3 bucket.
+    pub fn absolute_key(&self, key: &RemotePath) -> String {
+        let root = match self {
+            Self::Pageserver(root) => root,
+            Self::Safekeeper(root) => root,
+        };
+
+        let prefix = &root.prefix_in_bucket;
+        if prefix.ends_with('/') {
+            format!("{prefix}{key}")
+        } else {
+            format!("{prefix}/{key}")
+        }
+    }
+
     pub fn bucket_name(&self) -> &str {
         match self {
             Self::Pageserver(root) => &root.bucket_name,
@@ -192,6 +217,10 @@ impl RootTarget {
             Self::Safekeeper(root) => &root.delimiter,
         }
     }
+}
+
+pub fn remote_timeline_path_id(id: &TenantShardTimelineId) -> RemotePath {
+    remote_timeline_path(&id.tenant_shard_id, &id.timeline_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +243,14 @@ impl BucketConfig {
             prefix_in_bucket,
         })
     }
+}
+
+pub struct ControllerClientConfig {
+    /// URL to storage controller.  e.g. http://127.0.0.1:1234 when using `neon_local`
+    pub controller_api: Url,
+
+    /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
+    pub controller_jwt: String,
 }
 
 pub struct ConsoleConfig {
@@ -267,12 +304,19 @@ pub fn init_logging(file_name: &str) -> Option<WorkerGuard> {
     }
 }
 
-pub async fn init_s3_client(bucket_region: Region) -> Client {
+async fn init_s3_client(bucket_region: Region) -> Client {
     let config = aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
         .region(bucket_region)
         .load()
         .await;
     Client::new(&config)
+}
+
+fn default_prefix_in_bucket(node_kind: NodeKind) -> &'static str {
+    match node_kind {
+        NodeKind::Pageserver => "pageserver/v1/",
+        NodeKind::Safekeeper => "wal/",
+    }
 }
 
 async fn init_remote(
@@ -282,23 +326,47 @@ async fn init_remote(
     let bucket_region = Region::new(bucket_config.region);
     let delimiter = "/".to_string();
     let s3_client = Arc::new(init_s3_client(bucket_region).await);
+    let default_prefix = default_prefix_in_bucket(node_kind).to_string();
 
     let s3_root = match node_kind {
         NodeKind::Pageserver => RootTarget::Pageserver(S3Target {
             bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config
-                .prefix_in_bucket
-                .unwrap_or("pageserver/v1".to_string()),
+            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
             delimiter,
         }),
         NodeKind::Safekeeper => RootTarget::Safekeeper(S3Target {
             bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or("wal/".to_string()),
+            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
             delimiter,
         }),
     };
 
     Ok((s3_client, s3_root))
+}
+
+async fn init_remote_generic(
+    bucket_config: BucketConfig,
+    node_kind: NodeKind,
+) -> anyhow::Result<GenericRemoteStorage> {
+    let endpoint = env::var("AWS_ENDPOINT_URL").ok();
+    let default_prefix = default_prefix_in_bucket(node_kind).to_string();
+    let prefix_in_bucket = Some(bucket_config.prefix_in_bucket.unwrap_or(default_prefix));
+    let storage = S3Config {
+        bucket_name: bucket_config.bucket,
+        bucket_region: bucket_config.region,
+        prefix_in_bucket,
+        endpoint,
+        concurrency_limit: DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
+            .try_into()
+            .unwrap(),
+        max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+        upload_storage_class: None,
+    };
+    let storage_config = RemoteStorageConfig {
+        storage: RemoteStorageKind::AwsS3(storage),
+        timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+    };
+    GenericRemoteStorage::from_config(&storage_config).await
 }
 
 async fn list_objects_with_retries(

@@ -443,7 +443,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
 }
 
 impl GenericRemoteStorage {
-    pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
+    pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         let timeout = storage_config.timeout;
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs { local_path: path } => {
@@ -458,7 +458,7 @@ impl GenericRemoteStorage {
                     std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "<none>".into());
                 info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
-                Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout)?))
+                Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout).await?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
                 let storage_account = azure_config
@@ -502,6 +502,16 @@ impl GenericRemoteStorage {
         match byte_range {
             Some((start, end)) => self.download_byte_range(from, start, end, cancel).await,
             None => self.download(from, cancel).await,
+        }
+    }
+
+    /// The name of the bucket/container/etc.
+    pub fn bucket_name(&self) -> Option<&str> {
+        match self {
+            Self::LocalFs(_s) => None,
+            Self::AwsS3(s) => Some(s.bucket_name()),
+            Self::AzureBlob(s) => Some(s.container_name()),
+            Self::Unreliable(_s) => None,
         }
     }
 }
