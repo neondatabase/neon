@@ -2914,19 +2914,26 @@ impl Tenant {
 
                 let target = timeline.gc_info.read().unwrap();
 
-                if target.retain_lsns != branchpoints {
-                    tracing::error!(
-                        "Bug: `retain_lsns` is set incorrectly.  Should be {:?}, but found {:?}",
-                        branchpoints,
-                        target.retain_lsns
-                    );
-                    debug_assert!(false);
-                    // Do not GC based on bad information!
-                    // (ab-use an existing GcError type rather than adding a new one, since this is a
-                    // "should never happen" check that will be removed soon).
-                    return Err(GcError::Remote(anyhow::anyhow!(
-                        "retain_lsns failed validation!"
-                    )));
+                // We require that retain_lsns contains everything in `branchpoints`, but not that
+                // they are exactly equal: timeline deletions can race with us, so retain_lsns
+                // may contain some extra stuff.  It is safe to have extra timelines in there, because it
+                // just means that we retain slightly more data than we otherwise might.
+                let have_branchpoints = target.retain_lsns.iter().copied().collect::<HashSet<_>>();
+                for b in &branchpoints {
+                    if !have_branchpoints.contains(b) {
+                        tracing::error!(
+                            "Bug: `retain_lsns` is set incorrectly.  Expected be {:?}, but found {:?}",
+                            branchpoints,
+                            target.retain_lsns
+                        );
+                        debug_assert!(false);
+                        // Do not GC based on bad information!
+                        // (ab-use an existing GcError type rather than adding a new one, since this is a
+                        // "should never happen" check that will be removed soon).
+                        return Err(GcError::Remote(anyhow::anyhow!(
+                            "retain_lsns failed validation!"
+                        )));
+                    }
                 }
             }
         }
