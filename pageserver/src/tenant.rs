@@ -7277,10 +7277,20 @@ mod tests {
                     )]),
                 ),
             ],
-            above_horizon: KeyLogAtLsn(vec![(
-                Lsn(0x70),
-                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
-            )]),
+            above_horizon: KeyLogAtLsn(vec![
+                (
+                    Lsn(0x70),
+                    Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+                ),
+                (
+                    Lsn(0x80),
+                    Value::WalRecord(NeonWalRecord::wal_append(";0x80")),
+                ),
+                (
+                    Lsn(0x90),
+                    Value::WalRecord(NeonWalRecord::wal_append(";0x90")),
+                ),
+            ]),
         };
         assert_eq!(res, expected_res);
         // TODO: more tests with mixed image + delta, adding with k-merge test cases; e2e compaction test
@@ -7436,70 +7446,45 @@ mod tests {
             Bytes::from_static(b"value 9@0x10"),
         ];
 
-        for idx in 0..10 {
-            assert_eq!(
-                tline
-                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
-                    .await
-                    .unwrap(),
-                &expected_result[idx]
-            );
-            assert_eq!(
-                tline
-                    .get(get_key(idx as u32), Lsn(0x30), &ctx)
-                    .await
-                    .unwrap(),
-                &expected_result_at_gc_horizon[idx]
-            );
-            assert_eq!(
-                tline
-                    .get(get_key(idx as u32), Lsn(0x20), &ctx)
-                    .await
-                    .unwrap(),
-                &expected_result_at_lsn_20[idx]
-            );
-            assert_eq!(
-                tline
-                    .get(get_key(idx as u32), Lsn(0x10), &ctx)
-                    .await
-                    .unwrap(),
-                &expected_result_at_lsn_10[idx]
-            );
-        }
+        let verify_result = || async {
+            for idx in 0..10 {
+                assert_eq!(
+                    tline
+                        .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                        .await
+                        .unwrap(),
+                    &expected_result[idx]
+                );
+                assert_eq!(
+                    tline
+                        .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                        .await
+                        .unwrap(),
+                    &expected_result_at_gc_horizon[idx]
+                );
+                assert_eq!(
+                    tline
+                        .get(get_key(idx as u32), Lsn(0x20), &ctx)
+                        .await
+                        .unwrap(),
+                    &expected_result_at_lsn_20[idx]
+                );
+                assert_eq!(
+                    tline
+                        .get(get_key(idx as u32), Lsn(0x10), &ctx)
+                        .await
+                        .unwrap(),
+                    &expected_result_at_lsn_10[idx]
+                );
+            }
+        };
+
+        verify_result().await;
 
         let cancel = CancellationToken::new();
         tline.compact_with_gc(&cancel, &ctx).await.unwrap();
 
-        for idx in 0..10 {
-            assert_eq!(
-                tline
-                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
-                    .await
-                    .unwrap(),
-                &expected_result[idx]
-            );
-            assert_eq!(
-                tline
-                    .get(get_key(idx as u32), Lsn(0x30), &ctx)
-                    .await
-                    .unwrap(),
-                &expected_result_at_gc_horizon[idx]
-            );
-            assert_eq!(
-                tline
-                    .get(get_key(idx as u32), Lsn(0x20), &ctx)
-                    .await
-                    .unwrap(),
-                &expected_result_at_lsn_20[idx]
-            );
-            assert_eq!(
-                tline
-                    .get(get_key(idx as u32), Lsn(0x10), &ctx)
-                    .await
-                    .unwrap(),
-                &expected_result_at_lsn_10[idx]
-            );
-        }
+        verify_result().await;
 
         Ok(())
     }

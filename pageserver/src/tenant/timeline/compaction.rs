@@ -1271,12 +1271,19 @@ impl Timeline {
                     selected_layers.push(guard.get_from_desc(&desc));
                 }
             }
+            retain_lsns_below_horizon.sort();
             (selected_layers, gc_cutoff, retain_lsns_below_horizon)
         };
         let lowest_retain_lsn = retain_lsns_below_horizon
             .first()
             .copied()
             .unwrap_or(gc_cutoff);
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                lowest_retain_lsn,
+                *retain_lsns_below_horizon.iter().min().unwrap()
+            );
+        }
         info!(
             "picked {} layers for compaction with gc_cutoff={} lowest_retain_lsn={}",
             layer_selection.len(),
