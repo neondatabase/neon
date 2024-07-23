@@ -7341,7 +7341,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_with_retain_lsns() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_simple_bottom_most_compaction_with_retain_lsns")?;
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_with_retain_lsns");
         let (tenant, ctx) = harness.load().await;
 
         fn get_key(id: u32) -> Key {
