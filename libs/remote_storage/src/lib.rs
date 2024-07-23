@@ -176,7 +176,8 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// `max_keys` controls the maximum number of keys that will be returned.  If this is None, this function
     /// will iteratively call listobjects until it runs out of keys.  Note that this is not safe to use on
     /// unlimted size buckets, as the full list of objects is allocated into a monolithic data structure.
-    /// `ListObjectsV2`: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
+    ///
+    /// [`ListObjectsV2`]: <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>
     async fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
