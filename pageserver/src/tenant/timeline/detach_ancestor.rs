@@ -54,6 +54,30 @@ pub(crate) enum Error {
     Failpoint(&'static str),
 }
 
+impl Error {
+    /// Try to catch cancellation from within the `anyhow::Error`, or wrap the anyhow as the given
+    /// variant or fancier `or_else`.
+    fn launder<F>(e: anyhow::Error, or_else: F) -> Error
+    where
+        F: Fn(anyhow::Error) -> Error,
+    {
+        use crate::tenant::upload_queue::NotInitialized;
+        use remote_storage::TimeoutOrCancel;
+
+        if e.is::<NotInitialized>()
+            || TimeoutOrCancel::caused_by_cancel(&e)
+            || e.downcast_ref::<remote_storage::DownloadError>()
+                .is_some_and(|e| e.is_cancelled())
+            || e.downcast_ref::<crate::tenant::storage_layer::layer::DownloadError>()
+                .is_some_and(|e| e.is_cancelled())
+        {
+            Error::ShuttingDown
+        } else {
+            or_else(e)
+        }
+    }
+}
+
 impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
         match value {
@@ -415,7 +439,7 @@ async fn start_new_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attem
             crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
         )
         .await
-        .map_err(|e| Error::launder(e, Error::Prepare))?;
+        .map_err(|e| Error::launder(e, Error::Unexpected))?;
 
     Ok(attempt)
 }
@@ -551,12 +575,11 @@ async fn upload_rewritten_layer(
         return Ok(None);
     };
 
-    // FIXME: better shuttingdown error
     target
         .remote_client
         .upload_layer_file(&copied, cancel)
         .await
-        .map_err(UploadRewritten)?;
+        .map_err(|e| Error::launder(e, UploadRewritten))?;
 
     Ok(Some(copied.into()))
 }
@@ -567,7 +590,7 @@ async fn copy_lsn_prefix(
     target_timeline: &Arc<Timeline>,
     ctx: &RequestContext,
 ) -> Result<Option<ResidentLayer>, Error> {
-    use Error::{CopyDeltaPrefix, RewrittenDeltaDownloadFailed, ShuttingDown};
+    use Error::{self, CopyDeltaPrefix, RewrittenDeltaDownloadFailed, ShuttingDown};
 
     if target_timeline.cancel.is_cancelled() {
         return Err(ShuttingDown);
@@ -589,8 +612,7 @@ async fn copy_lsn_prefix(
     let resident = layer
         .download_and_keep_resident()
         .await
-        // likely shutdown
-        .map_err(RewrittenDeltaDownloadFailed)?;
+        .map_err(|e| Error::launder(e, RewrittenDeltaDownloadFailed))?;
 
     let records = resident
         .copy_delta_prefix(&mut writer, end_lsn, ctx)
@@ -646,13 +668,12 @@ async fn remote_copy(
         metadata,
     );
 
-    // FIXME: better shuttingdown error
     adoptee
         .remote_client
         .copy_timeline_layer(adopted, &owned, cancel)
         .await
         .map(move |()| owned)
-        .map_err(CopyFailed)
+        .map_err(|e| Error::launder(e, CopyFailed))
 }
 
 pub(crate) enum DetachingAndReparenting {
