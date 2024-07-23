@@ -99,7 +99,7 @@ RUN mkdir -p /data/.neon/ && \
        "pg_distrib_dir='/usr/local/'\n" \
        "listen_pg_addr='0.0.0.0:6400'\n" \
        "listen_http_addr='0.0.0.0:9898'\n" \
-  > /data/.neon/pageserver.toml \
+  > /data/.neon/pageserver.toml && \
   chown -R neon:neon /data/.neon
 
 # When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
@@ -112,5 +112,5 @@ USER neon
 EXPOSE 6400
 EXPOSE 9898
 
-CMD chown -R neon:neon /data/.neon && /usr/local/bin/pageserver -D /data/.neon
+CMD /usr/local/bin/pageserver -D /data/.neon
 
