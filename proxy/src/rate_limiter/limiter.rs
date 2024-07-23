@@ -61,7 +61,7 @@ impl GlobalRateLimiter {
 // Purposefully ignore user name and database name as clients can reconnect
 // with different names, so we'll end up sending some http requests to
 // the control plane.
-pub type EndpointRateLimiter = BucketRateLimiter<EndpointIdInt, StdRng, RandomState>;
+pub type WakeComputeRateLimiter = BucketRateLimiter<EndpointIdInt, StdRng, RandomState>;
 
 pub struct BucketRateLimiter<Key, Rand = StdRng, Hasher = RandomState> {
     map: DashMap<Key, Vec<RateBucket>, Hasher>,
@@ -103,7 +103,7 @@ pub struct RateBucketInfo {
 
 impl std::fmt::Display for RateBucketInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let rps = (self.max_rpi as u64) * 1000 / self.interval.as_millis() as u64;
+        let rps = self.rps().floor() as u64;
         write!(f, "{rps}@{}", humantime::format_duration(self.interval))
     }
 }
@@ -139,6 +139,10 @@ impl RateBucketInfo {
         Self::new(300, Duration::from_secs(60)),
         Self::new(200, Duration::from_secs(600)),
     ];
+
+    pub fn rps(&self) -> f64 {
+        (self.max_rpi as f64) / self.interval.as_secs_f64()
+    }
 
     pub fn validate(info: &mut [Self]) -> anyhow::Result<()> {
         info.sort_unstable_by_key(|info| info.interval);
@@ -245,7 +249,7 @@ mod tests {
     use rustc_hash::FxHasher;
     use tokio::time;
 
-    use super::{BucketRateLimiter, EndpointRateLimiter};
+    use super::BucketRateLimiter;
     use crate::{intern::EndpointIdInt, rate_limiter::RateBucketInfo, EndpointId};
 
     #[test]
@@ -293,7 +297,7 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         RateBucketInfo::validate(&mut rates).unwrap();
-        let limiter = EndpointRateLimiter::new(rates);
+        let limiter = BucketRateLimiter::new(rates);
 
         let endpoint = EndpointId::from("ep-my-endpoint-1234");
         let endpoint = EndpointIdInt::from(endpoint);
