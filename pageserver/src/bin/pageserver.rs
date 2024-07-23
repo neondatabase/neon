@@ -2,17 +2,18 @@
 
 //! Main entry point for the Page Server executable.
 
+use std::env;
 use std::env::{var, VarError};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, ops::ControlFlow, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::config::PageserverIdentity;
 use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
@@ -29,7 +30,7 @@ use tracing::*;
 
 use metrics::set_build_info_metric;
 use pageserver::{
-    config::{defaults::*, PageServerConf},
+    config::PageServerConf,
     context::{DownloadBehavior, RequestContext},
     deletion_queue::DeletionQueue,
     http, page_cache, page_service, task_mgr,
@@ -88,18 +89,13 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Error opening workdir '{workdir}'"))?;
 
     let cfg_file_path = workdir.join("pageserver.toml");
+    let identity_file_path = workdir.join("identity.toml");
 
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir)
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
-    let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
-        ControlFlow::Continue(conf) => conf,
-        ControlFlow::Break(()) => {
-            info!("Pageserver config init successful");
-            return Ok(());
-        }
-    };
+    let conf = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
 
     // Initialize logging.
     //
@@ -154,70 +150,55 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn initialize_config(
+    identity_file_path: &Utf8Path,
     cfg_file_path: &Utf8Path,
-    arg_matches: clap::ArgMatches,
     workdir: &Utf8Path,
-) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
-    let init = arg_matches.get_flag("init");
-
-    let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
+) -> anyhow::Result<&'static PageServerConf> {
+    // The deployment orchestrator writes out an indentity file containing the node id
+    // for all pageservers. This file is the source of truth for the node id. In order
+    // to allow for rolling back pageserver releases, the node id is also included in
+    // the pageserver config that the deployment orchestrator writes to disk for the pageserver.
+    // A rolled back version of the pageserver will get the node id from the pageserver.toml
+    // config file.
+    let identity = match std::fs::File::open(identity_file_path) {
         Ok(mut f) => {
-            if init {
-                anyhow::bail!("config file already exists: {cfg_file_path}");
+            let md = f.metadata().context("stat config file")?;
+            if !md.is_file() {
+                anyhow::bail!("Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ...");
             }
+
+            let mut s = String::new();
+            f.read_to_string(&mut s).context("read identity file")?;
+            toml_edit::de::from_str::<PageserverIdentity>(&s)?
+        }
+        Err(e) => {
+            anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
+        }
+    };
+
+    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
+        Ok(mut f) => {
             let md = f.metadata().context("stat config file")?;
             if md.is_file() {
                 let mut s = String::new();
                 f.read_to_string(&mut s).context("read config file")?;
-                Some(s.parse().context("parse config file toml")?)
+                s.parse().context("parse config file toml")?
             } else {
                 anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
         }
     };
 
-    let mut effective_config = file_contents.unwrap_or_else(|| {
-        DEFAULT_CONFIG_FILE
-            .parse()
-            .expect("unit tests ensure this works")
-    });
-
-    // Patch with overrides from the command line
-    if let Some(values) = arg_matches.get_many::<String>("config-override") {
-        for option_line in values {
-            let doc = toml_edit::Document::from_str(option_line).with_context(|| {
-                format!("Option '{option_line}' could not be parsed as a toml document")
-            })?;
-
-            for (key, item) in doc.iter() {
-                effective_config.insert(key, item.clone());
-            }
-        }
-    }
-
-    debug!("Resulting toml: {effective_config}");
+    debug!("Using pageserver toml: {config}");
 
     // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
+    let conf = PageServerConf::parse_and_validate(identity.id, &config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
-    if init {
-        info!("Writing pageserver config to '{cfg_file_path}'");
-
-        std::fs::write(cfg_file_path, effective_config.to_string())
-            .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
-        info!("Config successfully written to '{cfg_file_path}'")
-    }
-
-    Ok(if init {
-        ControlFlow::Break(())
-    } else {
-        ControlFlow::Continue(Box::leak(Box::new(conf)))
-    })
+    Ok(Box::leak(Box::new(conf)))
 }
 
 struct WaitForPhaseResult<F: std::future::Future + Unpin> {
@@ -711,26 +692,10 @@ fn cli() -> Command {
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(version())
         .arg(
-            Arg::new("init")
-                .long("init")
-                .action(ArgAction::SetTrue)
-                .help("Initialize pageserver with all given config overrides"),
-        )
-        .arg(
             Arg::new("workdir")
                 .short('D')
                 .long("workdir")
                 .help("Working directory for the pageserver"),
-        )
-        // See `settings.md` for more details on the extra configuration patameters pageserver can process
-        .arg(
-            Arg::new("config-override")
-                .long("config-override")
-                .short('c')
-                .num_args(1)
-                .action(ArgAction::Append)
-                .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
-                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
         .arg(
             Arg::new("enabled-features")
