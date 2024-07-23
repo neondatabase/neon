@@ -204,9 +204,6 @@ postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git",
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 
-## Other git libraries
-heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
-
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
