@@ -474,13 +474,8 @@ pub(crate) enum LayerVisibilityHint {
     /// Calculating layer visibilty requires I/O, so until this has happened layers are loaded
     /// in this state.  Note that newly written layers may be called Visible immediately, this uninitialized
     /// state is for when existing layers are constructed while loading a timeline.
+    #[default]
     Uninitialized,
-}
-
-impl Default for LayerVisibilityHint {
-    fn default() -> Self {
-        Self::Uninitialized
-    }
 }
 
 #[derive(Debug)]
