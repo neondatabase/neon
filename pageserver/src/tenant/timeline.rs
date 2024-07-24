@@ -4775,6 +4775,18 @@ impl From<CollectKeySpaceError> for CompactionError {
     }
 }
 
+impl From<super::upload_queue::NotInitialized> for CompactionError {
+    fn from(value: super::upload_queue::NotInitialized) -> Self {
+        match value {
+            super::upload_queue::NotInitialized::Uninitialized
+            | super::upload_queue::NotInitialized::Stopped => {
+                CompactionError::Other(anyhow::anyhow!(value))
+            }
+            super::upload_queue::NotInitialized::ShuttingDown => CompactionError::ShuttingDown,
+        }
+    }
+}
+
 #[serde_as]
 #[derive(serde::Serialize)]
 struct RecordedDuration(#[serde_as(as = "serde_with::DurationMicroSeconds")] Duration);
@@ -4920,7 +4932,7 @@ impl Timeline {
     fn upload_new_image_layers(
         self: &Arc<Self>,
         new_images: impl IntoIterator<Item = ResidentLayer>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), super::upload_queue::NotInitialized> {
         for layer in new_images {
             self.remote_client.schedule_layer_file_upload(layer)?;
         }

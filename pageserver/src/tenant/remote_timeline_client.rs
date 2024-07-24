@@ -630,7 +630,7 @@ impl RemoteTimelineClient {
     ///
     /// Like schedule_index_upload_for_metadata_update(), this merely adds
     /// the upload to the upload queue and returns quickly.
-    pub fn schedule_index_upload_for_file_changes(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub fn schedule_index_upload_for_file_changes(self: &Arc<Self>) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -645,7 +645,7 @@ impl RemoteTimelineClient {
     fn schedule_index_upload(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
         // fix up the duplicated field
         upload_queue.dirty.disk_consistent_lsn = disk_consistent_lsn;
@@ -653,7 +653,7 @@ impl RemoteTimelineClient {
         // make sure it serializes before doing it in perform_upload_task so that it doesn't
         // look like a retryable error
         let void = std::io::sink();
-        serde_json::to_writer(void, &upload_queue.dirty).context("serialize index_part.json")?;
+        serde_json::to_writer(void, &upload_queue.dirty).expect("serialize index_part.json");
 
         let index_part = &upload_queue.dirty;
 
