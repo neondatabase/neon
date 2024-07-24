@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
-use azure_core::RetryOptions;
+use azure_core::{Continuable, RetryOptions};
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
@@ -306,23 +306,43 @@ impl RemoteStorage for AzureBlobStorage {
                 builder = builder.max_results(MaxResults::new(limit));
             }
 
-            let response = builder.into_stream();
-            let response = response.into_stream().map_err(to_download_error);
-            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
-            let response = response.map(|res| match res {
-                Ok(res) => res,
-                Err(_elapsed) => Err(DownloadError::Timeout),
-            });
+            let mut next_marker = None;
 
-            let mut response = std::pin::pin!(response);
+            'outer: loop {
+                let mut builder = builder.clone();
+                if let Some(marker) = next_marker.clone() {
+                    builder = builder.marker(marker);
+                }
+                let response = builder.into_stream();
+                let response = response.into_stream().map_err(to_download_error);
+                let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+                let response = response.map(|res| match res {
+                    Ok(res) => res,
+                    Err(_elapsed) => Err(DownloadError::Timeout),
+                });
 
-            let mut max_keys = max_keys.map(|mk| mk.get());
-            'outer: while let Some(entry) = tokio::select! {
-                op = response.next() => Ok(op),
-                _ = cancel.cancelled() => Err(DownloadError::Cancelled),
-            }? {
+                let mut response = std::pin::pin!(response);
+
+                let mut max_keys = max_keys.map(|mk| mk.get());
+                let next_item = tokio::select! {
+                    op = response.next() => Ok(op),
+                    _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                }?;
+                let Some(entry) = next_item else {
+                    // The list is complete, so yield it.
+                    break;
+                };
+
                 let mut res = Listing::default();
-                let entry = entry?;
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        // The error is potentially retryable, yield it and rewind the loop.
+                        yield Err(e);
+                        continue;
+                    }
+                };
+                next_marker = entry.continuation();
                 let prefix_iter = entry
                     .blobs
                     .prefixes()
