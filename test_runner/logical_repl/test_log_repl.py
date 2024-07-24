@@ -69,7 +69,6 @@ def test_clickhouse(test_output_dir: Path, remote_pg: RemotePostgres):
     cmd = ["docker", "compose", "up", "-d", "--quiet-pull", "--no-color", "--wait"]
     subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
     try:
-        conn = None
         for _ in range(5):
             try:
                 conn = psycopg2.connect(remote_pg.connstr())
