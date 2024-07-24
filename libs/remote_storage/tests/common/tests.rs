@@ -29,10 +29,10 @@ use super::{
 /// * with no prefix, it lists everything after its `${random_prefix_part}/` — that should be `${base_prefix_str}` value only
 /// * with `${base_prefix_str}/` prefix, it lists every `sub_prefix_${i}`
 ///
-/// With the real S3 enabled and `#[cfg(test)]` Rust configuration used, the S3 client test adds a `max-keys` param to limit the response keys.
-/// This way, we are able to test the pagination implicitly, by ensuring all results are returned from the remote storage and avoid uploading too many blobs to S3,
-/// since current default AWS S3 pagination limit is 1000.
-/// (see https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax)
+/// In the `MaybeEnabledStorageWithTestBlobs::setup`, we set the `max_keys_in_list_response` param to limit the keys in a single response.
+/// This way, we are able to test the pagination, by ensuring all results are returned from the remote storage and avoid uploading too many blobs to S3,
+/// as the current default AWS S3 pagination limit is 1000.
+/// (see <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>).
 ///
 /// Lastly, the test attempts to clean up and remove all uploaded S3 files.
 /// If any errors appear during the clean up, they get logged, but the test is not failed or stopped until clean up is finished.
