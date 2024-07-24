@@ -206,6 +206,13 @@ def test_scrubber_physical_gc_ancestors(
     workload.init()
     workload.write_rows(100)
 
+    # Make sure we're fully uploaded: if we wrote future image layers which will be dropped later, these would show up
+    # later as ancestor layers to GC, and disrupt the test.
+    workload.stop()
+    env.get_tenant_pageserver(tenant_id).http_client().timeline_checkpoint(
+        tenant_id, timeline_id, compact=False, wait_until_uploaded=True
+    )
+
     new_shard_count = 4
     assert shard_count is None or new_shard_count > shard_count
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
