@@ -21,6 +21,10 @@ from fixtures.utils import human_bytes, wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
 
+# access times in the pageserver are stored at a very low resolution: to generate meaningfully different
+# values, tests must inject sleeps
+ATIME_RESOLUTION = 2
+
 
 @pytest.mark.parametrize("config_level_override", [None, 400])
 def test_min_resident_size_override_handling(
@@ -546,6 +550,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
     (tenant_id, timeline_id) = warm
 
     # make picked tenant more recently used than the other one
+    time.sleep(ATIME_RESOLUTION)
     env.warm_up_tenant(tenant_id)
 
     # Build up enough pressure to require evictions from both tenants,
@@ -621,6 +626,10 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     timelines = []
     for scale in [1, 1, 1, 4]:
         timelines.append((pgbench_init_tenant(layer_size, scale, env, pg_bin), scale))
+
+        # Eviction times are stored at a low resolution.  We must ensure that the time between
+        # tenants is long enough for the pageserver to distinguish them.
+        time.sleep(ATIME_RESOLUTION)
 
     env.neon_cli.safekeeper_stop()
 

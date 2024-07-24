@@ -52,7 +52,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::{ImageCompressionAlgorithm, LayerAccessKind};
+use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -265,7 +265,7 @@ impl DeltaLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
+        let inner = self.load(ctx).await?;
 
         inner.dump(ctx).await
     }
@@ -298,12 +298,8 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    async fn load(
-        &self,
-        access_kind: LayerAccessKind,
-        ctx: &RequestContext,
-    ) -> Result<&Arc<DeltaLayerInner>> {
-        self.access_stats.record_access(access_kind, ctx);
+    async fn load(&self, ctx: &RequestContext) -> Result<&Arc<DeltaLayerInner>> {
+        self.access_stats.record_access(ctx);
         // Quick exit if already loaded
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
@@ -356,7 +352,7 @@ impl DeltaLayer {
                 summary.lsn_range,
                 metadata.len(),
             ),
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
+            access_stats: Default::default(),
             inner: OnceCell::new(),
         })
     }
