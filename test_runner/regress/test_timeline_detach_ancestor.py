@@ -1119,9 +1119,6 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     assert isinstance(remote_storage, S3Storage)
 
     not_reparented: Set[TimelineId] = set()
-
-    remote_copies = None
-
     # tracked offset in the pageserver log which is at least at the most recent activation
     offset = None
 
@@ -1137,15 +1134,6 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
             http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
         ), "first round should had detached 'detached'"
 
-        metric = remote_storage_copy_requests()
-        if remote_copies is None:
-            assert metric is not None
-            remote_copies = metric
-        else:
-            assert (
-                remote_copies == metric
-            ), "there should not have been any more copies after first round"
-
         reparented, not_reparented = reparenting_progress(timelines)
         assert reparented == nth_round + 1
 
@@ -1156,19 +1144,35 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
                 offset,
             )
             _, offset = env.pageserver.assert_log_contains(
-                ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
+                ".*: attach finished, activating", offset
             )
             _, offset = env.pageserver.assert_log_contains(
                 ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
                 offset,
             )
+            metric = remote_storage_copy_requests()
+            assert metric != 0
+            # make sure the gc blocking is persistent
+            env.pageserver.restart()
+            env.pageserver.quiesce_tenants()
+            time.sleep(2)
+            _, offset = env.pageserver.assert_log_contains(
+                ".*: attach finished, activating", offset
+            )
+            _, offset = env.pageserver.assert_log_contains(
+                ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+                offset,
+            )
+            # restore failpoint for the next reparented
+            http.configure_failpoints(("timeline-detach-ancestor::allow_one_reparented", "return"))
         else:
             _, offset = env.pageserver.assert_log_contains(
-                ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
+                ".*: attach finished, activating", offset
             )
+            metric = remote_storage_copy_requests()
+            assert metric == 0, "copies happen in the first round"
 
     assert offset is not None
-    assert remote_copies is not None
     assert len(not_reparented) == 1
 
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "return"))
@@ -1179,9 +1183,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     ) as exc:
         http.detach_ancestor(env.initial_tenant, detached)
     assert exc.value.status_code == 500
-    _, offset = env.pageserver.assert_log_contains(
-        ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
-    )
+    _, offset = env.pageserver.assert_log_contains(".*: attach finished, activating", offset)
 
     # delete the previous ancestor to take a different path to completion. all
     # other tests take the "detach? reparent complete", but this only hits
@@ -1200,17 +1202,14 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
 
     time.sleep(2)
     assert (
-        env.pageserver.log_contains(
-            ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
-        )
-        is None
+        env.pageserver.log_contains(".*: attach finished, activating", offset) is None
     ), "there should be no restart with the final detach_ancestor as it only completed"
 
     # gc is unblocked
     env.pageserver.assert_log_contains(".* gc_loop.*: 5 timelines need GC", offset)
 
     metric = remote_storage_copy_requests()
-    assert remote_copies == metric
+    assert metric == 0
 
 
 # TODO:
