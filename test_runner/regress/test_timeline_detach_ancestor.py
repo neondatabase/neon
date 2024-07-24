@@ -1049,15 +1049,13 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
             victim_http.configure_failpoints((pausepoint, "off"))
 
 
-@pytest.mark.parametrize("action", ["return"])
 def test_retried_detach_ancestor_after_failed_reparenting(
-    neon_env_builder: NeonEnvBuilder, action: str
+    neon_env_builder: NeonEnvBuilder
 ):
     """
     Using a failpoint, force the completion step of timeline ancestor detach to fail after reparenting a single timeline.
     Retrying should try reparenting until all reparentings are done, all the time blocking gc.
     """
-    assert action in ["return"]
 
     # to get the remote storage metrics
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
@@ -1094,12 +1092,12 @@ def test_retried_detach_ancestor_after_failed_reparenting(
 
         flush_ep_to_pageserver(env, ep, env.initial_tenant, env.initial_timeline)
 
-    # detach E
+    # detach "E" which has most reparentable timelines under it
     detached = timelines.pop()
 
     http = http.without_status_retrying()
 
-    http.configure_failpoints(("timeline-detach-ancestor::allow_one_reparented", action))
+    http.configure_failpoints(("timeline-detach-ancestor::allow_one_reparented", "return"))
 
     remote_storage = env.pageserver_remote_storage
     assert isinstance(remote_storage, S3Storage)
@@ -1113,13 +1111,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(
 
     for nth_round in range(len(timelines) - 1):
         log.info(f"{nth_round} round")
-        if action == "return":
-            # raises fails if no exception was raised
-            with pytest.raises(PageserverApiException, match=".*failed to reparent all candidate timelines, please retry") as exc:
-                http.detach_ancestor(env.initial_tenant, detached)
-            assert exc.value.status_code == 500
-        else:
-            raise RuntimeError("not implemented {action}")
+        with pytest.raises(PageserverApiException, match=".*failed to reparent all candidate timelines, please retry") as exc:
+            http.detach_ancestor(env.initial_tenant, detached)
+        assert exc.value.status_code == 500
 
         assert (
             http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
@@ -1143,11 +1137,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(
             detail = http.timeline_detail(env.initial_tenant, timeline)
             ancestor = TimelineId(detail["ancestor_timeline_id"])
             if ancestor == detached:
-                log.info(f"{timeline} has been reparented")
                 reparented += 1
             else:
                 not_reparented.add(timeline)
-                log.info(f"{timeline} still has original parent")
 
         assert reparented == nth_round + 1
 
