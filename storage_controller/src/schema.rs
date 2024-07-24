@@ -1,6 +1,16 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    metadata_health (tenant_id, shard_number, shard_count) {
+        tenant_id -> Varchar,
+        shard_number -> Int4,
+        shard_count -> Int4,
+        healthy -> Bool,
+        last_scrubbed_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     nodes (node_id) {
         node_id -> Int8,
         scheduling_policy -> Varchar,
@@ -26,4 +36,8 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(nodes, tenant_shards,);
+diesel::allow_tables_to_appear_in_same_query!(
+    metadata_health,
+    nodes,
+    tenant_shards,
+);

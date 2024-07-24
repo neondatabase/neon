@@ -90,6 +90,10 @@ pub(crate) enum DatabaseOperation {
     UpdateTenantShard,
     DeleteTenant,
     UpdateTenantConfig,
+    UpdateMetadataHealth,
+    ListMetadataHealth,
+    ListMetadataHealthUnhealthy,
+    ListMetadataHealthOutdated,
 }
 
 #[must_use]
@@ -325,12 +329,18 @@ impl Persistence {
     /// Ordering: call this _after_ deleting the tenant on pageservers, but _before_ dropping state for
     /// the tenant from memory on this server.
     pub(crate) async fn delete_tenant(&self, del_tenant_id: TenantId) -> DatabaseResult<()> {
-        use crate::schema::tenant_shards::dsl::*;
+        use crate::schema::metadata_health;
+        use crate::schema::tenant_shards;
         self.with_measured_conn(
             DatabaseOperation::DeleteTenant,
             move |conn| -> DatabaseResult<()> {
-                diesel::delete(tenant_shards)
-                    .filter(tenant_id.eq(del_tenant_id.to_string()))
+                diesel::delete(tenant_shards::table)
+                    .filter(tenant_shards::tenant_id.eq(del_tenant_id.to_string()))
+                    .execute(conn)?;
+
+                // Delete metadata health status as well
+                diesel::delete(metadata_health::table)
+                    .filter(metadata_health::tenant_id.eq(del_tenant_id.to_string()))
                     .execute(conn)?;
 
                 Ok(())
@@ -675,6 +685,88 @@ impl Persistence {
         )
         .await
     }
+
+    /// Stores all the latest metadata health updates durably. Updates existing entry on conflict.
+    ///
+    /// **Correctness:** `metadata_health_updates` should all belong the tenant shards managed by the storage controller.
+    #[allow(dead_code)]
+    pub(crate) async fn update_metadata_health_records(
+        &self,
+        metadata_health_records: Vec<MetadataHealthPersistence>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::metadata_health::dsl::*;
+
+        self.with_measured_conn(
+            DatabaseOperation::UpdateMetadataHealth,
+            move |conn| -> DatabaseResult<_> {
+                for update in &metadata_health_records {
+                    diesel::insert_into(metadata_health)
+                        .values(update)
+                        .on_conflict((tenant_id, shard_number, shard_count))
+                        .do_update()
+                        .set((
+                            healthy.eq(update.healthy),
+                            last_scrubbed_at.eq(update.last_scrubbed_at),
+                        ))
+                        .execute(conn)?;
+                }
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Lists all the metadata health records.
+    #[allow(dead_code)]
+    pub(crate) async fn list_metadata_health_records(
+        &self,
+    ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
+        self.with_measured_conn(
+            DatabaseOperation::ListMetadataHealth,
+            move |conn| -> DatabaseResult<_> {
+                Ok(
+                    crate::schema::metadata_health::table
+                        .load::<MetadataHealthPersistence>(conn)?,
+                )
+            },
+        )
+        .await
+    }
+
+    /// Lists all the metadata health records that is unhealthy.
+    #[allow(dead_code)]
+    pub(crate) async fn list_unhealthy_metadata_health_records(
+        &self,
+    ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
+        use crate::schema::metadata_health::dsl::*;
+        self.with_measured_conn(
+            DatabaseOperation::ListMetadataHealthUnhealthy,
+            move |conn| -> DatabaseResult<_> {
+                Ok(crate::schema::metadata_health::table
+                    .filter(healthy.eq(false))
+                    .load::<MetadataHealthPersistence>(conn)?)
+            },
+        )
+        .await
+    }
+
+    /// Lists all the metadata health records that have not been updated since an `earlier` time.
+    #[allow(dead_code)]
+    pub(crate) async fn list_metadata_health_records_not_scrubbed_since(
+        &self,
+        earlier: chrono::DateTime<chrono::Utc>,
+    ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
+        use crate::schema::metadata_health::dsl::*;
+        self.with_measured_conn(
+            DatabaseOperation::ListMetadataHealthOutdated,
+            move |conn| -> DatabaseResult<_> {
+                Ok(crate::schema::metadata_health::table
+                    .filter(last_scrubbed_at.lt(earlier))
+                    .load::<MetadataHealthPersistence>(conn)?)
+            },
+        )
+        .await
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
@@ -743,4 +835,30 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_http_port: i32,
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
+}
+
+/// Tenant metadata health status that are stored durably.
+#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[diesel(table_name = crate::schema::metadata_health)]
+pub(crate) struct MetadataHealthPersistence {
+    #[serde(default)]
+    pub(crate) tenant_id: String,
+    #[serde(default)]
+    pub(crate) shard_number: i32,
+    #[serde(default)]
+    pub(crate) shard_count: i32,
+
+    pub(crate) healthy: bool,
+    pub(crate) last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl MetadataHealthPersistence {
+    #[allow(dead_code)]
+    pub(crate) fn get_tenant_shard_id(&self) -> Result<TenantShardId, hex::FromHexError> {
+        Ok(TenantShardId {
+            tenant_id: TenantId::from_str(self.tenant_id.as_str())?,
+            shard_number: ShardNumber(self.shard_number as u8),
+            shard_count: ShardCount::new(self.shard_count as u8),
+        })
+    }
 }

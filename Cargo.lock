@@ -1687,6 +1687,7 @@ checksum = "62d6dcd069e7b5fe49a302411f759d4cf1cf2c27fe798ef46fb8baefc053dd2b"
 dependencies = [
  "bitflags 2.4.1",
  "byteorder",
+ "chrono",
  "diesel_derives",
  "itoa",
  "pq-sys",
@@ -5762,6 +5763,7 @@ dependencies = [
  "aws-config",
  "bytes",
  "camino",
+ "chrono",
  "clap",
  "control_plane",
  "diesel",

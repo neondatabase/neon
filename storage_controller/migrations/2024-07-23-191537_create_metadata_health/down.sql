@@ -1,0 +1,1 @@
+DROP TABLE metadata_health;
