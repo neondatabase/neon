@@ -19,7 +19,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
-from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import assert_pageserver_backups_equal, wait_until
 from requests import ReadTimeout
 
@@ -1124,9 +1124,6 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     http = http.without_status_retrying()
 
     http.configure_failpoints(("timeline-detach-ancestor::allow_one_reparented", "return"))
-
-    remote_storage = env.pageserver_remote_storage
-    assert isinstance(remote_storage, S3Storage)
 
     not_reparented: Set[TimelineId] = set()
     # tracked offset in the pageserver log which is at least at the most recent activation
