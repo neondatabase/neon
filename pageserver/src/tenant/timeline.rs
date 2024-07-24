@@ -4787,15 +4787,6 @@ impl From<super::upload_queue::NotInitialized> for CompactionError {
     }
 }
 
-impl From<super::storage_layer::layer::LoadError> for CompactionError {
-    fn from(value: super::storage_layer::layer::LoadError) -> Self {
-        match value {
-            super::storage_layer::layer::LoadError::Io(e)
-            | super::storage_layer::layer::LoadError::Corruption(e) => CompactionError::Other(e),
-        }
-    }
-}
-
 impl CompactionError {
     /// We cannot do compaction because we could not download a layer that is input to the compaction.
     pub(crate) fn input_layer_download_failed(
