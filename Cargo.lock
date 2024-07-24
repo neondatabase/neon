@@ -4648,6 +4648,7 @@ name = "remote_storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "aws-config",
  "aws-credential-types",
