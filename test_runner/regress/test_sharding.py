@@ -200,8 +200,8 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         # disable background compaction and GC. We invoke it manually when we want it to happen.
         "gc_period": "0s",
         "compaction_period": "0s",
-        # create image layers eagerly, so that GC can remove some layers
-        "image_creation_threshold": 1,
+        # Disable automatic creation of image layers, as we will create them explicitly when we want them
+        "image_creation_threshold": 9999,
         "image_layer_creation_check_threshold": 0,
     }
 
