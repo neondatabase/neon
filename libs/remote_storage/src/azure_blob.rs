@@ -368,6 +368,11 @@ impl RemoteStorage for AzureBlobStorage {
                     }
                 }
                 yield Ok(res);
+
+                // We are done here
+                if next_marker.is_none() {
+                    break;
+                }
             }
         }
     }
