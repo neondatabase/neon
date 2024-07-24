@@ -27,6 +27,7 @@ use utils::id::TimelineId;
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
+use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc, ValueReconstructState};
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
@@ -239,7 +240,7 @@ impl Timeline {
         self: &Arc<Self>,
         rewrite_max: usize,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CompactionError> {
         let mut drop_layers = Vec::new();
         let mut layers_to_rewrite: Vec<Layer> = Vec::new();
 
@@ -360,7 +361,8 @@ impl Timeline {
                 layer.layer_desc().image_layer_lsn(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(CompactionError::Other)?;
 
             // Safety of layer rewrites:
             // - We are writing to a different local file path than we are reading from, so the old Layer
@@ -375,14 +377,20 @@ impl Timeline {
             // - We do not run concurrently with other kinds of compaction, so the only layer map writes we race with are:
             //    - GC, which at worst witnesses us "undelete" a layer that they just deleted.
             //    - ingestion, which only inserts layers, therefore cannot collide with us.
-            let resident = layer.download_and_keep_resident().await?;
+            let resident = layer
+                .download_and_keep_resident()
+                .await
+                .map_err(CompactionError::input_layer_download_failed)?;
 
             let keys_written = resident
                 .filter(&self.shard_identity, &mut image_layer_writer, ctx)
                 .await?;
 
             if keys_written > 0 {
-                let new_layer = image_layer_writer.finish(self, ctx).await?;
+                let new_layer = image_layer_writer
+                    .finish(self, ctx)
+                    .await
+                    .map_err(CompactionError::Other)?;
                 tracing::info!(layer=%new_layer, "Rewrote layer, {} -> {} bytes",
                     layer.metadata().file_size,
                     new_layer.metadata().file_size);
@@ -410,7 +418,13 @@ impl Timeline {
         // necessary for correctness, but it simplifies testing, and avoids proceeding with another
         // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
         // load.
-        self.remote_client.wait_completion().await?;
+        match self.remote_client.wait_completion().await {
+            Ok(()) => (),
+            Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
+            Err(WaitCompletionError::UploadQueueShutDownOrStopped) => {
+                return Err(CompactionError::ShuttingDown)
+            }
+        }
 
         fail::fail_point!("compact-shard-ancestors-persistent");
 
@@ -468,7 +482,7 @@ impl Timeline {
         stats.read_lock_held_spawn_blocking_startup_micros =
             stats.read_lock_acquisition_micros.till_now(); // set by caller
         let layers = guard.layer_map();
-        let level0_deltas = layers.get_level0_deltas()?;
+        let level0_deltas = layers.get_level0_deltas();
         let mut level0_deltas = level0_deltas
             .into_iter()
             .map(|x| guard.get_from_desc(&x))
@@ -596,7 +610,7 @@ impl Timeline {
         let mut all_keys = Vec::new();
 
         for l in deltas_to_compact.iter() {
-            all_keys.extend(l.load_keys(ctx).await?);
+            all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
         }
 
         // FIXME: should spawn_blocking the rest of this function
@@ -718,7 +732,7 @@ impl Timeline {
             key, lsn, ref val, ..
         } in all_values_iter
         {
-            let value = val.load(ctx).await?;
+            let value = val.load(ctx).await.map_err(CompactionError::Other)?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -775,7 +789,8 @@ impl Timeline {
                                 .take()
                                 .unwrap()
                                 .finish(prev_key.unwrap().next(), self, ctx)
-                                .await?,
+                                .await
+                                .map_err(CompactionError::Other)?,
                         );
                         writer = None;
 
@@ -813,7 +828,8 @@ impl Timeline {
                             },
                             ctx,
                         )
-                        .await?,
+                        .await
+                        .map_err(CompactionError::Other)?,
                     );
                 }
 
@@ -821,7 +837,8 @@ impl Timeline {
                     .as_mut()
                     .unwrap()
                     .put_value(key, lsn, value, ctx)
-                    .await?;
+                    .await
+                    .map_err(CompactionError::Other)?;
             } else {
                 debug!(
                     "Dropping key {} during compaction (it belongs on shard {:?})",
@@ -837,7 +854,12 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next(), self, ctx).await?);
+            new_layers.push(
+                writer
+                    .finish(prev_key.unwrap().next(), self, ctx)
+                    .await
+                    .map_err(CompactionError::Other)?,
+            );
         }
 
         // Sync layers
@@ -1019,7 +1041,7 @@ impl Timeline {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
 
-            let l0_deltas = layers.get_level0_deltas()?;
+            let l0_deltas = layers.get_level0_deltas();
             drop(guard);
 
             // As an optimization, if we find that there are too few L0 layers,
@@ -1049,7 +1071,9 @@ impl Timeline {
             fanout,
             ctx,
         )
-        .await?;
+        .await
+        // TODO: compact_tiered needs to return CompactionError
+        .map_err(CompactionError::Other)?;
 
         adaptor.flush_updates().await?;
         Ok(())
@@ -1516,7 +1540,7 @@ impl TimelineAdaptor {
         }
     }
 
-    pub async fn flush_updates(&mut self) -> anyhow::Result<()> {
+    pub async fn flush_updates(&mut self) -> Result<(), CompactionError> {
         let layers_to_delete = {
             let guard = self.timeline.layers.read().await;
             self.layers_to_delete

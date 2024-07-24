@@ -287,6 +287,14 @@ pub enum PersistIndexPartWithDeletedFlagError {
     Other(#[from] anyhow::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum WaitCompletionError {
+    #[error(transparent)]
+    NotInitialized(NotInitialized),
+    #[error("wait_completion aborted because upload queue was stopped")]
+    UploadQueueShutDownOrStopped,
+}
+
 /// A client for accessing a timeline's data in remote storage.
 ///
 /// This takes care of managing the number of connections, and balancing them
@@ -699,7 +707,9 @@ impl RemoteTimelineClient {
             self.schedule_barrier0(upload_queue)
         };
 
-        Self::wait_completion0(receiver).await
+        Self::wait_completion0(receiver)
+            .await
+            .context("wait completion")
     }
 
     /// Schedules uploading a new version of `index_part.json` with the given layers added,
@@ -732,7 +742,9 @@ impl RemoteTimelineClient {
             barrier
         };
 
-        Self::wait_completion0(barrier).await
+        Self::wait_completion0(barrier)
+            .await
+            .context("wait completion")
     }
 
     /// Launch an upload operation in the background; the file is added to be included in next
@@ -969,10 +981,12 @@ impl RemoteTimelineClient {
     }
 
     /// Wait for all previously scheduled uploads/deletions to complete
-    pub(crate) async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub(crate) async fn wait_completion(self: &Arc<Self>) -> Result<(), WaitCompletionError> {
         let receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
-            let upload_queue = guard.initialized_mut()?;
+            let upload_queue = guard
+                .initialized_mut()
+                .map_err(WaitCompletionError::NotInitialized)?;
             self.schedule_barrier0(upload_queue)
         };
 
@@ -981,9 +995,9 @@ impl RemoteTimelineClient {
 
     async fn wait_completion0(
         mut receiver: tokio::sync::watch::Receiver<()>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WaitCompletionError> {
         if receiver.changed().await.is_err() {
-            anyhow::bail!("wait_completion aborted because upload queue was stopped");
+            return Err(WaitCompletionError::UploadQueueShutDownOrStopped);
         }
 
         Ok(())

@@ -4760,7 +4760,7 @@ pub(crate) enum CompactionError {
     ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<CollectKeySpaceError> for CompactionError {
@@ -4783,6 +4783,15 @@ impl From<super::upload_queue::NotInitialized> for CompactionError {
                 CompactionError::Other(anyhow::anyhow!(value))
             }
             super::upload_queue::NotInitialized::ShuttingDown => CompactionError::ShuttingDown,
+        }
+    }
+}
+
+impl From<super::storage_layer::layer::LoadError> for CompactionError {
+    fn from(value: super::storage_layer::layer::LoadError) -> Self {
+        match value {
+            super::storage_layer::layer::LoadError::Io(e)
+            | super::storage_layer::layer::LoadError::Corruption(e) => CompactionError::Other(e),
         }
     }
 }
@@ -4880,7 +4889,7 @@ impl Timeline {
         new_deltas: &[ResidentLayer],
         new_images: &[ResidentLayer],
         layers_to_remove: &[Layer],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CompactionError> {
         let mut guard = self.layers.write().await;
 
         let mut duplicated_layers = HashSet::new();
@@ -4898,7 +4907,7 @@ impl Timeline {
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
             } else if LayerMap::is_l0(&l.layer_desc().key_range) {
-                bail!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
+                return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
                 insert_layers.push(l.clone());
             }

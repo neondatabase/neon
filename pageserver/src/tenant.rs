@@ -4525,7 +4525,7 @@ mod tests {
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .into_iter()
             .map(|desc| layer_map.get_from_desc(&desc))
             .collect::<Vec<_>>();
@@ -5744,7 +5744,7 @@ mod tests {
             .read()
             .await
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .len();
 
         tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
@@ -5754,7 +5754,7 @@ mod tests {
             .read()
             .await
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .len();
 
         assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
