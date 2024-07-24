@@ -168,7 +168,7 @@ jobs:
         path: /tmp/neon/
         prefix: latest
 
-    - name: Run benchmark
+    - name: Run Logical Replication benchmarks
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
@@ -180,8 +180,10 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
         NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
+        BENCHMARK_PROJECT_ID_PUB: ${{ vars.BENCHMARK_PROJECT_ID_PUB }}
+        BENCHMARK_PROJECT_ID_SUB: ${{ vars.BENCHMARK_PROJECT_ID_SUB }}
 
-    - name: Run benchmark
+    - name: Run Physical Replication benchmarks
       uses: ./.github/actions/run-python-test-set
       with:
         build_type: ${{ env.BUILD_TYPE }}
