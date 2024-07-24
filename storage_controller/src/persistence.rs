@@ -757,14 +757,56 @@ impl Persistence {
     pub(crate) async fn list_outdated_metadata_health_records(
         &self,
         earlier: chrono::DateTime<chrono::Utc>,
-    ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
-        use crate::schema::metadata_health::dsl::*;
+    ) -> DatabaseResult<
+        Vec<(
+            String,
+            i32,
+            i32,
+            Option<bool>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        )>,
+    > {
+        use crate::schema::metadata_health;
+        use crate::schema::tenant_shards;
+
         self.with_measured_conn(
             DatabaseOperation::ListMetadataHealthOutdated,
             move |conn| -> DatabaseResult<_> {
-                Ok(crate::schema::metadata_health::table
-                    .filter(last_scrubbed_at.lt(earlier))
-                    .load::<MetadataHealthPersistence>(conn)?)
+                let query = tenant_shards::table
+                    .left_join(
+                        metadata_health::table.on(tenant_shards::tenant_id
+                            .eq(metadata_health::tenant_id)
+                            .and(tenant_shards::shard_number.eq(metadata_health::shard_number))
+                            .and(tenant_shards::shard_count.eq(metadata_health::shard_count))),
+                    )
+                    .select((
+                        tenant_shards::tenant_id,
+                        tenant_shards::shard_number,
+                        tenant_shards::shard_count,
+                        metadata_health::healthy.nullable(),
+                        metadata_health::last_scrubbed_at.nullable(),
+                    ))
+                    .filter(
+                        metadata_health::last_scrubbed_at
+                            .nullable()
+                            // tenant shards that do not have an update
+                            .is_null()
+                            // tenant shards that has outdated metadata health records
+                            .or(metadata_health::last_scrubbed_at.lt(earlier)),
+                    );
+
+                let sql = diesel::debug_query::<diesel::pg::Pg, _>(&query);
+                tracing::info!("Executed query: {}", sql);
+
+                let res = query.load::<(
+                    String,
+                    i32,
+                    i32,
+                    Option<bool>,
+                    Option<chrono::DateTime<chrono::Utc>>,
+                )>(conn)?;
+
+                Ok(res)
             },
         )
         .await

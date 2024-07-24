@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::time::Duration;
 
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
@@ -282,11 +283,18 @@ pub enum PlacementPolicy {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateResponse {}
 
-#[derive(Serialize, Deserialize, Debug)]
+/// Metadata health record posted from scrubber.
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MetadataHealthRecord {
     pub tenant_shard_id: TenantShardId,
-    pub healthy: bool,
-    pub last_scrubed_since: chrono::DateTime<chrono::Utc>,
+    pub healthy: Option<bool>,
+    pub last_scrubbed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl MetadataHealthRecord {
+    pub fn has_been_scanned(&self) -> bool {
+        self.last_scrubbed_at.is_some()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -298,11 +306,6 @@ pub struct MetadataHealthUpdateRequest {
 pub struct MetadataHealthUpdateResponse {}
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct MetadataHealthListResponse {
-    pub health_records: Vec<MetadataHealthRecord>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 
 pub struct MetadataHealthListUnhealthyResponse {
     pub unhealthy_tenant_shards: Vec<TenantShardId>,
@@ -311,7 +314,8 @@ pub struct MetadataHealthListUnhealthyResponse {
 #[derive(Serialize, Deserialize, Debug)]
 
 pub struct MetadataHealthListOutdatedRequest {
-    pub not_scrubbed_since: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "humantime_serde")]
+    pub not_scrubbed_for: Duration,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

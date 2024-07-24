@@ -5971,27 +5971,76 @@ impl Service {
         Ok(())
     }
 
+    /// Updates scrubber metadata health check results.
     pub(crate) async fn metadata_health_update(
         &self,
-        metadata_health_records: Vec<MetadataHealthRecord>,
+        health_records: Vec<MetadataHealthRecord>,
     ) -> Result<(), ApiError> {
-        todo!()
+        let persistence_records = {
+            let locked = self.inner.read().unwrap();
+            health_records
+                .into_iter()
+                // Retain only health records associated with tenant shards managed by storage controller.
+                .filter(|r| locked.tenants.contains_key(&r.tenant_shard_id))
+                .map(|r| r.try_into())
+                .try_collect()
+                .map_err(ApiError::InternalServerError)?
+        };
+
+        self.persistence
+            .update_metadata_health_records(persistence_records)
+            .await?;
+        Ok(())
     }
 
-    pub(crate) async fn metadata_health_list(&self) -> Result<Vec<MetadataHealthRecord>, ApiError> {
-        todo!()
-    }
-
+    /// Lists the tenant shards that has unhealthy metadata status.
     pub(crate) async fn metadata_health_list_unhealthy(
         &self,
     ) -> Result<Vec<TenantShardId>, ApiError> {
-        todo!()
+        let result = self
+            .persistence
+            .list_unhealthy_metadata_health_records()
+            .await?
+            .iter()
+            .map(|p| p.get_tenant_shard_id().unwrap())
+            .collect();
+
+        Ok(result)
     }
 
+    /// Lists the tenant shards that have not been scrubbed for some duration.
     pub(crate) async fn metadata_health_list_outdated(
         &self,
-        not_scrubbed_since: chrono::DateTime<chrono::Utc>,
+        not_scrubbed_for: Duration,
     ) -> Result<Vec<MetadataHealthRecord>, ApiError> {
-        todo!()
+        let earlier = chrono::offset::Utc::now() - not_scrubbed_for;
+        let result = self
+            .persistence
+            .list_outdated_metadata_health_records(earlier)
+            .await?
+            .into_iter()
+            .map(
+                |(tenant_id, shard_number, shard_count, healthy, last_scrubbed_at)| {
+                    if let Ok(tenant_id) = TenantId::from_str(tenant_id.as_str()) {
+                        let tenant_shard_id = TenantShardId {
+                            tenant_id,
+                            shard_number: ShardNumber(shard_number as u8),
+                            shard_count: ShardCount::new(shard_count as u8),
+                        };
+
+                        Ok(MetadataHealthRecord {
+                            tenant_shard_id,
+                            healthy,
+                            last_scrubbed_at,
+                        })
+                    } else {
+                        anyhow::bail!("Error parsing tenant id from db")
+                    }
+                },
+            )
+            .try_collect()
+            .map_err(ApiError::InternalServerError)?;
+
+        Ok(result)
     }
 }

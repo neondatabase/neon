@@ -12,8 +12,8 @@ use hyper::{StatusCode, Uri};
 use metrics::{BuildInfo, NeonMetrics};
 use pageserver_api::controller_api::{
     MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
-    MetadataHealthListResponse, MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest,
-    MetadataHealthUpdateResponse, TenantCreateRequest,
+    MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
+    TenantCreateRequest,
 };
 use pageserver_api::models::{
     TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
@@ -578,18 +578,6 @@ async fn handle_metadata_health_update(mut req: Request<Body>) -> Result<Respons
     json_response(StatusCode::OK, MetadataHealthUpdateResponse {})
 }
 
-async fn handle_metadata_health_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
-
-    let state = get_state(&req);
-    let health_records = state.service.metadata_health_list().await?;
-
-    json_response(
-        StatusCode::OK,
-        MetadataHealthListResponse { health_records },
-    )
-}
-
 async fn handle_metadata_health_list_unhealthy(
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
@@ -615,7 +603,7 @@ async fn handle_metadata_health_list_outdated(
     let state = get_state(&req);
     let health_records = state
         .service
-        .metadata_health_list_outdated(list_outdated_req.not_scrubbed_since)
+        .metadata_health_list_outdated(list_outdated_req.not_scrubbed_for)
         .await?;
 
     json_response(
@@ -1008,13 +996,6 @@ pub fn make_router(
                 r,
                 handle_metadata_health_update,
                 RequestName("control_v1_metadata_health_update"),
-            )
-        })
-        .get("/control/v1/metadata_health", |r| {
-            named_request_span(
-                r,
-                handle_metadata_health_list,
-                RequestName("control_v1_metadata_health_list"),
             )
         })
         .get("/control/v1/metadata_health/unhealthy", |r| {
