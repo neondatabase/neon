@@ -1050,8 +1050,18 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
 
 def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: NeonEnvBuilder):
     """
-    Using a failpoint, force the completion step of timeline ancestor detach to fail after reparenting a single timeline.
-    Retrying should try reparenting until all reparentings are done, all the time blocking gc.
+    Using a failpoint, force the completion step of timeline ancestor detach to
+    fail after reparenting a single timeline.
+
+    Retrying should try reparenting until all reparentings are done, all the
+    time blocking gc even across restarts (first round).
+
+    A completion failpoint is used to inhibit completion on second to last
+    round.
+
+    On last round, the completion uses a path where no reparentings can happen
+    because original ancestor is deleted, and there is a completion to unblock
+    gc without restart.
     """
 
     # to get the remote storage metrics
