@@ -376,7 +376,7 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
 
     # Tenant creation requests which arrive out of order will generate complaints about
-    # generation nubmers out of order.
+    # generation numbers out of order.
     env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
 
     # Timeline::flush_and_shutdown cannot tell if it is hitting a failure because of

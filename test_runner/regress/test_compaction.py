@@ -265,7 +265,7 @@ def test_uploads_and_deletions(
     if compaction_algorithm == CompactionAlgorithm.TIERED:
         found_allowed_error = any(env.pageserver.log_contains(e) for e in allowed_errors)
         if not found_allowed_error:
-            raise Exception("None of the allowed_errors occured in the log")
+            raise Exception("None of the allowed_errors occurred in the log")
 
 
 def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder):

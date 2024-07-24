@@ -130,7 +130,7 @@ def test_remote_extensions(
 #
 # 3.Test that extension is downloaded after endpoint restart,
 # when the library is used in the query.
-# Run the test with mutliple simultaneous connections to an endpoint.
+# Run the test with multiple simultaneous connections to an endpoint.
 # to ensure that the extension is downloaded only once.
 #
 # 4. Test that private extensions are only downloaded when they are present in the spec.
