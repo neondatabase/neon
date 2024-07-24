@@ -187,35 +187,6 @@ def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Ite
     yield versioned_dir
 
 
-@pytest.fixture(scope="function")
-def clickhouse_instance(test_output_dir):
-    """
-    Startup and teardown a docker container with Clickhouse
-    """
-    log.info("Starting ClickHouse container")
-    cmd = [
-        "docker",
-        "run",
-        "-d",
-        "-p",
-        "9000:9000",
-        "-p",
-        "8123:8123",
-        "-h",
-        "clickhouse",
-        "--name",
-        "clickhouse",
-        "clickhouse/clickhouse-server",
-    ]
-    log.debug("start cmd: %s", " ".join(cmd))
-    subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
-    yield
-    log.info("Stopping ClickHouse container")
-    cmd = ["docker", "rm", "-f", "clickhouse"]
-    log.debug("stop cmd: %s", cmd)
-    subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
-
-
 @pytest.fixture(scope="session")
 def neon_api_key() -> str:
     api_key = os.getenv("NEON_API_KEY")

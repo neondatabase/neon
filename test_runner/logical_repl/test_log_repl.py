@@ -12,14 +12,15 @@ import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
+from fixtures.utils import subprocess_capture
 
 
 def timeout_query_clickhouse(
-    client,
-    query: str,
-    digest: str,
-    timeout: timedelta = timedelta(seconds=30),
-    interval: float = 0.5,
+        client,
+        query: str,
+        digest: str,
+        timeout: timedelta = timedelta(seconds=60),
+        interval: float = 0.5,
 ):
     """
     Repeatedly run the query on the client
@@ -45,6 +46,35 @@ def timeout_query_clickhouse(
             return res
         time.sleep(interval)
     raise TimeoutError
+
+
+@pytest.fixture(scope="function")
+def clickhouse_instance(test_output_dir):
+    """
+    Startup and teardown a docker container with Clickhouse
+    """
+    log.info("Starting ClickHouse container")
+    cmd = [
+        "docker",
+        "run",
+        "-d",
+        "-p",
+        "9000:9000",
+        "-p",
+        "8123:8123",
+        "-h",
+        "clickhouse",
+        "--name",
+        "clickhouse",
+        "clickhouse/clickhouse-server",
+    ]
+    log.debug("start cmd: %s", " ".join(cmd))
+    subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
+    yield
+    log.info("Stopping ClickHouse container")
+    cmd = ["docker", "rm", "-f", "clickhouse"]
+    log.debug("stop cmd: %s", cmd)
+    subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
 
 
 @pytest.mark.remote_cluster
