@@ -16,7 +16,7 @@ pub type EndpointRateLimiter = LeakyBucketRateLimiter<EndpointIdInt>;
 
 pub struct LeakyBucketRateLimiter<Key> {
     map: DashMap<Key, LeakyBucketState, RandomState>,
-    info: LeakyBucketConfig,
+    config: LeakyBucketConfig,
     access_count: AtomicUsize,
 }
 
@@ -26,10 +26,10 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
         max: 1500.0,
     };
 
-    pub fn new_with_shards(info: LeakyBucketConfig, shards: usize) -> Self {
+    pub fn new_with_shards(config: LeakyBucketConfig, shards: usize) -> Self {
         Self {
             map: DashMap::with_hasher_and_shard_amount(RandomState::new(), shards),
-            info,
+            config,
             access_count: AtomicUsize::new(0),
         }
     }
@@ -47,7 +47,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
             filled: 0.0,
         });
 
-        entry.check(&self.info, now, n as f64)
+        entry.check(&self.config, now, n as f64)
     }
 
     fn do_gc(&self, now: Instant) {
@@ -59,7 +59,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
         let shard = thread_rng().gen_range(0..n);
         self.map.shards()[shard]
             .write()
-            .retain(|_, value| !value.get_mut().update(&self.info, now));
+            .retain(|_, value| !value.get_mut().update(&self.config, now));
     }
 }
 

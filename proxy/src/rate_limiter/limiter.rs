@@ -249,7 +249,7 @@ mod tests {
     use rustc_hash::FxHasher;
     use tokio::time;
 
-    use super::BucketRateLimiter;
+    use super::{BucketRateLimiter, WakeComputeRateLimiter};
     use crate::{intern::EndpointIdInt, rate_limiter::RateBucketInfo, EndpointId};
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
             .map(|s| s.parse().unwrap())
             .collect();
         RateBucketInfo::validate(&mut rates).unwrap();
-        let limiter = BucketRateLimiter::new(rates);
+        let limiter = WakeComputeRateLimiter::new(rates);
 
         let endpoint = EndpointId::from("ep-my-endpoint-1234");
         let endpoint = EndpointIdInt::from(endpoint);
