@@ -783,6 +783,10 @@ jobs:
 
   neon-image:
     needs: [ neon-image-arch, tag ]
+    permissions: # This is for Azure login to work.
+      id-token: write
+      contents: read
+    environment: dev
     runs-on: ubuntu-22.04
 
     steps:
@@ -807,6 +811,18 @@ jobs:
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{ needs.tag.outputs.build-tag }} \
                                                                                 neondatabase/neon:${{ needs.tag.outputs.build-tag }}
+
+      - name: Azure login
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Copy docker images to ACR-dev
+        run: |
+          docker buildx imagetools create -t neoneastus2.azurecr.io/neondatabase/neon:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}
 
   compute-node-image-arch:
     needs: [ check-permissions, build-build-tools-image, tag ]
@@ -913,6 +929,10 @@ jobs:
           rm -rf .docker-custom
 
   compute-node-image:
+    permissions: # This is for Azure login to work.
+      id-token: write
+      contents: read
+    environment: dev
     needs: [ compute-node-image-arch, tag ]
     runs-on: ubuntu-22.04
 
@@ -961,6 +981,24 @@ jobs:
         if: matrix.version == 'v16'
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
+                                                                                neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
+
+      - name: Azure login
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Push multi-arch compute-node-${{ matrix.version }} image to ACR
+        run: |
+          docker buildx imagetools create -t neoneastus2.azurecr.io/neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
+                                                                                neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+
+      - name: Push multi-arch compute-tools image to ACR
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t neoneastus2.azurecr.io/neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
                                                                                 neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
 
   vm-compute-node-image:
@@ -1085,6 +1123,10 @@ jobs:
           rm -rf .docker-custom
 
   promote-images:
+    permissions: # This is for Azure login to work.
+      id-token: write
+      contents: read
+    environment: dev
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
@@ -1109,6 +1151,20 @@ jobs:
           for version in ${VERSIONS}; do
             docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
+          done
+
+      - name: Azure login
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Copy docker images to ACR-dev
+        run: |
+          for version in ${VERSIONS}; do
+          docker buildx imagetools create -t neoneastus2.azurecr.io/neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
+                                             neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
           done
 
       - name: Add latest tag to images
