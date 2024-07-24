@@ -426,7 +426,7 @@ impl Layer {
     }
 
     /// Downloads if necessary and creates a guard, which will keep this layer from being evicted.
-    pub(crate) async fn download_and_keep_resident(&self) -> anyhow::Result<ResidentLayer> {
+    pub(crate) async fn download_and_keep_resident(&self) -> Result<ResidentLayer, DownloadError> {
         let downloaded = self.0.get_or_maybe_download(true, None).await?;
 
         Ok(ResidentLayer {

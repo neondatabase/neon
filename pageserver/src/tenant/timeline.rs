@@ -4787,6 +4787,26 @@ impl From<super::upload_queue::NotInitialized> for CompactionError {
     }
 }
 
+impl CompactionError {
+    /// We cannot do compaction because we could not download a layer that is input to the compaction.
+    pub(crate) fn input_layer_download_failed(
+        e: super::storage_layer::layer::DownloadError,
+    ) -> Self {
+        match e {
+            super::storage_layer::layer::DownloadError::TimelineShutdown |
+            /* TODO DownloadCancelled correct here? */
+            super::storage_layer::layer::DownloadError::DownloadCancelled  => CompactionError::ShuttingDown,
+            super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads |
+            super::storage_layer::layer::DownloadError::DownloadRequired |
+            super::storage_layer::layer::DownloadError::NotFile(_) |
+            super::storage_layer::layer::DownloadError::DownloadFailed |
+            super::storage_layer::layer::DownloadError::PreStatFailed(_)=>CompactionError::Other(anyhow::anyhow!(e)),
+            #[cfg(test)]
+            super::storage_layer::layer::DownloadError::Failpoint(_) =>  CompactionError::Other(anyhow::anyhow!(e)),
+        }
+    }
+}
+
 #[serde_as]
 #[derive(serde::Serialize)]
 struct RecordedDuration(#[serde_as(as = "serde_with::DurationMicroSeconds")] Duration);
@@ -4910,7 +4930,7 @@ impl Timeline {
         self: &Arc<Self>,
         mut replace_layers: Vec<(Layer, ResidentLayer)>,
         mut drop_layers: Vec<Layer>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), super::upload_queue::NotInitialized> {
         let mut guard = self.layers.write().await;
 
         // Trim our lists in case our caller (compaction) raced with someone else (GC) removing layers: we want

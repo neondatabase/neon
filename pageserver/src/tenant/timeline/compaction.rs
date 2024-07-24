@@ -521,14 +521,23 @@ impl Timeline {
         ) as u64
             * std::cmp::max(self.get_checkpoint_distance(), DEFAULT_CHECKPOINT_DISTANCE);
 
-        deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
+        deltas_to_compact.push(
+            first_level0_delta
+                .download_and_keep_resident()
+                .await
+                .map_err(CompactionError::input_layer_download_failed)?,
+        );
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
 
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            deltas_to_compact.push(l.download_and_keep_resident().await?);
+            deltas_to_compact.push(
+                l.download_and_keep_resident()
+                    .await
+                    .map_err(CompactionError::input_layer_download_failed)?,
+            );
             deltas_to_compact_bytes += l.metadata().file_size;
             prev_lsn_end = lsn_range.end;
 
