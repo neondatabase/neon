@@ -537,7 +537,7 @@ impl RemoteStorage for S3Bucket {
                     Err(e) => {
                         // The error is potentially retryable, so we must rewind the loop after yielding.
                         yield Err(e);
-                        break 'outer;
+                        continue 'outer;
                     },
                 };
 
