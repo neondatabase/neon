@@ -6,7 +6,13 @@ on:
       - main
       - release
       - release-proxy
+    paths-ignore:
+      - "**.md"
+      - "docs/**.md"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**.md"
 
 defaults:
   run:
@@ -19,7 +25,7 @@ concurrency:
 
 env:
   RUST_BACKTRACE: 1
-  COPT: '-Werror'
+  COPT: "-Werror"
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
@@ -33,7 +39,7 @@ jobs:
       github-event-name: ${{ github.event_name }}
 
   cancel-previous-e2e-tests:
-    needs: [ check-permissions ]
+    needs: [check-permissions]
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
 
@@ -47,8 +53,8 @@ jobs:
               --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
 
   tag:
-    needs: [ check-permissions ]
-    runs-on: [ self-hosted, gen3, small ]
+    needs: [check-permissions]
+    runs-on: [self-hosted, gen3, small]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -78,19 +84,19 @@ jobs:
         id: build-tag
 
   check-build-tools-image:
-    needs: [ check-permissions ]
+    needs: [check-permissions]
     uses: ./.github/workflows/check-build-tools-image.yml
 
   build-build-tools-image:
-    needs: [ check-build-tools-image ]
+    needs: [check-build-tools-image]
     uses: ./.github/workflows/build-build-tools-image.yml
     with:
       image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
     secrets: inherit
 
   check-codestyle-python:
-    needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    needs: [check-permissions, build-build-tools-image]
+    runs-on: [self-hosted, gen3, small]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -124,8 +130,8 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    needs: [check-permissions, build-build-tools-image]
+    runs-on: [self-hosted, gen3, small]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -140,16 +146,16 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-#      Disabled for now
-#      - name: Restore cargo deps cache
-#        id: cache_cargo
-#        uses: actions/cache@v4
-#        with:
-#          path: |
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      #      Disabled for now
+      #      - name: Restore cargo deps cache
+      #        id: cache_cargo
+      #        uses: actions/cache@v4
+      #        with:
+      #          path: |
+      #            !~/.cargo/registry/src
+      #            ~/.cargo/git/
+      #            target/
+      #          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
@@ -174,7 +180,7 @@ jobs:
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items
         env:
-            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
+          RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
@@ -194,8 +200,8 @@ jobs:
         run: cargo deny check --hide-inclusion-graph
 
   build-neon:
-    needs: [ check-permissions, tag, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    needs: [check-permissions, tag, build-build-tools-image]
+    runs-on: [self-hosted, gen3, large]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -209,7 +215,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [debug, release]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -280,19 +286,19 @@ jobs:
       # uncompressed versions of the crates in ~/.cargo/registry/cache
       # directory, and it's faster to let 'cargo' to rebuild it from the
       # compressed crates.
-#      - name: Cache cargo deps
-#        id: cache_cargo
-#        uses: actions/cache@v4
-#        with:
-#          path: |
-#            ~/.cargo/registry/
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
-#          key: |
-#            v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-#            v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+      #      - name: Cache cargo deps
+      #        id: cache_cargo
+      #        uses: actions/cache@v4
+      #        with:
+      #          path: |
+      #            ~/.cargo/registry/
+      #            !~/.cargo/registry/src
+      #            ~/.cargo/git/
+      #            target/
+      #          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+      #          key: |
+      #            v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      #            v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -427,8 +433,8 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    needs: [ check-permissions, build-neon, build-build-tools-image, tag ]
-    runs-on: [ self-hosted, gen3, large ]
+    needs: [check-permissions, build-neon, build-build-tools-image, tag]
+    runs-on: [self-hosted, gen3, large]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -439,8 +445,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
-        pg_version: [ v14, v15, v16 ]
+        build_type: [debug, release]
+        pg_version: [v14, v15, v16]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -480,8 +486,8 @@ jobs:
   get-benchmarks-durations:
     outputs:
       json: ${{ steps.get-benchmark-durations.outputs.json }}
-    needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    needs: [check-permissions, build-build-tools-image]
+    runs-on: [self-hosted, gen3, small]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -513,8 +519,14 @@ jobs:
           echo "json=$(jq --compact-output '.' /tmp/benchmark_durations.json)" >> $GITHUB_OUTPUT
 
   benchmarks:
-    needs: [ check-permissions, build-neon, build-build-tools-image, get-benchmarks-durations ]
-    runs-on: [ self-hosted, gen3, small ]
+    needs:
+      [
+        check-permissions,
+        build-neon,
+        build-build-tools-image,
+        get-benchmarks-durations,
+      ]
+    runs-on: [self-hosted, gen3, small]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -527,8 +539,8 @@ jobs:
       fail-fast: false
       matrix:
         # the amount of groups (N) should be reflected in `extra_params: --splits N ...`
-        pytest_split_group: [ 1, 2, 3, 4, 5 ]
-        build_type: [ release ]
+        pytest_split_group: [1, 2, 3, 4, 5]
+        build_type: [release]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -554,28 +566,35 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   report-benchmarks-failures:
-    needs: [ benchmarks, create-test-report ]
+    needs: [benchmarks, create-test-report]
     if: github.ref_name == 'main' && failure() && needs.benchmarks.result == 'failure'
     runs-on: ubuntu-22.04
 
     steps:
-    - uses: slackapi/slack-github-action@v1
-      with:
-        channel-id: C060CNA47S9 # on-call-staging-storage-stream
-        slack-message: |
-          Benchmarks failed on main: ${{ github.event.head_commit.url }}
+      - uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: C060CNA47S9 # on-call-staging-storage-stream
+          slack-message: |
+            Benchmarks failed on main: ${{ github.event.head_commit.url }}
 
-          Allure report: ${{ needs.create-test-report.outputs.report-url }}
-      env:
-        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+            Allure report: ${{ needs.create-test-report.outputs.report-url }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   create-test-report:
-    needs: [ check-permissions, regress-tests, coverage-report, benchmarks, build-build-tools-image ]
+    needs:
+      [
+        check-permissions,
+        regress-tests,
+        coverage-report,
+        benchmarks,
+        build-build-tools-image,
+      ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [self-hosted, gen3, small]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -621,8 +640,8 @@ jobs:
             })
 
   coverage-report:
-    needs: [ check-permissions, regress-tests, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    needs: [check-permissions, regress-tests, build-build-tools-image]
+    runs-on: [self-hosted, gen3, small]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -632,10 +651,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug ]
+        build_type: [debug]
     outputs:
-        coverage-html: ${{ steps.upload-coverage-report-new.outputs.report-url }}
-        coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
+      coverage-html: ${{ steps.upload-coverage-report-new.outputs.report-url }}
+      coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -726,15 +745,15 @@ jobs:
 
   trigger-e2e-tests:
     if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' }}
-    needs: [ check-permissions, promote-images, tag ]
+    needs: [check-permissions, promote-images, tag]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
 
   neon-image-arch:
-    needs: [ check-permissions, build-build-tools-image, tag ]
+    needs: [check-permissions, build-build-tools-image, tag]
     strategy:
       matrix:
-        arch: [ x64, arm64 ]
+        arch: [x64, arm64]
 
     runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
@@ -783,7 +802,7 @@ jobs:
           rm -rf .docker-custom
 
   neon-image:
-    needs: [ neon-image-arch, tag ]
+    needs: [neon-image-arch, tag]
     runs-on: ubuntu-22.04
 
     steps:
@@ -810,12 +829,12 @@ jobs:
                                                                                 neondatabase/neon:${{ needs.tag.outputs.build-tag }}
 
   compute-node-image-arch:
-    needs: [ check-permissions, build-build-tools-image, tag ]
+    needs: [check-permissions, build-build-tools-image, tag]
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
-        arch: [ x64, arm64 ]
+        version: [v14, v15, v16]
+        arch: [x64, arm64]
 
     runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
@@ -916,12 +935,12 @@ jobs:
           rm -rf .docker-custom
 
   compute-node-image:
-    needs: [ compute-node-image-arch, tag ]
+    needs: [compute-node-image-arch, tag]
     runs-on: ubuntu-22.04
 
     strategy:
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [v14, v15, v16]
 
     steps:
       - uses: docker/login-action@v3
@@ -967,12 +986,12 @@ jobs:
                                                                                 neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
 
   vm-compute-node-image:
-    needs: [ check-permissions, tag, compute-node-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    needs: [check-permissions, tag, compute-node-image]
+    runs-on: [self-hosted, gen3, large]
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [v14, v15, v16]
     env:
       VM_BUILDER_VERSION: v0.29.3
 
@@ -1022,11 +1041,11 @@ jobs:
           rm -rf .docker-custom
 
   test-images:
-    needs: [ check-permissions, tag, neon-image, compute-node-image ]
+    needs: [check-permissions, tag, neon-image, compute-node-image]
     strategy:
       fail-fast: false
       matrix:
-        arch: [ x64, arm64 ]
+        arch: [x64, arm64]
 
     runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
@@ -1088,7 +1107,7 @@ jobs:
           rm -rf .docker-custom
 
   promote-images:
-    needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
+    needs: [check-permissions, tag, test-images, vm-compute-node-image]
     runs-on: ubuntu-22.04
 
     env:
@@ -1152,7 +1171,7 @@ jobs:
           done
 
   trigger-custom-extensions-build-and-wait:
-    needs: [ check-permissions, tag ]
+    needs: [check-permissions, tag]
     runs-on: ubuntu-22.04
     steps:
       - name: Set PR's status to pending and request a remote CI test
@@ -1226,10 +1245,17 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, promote-images, tag, regress-tests, trigger-custom-extensions-build-and-wait ]
+    needs:
+      [
+        check-permissions,
+        promote-images,
+        tag,
+        regress-tests,
+        trigger-custom-extensions-build-and-wait,
+      ]
     if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [self-hosted, gen3, small]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
       - name: Fix git ownership
@@ -1327,10 +1353,10 @@ jobs:
             })
 
   promote-compatibility-data:
-    needs: [ check-permissions, promote-images, tag, regress-tests ]
+    needs: [check-permissions, promote-images, tag, regress-tests]
     if: github.ref_name == 'release'
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [self-hosted, gen3, small]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -1366,7 +1392,7 @@ jobs:
           done
 
   pin-build-tools-image:
-    needs: [ build-build-tools-image, promote-images, regress-tests ]
+    needs: [build-build-tools-image, promote-images, regress-tests]
     if: github.ref_name == 'main'
     uses: ./.github/workflows/pin-build-tools-image.yml
     with:
