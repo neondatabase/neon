@@ -740,7 +740,7 @@ impl RemoteTimelineClient {
     pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
         layer: ResidentLayer,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
