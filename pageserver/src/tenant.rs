@@ -7470,7 +7470,10 @@ mod tests {
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![Lsn(0x10), Lsn(0x20)],
+                retain_lsns: vec![
+                    (Lsn(0x10), tline.timeline_id),
+                    (Lsn(0x20), tline.timeline_id),
+                ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
                     space: Lsn(0x30),

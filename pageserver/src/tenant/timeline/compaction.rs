@@ -1254,7 +1254,7 @@ impl Timeline {
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = gc_info.cutoffs.select_min();
-            for lsn in &gc_info.retain_lsns {
+            for (lsn, _timeline_id) in &gc_info.retain_lsns {
                 if lsn < &gc_cutoff {
                     retain_lsns_below_horizon.push(*lsn);
                 }
