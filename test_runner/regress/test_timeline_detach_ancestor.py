@@ -1064,13 +1064,15 @@ def test_retried_detach_ancestor_after_failed_reparenting(
     env = neon_env_builder.init_start(
         initial_tenant_conf={
             "gc_period": "1s",
+            "lsn_lease_length": "0s",
         }
     )
 
     env.pageserver.allowed_errors.extend(
         [
             ".* reparenting failed: failpoint: timeline-detach-ancestor::allow_one_reparented",
-            ".* Error processing HTTP request: InternalServerError\\(timeline detach ancestor completion",
+            ".* Error processing HTTP request: InternalServerError\\(failed to reparent all candidate timelines, please retry",
+            ".* Error processing HTTP request: InternalServerError\\(failpoint: timeline-detach-ancestor::complete_before_uploading",
         ]
     )
 
@@ -1104,29 +1106,37 @@ def test_retried_detach_ancestor_after_failed_reparenting(
 
     not_reparented: Set[TimelineId] = set()
 
-    for round in range(len(timelines) - 1):
-        log.info(f"{round} round")
+    remote_copies = None
+
+    # tracked offset in the pageserver log which is at least at the most recent activation
+    offset = None
+
+    for nth_round in range(len(timelines) - 1):
+        log.info(f"{nth_round} round")
         if action == "return":
             # raises fails if no exception was raised
-            with pytest.raises(PageserverApiException) as exc:
+            with pytest.raises(PageserverApiException, match=".*failed to reparent all candidate timelines, please retry") as exc:
                 http.detach_ancestor(env.initial_tenant, detached)
-            assert exc.value.status_code in [
-                500,
-                503,
-            ], f"its retryable, should be 500 or 503? {exc.value}"
-            log.info(exc.value)
-            # FIXME: assert the message
+            assert exc.value.status_code == 500
         else:
             raise RuntimeError("not implemented {action}")
 
-        # now the tenant should be restarted, but because it has already detached in the remote storage, we dont expect any remote copies from attempt N+1
-        # FIXME: validate using remote storage metrics
+        assert (
+            http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
+        ), "first round should had detached 'detached'"
 
-        time.sleep(1)
+        metric = http.get_metric_value(
+            "remote_storage_s3_request_seconds_count",
+            {"request_type": "copy_object", "result": "ok"},
+        )
+        if remote_copies is None:
+            assert metric is not None
+            remote_copies = metric
+        else:
+            assert (
+                remote_copies == metric
+            ), "there should not have been any more copies after first round"
 
-        env.pageserver.quiesce_tenants()
-
-        assert http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
         reparented = 0
         not_reparented = set()
         for timeline in timelines:
@@ -1139,26 +1149,43 @@ def test_retried_detach_ancestor_after_failed_reparenting(
                 not_reparented.add(timeline)
                 log.info(f"{timeline} still has original parent")
 
-        assert reparented == round + 1
+        assert reparented == nth_round + 1
 
-        if round == 0:
-            time.sleep(1)
-            # find the error log line, find the gc paused log line after It
+        if nth_round == 0:
+            time.sleep(2)
+            _, offset = env.pageserver.assert_log_contains(
+                ".*INFO request\\{method=PUT path=/v1/tenant/[0-9a-f]{32}/timeline/[0-9a-f]{32}/detach_ancestor .*\\}: Handling request",
+                offset,
+            )
+            _, offset = env.pageserver.assert_log_contains(
+                ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
+            )
+            _, offset = env.pageserver.assert_log_contains(
+                ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+                offset,
+            )
+        else:
+            _, offset = env.pageserver.assert_log_contains(
+                ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
+            )
 
+    assert offset is not None
+    assert remote_copies is not None
     assert len(not_reparented) == 1
 
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "return"))
 
     # almost final round, the failpoint is hit no longer, and everything completes
-    with pytest.raises(PageserverApiException) as exc:
+    with pytest.raises(PageserverApiException, match=".* timeline-detach-ancestor::complete_before_uploading") as exc:
         http.detach_ancestor(env.initial_tenant, detached)
+    assert exc.value.status_code == 500
+    _, offset = env.pageserver.assert_log_contains(
+        ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
+    )
 
     # delete the remaining and previous ancestor to take a different path to
     # completion (all other tests take the "detach? reparent complete", but
     # this is only "complete".
-    #
-    # TODO: it should not actually restart the tenant, but does right now.
-    # luckily it also waits it to activate.
     for timeline in itertools.chain(not_reparented, [env.initial_timeline]):
         http.timeline_delete(env.initial_tenant, timeline)
         wait_timeline_detail_404(http, env.initial_tenant, timeline, 20)
@@ -1179,8 +1206,22 @@ def test_retried_detach_ancestor_after_failed_reparenting(
             reparented += 1
     assert reparented == len(timelines)
 
-    time.sleep(1)
-    # find the gc is now unblocked line, find nothing to gc
+    time.sleep(2)
+    assert (
+        env.pageserver.log_contains(
+            ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
+        )
+        is None
+    ), "there should be no restart with the final detach_ancestor as it only completed"
+
+    # gc is unblocked
+    env.pageserver.assert_log_contains(".* gc_loop.*: 4 timelines need GC", offset)
+
+    metric = http.get_metric_value(
+        "remote_storage_s3_request_seconds_count",
+        {"request_type": "copy_object", "result": "ok"},
+    )
+    assert remote_copies == metric
 
 
 # TODO:
