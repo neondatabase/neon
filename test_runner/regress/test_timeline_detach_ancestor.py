@@ -1223,9 +1223,6 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
 
 
 # TODO:
-# - after starting the operation, pageserver is shutdown, restarted
-# - after starting the operation, bottom-most timeline is deleted, pageserver is restarted, gc is inhibited
-# - deletion of reparented while reparenting should fail once, then succeed (?)
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
 #
