@@ -1625,7 +1625,7 @@ pub(crate) struct DownloadedLayer {
     owner: Weak<LayerInner>,
     // Use tokio OnceCell as we do not need to deinitialize this, it'll just get dropped with the
     // DownloadedLayer
-    kind: tokio::sync::OnceCell<anyhow::Result<LayerKind>>,
+    kind: tokio::sync::OnceCell<LayerKind>,
     version: usize,
 }
 
@@ -1650,6 +1650,14 @@ impl Drop for DownloadedLayer {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LoadError {
+    #[error(transparent)]
+    Io(anyhow::Error),
+    #[error(transparent)]
+    Corruption(anyhow::Error),
+}
+
 impl DownloadedLayer {
     /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`], or fails to
     /// initialize it permanently.
@@ -1661,7 +1669,7 @@ impl DownloadedLayer {
         &'a self,
         owner: &Arc<LayerInner>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<&'a LayerKind> {
+    ) -> Result<&'a LayerKind, LoadError> {
         let init = || async {
             assert_eq!(
                 Weak::as_ptr(&self.owner),
@@ -1683,7 +1691,7 @@ impl DownloadedLayer {
                     ctx,
                 )
                 .await
-                .map(|res| res.map(LayerKind::Delta))
+                .map(LayerKind::Delta)
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
@@ -1700,32 +1708,19 @@ impl DownloadedLayer {
                     ctx,
                 )
                 .await
-                .map(|res| res.map(LayerKind::Image))
+                .map(LayerKind::Image)
             };
 
             match res {
-                Ok(Ok(layer)) => Ok(Ok(layer)),
-                Ok(Err(transient)) => Err(transient),
+                Ok(layer) => Ok(layer),
                 Err(permanent) => {
                     LAYER_IMPL_METRICS.inc_permanent_loading_failures();
-                    // TODO(#5815): we are not logging all errors, so temporarily log them **once**
-                    // here as well
-                    let permanent = permanent.context("load layer");
                     tracing::error!("layer loading failed permanently: {permanent:#}");
-                    Ok(Err(permanent))
+                    Err(permanent)
                 }
             }
         };
-        self.kind
-            .get_or_try_init(init)
-            // return transient errors using `?`
-            .await?
-            .as_ref()
-            .map_err(|e| {
-                // errors are not clonabled, cannot but stringify
-                // test_broken_timeline matches this string
-                anyhow::anyhow!("layer loading failed: {e:#}")
-            })
+        self.kind.get_or_try_init(init).await
     }
 
     async fn get_value_reconstruct_data(
@@ -1760,7 +1755,12 @@ impl DownloadedLayer {
     ) -> Result<(), GetVectoredError> {
         use LayerKind::*;
 
-        match self.get(owner, ctx).await.map_err(GetVectoredError::from)? {
+        match self
+            .get(owner, ctx)
+            .await
+            .context("get layer") /* TODO avoid this */
+            .map_err(GetVectoredError::Other)?
+        {
             Delta(d) => {
                 d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
                     .await

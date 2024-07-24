@@ -46,7 +46,7 @@ use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
@@ -72,6 +72,7 @@ use utils::{
     lsn::Lsn,
 };
 
+use super::layer::LoadError;
 use super::{
     AsLayerDesc, LayerAccessStats, LayerName, PersistentLayerDesc, ResidentLayer,
     ValuesReconstructState,
@@ -307,12 +308,10 @@ impl DeltaLayer {
             .with_context(|| format!("Failed to load delta layer {}", self.path()))
     }
 
-    async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>> {
+    async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>, LoadError> {
         let path = self.path();
 
-        let loaded = DeltaLayerInner::load(&path, None, None, ctx)
-            .await
-            .and_then(|res| res)?;
+        let loaded = DeltaLayerInner::load(&path, None, None, ctx).await?;
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
@@ -760,18 +759,19 @@ impl DeltaLayerInner {
         &self.layer_lsn_range
     }
 
-    /// Returns nested result following Result<Result<_, OpErr>, Critical>:
-    /// - inner has the success or transient failure
-    /// - outer has the permanent failure
     pub(super) async fn load(
         path: &Utf8Path,
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
-    ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
+    ) -> Result<Self, LoadError> {
         let file = match VirtualFile::open(path, ctx).await {
             Ok(file) => file,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
+            Err(e) => {
+                return Err(LoadError::Io(
+                    anyhow::Error::new(e).context("open layer file"),
+                ));
+            }
         };
         let file_id = page_cache::next_file_id();
 
@@ -779,12 +779,17 @@ impl DeltaLayerInner {
 
         let summary_blk = match block_reader.read_blk(0, ctx).await {
             Ok(blk) => blk,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
+            Err(e) => {
+                return Err(LoadError::Io(
+                    anyhow::Error::new(e).context("read first block"),
+                ));
+            }
         };
 
         // TODO: this should be an assertion instead; see ImageLayerInner::load
-        let actual_summary =
-            Summary::des_prefix(summary_blk.as_ref()).context("deserialize first block")?;
+        let actual_summary = Summary::des_prefix(summary_blk.as_ref())
+            .context("deserialize first block")
+            .map_err(LoadError::Corruption)?;
 
         if let Some(mut expected_summary) = summary {
             // production code path
@@ -794,15 +799,15 @@ impl DeltaLayerInner {
             expected_summary.timeline_id = actual_summary.timeline_id;
 
             if actual_summary != expected_summary {
-                bail!(
+                return Err(LoadError::Corruption(anyhow::anyhow!(
                     "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
                     actual_summary,
                     expected_summary
-                );
+                )));
             }
         }
 
-        Ok(Ok(DeltaLayerInner {
+        Ok(DeltaLayerInner {
             file,
             file_id,
             index_start_blk: actual_summary.index_start_blk,
@@ -810,7 +815,7 @@ impl DeltaLayerInner {
             max_vectored_read_bytes,
             layer_key_range: actual_summary.key_range,
             layer_lsn_range: actual_summary.lsn_range,
-        }))
+        })
     }
 
     pub(super) async fn get_value_reconstruct_data(
