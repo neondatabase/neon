@@ -141,29 +141,29 @@ RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouti
 # Build plv8
 #
 #########################################################################################
-FROM build-deps AS plv8-build
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# FROM build-deps AS plv8-build
+# COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN apt update && \
-    apt install -y ninja-build python3-dev libncurses5 binutils clang
+# RUN apt update && \
+#     apt install -y ninja-build python3-dev libncurses5 binutils clang
 
-RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.tar.gz && \
-    echo "7096c3290928561f0d4901b7a52794295dc47f6303102fae3f8e42dd575ad97d plv8.tar.gz" | sha256sum --check && \
-    mkdir plv8-src && cd plv8-src && tar xzf ../plv8.tar.gz --strip-components=1 -C . && \
-    # generate and copy upgrade scripts
-    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
-    cp upgrade/* /usr/local/pgsql/share/extension/ && \
-    export PATH="/usr/local/pgsql/bin:$PATH" && \
-    make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
-    rm -rf /plv8-* && \
-    find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
-    # don't break computes with installed old version of plv8
-    cd /usr/local/pgsql/lib/ && \
-    ln -s plv8-3.1.10.so plv8-3.1.5.so && \
-    ln -s plv8-3.1.10.so plv8-3.1.8.so && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
+# RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.tar.gz && \
+#     echo "7096c3290928561f0d4901b7a52794295dc47f6303102fae3f8e42dd575ad97d plv8.tar.gz" | sha256sum --check && \
+#     mkdir plv8-src && cd plv8-src && tar xzf ../plv8.tar.gz --strip-components=1 -C . && \
+#     # generate and copy upgrade scripts
+#     mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
+#     cp upgrade/* /usr/local/pgsql/share/extension/ && \
+#     export PATH="/usr/local/pgsql/bin:$PATH" && \
+#     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
+#     rm -rf /plv8-* && \
+#     find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
+#     # don't break computes with installed old version of plv8
+#     cd /usr/local/pgsql/lib/ && \
+#     ln -s plv8-3.1.10.so plv8-3.1.5.so && \
+#     ln -s plv8-3.1.10.so plv8-3.1.8.so && \
+#     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
+#     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
+#     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
 
 #########################################################################################
 #
@@ -662,6 +662,18 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
 
 USER root
 
+## pg_neon_ai
+
+FROM rust-extensions-build AS pg-neon-ai-pg-build
+ARG PG_VERSION
+
+RUN wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz && \
+    mkdir pg_neon_ai-src && cd pg_neon_ai-src && tar xzf ../pg_neon_ai.tar.gz --strip-components=1 -C . && \
+    sed -i 's/pgrx = "0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/neon_ai.control
+
+
 #########################################################################################
 #
 # Layer "pg-jsonschema-pg-build"
@@ -799,12 +811,13 @@ ARG PG_VERSION
 # Public extensions
 COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=postgis-build /sfcgal/* /
-COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
+#COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /h3/usr /
 COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-neon-ai-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -918,7 +931,7 @@ RUN mkdir /ext-src
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 #COPY --from=postgis-build /sfcgal/* /usr
-COPY --from=plv8-build /plv8.tar.gz /ext-src/
+#COPY --from=plv8-build /plv8.tar.gz /ext-src/
 COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
 COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
