@@ -5,9 +5,11 @@ use std::time::Duration;
 use std::time::Instant;
 
 use self::split_state::SplitState;
+use anyhow::bail;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
+use pageserver_api::controller_api::MetadataHealthRecord;
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
@@ -752,7 +754,7 @@ impl Persistence {
 
     /// Lists all the metadata health records that have not been updated since an `earlier` time.
     #[allow(dead_code)]
-    pub(crate) async fn list_metadata_health_records_not_scrubbed_since(
+    pub(crate) async fn list_outdated_metadata_health_records(
         &self,
         earlier: chrono::DateTime<chrono::Utc>,
     ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
@@ -860,5 +862,39 @@ impl MetadataHealthPersistence {
             shard_number: ShardNumber(self.shard_number as u8),
             shard_count: ShardCount::new(self.shard_count as u8),
         })
+    }
+}
+
+impl TryFrom<MetadataHealthRecord> for MetadataHealthPersistence {
+    type Error = anyhow::Error;
+
+    fn try_from(value: MetadataHealthRecord) -> Result<Self, Self::Error> {
+        match (value.healthy, value.last_scrubbed_at) {
+            (Some(healthy), Some(last_scrubbed_at)) => {
+                let tenant_id = value.tenant_shard_id.tenant_id.to_string();
+                let shard_number = value.tenant_shard_id.shard_number.0 as i32;
+                let shard_count = value.tenant_shard_id.shard_count.literal() as i32;
+                Ok(MetadataHealthPersistence {
+                    tenant_id,
+                    shard_number,
+                    shard_count,
+                    healthy,
+                    last_scrubbed_at,
+                })
+            }
+            _ => bail!("healthy and last_scrubbed_at must not be None."),
+        }
+    }
+}
+
+impl From<MetadataHealthPersistence> for MetadataHealthRecord {
+    fn from(value: MetadataHealthPersistence) -> Self {
+        MetadataHealthRecord {
+            tenant_shard_id: value
+                .get_tenant_shard_id()
+                .expect("stored tenant id should be valid"),
+            healthy: Some(value.healthy),
+            last_scrubbed_at: Some(value.last_scrubbed_at),
+        }
     }
 }
