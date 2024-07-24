@@ -5,6 +5,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -429,9 +430,6 @@ pub async fn get_timeline_objects(
     tracing::debug!("Listing objects in timeline {ttid}");
     let timeline_root = super::remote_timeline_path_id(&ttid);
 
-    // TODO: apply extra validation based on object modification time.  Don't purge
-    // timelines whose index_part.json has been touched recently.
-
     let list = s3_client
         .list(
             Some(&timeline_root),
@@ -502,6 +500,7 @@ impl DeletionProgressTracker {
 pub async fn purge_garbage(
     input_path: String,
     mode: PurgeMode,
+    min_age: Duration,
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let list_bytes = tokio::fs::read(&input_path).await?;
@@ -568,6 +567,36 @@ pub async fn purge_garbage(
     let mut progress_tracker = DeletionProgressTracker::default();
     while let Some(result) = get_objects_results.next().await {
         let mut object_list = result?;
+
+        // Extra safety check: even if a collection of objects is garbage, check max() of modification
+        // times before purging, so that if we incorrectly marked a live tenant as garbage then we would
+        // notice that its index has been written recently and would omit deleting it.
+        if object_list.is_empty() {
+            // Simplify subsequent code by ensuring list always has at least one item
+            continue;
+        }
+        let max_mtime = object_list.iter().map(|o| o.last_modified).max().unwrap();
+        let age = max_mtime.elapsed();
+        match age {
+            Err(_) => {
+                tracing::warn!("Bad last_modified time");
+                continue;
+            }
+            Ok(a) if a < min_age => {
+                // Failed age check.  This doesn't mean we did something wrong: a tenant might really be garbage and recently
+                // written, but out of an abundance of caution we still don't purge it.
+                tracing::info!(
+                    "Skipping young objects {}..{}",
+                    object_list.first().as_ref().unwrap().key,
+                    object_list.last().as_ref().unwrap().key
+                );
+                continue;
+            }
+            Ok(_) => {
+                // Passed age check
+            }
+        }
+
         objects_to_delete.append(&mut object_list);
         if objects_to_delete.len() >= MAX_KEYS_PER_DELETE {
             do_delete(
