@@ -798,7 +798,24 @@ impl Service {
                         PageserverState::WarmingUp { started_at } => {
                             NodeAvailability::WarmingUp(started_at)
                         }
-                        PageserverState::Offline => NodeAvailability::Offline,
+                        PageserverState::Offline => {
+                            // The node might have been placed in the WarmingUp state
+                            // while the heartbeat round was on-going. Hence, filter out
+                            // offline transitions for WarmingUp nodes that are still within
+                            // their grace period.
+                            if let Ok(NodeAvailability::WarmingUp(started_at)) =
+                                self.get_node(node_id).await.map(|n| n.get_availability())
+                            {
+                                let now = Instant::now();
+                                if now - started_at >= self.config.max_warming_up_interval {
+                                    NodeAvailability::Offline
+                                } else {
+                                    NodeAvailability::WarmingUp(started_at)
+                                }
+                            } else {
+                                NodeAvailability::Offline
+                            }
+                        }
                     };
 
                     // This is the code path for geniune availability transitions (i.e node
@@ -1657,7 +1674,7 @@ impl Service {
                     node.set_scheduling(NodeSchedulingPolicy::Active);
                 }
 
-                tracing::info!("Marking {} unavailable on reattach", reattach_req.node_id);
+                tracing::info!("Marking {} warming-up on reattach", reattach_req.node_id);
                 node.set_availability(NodeAvailability::WarmingUp(std::time::Instant::now()));
 
                 scheduler.node_upsert(node);
