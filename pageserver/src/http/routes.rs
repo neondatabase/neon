@@ -1899,7 +1899,6 @@ async fn timeline_detach_ancestor_handler(
                         ctx,
                     )
                     .await
-                    .context("timeline detach ancestor completion")
                     .map_err(ApiError::InternalServerError)?;
 
                 AncestorDetached {
