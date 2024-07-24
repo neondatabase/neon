@@ -1073,6 +1073,8 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
         }
     )
 
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
     env.pageserver.allowed_errors.extend(
         [
             ".* reparenting failed: failpoint: timeline-detach-ancestor::allow_one_reparented",
