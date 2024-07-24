@@ -108,7 +108,10 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
         if flags.contains(CompactFlags::EnhancedGcBottomMostCompaction) {
-            return self.compact_with_gc(cancel, ctx).await;
+            return self
+                .compact_with_gc(cancel, ctx)
+                .await
+                .map_err(CompactionError::Other);
         }
 
         // High level strategy for compaction / image creation:
@@ -1235,7 +1238,7 @@ impl Timeline {
         self: &Arc<Self>,
         _cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> anyhow::Result<()> {
         use std::collections::BTreeSet;
 
         info!("running enhanced gc bottom-most compaction");
