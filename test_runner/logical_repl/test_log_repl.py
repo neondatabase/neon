@@ -98,8 +98,7 @@ def test_clickhouse(test_output_dir: Path, remote_pg: RemotePostgres):
         log.debug('Sleeping before final checking if Neon is still alive')
         time.sleep(3)
         cur.execute('SELECT 1')
-        cmd = ["docker", "compose", "down"]
-        subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
+        clickhouse_cleanup(test_output_dir)
     except Exception as e:
         clickhouse_cleanup(test_output_dir)
         raise e
