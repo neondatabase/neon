@@ -20,7 +20,7 @@ def main(args: argparse.Namespace):
     psconn: PgConnection = psycopg2.connect(pageserver_connstr)
     psconn.autocommit = True
 
-    output = open(output_path, "wb")
+    output = open(output_path, "w")
 
     with psconn.cursor() as pscur:
         pscur.copy_expert(f"basebackup {tenant_id} {timeline_id} {lsn}", output)
