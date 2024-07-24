@@ -1366,12 +1366,13 @@ impl RemoteTimelineClient {
         // marker via its deleted_at attribute
         let latest_index = remaining
             .iter()
-            .filter(|p| {
-                p.object_name()
+            .filter(|o| {
+                o.key
+                    .object_name()
                     .map(|n| n.starts_with(IndexPart::FILE_NAME))
                     .unwrap_or(false)
             })
-            .filter_map(|path| parse_remote_index_path(path.clone()).map(|gen| (path, gen)))
+            .filter_map(|o| parse_remote_index_path(o.key.clone()).map(|gen| (o.key.clone(), gen)))
             .max_by_key(|i| i.1)
             .map(|i| i.0.clone())
             .unwrap_or(
@@ -1382,14 +1383,12 @@ impl RemoteTimelineClient {
 
         let remaining_layers: Vec<RemotePath> = remaining
             .into_iter()
-            .filter(|p| {
-                if p == &latest_index {
-                    return false;
+            .filter_map(|o| {
+                if o.key == latest_index || o.key.object_name() == Some(INITDB_PRESERVED_PATH) {
+                    None
+                } else {
+                    Some(o.key)
                 }
-                if p.object_name() == Some(INITDB_PRESERVED_PATH) {
-                    return false;
-                }
-                true
             })
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
