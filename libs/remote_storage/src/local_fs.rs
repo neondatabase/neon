@@ -409,7 +409,7 @@ impl RemoteStorage for LocalFs {
                     } else {
                         result.keys.push(ListingObject {
                             key: RemotePath::from_string(&relative_key).unwrap(),
-                            // LocalFs is just for testing, we do not store modification times
+                            // LocalFs is just for testing
                             last_modified: SystemTime::now(),
                         });
                     }
