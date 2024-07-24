@@ -1049,9 +1049,7 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
             victim_http.configure_failpoints((pausepoint, "off"))
 
 
-def test_retried_detach_ancestor_after_failed_reparenting(
-    neon_env_builder: NeonEnvBuilder
-):
+def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: NeonEnvBuilder):
     """
     Using a failpoint, force the completion step of timeline ancestor detach to fail after reparenting a single timeline.
     Retrying should try reparenting until all reparentings are done, all the time blocking gc.
@@ -1111,7 +1109,10 @@ def test_retried_detach_ancestor_after_failed_reparenting(
 
     for nth_round in range(len(timelines) - 1):
         log.info(f"{nth_round} round")
-        with pytest.raises(PageserverApiException, match=".*failed to reparent all candidate timelines, please retry") as exc:
+        with pytest.raises(
+            PageserverApiException,
+            match=".*failed to reparent all candidate timelines, please retry",
+        ) as exc:
             http.detach_ancestor(env.initial_tenant, detached)
         assert exc.value.status_code == 500
 
@@ -1168,7 +1169,9 @@ def test_retried_detach_ancestor_after_failed_reparenting(
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "return"))
 
     # almost final round, the failpoint is hit no longer, and everything completes
-    with pytest.raises(PageserverApiException, match=".* timeline-detach-ancestor::complete_before_uploading") as exc:
+    with pytest.raises(
+        PageserverApiException, match=".* timeline-detach-ancestor::complete_before_uploading"
+    ) as exc:
         http.detach_ancestor(env.initial_tenant, detached)
     assert exc.value.status_code == 500
     _, offset = env.pageserver.assert_log_contains(
