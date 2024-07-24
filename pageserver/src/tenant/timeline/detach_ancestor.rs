@@ -297,6 +297,8 @@ impl SharedState {
         // TODO: pause failpoint here to catch the situation where detached timeline is deleted...?
         // we are not yet holding the gate so it could advance to the point of removing from
         // timelines.
+        //
+        // pause failpoint which triggers after activating but before completing here
 
         let Some(timeline) = tenant
             .timelines
