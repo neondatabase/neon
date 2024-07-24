@@ -391,7 +391,6 @@ impl DeleteTimelineFlow {
             Some(tenant_shard_id),
             Some(timeline_id),
             "timeline_delete",
-            false,
             async move {
                 if let Err(err) = Self::background(guard, conf, &tenant, &timeline).await {
                     error!("Error: {err:#}");

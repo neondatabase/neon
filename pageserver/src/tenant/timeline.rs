@@ -1,5 +1,5 @@
 pub(crate) mod analysis;
-mod compaction;
+pub(crate) mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
@@ -2477,7 +2477,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "layer flush task",
-            false,
             async move {
                 let _guard = guard;
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
@@ -2822,7 +2821,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "initial size calculation",
-            false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
                 let cancel = task_mgr::shutdown_token();
@@ -2991,7 +2989,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
-            false,
             async move {
                 let res = self_clone
                     .logical_size_calculation_task(lsn, cause, &ctx)
@@ -3158,7 +3155,7 @@ impl Timeline {
         let guard = self.layers.read().await;
 
         let resident = guard.likely_resident_layers().map(|layer| {
-            let last_activity_ts = layer.access_stats().latest_activity_or_now();
+            let last_activity_ts = layer.access_stats().latest_activity();
 
             HeatMapLayer::new(
                 layer.layer_desc().layer_name(),
@@ -4868,7 +4865,7 @@ impl Timeline {
                 // for compact_level0_phase1 creating an L0, which does not happen in practice
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
-            } else if LayerMap::is_l0(l.layer_desc()) {
+            } else if LayerMap::is_l0(&l.layer_desc().key_range) {
                 bail!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
             } else {
                 insert_layers.push(l.clone());
@@ -5435,7 +5432,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "download all remote layers task",
-            false,
             async move {
                 self_clone.download_all_remote_layers(request).await;
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
@@ -5586,7 +5582,7 @@ impl Timeline {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-                let last_activity_ts = layer.access_stats().latest_activity_or_now();
+                let last_activity_ts = layer.access_stats().latest_activity();
 
                 EvictionCandidate {
                     layer: layer.into(),
