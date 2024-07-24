@@ -4,16 +4,16 @@ Test the logical replication in Neon with the different consumers
 import hashlib
 import os
 import time
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import clickhouse_connect
 import psycopg2
 import pytest
-import clickhouse_connect
 from clickhouse_connect.driver.exceptions import DatabaseError
-
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import subprocess_capture
-from fixtures.log_helper import log
 
 
 def timeout_query_clickhouse(client, query: str, digest: str,
