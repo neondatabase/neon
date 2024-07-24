@@ -12,40 +12,28 @@ import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
-from fixtures.utils import subprocess_capture
+from fixtures.utils import subprocess_capture, wait_until
 
 
-def timeout_query_clickhouse(
+def query_clickhouse(
     client,
     query: str,
     digest: str,
-    timeout: timedelta = timedelta(seconds=60),
-    interval: float = 0.5,
 ):
     """
-    Repeatedly run the query on the client
+    Run the query on the client
     return answer if successful, raise an exception otherwise
     """
-    start = datetime.now()
-    while datetime.now() - start <= timeout:
-        hash_res = res = None
-        try:
-            res = client.query(query)
-        except DatabaseError as dbe:
-            log.debug("Query: %s", query)
-            log.debug(dbe)
-        else:
-            m = hashlib.sha1()
-            m.update(repr(tuple(res.result_rows)).encode())
-            hash_res = m.hexdigest()
-        if res:
-            log.debug(res.result_rows)
-        if hash_res:
-            log.debug("Hash: %s", hash_res)
-        if hash_res == digest:
-            return res
-        time.sleep(interval)
-    raise TimeoutError
+    log.debug("Query: %s", query)
+    res = client.query(query)
+    log.debug(res.result_rows)
+    m = hashlib.sha1()
+    m.update(repr(tuple(res.result_rows)).encode())
+    hash_res = m.hexdigest()
+    log.debug("Hash: %s", hash_res)
+    if hash_res == digest:
+        return res
+    raise ValueError("Hash mismatch")
 
 
 @pytest.fixture(scope="function")
@@ -106,17 +94,25 @@ def test_clickhouse(clickhouse_instance, remote_pg: RemotePostgres):
         f"'{conn_options['user']}', '{conn_options['password']}') "
         "SETTINGS materialized_postgresql_tables_list = 'table1';"
     )
-    timeout_query_clickhouse(
-        client,
-        "select * from db1_postgres.table1 order by 1",
-        "ee600d8f7cd05bd0b169fa81f44300a9dd10085a",
+    wait_until(
+        120,
+        0.5,
+        lambda: query_clickhouse(
+            client,
+            "select * from db1_postgres.table1 order by 1",
+            "ee600d8f7cd05bd0b169fa81f44300a9dd10085a",
+        ),
     )
     cur.execute("INSERT INTO table1 (id, column1) VALUES (3, 'ghi'), (4, 'jkl');")
     conn.commit()
-    timeout_query_clickhouse(
-        client,
-        "select * from db1_postgres.table1 order by 1",
-        "9eba2daaf7e4d7d27ac849525f68b562ab53947d",
+    wait_until(
+        120,
+        0.5,
+        lambda: query_clickhouse(
+            client,
+            "select * from db1_postgres.table1 order by 1",
+            "9eba2daaf7e4d7d27ac849525f68b562ab53947d",
+        ),
     )
     log.debug("Sleeping before final checking if Neon is still alive")
     time.sleep(3)
