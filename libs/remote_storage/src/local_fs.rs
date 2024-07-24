@@ -990,7 +990,7 @@ mod fs_tests {
             )
             .await?;
         assert_eq!(
-            listing.keys.into_iter().map(|o| o.key).collect(),
+            listing.keys.into_iter().map(|o| o.key).collect::<Vec<_>>(),
             [RemotePath::from_string("uncle").unwrap()].to_vec()
         );
         assert_eq!(
@@ -1007,7 +1007,7 @@ mod fs_tests {
                 &cancel,
             )
             .await?;
-        assert_eq!(listing.keys, [].to_vec());
+        assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
             [RemotePath::from_string("grandparent").unwrap()].to_vec()
@@ -1022,7 +1022,7 @@ mod fs_tests {
                 &cancel,
             )
             .await?;
-        assert_eq!(listing.keys, [].to_vec());
+        assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
             [RemotePath::from_string("grandparent").unwrap()].to_vec()
@@ -1055,7 +1055,7 @@ mod fs_tests {
                 &cancel,
             )
             .await?;
-        assert_eq!(listing.keys, [].to_vec());
+        assert_eq!(listing.keys, vec![]);
 
         let mut found_prefixes = listing.prefixes.clone();
         found_prefixes.sort();
