@@ -288,8 +288,6 @@ impl SharedState {
 
         self.inner.lock().unwrap().validate(&attempt);
 
-        // FIXME: could check more preconditions, like that the timeline has been detached?
-
         let mut attempt = scopeguard::guard(attempt, |attempt| {
             // our attempt will no longer be valid, so release it
             self.inner.lock().unwrap().cancel(attempt);
@@ -323,6 +321,8 @@ impl SharedState {
         } else {
             // Some(gate_entered) means the tenant was not restarted, as is not required
         }
+
+        assert!(timeline.ancestor_timeline.is_none());
 
         // this should be an 503 at least...?
         fail::fail_point!(
