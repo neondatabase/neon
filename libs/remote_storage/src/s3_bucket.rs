@@ -507,7 +507,7 @@ impl RemoteStorage for S3Bucket {
                     .list_objects_v2()
                     .bucket(self.bucket_name.clone())
                     .set_prefix(list_prefix.clone())
-                    .set_continuation_token(continuation_token)
+                    .set_continuation_token(continuation_token.clone())
                     .set_max_keys(request_max_keys);
 
                 if let ListingMode::WithDelimiter = mode {
