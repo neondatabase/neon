@@ -721,7 +721,6 @@ impl Tenant {
             Some(tenant_shard_id),
             None,
             "attach tenant",
-            false,
             async move {
 
                 info!(
@@ -3993,6 +3992,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
+    use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{DeltaLayerTestDesc, GcInfo};
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
@@ -7212,6 +7212,322 @@ mod tests {
                 &expected_result_at_gc_horizon[idx]
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_generate_key_retention() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_generate_key_retention").await?;
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        tline.force_advance_lsn(Lsn(0x70));
+        let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let history = vec![
+            (
+                key,
+                Lsn(0x10),
+                Value::Image(Bytes::copy_from_slice(b"0x10")),
+            ),
+            (
+                key,
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x20")),
+            ),
+            (
+                key,
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x30")),
+            ),
+            (
+                key,
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x40")),
+            ),
+            (
+                key,
+                Lsn(0x50),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x50")),
+            ),
+            (
+                key,
+                Lsn(0x60),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x60")),
+            ),
+            (
+                key,
+                Lsn(0x70),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+            ),
+            (
+                key,
+                Lsn(0x80),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x80")),
+            ),
+            (
+                key,
+                Lsn(0x90),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x90")),
+            ),
+        ];
+        let res = tline
+            .generate_key_retention(
+                key,
+                &history,
+                Lsn(0x60),
+                &[Lsn(0x20), Lsn(0x40), Lsn(0x50)],
+                3,
+            )
+            .await
+            .unwrap();
+        let expected_res = KeyHistoryRetention {
+            below_horizon: vec![
+                (
+                    Lsn(0x20),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x20),
+                        Value::Image(Bytes::copy_from_slice(b"0x10;0x20")),
+                    )]),
+                ),
+                (
+                    Lsn(0x40),
+                    KeyLogAtLsn(vec![
+                        (
+                            Lsn(0x30),
+                            Value::WalRecord(NeonWalRecord::wal_append(";0x30")),
+                        ),
+                        (
+                            Lsn(0x40),
+                            Value::WalRecord(NeonWalRecord::wal_append(";0x40")),
+                        ),
+                    ]),
+                ),
+                (
+                    Lsn(0x50),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x50),
+                        Value::Image(Bytes::copy_from_slice(b"0x10;0x20;0x30;0x40;0x50")),
+                    )]),
+                ),
+                (
+                    Lsn(0x60),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x60),
+                        Value::WalRecord(NeonWalRecord::wal_append(";0x60")),
+                    )]),
+                ),
+            ],
+            above_horizon: KeyLogAtLsn(vec![
+                (
+                    Lsn(0x70),
+                    Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+                ),
+                (
+                    Lsn(0x80),
+                    Value::WalRecord(NeonWalRecord::wal_append(";0x80")),
+                ),
+                (
+                    Lsn(0x90),
+                    Value::WalRecord(NeonWalRecord::wal_append(";0x90")),
+                ),
+            ]),
+        };
+        assert_eq!(res, expected_res);
+        // TODO: more tests with mixed image + delta, adding with k-merge test cases; e2e compaction test
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_simple_bottom_most_compaction_with_retain_lsns() -> anyhow::Result<()> {
+        let harness =
+            TenantHarness::create("test_simple_bottom_most_compaction_with_retain_lsns").await?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x28),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x28")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+        ];
+        let delta2 = vec![
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(6),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+        ];
+        let delta3 = vec![
+            (
+                get_key(8),
+                Lsn(0x48),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x48")),
+            ),
+            (
+                get_key(9),
+                Lsn(0x48),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x48")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
+                ], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            *guard = GcInfo {
+                retain_lsns: vec![Lsn(0x10), Lsn(0x20)],
+                cutoffs: GcCutoffs {
+                    time: Lsn(0x30),
+                    space: Lsn(0x30),
+                },
+                leases: Default::default(),
+                within_ancestor_pitr: false,
+            };
+        }
+
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10@0x30"),
+            Bytes::from_static(b"value 3@0x10@0x28@0x30@0x40"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10@0x48"),
+            Bytes::from_static(b"value 9@0x10@0x48"),
+        ];
+
+        let expected_result_at_gc_horizon = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10@0x30"),
+            Bytes::from_static(b"value 3@0x10@0x28@0x30"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
+
+        let expected_result_at_lsn_20 = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10"),
+            Bytes::from_static(b"value 3@0x10"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
+
+        let expected_result_at_lsn_10 = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10"),
+            Bytes::from_static(b"value 2@0x10"),
+            Bytes::from_static(b"value 3@0x10"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10"),
+            Bytes::from_static(b"value 6@0x10"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
+
+        let verify_result = || async {
+            for idx in 0..10 {
+                assert_eq!(
+                    tline
+                        .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                        .await
+                        .unwrap(),
+                    &expected_result[idx]
+                );
+                assert_eq!(
+                    tline
+                        .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                        .await
+                        .unwrap(),
+                    &expected_result_at_gc_horizon[idx]
+                );
+                assert_eq!(
+                    tline
+                        .get(get_key(idx as u32), Lsn(0x20), &ctx)
+                        .await
+                        .unwrap(),
+                    &expected_result_at_lsn_20[idx]
+                );
+                assert_eq!(
+                    tline
+                        .get(get_key(idx as u32), Lsn(0x10), &ctx)
+                        .await
+                        .unwrap(),
+                    &expected_result_at_lsn_10[idx]
+                );
+            }
+        };
+
+        verify_result().await;
+
+        let cancel = CancellationToken::new();
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+
+        verify_result().await;
 
         Ok(())
     }

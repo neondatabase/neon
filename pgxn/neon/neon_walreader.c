@@ -220,7 +220,8 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 			return NEON_WALREAD_ERROR;
 		}
 		/* we'll poll immediately */
-		state->rem_state = RS_CONNECTING_READ;
+		state->rem_state = RS_CONNECTING_WRITE;
+		return NEON_WALREAD_WOULDBLOCK;
 	}
 
 	if (state->rem_state == RS_CONNECTING_READ || state->rem_state == RS_CONNECTING_WRITE)
