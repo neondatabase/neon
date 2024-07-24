@@ -10,7 +10,11 @@ use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use metrics::{BuildInfo, NeonMetrics};
-use pageserver_api::controller_api::TenantCreateRequest;
+use pageserver_api::controller_api::{
+    MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
+    MetadataHealthListResponse, MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest,
+    MetadataHealthUpdateResponse, TenantCreateRequest,
+};
 use pageserver_api::models::{
     TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
@@ -560,6 +564,66 @@ async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, A
     json_response(StatusCode::ACCEPTED, ())
 }
 
+async fn handle_metadata_health_update(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Scrubber)?;
+
+    let update_req = json_request::<MetadataHealthUpdateRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    state
+        .service
+        .metadata_health_update(update_req.health_records)
+        .await?;
+
+    json_response(StatusCode::OK, MetadataHealthUpdateResponse {})
+}
+
+async fn handle_metadata_health_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let health_records = state.service.metadata_health_list().await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListResponse { health_records },
+    )
+}
+
+async fn handle_metadata_health_list_unhealthy(
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let unhealthy_tenant_shards = state.service.metadata_health_list_unhealthy().await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListUnhealthyResponse {
+            unhealthy_tenant_shards,
+        },
+    )
+}
+
+async fn handle_metadata_health_list_outdated(
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let list_outdated_req = json_request::<MetadataHealthListOutdatedRequest>(&mut req).await?;
+    let state = get_state(&req);
+    let health_records = state
+        .service
+        .metadata_health_list_outdated(list_outdated_req.not_scrubbed_since)
+        .await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListOutdatedResponse { health_records },
+    )
+}
+
 async fn handle_tenant_shard_split(
     service: Arc<Service>,
     mut req: Request<Body>,
@@ -936,6 +1000,35 @@ pub fn make_router(
                 r,
                 handle_cancel_node_fill,
                 RequestName("control_v1_cancel_node_fill"),
+            )
+        })
+        // Metadata health operations
+        .post("/control/v1/metadata_health/update", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_update,
+                RequestName("control_v1_metadata_health_update"),
+            )
+        })
+        .get("/control/v1/metadata_health", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list,
+                RequestName("control_v1_metadata_health_list"),
+            )
+        })
+        .get("/control/v1/metadata_health/unhealthy", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list_unhealthy,
+                RequestName("control_v1_metadata_health_list_unhealthy"),
+            )
+        })
+        .post("/control/v1/metadata_health/outdated", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list_outdated,
+                RequestName("control_v1_metadata_health_list_outdated"),
             )
         })
         // TODO(vlad): endpoint for cancelling drain and fill

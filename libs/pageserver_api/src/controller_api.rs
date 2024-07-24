@@ -282,6 +282,44 @@ pub enum PlacementPolicy {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateResponse {}
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthRecord {
+    pub tenant_shard_id: TenantShardId,
+    pub healthy: bool,
+    pub last_scrubed_since: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthUpdateRequest {
+    pub health_records: Vec<MetadataHealthRecord>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthUpdateResponse {}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthListResponse {
+    pub health_records: Vec<MetadataHealthRecord>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+
+pub struct MetadataHealthListUnhealthyResponse {
+    pub unhealthy_tenant_shards: Vec<TenantShardId>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+
+pub struct MetadataHealthListOutdatedRequest {
+    pub not_scrubbed_since: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+
+pub struct MetadataHealthListOutdatedResponse {
+    pub health_records: Vec<MetadataHealthRecord>,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

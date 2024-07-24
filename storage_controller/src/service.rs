@@ -32,8 +32,8 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
-        NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
+        MetadataHealthRecord, NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy,
+        PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
         TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
         TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
         TenantShardMigrateResponse, UtilizationScore,
@@ -5969,5 +5969,29 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn metadata_health_update(
+        &self,
+        metadata_health_records: Vec<MetadataHealthRecord>,
+    ) -> Result<(), ApiError> {
+        todo!()
+    }
+
+    pub(crate) async fn metadata_health_list(&self) -> Result<Vec<MetadataHealthRecord>, ApiError> {
+        todo!()
+    }
+
+    pub(crate) async fn metadata_health_list_unhealthy(
+        &self,
+    ) -> Result<Vec<TenantShardId>, ApiError> {
+        todo!()
+    }
+
+    pub(crate) async fn metadata_health_list_outdated(
+        &self,
+        not_scrubbed_since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<MetadataHealthRecord>, ApiError> {
+        todo!()
     }
 }
