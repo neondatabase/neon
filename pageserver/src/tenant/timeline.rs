@@ -460,7 +460,7 @@ pub(crate) struct GcInfo {
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<Lsn>,
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -476,12 +476,21 @@ impl GcInfo {
     pub(crate) fn min_cutoff(&self) -> Lsn {
         self.cutoffs.select_min()
     }
+
+    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn) {
+        self.retain_lsns.push((child_lsn, child_id));
+        self.retain_lsns.sort_by_key(|i| i.0);
+    }
+
+    pub(super) fn remove_child(&mut self, child_id: TimelineId) {
+        self.retain_lsns.retain(|i| i.1 != child_id);
+    }
 }
 
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
 /// is a single number (the oldest LSN which we must retain), but it internally distinguishes
 /// between time-based and space-based retention for observability and consumption metrics purposes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct GcCutoffs {
     /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.
@@ -2306,6 +2315,11 @@ impl Timeline {
                 &conf.default_tenant_conf,
             )
         };
+
+        if let Some(ancestor) = &ancestor {
+            let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
+            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn());
+        }
 
         Arc::new_cyclic(|myself| {
             let metrics = TimelineMetrics::new(
@@ -4753,6 +4767,18 @@ impl Timeline {
     }
 }
 
+impl Drop for Timeline {
+    fn drop(&mut self) {
+        if let Some(ancestor) = &self.ancestor_timeline {
+            // This lock should never be poisoned, but in case it is we do a .map() instead of
+            // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
+            if let Ok(mut gc_info) = ancestor.gc_info.write() {
+                gc_info.remove_child(self.timeline_id)
+            }
+        }
+    }
+}
+
 /// Top-level failure to compact.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CompactionError {
@@ -5070,7 +5096,11 @@ impl Timeline {
 
             let space_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
             let time_cutoff = gc_info.cutoffs.time;
-            let retain_lsns = gc_info.retain_lsns.clone();
+            let retain_lsns = gc_info
+                .retain_lsns
+                .iter()
+                .map(|(lsn, _child_id)| *lsn)
+                .collect();
 
             // Gets the maximum LSN that holds the valid lease.
             //

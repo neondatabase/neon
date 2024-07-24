@@ -165,6 +165,9 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// The stream is guaranteed to return at least one element, even in the case of errors
     /// (in that case it's an `Err()`), or an empty `Listing`.
     ///
+    /// The stream is not ending if it returns an error, as long as [`is_permanent`] returns false on the error.
+    /// The `next` function can be retried, and maybe in a future retry, there will be success.
+    ///
     /// Note that the prefix is relative to any `prefix_in_bucket` configured for the client, not
     /// from the absolute root of the bucket.
     ///
@@ -178,6 +181,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// unlimted size buckets, as the full list of objects is allocated into a monolithic data structure.
     ///
     /// [`ListObjectsV2`]: <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>
+    /// [`is_permanent`]: DownloadError::is_permanent
     fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,

@@ -290,6 +290,7 @@ fn start_pageserver(
     // Create and lock PID file. This ensures that there cannot be more than one
     // pageserver process running at the same time.
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
+    info!("Claiming pid file at {lock_file_path:?}...");
     let lock_file =
         utils::pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
     info!("Claimed pid file at {lock_file_path:?}");
