@@ -814,9 +814,7 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     if sharded and mode == "delete_tenant":
         # the shared/exclusive lock for tenant is blocking this:
         # timeline detach ancestor takes shared, delete tenant takes exclusive
-        pytest.skip(
-            "tenant deletion while timeline ancestor detach is underway is not supported yet"
-        )
+        pytest.skip("tenant deletion while timeline ancestor detach is underway cannot happen")
 
     shard_count = 2 if sharded else 1
 
