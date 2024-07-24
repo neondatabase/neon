@@ -1221,6 +1221,51 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     assert metric == 0
 
 
+def test_deletion_after_timeline_ancestor_detach_before_completion(
+    neon_env_builder: NeonEnvBuilder,
+):
+    env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    http = env.pageserver.http_client()
+
+    detached = env.neon_cli.create_branch("detached")
+
+    failpoint = "timeline-detach-ancestor::after_activating_before_finding-pausable"
+
+    http.configure_failpoints((failpoint, "pause"))
+
+    def detach_and_get_stuck():
+        return http.detach_ancestor(env.initial_tenant, detached)
+
+    def pausepoint_hit():
+        env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+
+    def delete_detached():
+        return http.timeline_delete(env.initial_tenant, detached)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            detach = pool.submit(detach_and_get_stuck)
+
+            wait_until(10, 1.0, pausepoint_hit)
+
+            delete_detached()
+
+            wait_timeline_detail_404(http, env.initial_tenant, detached, 10, 1.0)
+
+            http.configure_failpoints((failpoint, "off"))
+
+            with pytest.raises(PageserverApiException) as exc:
+                detach.result()
+
+            # FIXME: this should be 404 but because there is another Anyhow conversion it is 500
+            assert exc.value.status_code == 500
+    finally:
+        http.configure_failpoints((failpoint, "off"))
+
+
 # TODO:
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
