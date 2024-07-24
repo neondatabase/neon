@@ -337,7 +337,7 @@ impl RemoteStorage for AzureBlobStorage {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(e) => {
-                        // The error is potentially retryable, yield it and rewind the loop.
+                        // The error is potentially retryable, so we must rewind the loop after yielding.
                         yield Err(e);
                         continue;
                     }
