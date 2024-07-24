@@ -44,6 +44,9 @@ pub(crate) enum Error {
     #[error("wait for tenant to activate after restarting")]
     WaitToActivate(#[source] GetActiveTenantError),
 
+    #[error("detached timeline was not found after restart")]
+    DetachedNotFoundAfterRestart,
+
     #[error("unexpected error")]
     Unexpected(#[source] anyhow::Error),
 
@@ -73,6 +76,7 @@ impl From<Error> for ApiError {
             | e @ Error::CopyFailed(_)
             | e @ Error::Unexpected(_)
             | e @ Error::Failpoint(_) => ApiError::InternalServerError(e.into()),
+            Error::DetachedNotFoundAfterRestart => ApiError::NotFound(value.into()),
         }
     }
 }
@@ -283,20 +287,13 @@ impl SharedState {
 
         self.inner.lock().unwrap().validate(&attempt);
 
-        let mut attempt = scopeguard::guard(attempt, |attempt| {
-            // our attempt will no longer be valid, so release it
-            self.inner.lock().unwrap().cancel(attempt);
-        });
-
         tenant
             .wait_to_become_active(std::time::Duration::from_secs(9999))
             .await?;
 
-        // TODO: pause failpoint here to catch the situation where detached timeline is deleted...?
-        // we are not yet holding the gate so it could advance to the point of removing from
-        // timelines.
-        //
-        // pause failpoint which triggers after activating but before completing here
+        utils::pausable_failpoint!(
+            "timeline-detach-ancestor::after_activating_before_finding-pausable"
+        );
 
         let Some(timeline) = tenant
             .timelines
@@ -305,9 +302,13 @@ impl SharedState {
             .get(&attempt.timeline_id)
             .cloned()
         else {
-            // FIXME: this needs a test case ... basically deletion right after activation?
-            unreachable!("unsure if there is an ordering, but perhaps this is possible?");
+            return Err(Error::DetachedNotFoundAfterRestart);
         };
+
+        let mut attempt = scopeguard::guard(attempt, |attempt| {
+            // our attempt will no longer be valid, so release it
+            self.inner.lock().unwrap().cancel(attempt);
+        });
 
         // the gate being entered does not matter much, but lets be strict
         if attempt.gate_entered.is_none() {
