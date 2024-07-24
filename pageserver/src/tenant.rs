@@ -1621,7 +1621,7 @@ impl Tenant {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(), timeline::CompactionError> {
+    ) -> Result<(), timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
             return Ok(());
@@ -1666,12 +1666,14 @@ impl Tenant {
                 .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await
-                .map_err(|e| {
-                    self.compaction_circuit_breaker
-                        .lock()
-                        .unwrap()
-                        .fail(&CIRCUIT_BREAKERS_BROKEN, &e);
-                    e
+                .inspect_err(|e| match e {
+                    timeline::CompactionError::ShuttingDown => (),
+                    timeline::CompactionError::Other(e) => {
+                        self.compaction_circuit_breaker
+                            .lock()
+                            .unwrap()
+                            .fail(&CIRCUIT_BREAKERS_BROKEN, e);
+                    }
                 })?;
         }
 
