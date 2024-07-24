@@ -1074,6 +1074,24 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
 
     http = env.pageserver.http_client()
 
+    def remote_storage_copy_requests():
+        return http.get_metric_value(
+            "remote_storage_s3_request_seconds_count",
+            {"request_type": "copy_object", "result": "ok"},
+        )
+
+    def reparenting_progress(timelines: List[TimelineId]) -> Tuple[int, Set[TimelineId]]:
+        reparented = 0
+        not_reparented = set()
+        for timeline in timelines:
+            detail = http.timeline_detail(env.initial_tenant, timeline)
+            ancestor = TimelineId(detail["ancestor_timeline_id"])
+            if ancestor == detached:
+                reparented += 1
+            else:
+                not_reparented.add(timeline)
+        return (reparented, not_reparented)
+
     # main ------A-----B-----C-----D-----E> lsn
     timelines = []
     with env.endpoints.create_start("main") as ep:
@@ -1120,10 +1138,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
             http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
         ), "first round should had detached 'detached'"
 
-        metric = http.get_metric_value(
-            "remote_storage_s3_request_seconds_count",
-            {"request_type": "copy_object", "result": "ok"},
-        )
+        metric = remote_storage_copy_requests()
         if remote_copies is None:
             assert metric is not None
             remote_copies = metric
@@ -1132,16 +1147,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
                 remote_copies == metric
             ), "there should not have been any more copies after first round"
 
-        reparented = 0
-        not_reparented = set()
-        for timeline in timelines:
-            detail = http.timeline_detail(env.initial_tenant, timeline)
-            ancestor = TimelineId(detail["ancestor_timeline_id"])
-            if ancestor == detached:
-                reparented += 1
-            else:
-                not_reparented.add(timeline)
-
+        reparented, not_reparented = reparenting_progress(timelines)
         assert reparented == nth_round + 1
 
         if nth_round == 0:
@@ -1191,14 +1197,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     assert reparented_resp == timelines
     # no need to quiesce_tenants anymore, because completion does that
 
-    reparented = 0
-    for timeline in timelines:
-        if timeline in not_reparented:
-            continue
-        detail = http.timeline_detail(env.initial_tenant, timeline)
-        ancestor = TimelineId(detail["ancestor_timeline_id"])
-        if ancestor == detached:
-            reparented += 1
+    reparented, not_reparented = reparenting_progress(timelines)
     assert reparented == len(timelines)
 
     time.sleep(2)
@@ -1212,10 +1211,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # gc is unblocked
     env.pageserver.assert_log_contains(".* gc_loop.*: 4 timelines need GC", offset)
 
-    metric = http.get_metric_value(
-        "remote_storage_s3_request_seconds_count",
-        {"request_type": "copy_object", "result": "ok"},
-    )
+    metric = remote_storage_copy_requests()
     assert remote_copies == metric
 
 
