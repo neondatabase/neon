@@ -826,7 +826,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         names: I,
-    ) -> anyhow::Result<Vec<(LayerName, LayerFileMetadata)>>
+    ) -> Result<Vec<(LayerName, LayerFileMetadata)>, NotInitialized>
     where
         I: IntoIterator<Item = LayerName>,
     {
@@ -952,7 +952,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         compacted_from: &[Layer],
         compacted_to: &[ResidentLayer],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
