@@ -1,6 +1,5 @@
 import datetime
 import enum
-import itertools
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1110,6 +1109,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
 
     # detach "E" which has most reparentable timelines under it
     detached = timelines.pop()
+    assert len(timelines) == 4
 
     http = http.without_status_retrying()
 
@@ -1125,8 +1125,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # tracked offset in the pageserver log which is at least at the most recent activation
     offset = None
 
-    for nth_round in range(len(timelines) - 1):
-        log.info(f"{nth_round} round")
+    for nth_round in range(3):
         with pytest.raises(
             PageserverApiException,
             match=".*failed to reparent all candidate timelines, please retry",
@@ -1184,16 +1183,15 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
         ".* attach\\{.* gen=00000001\\}: attach finished, activating", offset
     )
 
-    # delete the remaining and previous ancestor to take a different path to
-    # completion (all other tests take the "detach? reparent complete", but
-    # this is only "complete".
-    for timeline in itertools.chain(not_reparented, [env.initial_timeline]):
-        http.timeline_delete(env.initial_tenant, timeline)
-        wait_timeline_detail_404(http, env.initial_tenant, timeline, 20)
+    # delete the previous ancestor to take a different path to completion. all
+    # other tests take the "detach? reparent complete", but this only hits
+    # "complete".
+    http.timeline_delete(env.initial_tenant, env.initial_timeline)
+    wait_timeline_detail_404(http, env.initial_tenant, env.initial_timeline, 20)
 
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "off"))
+
     reparented_resp = http.detach_ancestor(env.initial_tenant, detached)
-    timelines = [x for x in timelines if x not in not_reparented]
     assert reparented_resp == timelines
     # no need to quiesce_tenants anymore, because completion does that
 
@@ -1209,7 +1207,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     ), "there should be no restart with the final detach_ancestor as it only completed"
 
     # gc is unblocked
-    env.pageserver.assert_log_contains(".* gc_loop.*: 4 timelines need GC", offset)
+    env.pageserver.assert_log_contains(".* gc_loop.*: 5 timelines need GC", offset)
 
     metric = remote_storage_copy_requests()
     assert remote_copies == metric
