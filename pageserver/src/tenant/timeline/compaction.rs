@@ -4,7 +4,7 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -29,7 +29,9 @@ use crate::page_cache;
 use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
-use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc, ValueReconstructState};
+use crate::tenant::storage_layer::{
+    AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
+};
 use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
@@ -1150,13 +1152,14 @@ impl Timeline {
     pub(crate) async fn generate_key_retention(
         self: &Arc<Timeline>,
         key: Key,
-        history: &[(Key, Lsn, Value)],
+        full_history: &[(Key, Lsn, Value)],
         horizon: Lsn,
         retain_lsn_below_horizon: &[Lsn],
         delta_threshold_cnt: usize,
     ) -> anyhow::Result<KeyHistoryRetention> {
         // Pre-checks for the invariants
         if cfg!(debug_assertions) {
+            let history = full_history;
             for (log_key, _, _) in history {
                 assert_eq!(log_key, &key, "mismatched key");
             }
@@ -1194,7 +1197,7 @@ impl Timeline {
             }
             lsn_split_points.push(horizon);
             let mut current_idx = 0;
-            for item @ (_, lsn, _) in history {
+            for item @ (_, lsn, _) in full_history {
                 while current_idx < lsn_split_points.len() && *lsn > lsn_split_points[current_idx] {
                     current_idx += 1;
                 }
@@ -1233,6 +1236,64 @@ impl Timeline {
             "should have at least below + above horizon batches"
         );
         let mut replay_history: Vec<(Key, Lsn, Value)> = Vec::new();
+
+        /// Generate debug information for the replay history
+        fn generate_history_trace(replay_history: &[(Key, Lsn, Value)]) -> String {
+            use std::fmt::Write;
+            let mut output = String::new();
+            if let Some((key, _, _)) = replay_history.first() {
+                write!(output, "key={} ", key).unwrap();
+                let mut cnt = 0;
+                for (_, lsn, val) in replay_history {
+                    if val.is_image() {
+                        write!(output, "i@{} ", lsn).unwrap();
+                    } else if val.will_init() {
+                        write!(output, "di@{} ", lsn).unwrap();
+                    } else {
+                        write!(output, "d@{} ", lsn).unwrap();
+                    }
+                    cnt += 1;
+                    if cnt >= 128 {
+                        write!(output, "... and more").unwrap();
+                        break;
+                    }
+                }
+            } else {
+                write!(output, "<no history>").unwrap();
+            }
+            output
+        }
+
+        fn generate_debug_trace(
+            replay_history: &[(Key, Lsn, Value)],
+            full_history: &[(Key, Lsn, Value)],
+            lsns: &[Lsn],
+            horizon: Lsn,
+        ) -> String {
+            use std::fmt::Write;
+            let mut output = String::new();
+            writeln!(
+                output,
+                "replay_history: {}",
+                generate_history_trace(replay_history)
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "full_history: {}",
+                generate_history_trace(full_history)
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "when processing: [{}] horizon={}",
+                lsns.iter().map(|l| format!("{l}")).join(","),
+                horizon
+            )
+            .unwrap();
+            output
+        }
+
         for (i, split_for_lsn) in split_history.into_iter().enumerate() {
             records_since_last_image += split_for_lsn.len();
             let generate_image = if i == 0 {
@@ -1256,7 +1317,18 @@ impl Timeline {
                 }
             }
             if let Some((_, _, val)) = replay_history.first() {
-                assert!(val.will_init(), "invalid history, no base image");
+                if !val.will_init() {
+                    return Err(anyhow::anyhow!("invalid history, no base image")).with_context(
+                        || {
+                            generate_debug_trace(
+                                &replay_history,
+                                full_history,
+                                retain_lsn_below_horizon,
+                                horizon,
+                            )
+                        },
+                    );
+                }
             }
             if generate_image && records_since_last_image > 0 {
                 records_since_last_image = 0;
@@ -1267,14 +1339,30 @@ impl Timeline {
                     img = Some((*lsn, val.clone()));
                     for (_, lsn, val) in history.into_iter().skip(1) {
                         let Value::WalRecord(rec) = val else {
-                            panic!("invalid record")
+                            return Err(anyhow::anyhow!(
+                                "invalid record, first record is image, expect walrecords"
+                            ))
+                            .with_context(|| {
+                                generate_debug_trace(
+                                    &replay_history,
+                                    full_history,
+                                    retain_lsn_below_horizon,
+                                    horizon,
+                                )
+                            });
                         };
                         records.push((lsn, rec));
                     }
                 } else {
                     for (_, lsn, val) in history.into_iter() {
                         let Value::WalRecord(rec) = val else {
-                            panic!("invalid record")
+                            return Err(anyhow::anyhow!("invalid record, first record is walrecord, expect rest are walrecord"))
+                                .with_context(|| generate_debug_trace(
+                                    &replay_history,
+                                    full_history,
+                                    retain_lsn_below_horizon,
+                                    horizon,
+                                ));
                         };
                         records.push((lsn, rec));
                     }
@@ -1286,12 +1374,11 @@ impl Timeline {
                 replay_history.push((key, request_lsn, Value::Image(img.clone())));
                 retention.push(vec![(request_lsn, Value::Image(img))]);
             } else {
-                retention.push(
-                    split_for_lsn
-                        .iter()
-                        .map(|(_, lsn, value)| (*lsn, value.clone()))
-                        .collect(),
-                );
+                let deltas = split_for_lsn
+                    .iter()
+                    .map(|(_, lsn, value)| (*lsn, value.clone()))
+                    .collect_vec();
+                retention.push(deltas);
             }
         }
         let mut result = Vec::with_capacity(retention.len());
@@ -1306,7 +1393,7 @@ impl Timeline {
                 result.push((lsn_split_points[idx], KeyLogAtLsn(logs)));
             }
         }
-        unreachable!()
+        unreachable!("key retention is empty")
     }
 
     /// An experimental compaction building block that combines compaction with garbage collection.
@@ -1412,6 +1499,13 @@ impl Timeline {
         let mut accumulated_values = Vec::new();
         let mut last_key: Option<Key> = None;
 
+        enum FlushDeltaResult {
+            /// Create a new resident layer
+            CreateResidentLayer(ResidentLayer),
+            /// Keep an original delta layer
+            KeepLayer(PersistentLayerKey),
+        }
+
         async fn flush_deltas(
             deltas: &mut Vec<(Key, Lsn, crate::repository::Value)>,
             last_key: Key,
@@ -1420,7 +1514,7 @@ impl Timeline {
             tline: &Arc<Timeline>,
             lowest_retain_lsn: Lsn,
             ctx: &RequestContext,
-        ) -> anyhow::Result<Option<ResidentLayer>> {
+        ) -> anyhow::Result<Option<FlushDeltaResult>> {
             // Check if we need to split the delta layer. We split at the original delta layer boundary to avoid
             // overlapping layers.
             //
@@ -1443,33 +1537,78 @@ impl Timeline {
             if !need_split {
                 return Ok(None);
             }
-            let deltas = std::mem::take(deltas);
+            let deltas: Vec<(Key, Lsn, Value)> = std::mem::take(deltas);
             if deltas.is_empty() {
                 return Ok(None);
             }
             let end_lsn = deltas.iter().map(|(_, lsn, _)| lsn).max().copied().unwrap() + 1;
+            let key_start = deltas.first().unwrap().0;
+            let key_end = deltas.last().unwrap().0.next();
+            {
+                // Hack: skip delta layer if we need to produce a layer of a same key-lsn.
+                let guard = tline.layers.read().await;
+                let key = PersistentLayerKey {
+                    key_range: key_start..key_end,
+                    lsn_range: lowest_retain_lsn..end_lsn,
+                    is_delta: true,
+                };
+                if guard.contains_key(&key) {
+                    drop(guard);
+                    info!(
+                        "skipping delta layer due to duplicated layer key: {}..{} {}..{}",
+                        key_start, key_end, lowest_retain_lsn, end_lsn
+                    );
+                    return Ok(Some(FlushDeltaResult::KeepLayer(key)));
+                }
+            }
+
             let mut delta_layer_writer = DeltaLayerWriter::new(
                 tline.conf,
                 tline.timeline_id,
                 tline.tenant_shard_id,
-                deltas.first().unwrap().0,
+                key_start,
                 lowest_retain_lsn..end_lsn,
                 ctx,
             )
             .await?;
-            let key_end = deltas.last().unwrap().0.next();
             for (key, lsn, val) in deltas {
                 delta_layer_writer.put_value(key, lsn, val, ctx).await?;
             }
             let delta_layer = delta_layer_writer.finish(key_end, tline, ctx).await?;
-            Ok(Some(delta_layer))
+            Ok(Some(FlushDeltaResult::CreateResidentLayer(delta_layer)))
         }
+
+        // Hack the key range to be min..(max-1). Otherwise, the image layer will be
+        // interpreted as an L0 delta layer. Also, to avoid creating duplicated image layers,
+        // we varies the end key a little bit each time we do the compaction. This should
+        // be fixed in the future (i.e., we allow replace an existing layer with another
+        // layer of the same key range).
+        let hack_image_layer_range = {
+            let guard = self.layers.read().await;
+
+            let mut end_key = Key::MAX;
+            end_key.field6 -= 1;
+            let mut img_range = Key::MIN..end_key;
+
+            while guard.contains_key(&PersistentLayerKey {
+                key_range: img_range.clone(),
+                lsn_range: PersistentLayerDesc::image_layer_lsn_range(lowest_retain_lsn),
+                is_delta: false,
+            }) {
+                img_range.end.field6 -= 1;
+                continue;
+            }
+            // We will get `MIN..(MAX-1)` for an iteration, and `MIN..(MAX-2)` for the next iteration.
+            // Then for the third iteration, because `MIN..(MAX-1)` gets removed in the first iteration,
+            // we will again get `MIN..(MAX-1)`.
+            img_range
+        };
 
         let mut image_layer_writer = ImageLayerWriter::new(
             self.conf,
             self.timeline_id,
             self.tenant_shard_id,
-            &(Key::MIN..Key::MAX), // covers the full key range
+            &hack_image_layer_range, // covers the full key range
             lowest_retain_lsn,
             ctx,
         )
@@ -1553,7 +1692,19 @@ impl Timeline {
             1
         );
         let mut compact_to = Vec::new();
-        compact_to.extend(delta_layers);
+        let mut keep_delta_layers = HashSet::new();
+        for action in delta_layers {
+            match action {
+                FlushDeltaResult::CreateResidentLayer(layer) => {
+                    compact_to.push(layer);
+                }
+                FlushDeltaResult::KeepLayer(l) => {
+                    keep_delta_layers.insert(l);
+                }
+            }
+        }
+        let mut layer_selection = layer_selection;
+        layer_selection.retain(|x| !keep_delta_layers.contains(&x.layer_desc().key()));
         compact_to.push(image_layer);
         // Step 3: Place back to the layer map.
         {

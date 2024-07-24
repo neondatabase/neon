@@ -6909,7 +6909,11 @@ mod tests {
             vec![
                 // Image layer at GC horizon
                 PersistentLayerKey {
-                    key_range: Key::MIN..Key::MAX,
+                    key_range: {
+                        let mut key = Key::MAX;
+                        key.field6 -= 1;
+                        Key::MIN..key
+                    },
                     lsn_range: Lsn(0x30)..Lsn(0x31),
                     is_delta: false
                 },
@@ -6927,6 +6931,15 @@ mod tests {
                 }
             ]
         );
+
+        // increase GC horizon and compact again
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.space = Lsn(0x40);
+        }
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
 
         Ok(())
     }
@@ -7278,6 +7291,15 @@ mod tests {
                 &expected_result_at_gc_horizon[idx]
             );
         }
+
+        // increase GC horizon and compact again
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            guard.cutoffs.time = Lsn(0x40);
+            guard.cutoffs.space = Lsn(0x40);
+        }
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
 
         Ok(())
     }
@@ -7674,6 +7696,10 @@ mod tests {
         ];
 
         let verify_result = || async {
+            let gc_horizon = {
+                let gc_info = tline.gc_info.read().unwrap();
+                gc_info.cutoffs.time
+            };
             for idx in 0..10 {
                 assert_eq!(
                     tline
@@ -7684,7 +7710,7 @@ mod tests {
                 );
                 assert_eq!(
                     tline
-                        .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                        .get(get_key(idx as u32), gc_horizon, &ctx)
                         .await
                         .unwrap(),
                     &expected_result_at_gc_horizon[idx]
@@ -7710,7 +7736,24 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        verify_result().await;
 
+        // compact again
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        verify_result().await;
+
+        // increase GC horizon and compact again
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            guard.cutoffs.time = Lsn(0x38);
+            guard.cutoffs.space = Lsn(0x38);
+        }
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        verify_result().await; // no wals between 0x30 and 0x38, so we should obtain the same result
+
+        // not increasing the GC horizon and compact again
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
         verify_result().await;
 
         Ok(())
