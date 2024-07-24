@@ -366,7 +366,7 @@ impl RemoteStorage for LocalFs {
                     } else {
                         Some(ListingObject {
                             key: k.clone(),
-                            // LocalFs is just for testing, we do not store modification times
+                            // LocalFs is just for testing, so just specify a dummy time
                             last_modified: SystemTime::now(),
                         })
                     }
