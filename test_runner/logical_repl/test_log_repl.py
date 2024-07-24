@@ -16,11 +16,11 @@ from fixtures.utils import subprocess_capture
 
 
 def timeout_query_clickhouse(
-        client,
-        query: str,
-        digest: str,
-        timeout: timedelta = timedelta(seconds=60),
-        interval: float = 0.5,
+    client,
+    query: str,
+    digest: str,
+    timeout: timedelta = timedelta(seconds=60),
+    interval: float = 0.5,
 ):
     """
     Repeatedly run the query on the client
