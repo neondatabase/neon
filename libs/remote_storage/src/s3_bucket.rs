@@ -532,7 +532,14 @@ impl RemoteStorage for S3Bucket {
                     .req_seconds
                     .observe_elapsed(kind, &response, started_at);
 
-                let response = response?;
+                let response = match response {
+                    Ok(response) => response,
+                    Err(e) => {
+                        // The error is potentially retryable, so we must rewind the loop after yielding.
+                        yield Err(e);
+                        break 'outer;
+                    },
+                };
 
                 let keys = response.contents();
                 let prefixes = response.common_prefixes.as_deref().unwrap_or_default();
