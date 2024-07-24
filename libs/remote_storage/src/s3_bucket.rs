@@ -507,7 +507,7 @@ impl RemoteStorage for S3Bucket {
                     .list_objects_v2()
                     .bucket(self.bucket_name.clone())
                     .set_prefix(list_prefix.clone())
-                    .set_continuation_token(continuation_token)
+                    .set_continuation_token(continuation_token.clone())
                     .set_max_keys(request_max_keys);
 
                 if let ListingMode::WithDelimiter = mode {
@@ -532,7 +532,14 @@ impl RemoteStorage for S3Bucket {
                     .req_seconds
                     .observe_elapsed(kind, &response, started_at);
 
-                let response = response?;
+                let response = match response {
+                    Ok(response) => response,
+                    Err(e) => {
+                        // The error is potentially retryable, so we must rewind the loop after yielding.
+                        yield Err(e);
+                        continue 'outer;
+                    },
+                };
 
                 let keys = response.contents();
                 let prefixes = response.common_prefixes.as_deref().unwrap_or_default();
