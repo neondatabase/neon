@@ -92,6 +92,7 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 tracing.workspace = true
+typed-json.workspace = true
 url.workspace = true
 urlencoding.workspace = true
 utils.workspace = true

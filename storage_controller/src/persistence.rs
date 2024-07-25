@@ -5,8 +5,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use self::split_state::SplitState;
-use camino::Utf8Path;
-use camino::Utf8PathBuf;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
@@ -55,11 +53,6 @@ use crate::node::Node;
 /// we can UPDATE a node's scheduling mode reasonably quickly to mark a bad node offline.
 pub struct Persistence {
     connection_pool: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<PgConnection>>,
-
-    // In test environments, we support loading+saving a JSON file.  This is temporary, for the benefit of
-    // test_compatibility.py, so that we don't have to commit to making the database contents fully backward/forward
-    // compatible just yet.
-    json_path: Option<Utf8PathBuf>,
 }
 
 /// Legacy format, for use in JSON compat objects in test environment
@@ -124,7 +117,7 @@ impl Persistence {
     const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 
-    pub fn new(database_url: String, json_path: Option<Utf8PathBuf>) -> Self {
+    pub fn new(database_url: String) -> Self {
         let manager = diesel::r2d2::ConnectionManager::<PgConnection>::new(database_url);
 
         // We will use a connection pool: this is primarily to _limit_ our connection count, rather than to optimize time
@@ -139,10 +132,7 @@ impl Persistence {
             .build(manager)
             .expect("Could not build connection pool");
 
-        Self {
-            connection_pool,
-            json_path,
-        }
+        Self { connection_pool }
     }
 
     /// A helper for use during startup, where we would like to tolerate concurrent restarts of the
@@ -302,85 +292,13 @@ impl Persistence {
     /// At startup, load the high level state for shards, such as their config + policy.  This will
     /// be enriched at runtime with state discovered on pageservers.
     pub(crate) async fn list_tenant_shards(&self) -> DatabaseResult<Vec<TenantShardPersistence>> {
-        let loaded = self
-            .with_measured_conn(
-                DatabaseOperation::ListTenantShards,
-                move |conn| -> DatabaseResult<_> {
-                    Ok(crate::schema::tenant_shards::table.load::<TenantShardPersistence>(conn)?)
-                },
-            )
-            .await?;
-
-        if loaded.is_empty() {
-            if let Some(path) = &self.json_path {
-                if tokio::fs::try_exists(path)
-                    .await
-                    .map_err(|e| DatabaseError::Logical(format!("Error stat'ing JSON file: {e}")))?
-                {
-                    tracing::info!("Importing from legacy JSON format at {path}");
-                    return self.list_tenant_shards_json(path).await;
-                }
-            }
-        }
-        Ok(loaded)
-    }
-
-    /// Shim for automated compatibility tests: load tenants from a JSON file instead of database
-    pub(crate) async fn list_tenant_shards_json(
-        &self,
-        path: &Utf8Path,
-    ) -> DatabaseResult<Vec<TenantShardPersistence>> {
-        let bytes = tokio::fs::read(path)
-            .await
-            .map_err(|e| DatabaseError::Logical(format!("Failed to load JSON: {e}")))?;
-
-        let mut decoded = serde_json::from_slice::<JsonPersistence>(&bytes)
-            .map_err(|e| DatabaseError::Logical(format!("Deserialization error: {e}")))?;
-        for shard in decoded.tenants.values_mut() {
-            if shard.placement_policy == "\"Single\"" {
-                // Backward compat for test data after PR https://github.com/neondatabase/neon/pull/7165
-                shard.placement_policy = "{\"Attached\":0}".to_string();
-            }
-
-            if shard.scheduling_policy.is_empty() {
-                shard.scheduling_policy =
-                    serde_json::to_string(&ShardSchedulingPolicy::default()).unwrap();
-            }
-        }
-
-        let tenants: Vec<TenantShardPersistence> = decoded.tenants.into_values().collect();
-
-        // Synchronize database with what is in the JSON file
-        self.insert_tenant_shards(tenants.clone()).await?;
-
-        Ok(tenants)
-    }
-
-    /// For use in testing environments, where we dump out JSON on shutdown.
-    pub async fn write_tenants_json(&self) -> anyhow::Result<()> {
-        let Some(path) = &self.json_path else {
-            anyhow::bail!("Cannot write JSON if path isn't set (test environment bug)");
-        };
-        tracing::info!("Writing state to {path}...");
-        let tenants = self.list_tenant_shards().await?;
-        let mut tenants_map = HashMap::new();
-        for tsp in tenants {
-            let tenant_shard_id = TenantShardId {
-                tenant_id: TenantId::from_str(tsp.tenant_id.as_str())?,
-                shard_number: ShardNumber(tsp.shard_number as u8),
-                shard_count: ShardCount::new(tsp.shard_count as u8),
-            };
-
-            tenants_map.insert(tenant_shard_id, tsp);
-        }
-        let json = serde_json::to_string(&JsonPersistence {
-            tenants: tenants_map,
-        })?;
-
-        tokio::fs::write(path, &json).await?;
-        tracing::info!("Wrote {} bytes to {path}...", json.len());
-
-        Ok(())
+        self.with_measured_conn(
+            DatabaseOperation::ListTenantShards,
+            move |conn| -> DatabaseResult<_> {
+                Ok(crate::schema::tenant_shards::table.load::<TenantShardPersistence>(conn)?)
+            },
+        )
+        .await
     }
 
     /// Tenants must be persisted before we schedule them for the first time.  This enables us
@@ -542,6 +460,7 @@ impl Persistence {
         Ok(Generation::new(g as u32))
     }
 
+    #[allow(non_local_definitions)]
     /// For use when updating a persistent property of a tenant, such as its config or placement_policy.
     ///
     /// Do not use this for settting generation, unless in the special onboarding code path (/location_config)

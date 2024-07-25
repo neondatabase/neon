@@ -228,18 +228,20 @@ impl UploadQueue {
         Ok(self.initialized_mut().expect("we just set it"))
     }
 
-    pub(crate) fn initialized_mut(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
+    pub(crate) fn initialized_mut(
+        &mut self,
+    ) -> Result<&mut UploadQueueInitialized, NotInitialized> {
         use UploadQueue::*;
         match self {
-            Uninitialized => Err(NotInitialized::Uninitialized.into()),
+            Uninitialized => Err(NotInitialized::Uninitialized),
             Initialized(x) => {
                 if x.shutting_down {
-                    Err(NotInitialized::ShuttingDown.into())
+                    Err(NotInitialized::ShuttingDown)
                 } else {
                     Ok(x)
                 }
             }
-            Stopped(_) => Err(NotInitialized::Stopped.into()),
+            Stopped(_) => Err(NotInitialized::Stopped),
         }
     }
 

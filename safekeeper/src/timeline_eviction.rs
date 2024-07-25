@@ -14,6 +14,7 @@ use tracing::{debug, info, instrument, warn};
 use utils::crashsafe::durable_rename;
 
 use crate::{
+    metrics::{EvictionEvent, EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED},
     timeline_manager::{Manager, StateSnapshot},
     wal_backup,
     wal_backup_partial::{self, PartialRemoteSegment},
@@ -66,6 +67,15 @@ impl Manager {
 
         info!("starting eviction, using {:?}", partial_backup_uploaded);
 
+        EVICTION_EVENTS_STARTED
+            .with_label_values(&[EvictionEvent::Evict.into()])
+            .inc();
+        let _guard = scopeguard::guard((), |_| {
+            EVICTION_EVENTS_COMPLETED
+                .with_label_values(&[EvictionEvent::Evict.into()])
+                .inc();
+        });
+
         if let Err(e) = do_eviction(self, &partial_backup_uploaded).await {
             warn!("failed to evict timeline: {:?}", e);
             return;
@@ -87,6 +97,15 @@ impl Manager {
         };
 
         info!("starting uneviction, using {:?}", partial_backup_uploaded);
+
+        EVICTION_EVENTS_STARTED
+            .with_label_values(&[EvictionEvent::Restore.into()])
+            .inc();
+        let _guard = scopeguard::guard((), |_| {
+            EVICTION_EVENTS_COMPLETED
+                .with_label_values(&[EvictionEvent::Restore.into()])
+                .inc();
+        });
 
         if let Err(e) = do_uneviction(self, &partial_backup_uploaded).await {
             warn!("failed to unevict timeline: {:?}", e);
@@ -180,10 +199,7 @@ async fn redownload_partial_segment(
     file.flush().await?;
 
     let final_path = local_segment_path(mgr, partial);
-    info!(
-        "downloaded {} bytes, renaming to {}",
-        final_path, final_path,
-    );
+    info!("downloaded {actual_len} bytes, renaming to {final_path}");
     if let Err(e) = durable_rename(&tmp_file, &final_path, !mgr.conf.no_sync).await {
         // Probably rename succeeded, but fsync of it failed. Remove
         // the file then to avoid using it.

@@ -18,14 +18,17 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
+use pageserver_api::models::LocationConfigMode;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::LsnLeaseRequest;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
+use pageserver_api::models::TenantLocationConfigRequest;
 use pageserver_api::models::TenantLocationConfigResponse;
 use pageserver_api::models::TenantScanRemoteStorageResponse;
 use pageserver_api::models::TenantScanRemoteStorageShard;
@@ -33,12 +36,10 @@ use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
+use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
-use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantLocationConfigRequest,
-};
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
@@ -658,6 +659,39 @@ async fn timeline_preserve_initdb_handler(
     .instrument(info_span!("timeline_preserve_initdb_archive",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug(),
+                %timeline_id))
+    .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn timeline_archival_config_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let request_data: TimelineArchivalConfigRequest = json_request(&mut request).await?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        tenant
+            .apply_timeline_archival_config(timeline_id, request_data.state)
+            .await
+            .context("applying archival config")
+            .map_err(ApiError::InternalServerError)?;
+        Ok::<_, ApiError>(())
+    }
+    .instrument(info_span!("timeline_archival_config",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug(),
+                state = ?request_data.state,
                 %timeline_id))
     .await?;
 
@@ -1642,6 +1676,10 @@ async fn timeline_checkpoint_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
         flags |= CompactFlags::ForceImageLayerCreation;
     }
+
+    // By default, checkpoints come with a compaction, but this may be optionally disabled by tests that just want to flush + upload.
+    let compact = parse_query_param::<_, bool>(&request, "compact")?.unwrap_or(true);
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
@@ -1658,15 +1696,17 @@ async fn timeline_checkpoint_handler(
 
                 }
             })?;
-        timeline
-            .compact(&cancel, flags, &ctx)
-            .await
-            .map_err(|e|
-                match e {
-                    CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                    CompactionError::Other(e) => ApiError::InternalServerError(e)
-                }
-            )?;
+        if compact {
+            timeline
+                .compact(&cancel, flags, &ctx)
+                .await
+                .map_err(|e|
+                    match e {
+                        CompactionError::ShuttingDown => ApiError::ShuttingDown,
+                        CompactionError::Other(e) => ApiError::InternalServerError(e)
+                    }
+                )?;
+        }
 
         if wait_until_uploaded {
             timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
@@ -1721,7 +1761,9 @@ async fn timeline_detach_ancestor_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
-    use crate::tenant::timeline::detach_ancestor::Options;
+    use crate::tenant::timeline::detach_ancestor;
+    use pageserver_api::models::detach_ancestor::AncestorDetached;
+
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1729,7 +1771,7 @@ async fn timeline_detach_ancestor_handler(
     let span = tracing::info_span!("detach_ancestor", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id);
 
     async move {
-        let mut options = Options::default();
+        let mut options = detach_ancestor::Options::default();
 
         let rewrite_concurrency =
             parse_query_param::<_, std::num::NonZeroUsize>(&request, "rewrite_concurrency")?;
@@ -1757,27 +1799,36 @@ async fn timeline_detach_ancestor_handler(
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
-        let (_guard, prepared) = timeline
+        let progress = timeline
             .prepare_to_detach_from_ancestor(&tenant, options, ctx)
             .await?;
 
-        let res = state
-            .tenant_manager
-            .complete_detaching_timeline_ancestor(tenant_shard_id, timeline_id, prepared, ctx)
-            .await;
+        // uncomment to allow early as possible Tenant::drop
+        // drop(tenant);
 
-        match res {
-            Ok(reparented_timelines) => {
-                let resp = pageserver_api::models::detach_ancestor::AncestorDetached {
+        let resp = match progress {
+            detach_ancestor::Progress::Prepared(_guard, prepared) => {
+                // it would be great to tag the guard on to the tenant activation future
+                let reparented_timelines = state
+                    .tenant_manager
+                    .complete_detaching_timeline_ancestor(
+                        tenant_shard_id,
+                        timeline_id,
+                        prepared,
+                        ctx,
+                    )
+                    .await
+                    .context("timeline detach ancestor completion")
+                    .map_err(ApiError::InternalServerError)?;
+
+                AncestorDetached {
                     reparented_timelines,
-                };
-
-                json_response(StatusCode::OK, resp)
+                }
             }
-            Err(e) => Err(ApiError::InternalServerError(
-                e.context("timeline detach completion"),
-            )),
-        }
+            detach_ancestor::Progress::Done(resp) => resp,
+        };
+
+        json_response(StatusCode::OK, resp)
     }
     .instrument(span)
     .await
@@ -2777,6 +2828,10 @@ pub fn make_router(
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
             |r| api_handler(r, timeline_preserve_initdb_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
+            |r| api_handler(r, timeline_archival_config_handler),
         )
         .get("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)

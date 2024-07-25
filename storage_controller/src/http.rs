@@ -330,6 +330,22 @@ async fn handle_tenant_timeline_delete(
     .await
 }
 
+async fn handle_tenant_timeline_detach_ancestor(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    let res = service
+        .tenant_timeline_detach_ancestor(tenant_id, timeline_id)
+        .await?;
+
+    json_response(StatusCode::OK, res)
+}
+
 async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
@@ -414,7 +430,7 @@ async fn handle_tenant_describe(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Scrubber)?;
 
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
@@ -454,6 +470,14 @@ async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
+}
+
+async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
 }
 
 async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -878,6 +902,9 @@ pub fn make_router(
         .post("/control/v1/node", |r| {
             named_request_span(r, handle_node_register, RequestName("control_v1_node"))
         })
+        .delete("/control/v1/node/:node_id", |r| {
+            named_request_span(r, handle_node_delete, RequestName("control_v1_node_delete"))
+        })
         .get("/control/v1/node", |r| {
             named_request_span(r, handle_node_list, RequestName("control_v1_node"))
         })
@@ -995,6 +1022,16 @@ pub fn make_router(
                 RequestName("v1_tenant_timeline"),
             )
         })
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/detach_ancestor",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_detach_ancestor,
+                    RequestName("v1_tenant_timeline_detach_ancestor"),
+                )
+            },
+        )
         // Tenant detail GET passthrough to shard zero:
         .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(

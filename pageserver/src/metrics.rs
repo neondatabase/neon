@@ -473,6 +473,31 @@ static PITR_HISTORY_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+#[derive(strum_macros::EnumString, strum_macros::Display, strum_macros::IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum MetricLayerKind {
+    Delta,
+    Image,
+}
+
+static TIMELINE_LAYER_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_layer_bytes",
+        "Sum of layer physical sizes in bytes",
+        &["tenant_id", "shard_id", "timeline_id", "kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+static TIMELINE_LAYER_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_layer_count",
+        "Number of layers that exist",
+        &["tenant_id", "shard_id", "timeline_id", "kind"]
+    )
+    .expect("failed to define a metric")
+});
+
 static TIMELINE_ARCHIVE_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_archive_size",
@@ -565,6 +590,38 @@ static VALID_LSN_LEASE_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
         "pageserver_valid_lsn_lease_count",
         "The number of valid leases after refreshing gc info.",
         &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static CIRCUIT_BREAKERS_BROKEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_circuit_breaker_broken",
+        "How many times a circuit breaker has broken"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static CIRCUIT_BREAKERS_UNBROKEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_circuit_breaker_unbroken",
+        "How many times a circuit breaker has been un-broken (recovered)"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_compression_image_in_bytes_total",
+        "Size of uncompressed data written into image layers"
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static COMPRESSION_IMAGE_OUTPUT_BYTES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_compression_image_out_bytes_total",
+        "Size of compressed image layer written"
     )
     .expect("failed to define a metric")
 });
@@ -1474,7 +1531,6 @@ pub(crate) enum ComputeCommandKind {
     Basebackup,
     Fullbackup,
     LeaseLsn,
-    Show,
 }
 
 pub(crate) struct ComputeCommandCounters {
@@ -2126,6 +2182,10 @@ pub(crate) struct TimelineMetrics {
     pub last_record_gauge: IntGauge,
     pub pitr_history_size: UIntGauge,
     pub archival_size: UIntGauge,
+    pub(crate) layer_size_image: UIntGauge,
+    pub(crate) layer_count_image: UIntGauge,
+    pub(crate) layer_size_delta: UIntGauge,
+    pub(crate) layer_count_delta: UIntGauge,
     pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
@@ -2208,6 +2268,42 @@ impl TimelineMetrics {
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
 
+        let layer_size_image = TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&[
+                &tenant_id,
+                &shard_id,
+                &timeline_id,
+                MetricLayerKind::Image.into(),
+            ])
+            .unwrap();
+
+        let layer_count_image = TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&[
+                &tenant_id,
+                &shard_id,
+                &timeline_id,
+                MetricLayerKind::Image.into(),
+            ])
+            .unwrap();
+
+        let layer_size_delta = TIMELINE_LAYER_SIZE
+            .get_metric_with_label_values(&[
+                &tenant_id,
+                &shard_id,
+                &timeline_id,
+                MetricLayerKind::Delta.into(),
+            ])
+            .unwrap();
+
+        let layer_count_delta = TIMELINE_LAYER_COUNT
+            .get_metric_with_label_values(&[
+                &tenant_id,
+                &shard_id,
+                &timeline_id,
+                MetricLayerKind::Delta.into(),
+            ])
+            .unwrap();
+
         let standby_horizon_gauge = STANDBY_HORIZON
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -2262,6 +2358,10 @@ impl TimelineMetrics {
             last_record_gauge,
             pitr_history_size,
             archival_size,
+            layer_size_image,
+            layer_count_image,
+            layer_size_delta,
+            layer_count_delta,
             standby_horizon_gauge,
             resident_physical_size_gauge,
             current_logical_size_gauge,
@@ -2322,6 +2422,31 @@ impl TimelineMetrics {
 
         let _ = TIMELINE_ARCHIVE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = PITR_HISTORY_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+
+        let _ = TIMELINE_LAYER_SIZE.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+            MetricLayerKind::Image.into(),
+        ]);
+        let _ = TIMELINE_LAYER_COUNT.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+            MetricLayerKind::Image.into(),
+        ]);
+        let _ = TIMELINE_LAYER_SIZE.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+            MetricLayerKind::Delta.into(),
+        ]);
+        let _ = TIMELINE_LAYER_COUNT.remove_label_values(&[
+            tenant_id,
+            shard_id,
+            timeline_id,
+            MetricLayerKind::Delta.into(),
+        ]);
 
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);

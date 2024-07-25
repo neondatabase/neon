@@ -117,6 +117,9 @@ class LayerMapInfo:
     def image_layers(self) -> List[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Image"]
 
+    def delta_l0_layers(self) -> List[HistoricLayerInfo]:
+        return [x for x in self.historic_layers if x.kind == "Delta" and x.l0]
+
     def historic_by_name(self) -> Set[str]:
         return set(x.layer_file_name for x in self.historic_layers)
 
@@ -172,6 +175,21 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
 
+    def without_status_retrying(self) -> PageserverHttpClient:
+        retries = Retry(
+            status=0,
+            connect=5,
+            read=False,
+            backoff_factor=0.2,
+            status_forcelist=[],
+            allowed_methods=None,
+            remove_headers_on_redirect=[],
+        )
+
+        return PageserverHttpClient(
+            self.port, self.is_testing_enabled_or_skip, self.auth_token, retries
+        )
+
     @property
     def base_url(self) -> str:
         return f"http://localhost:{self.port}"
@@ -223,8 +241,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def tenant_attach(
         self,
         tenant_id: Union[TenantId, TenantShardId],
+        generation: int,
         config: None | Dict[str, Any] = None,
-        generation: Optional[int] = None,
     ):
         config = config or {}
 
@@ -644,6 +662,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_repartition=False,
         force_image_layer_creation=False,
         wait_until_uploaded=False,
+        compact: Optional[bool] = None,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -653,6 +672,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_image_layer_creation"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
+
+        if compact is not None:
+            query["compact"] = "true" if compact else "false"
 
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
@@ -814,17 +836,19 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
         batch_size: int | None = None,
-    ) -> Set[TimelineId]:
+        **kwargs,
+    ) -> List[TimelineId]:
         params = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
             params=params,
+            **kwargs,
         )
         self.verbose_error(res)
         json = res.json()
-        return set(map(TimelineId, json["reparented_timelines"]))
+        return list(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

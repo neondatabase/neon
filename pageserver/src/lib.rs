@@ -13,6 +13,7 @@ pub mod http;
 pub mod import_datadir;
 pub mod l0_flush;
 pub use pageserver_api::keyspace;
+use tokio_util::sync::CancellationToken;
 pub mod aux_file;
 pub mod metrics;
 pub mod page_cache;
@@ -23,7 +24,6 @@ pub mod span;
 pub(crate) mod statvfs;
 pub mod task_mgr;
 pub mod tenant;
-pub mod trace;
 pub mod utilization;
 pub mod virtual_file;
 pub mod walingest;
@@ -33,7 +33,10 @@ pub mod walredo;
 use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
-use tenant::mgr::TenantManager;
+use tenant::{
+    mgr::{BackgroundPurges, TenantManager},
+    secondary,
+};
 use tracing::info;
 
 /// Current storage format version
@@ -55,17 +58,39 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
 
+pub struct CancellableTask {
+    pub task: tokio::task::JoinHandle<()>,
+    pub cancel: CancellationToken,
+}
+pub struct HttpEndpointListener(pub CancellableTask);
+pub struct LibpqEndpointListener(pub CancellableTask);
+pub struct ConsumptionMetricsTasks(pub CancellableTask);
+pub struct DiskUsageEvictionTask(pub CancellableTask);
+impl CancellableTask {
+    pub async fn shutdown(self) {
+        self.cancel.cancel();
+        self.task.await.unwrap();
+    }
+}
+
 #[tracing::instrument(skip_all, fields(%exit_code))]
+#[allow(clippy::too_many_arguments)]
 pub async fn shutdown_pageserver(
+    http_listener: HttpEndpointListener,
+    libpq_listener: LibpqEndpointListener,
+    consumption_metrics_worker: ConsumptionMetricsTasks,
+    disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
     tenant_manager: &TenantManager,
+    background_purges: BackgroundPurges,
     mut deletion_queue: DeletionQueue,
+    secondary_controller_tasks: secondary::GlobalTasks,
     exit_code: i32,
 ) {
     use std::time::Duration;
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
     timed(
-        task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None),
+        libpq_listener.0.shutdown(),
         "shutdown LibpqEndpointListener",
         Duration::from_secs(1),
     )
@@ -92,12 +117,40 @@ pub async fn shutdown_pageserver(
     // Best effort to persist any outstanding deletions, to avoid leaking objects
     deletion_queue.shutdown(Duration::from_secs(5)).await;
 
+    timed(
+        consumption_metrics_worker.0.shutdown(),
+        "shutdown consumption metrics",
+        Duration::from_secs(1),
+    )
+    .await;
+
+    timed(
+        futures::future::OptionFuture::from(disk_usage_eviction_task.map(|t| t.0.shutdown())),
+        "shutdown disk usage eviction",
+        Duration::from_secs(1),
+    )
+    .await;
+
+    timed(
+        background_purges.shutdown(),
+        "shutdown background purges",
+        Duration::from_secs(1),
+    )
+    .await;
+
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
     // FIXME: We should probably stop accepting commands like attach/detach earlier.
     timed(
-        task_mgr::shutdown_tasks(Some(TaskKind::HttpEndpointListener), None, None),
+        http_listener.0.shutdown(),
         "shutdown http",
+        Duration::from_secs(1),
+    )
+    .await;
+
+    timed(
+        secondary_controller_tasks.wait(), // cancellation happened in caller
+        "secondary controller wait",
         Duration::from_secs(1),
     )
     .await;

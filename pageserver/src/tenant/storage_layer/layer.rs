@@ -1,9 +1,7 @@
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::{
-    HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
-};
+use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -160,13 +158,10 @@ impl Layer {
             metadata.file_size,
         );
 
-        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
-
         let owner = Layer(Arc::new(LayerInner::new(
             conf,
             timeline,
             local_path,
-            access_stats,
             desc,
             None,
             metadata.generation,
@@ -193,8 +188,6 @@ impl Layer {
             metadata.file_size,
         );
 
-        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
-
         let mut resident = None;
 
         let owner = Layer(Arc::new_cyclic(|owner| {
@@ -209,7 +202,6 @@ impl Layer {
                 conf,
                 timeline,
                 local_path,
-                access_stats,
                 desc,
                 Some(inner),
                 metadata.generation,
@@ -245,11 +237,6 @@ impl Layer {
                 version: 0,
             });
             resident = Some(inner.clone());
-            let access_stats = LayerAccessStats::empty_will_record_residence_event_later();
-            access_stats.record_residence_event(
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::LayerCreate,
-            );
 
             let local_path = local_layer_path(
                 conf,
@@ -259,16 +246,22 @@ impl Layer {
                 &timeline.generation,
             );
 
-            LayerInner::new(
+            let layer = LayerInner::new(
                 conf,
                 timeline,
                 local_path,
-                access_stats,
                 desc,
                 Some(inner),
                 timeline.generation,
                 timeline.get_shard_index(),
-            )
+            );
+
+            // Newly created layers are marked visible by default: the usual case is that they were created to be read.
+            layer
+                .access_stats
+                .set_visibility(super::LayerVisibilityHint::Visible);
+
+            layer
         }));
 
         let downloaded = resident.expect("just initialized");
@@ -332,9 +325,7 @@ impl Layer {
         use anyhow::ensure;
 
         let layer = self.0.get_or_maybe_download(true, Some(ctx)).await?;
-        self.0
-            .access_stats
-            .record_access(LayerAccessKind::GetValueReconstructData, ctx);
+        self.0.access_stats.record_access(ctx);
 
         if self.layer_desc().is_delta {
             ensure!(lsn_range.start >= self.layer_desc().lsn_range.start);
@@ -368,9 +359,7 @@ impl Layer {
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
 
-        self.0
-            .access_stats
-            .record_access(LayerAccessKind::GetValueReconstructData, ctx);
+        self.0.access_stats.record_access(ctx);
 
         layer
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
@@ -385,6 +374,7 @@ impl Layer {
     }
 
     /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
+    #[allow(dead_code)]
     pub(crate) async fn load_key_values(
         &self,
         ctx: &RequestContext,
@@ -693,6 +683,18 @@ impl Drop for LayerInner {
             // and we could be delaying shutdown for nothing.
         }
 
+        if let Some(timeline) = self.timeline.upgrade() {
+            // Only need to decrement metrics if the timeline still exists: otherwise
+            // it will have already de-registered these metrics via TimelineMetrics::shutdown
+            if self.desc.is_delta() {
+                timeline.metrics.layer_count_delta.dec();
+                timeline.metrics.layer_size_delta.sub(self.desc.file_size);
+            } else {
+                timeline.metrics.layer_count_image.dec();
+                timeline.metrics.layer_size_image.sub(self.desc.file_size);
+            }
+        }
+
         if !*self.wanted_deleted.get_mut() {
             return;
         }
@@ -773,7 +775,6 @@ impl LayerInner {
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
         local_path: Utf8PathBuf,
-        access_stats: LayerAccessStats,
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
@@ -791,6 +792,15 @@ impl LayerInner {
             (heavier_once_cell::OnceCell::default(), 0, Status::Evicted)
         };
 
+        // This object acts as a RAII guard on these metrics: increment on construction
+        if desc.is_delta() {
+            timeline.metrics.layer_count_delta.inc();
+            timeline.metrics.layer_size_delta.add(desc.file_size);
+        } else {
+            timeline.metrics.layer_count_image.inc();
+            timeline.metrics.layer_size_image.add(desc.file_size);
+        }
+
         LayerInner {
             conf,
             debug_str: {
@@ -799,7 +809,7 @@ impl LayerInner {
             path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
-            access_stats,
+            access_stats: Default::default(),
             wanted_deleted: AtomicBool::new(false),
             inner,
             version: AtomicUsize::new(version),
@@ -1154,10 +1164,7 @@ impl LayerInner {
                     LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
                 }
 
-                self.access_stats.record_residence_event(
-                    LayerResidenceStatus::Resident,
-                    LayerResidenceEventReason::ResidenceChange,
-                );
+                self.access_stats.record_residence_event();
 
                 Ok(self.initialize_after_layer_is_on_disk(permit))
             }
@@ -1276,7 +1283,7 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
-                l0: crate::tenant::layer_map::LayerMap::is_l0(self.layer_desc()),
+                l0: crate::tenant::layer_map::LayerMap::is_l0(&self.layer_desc().key_range),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
@@ -1469,14 +1476,22 @@ impl LayerInner {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
                     Ok(elapsed) => {
-                        timeline
-                            .metrics
-                            .evictions_with_low_residence_duration
-                            .read()
-                            .unwrap()
-                            .observe(elapsed);
+                        let accessed = self.access_stats.accessed();
+                        if accessed {
+                            // Only layers used for reads contribute to our "low residence" metric that is used
+                            // to detect thrashing.  Layers promoted for other reasons (e.g. compaction) are allowed
+                            // to be rapidly evicted without contributing to this metric.
+                            timeline
+                                .metrics
+                                .evictions_with_low_residence_duration
+                                .read()
+                                .unwrap()
+                                .observe(elapsed);
+                        }
+
                         tracing::info!(
                             residence_millis = elapsed.as_millis(),
+                            accessed,
                             "evicted layer after known residence period"
                         );
                     }
@@ -1503,10 +1518,7 @@ impl LayerInner {
             }
         }
 
-        self.access_stats.record_residence_event(
-            LayerResidenceStatus::Evicted,
-            LayerResidenceEventReason::ResidenceChange,
-        );
+        self.access_stats.record_residence_event();
 
         self.status.as_ref().unwrap().send_replace(Status::Evicted);
 
@@ -1832,9 +1844,7 @@ impl ResidentLayer {
                 // this is valid because the DownloadedLayer::kind is a OnceCell, not a
                 // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
                 // while it's being held.
-                owner
-                    .access_stats
-                    .record_access(LayerAccessKind::KeyIter, ctx);
+                owner.access_stats.record_access(ctx);
 
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await
@@ -1889,7 +1899,7 @@ impl ResidentLayer {
         self.owner.metadata()
     }
 
-    #[cfg(test)]
+    /// Cast the layer to a delta, return an error if it is an image layer.
     pub(crate) async fn get_as_delta(
         &self,
         ctx: &RequestContext,
@@ -1901,7 +1911,7 @@ impl ResidentLayer {
         }
     }
 
-    #[cfg(test)]
+    /// Cast the layer to an image, return an error if it is a delta layer.
     pub(crate) async fn get_as_image(
         &self,
         ctx: &RequestContext,

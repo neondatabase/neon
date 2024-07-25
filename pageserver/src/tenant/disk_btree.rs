@@ -262,7 +262,7 @@ where
 
     pub fn iter<'a>(self, start_key: &'a [u8; L], ctx: &'a RequestContext) -> DiskBtreeIterator<'a>
     where
-        R: 'a,
+        R: 'a + Send,
     {
         DiskBtreeIterator {
             stream: Box::pin(self.into_stream(start_key, ctx)),
@@ -521,7 +521,7 @@ where
 pub struct DiskBtreeIterator<'a> {
     #[allow(clippy::type_complexity)]
     stream: std::pin::Pin<
-        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a>,
+        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a + Send>,
     >,
 }
 
@@ -550,10 +550,10 @@ where
     /// We maintain the length of the stack to be always greater than zero.
     /// Two exceptions are:
     /// 1. `Self::flush_node`. The method will push the new node if it extracted the last one.
-    ///   So because other methods cannot see the intermediate state invariant still holds.
+    ///    So because other methods cannot see the intermediate state invariant still holds.
     /// 2. `Self::finish`. It consumes self and does not return it back,
-    ///  which means that this is where the structure is destroyed.
-    ///  Thus stack of zero length cannot be observed by other methods.
+    ///    which means that this is where the structure is destroyed.
+    ///    Thus stack of zero length cannot be observed by other methods.
     stack: Vec<BuildNode<L>>,
 
     /// Last key that was appended to the tree. Used to sanity check that append

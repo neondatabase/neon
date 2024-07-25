@@ -1,6 +1,10 @@
-import time
+from __future__ import annotations
 
-from fixtures.neon_fixtures import NeonEnv
+import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 def test_migrations(neon_simple_env: NeonEnv):
@@ -11,16 +15,13 @@ def test_migrations(neon_simple_env: NeonEnv):
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
 
-    endpoint.wait_for_migrations()
-
-    num_migrations = 9
+    num_migrations = 10
+    endpoint.wait_for_migrations(num_migrations=num_migrations)
 
     with endpoint.cursor() as cur:
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
         assert migration_id[0][0] == num_migrations
-
-    endpoint.assert_log_contains(f"INFO handle_migrations: Ran {num_migrations} migrations")
 
     endpoint.stop()
     endpoint.start()
@@ -31,5 +32,3 @@ def test_migrations(neon_simple_env: NeonEnv):
         cur.execute("SELECT id FROM neon_migration.migration_id")
         migration_id = cur.fetchall()
         assert migration_id[0][0] == num_migrations
-
-    endpoint.assert_log_contains("INFO handle_migrations: Ran 0 migrations")

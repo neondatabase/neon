@@ -1,3 +1,5 @@
+use std::time::UNIX_EPOCH;
+
 use pageserver_api::key::CONTROLFILE_KEY;
 use tokio::task::JoinSet;
 use utils::{
@@ -7,7 +9,7 @@ use utils::{
 
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
-use crate::context::DownloadBehavior;
+use crate::{context::DownloadBehavior, tenant::storage_layer::LayerVisibilityHint};
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
 
 /// Used in tests to advance a future to wanted await point, and not futher.
@@ -22,7 +24,7 @@ const FOREVER: std::time::Duration = std::time::Duration::from_secs(ADVANCE.as_s
 async fn smoke_test() {
     let handle = tokio::runtime::Handle::current();
 
-    let h = TenantHarness::create("smoke_test").unwrap();
+    let h = TenantHarness::create("smoke_test").await.unwrap();
     let span = h.span();
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
     let (tenant, _) = h.load().await;
@@ -176,7 +178,9 @@ async fn evict_and_wait_on_wanted_deleted() {
     // this is the runtime on which Layer spawns the blocking tasks on
     let handle = tokio::runtime::Handle::current();
 
-    let h = TenantHarness::create("evict_and_wait_on_wanted_deleted").unwrap();
+    let h = TenantHarness::create("evict_and_wait_on_wanted_deleted")
+        .await
+        .unwrap();
     utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
     let (tenant, ctx) = h.load().await;
 
@@ -258,7 +262,9 @@ fn read_wins_pending_eviction() {
     rt.block_on(async move {
         // this is the runtime on which Layer spawns the blocking tasks on
         let handle = tokio::runtime::Handle::current();
-        let h = TenantHarness::create("read_wins_pending_eviction").unwrap();
+        let h = TenantHarness::create("read_wins_pending_eviction")
+            .await
+            .unwrap();
         let (tenant, ctx) = h.load().await;
         let span = h.span();
         let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
@@ -390,7 +396,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
     rt.block_on(async move {
         // this is the runtime on which Layer spawns the blocking tasks on
         let handle = tokio::runtime::Handle::current();
-        let h = TenantHarness::create(name).unwrap();
+        let h = TenantHarness::create(name).await.unwrap();
         let (tenant, ctx) = h.load().await;
         let span = h.span();
         let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
@@ -559,8 +565,9 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
 #[tokio::test(start_paused = true)]
 async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     let handle = tokio::runtime::Handle::current();
-    let h =
-        TenantHarness::create("cancelled_get_or_maybe_download_does_not_cancel_eviction").unwrap();
+    let h = TenantHarness::create("cancelled_get_or_maybe_download_does_not_cancel_eviction")
+        .await
+        .unwrap();
     let (tenant, ctx) = h.load().await;
 
     let timeline = tenant
@@ -636,7 +643,9 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
 #[tokio::test(start_paused = true)]
 async fn evict_and_wait_does_not_wait_for_download() {
     // let handle = tokio::runtime::Handle::current();
-    let h = TenantHarness::create("evict_and_wait_does_not_wait_for_download").unwrap();
+    let h = TenantHarness::create("evict_and_wait_does_not_wait_for_download")
+        .await
+        .unwrap();
     let (tenant, ctx) = h.load().await;
     let span = h.span();
     let download_span = span.in_scope(|| tracing::info_span!("downloading", timeline_id = 1));
@@ -733,7 +742,9 @@ async fn eviction_cancellation_on_drop() {
     // this is the runtime on which Layer spawns the blocking tasks on
     let handle = tokio::runtime::Handle::current();
 
-    let h = TenantHarness::create("eviction_cancellation_on_drop").unwrap();
+    let h = TenantHarness::create("eviction_cancellation_on_drop")
+        .await
+        .unwrap();
     utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
     let (tenant, ctx) = h.load().await;
 
@@ -817,9 +828,9 @@ async fn eviction_cancellation_on_drop() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn layer_size() {
-    assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);
+    assert_eq!(std::mem::size_of::<LayerAccessStats>(), 8);
     assert_eq!(std::mem::size_of::<PersistentLayerDesc>(), 104);
-    assert_eq!(std::mem::size_of::<LayerInner>(), 2344);
+    assert_eq!(std::mem::size_of::<LayerInner>(), 312);
     // it also has the utf8 path
 }
 
@@ -958,4 +969,47 @@ fn spawn_blocking_pool_helper_actually_works() {
 
         println!("joined");
     });
+}
+
+/// Drop the low bits from a time, to emulate the precision loss in LayerAccessStats
+fn lowres_time(hires: SystemTime) -> SystemTime {
+    let ts = hires.duration_since(UNIX_EPOCH).unwrap().as_secs();
+    UNIX_EPOCH + Duration::from_secs(ts)
+}
+
+#[test]
+fn access_stats() {
+    let access_stats = LayerAccessStats::default();
+    // Default is visible
+    assert_eq!(access_stats.visibility(), LayerVisibilityHint::Visible);
+
+    access_stats.set_visibility(LayerVisibilityHint::Covered);
+    assert_eq!(access_stats.visibility(), LayerVisibilityHint::Covered);
+    access_stats.set_visibility(LayerVisibilityHint::Visible);
+    assert_eq!(access_stats.visibility(), LayerVisibilityHint::Visible);
+
+    let rtime = UNIX_EPOCH + Duration::from_secs(2000000000);
+    access_stats.record_residence_event_at(rtime);
+    assert_eq!(access_stats.latest_activity(), lowres_time(rtime));
+
+    let atime = UNIX_EPOCH + Duration::from_secs(2100000000);
+    access_stats.record_access_at(atime);
+    assert_eq!(access_stats.latest_activity(), lowres_time(atime));
+
+    // Setting visibility doesn't clobber access time
+    access_stats.set_visibility(LayerVisibilityHint::Covered);
+    assert_eq!(access_stats.latest_activity(), lowres_time(atime));
+    access_stats.set_visibility(LayerVisibilityHint::Visible);
+    assert_eq!(access_stats.latest_activity(), lowres_time(atime));
+}
+
+#[test]
+fn access_stats_2038() {
+    // The access stats structure uses a timestamp representation that will run out
+    // of bits in 2038.  One year before that, this unit test will start failing.
+
+    let one_year_from_now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
+        + Duration::from_secs(3600 * 24 * 365);
+
+    assert!(one_year_from_now.as_secs() < (2 << 31));
 }

@@ -197,6 +197,7 @@ struct EnabledS3 {
 impl EnabledS3 {
     async fn setup(max_keys_in_list_response: Option<i32>) -> Self {
         let client = create_s3_client(max_keys_in_list_response)
+            .await
             .context("S3 client creation")
             .expect("S3 client creation failed");
 
@@ -352,7 +353,7 @@ impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
     }
 }
 
-fn create_s3_client(
+async fn create_s3_client(
     max_keys_per_list_response: Option<i32>,
 ) -> anyhow::Result<Arc<GenericRemoteStorage>> {
     use rand::Rng;
@@ -385,7 +386,9 @@ fn create_s3_client(
         timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
     };
     Ok(Arc::new(
-        GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,
+        GenericRemoteStorage::from_config(&remote_storage_config)
+            .await
+            .context("remote storage init")?,
     ))
 }
 

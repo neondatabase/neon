@@ -7,12 +7,11 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use pageserver_api::{models::ImageCompressionAlgorithm, shard::TenantShardId};
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use serde;
 use serde::de::IntoDeserializer;
+use serde::{self, Deserialize};
 use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
-use utils::id::ConnectionId;
 use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
@@ -69,7 +68,6 @@ pub mod defaults {
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
@@ -124,7 +122,6 @@ pub mod defaults {
 #concurrent_tenant_warmup = '{DEFAULT_CONCURRENT_TENANT_WARMUP}'
 
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
-#cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
 #synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
 
 #disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
@@ -239,7 +236,6 @@ pub struct PageServerConf {
     // How often to collect metrics and send them to the metrics endpoint.
     pub metric_collection_interval: Duration,
     // How often to send unchanged cached metrics to the metrics endpoint.
-    pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
@@ -371,7 +367,6 @@ struct PageServerConfigBuilder {
     concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
 
     metric_collection_interval: BuilderValue<Duration>,
-    cached_metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
     metric_collection_bucket: BuilderValue<Option<RemoteStorageConfig>>,
@@ -411,6 +406,13 @@ struct PageServerConfigBuilder {
 }
 
 impl PageServerConfigBuilder {
+    fn new(node_id: NodeId) -> Self {
+        let mut this = Self::default();
+        this.id(node_id);
+
+        this
+    }
+
     #[inline(always)]
     fn default_values() -> Self {
         use self::BuilderValue::*;
@@ -455,10 +457,6 @@ impl PageServerConfigBuilder {
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
             .expect("cannot parse default metric collection interval")),
-            cached_metric_collection_interval: Set(humantime::parse_duration(
-                DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL,
-            )
-            .expect("cannot parse default cached_metric_collection_interval")),
             synthetic_size_calculation_interval: Set(humantime::parse_duration(
                 DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL,
             )
@@ -588,14 +586,6 @@ impl PageServerConfigBuilder {
 
     pub fn metric_collection_interval(&mut self, metric_collection_interval: Duration) {
         self.metric_collection_interval = BuilderValue::Set(metric_collection_interval)
-    }
-
-    pub fn cached_metric_collection_interval(
-        &mut self,
-        cached_metric_collection_interval: Duration,
-    ) {
-        self.cached_metric_collection_interval =
-            BuilderValue::Set(cached_metric_collection_interval)
     }
 
     pub fn metric_collection_endpoint(&mut self, metric_collection_endpoint: Option<Url>) {
@@ -731,7 +721,6 @@ impl PageServerConfigBuilder {
                 broker_keepalive_interval,
                 log_format,
                 metric_collection_interval,
-                cached_metric_collection_interval,
                 metric_collection_endpoint,
                 metric_collection_bucket,
                 synthetic_size_calculation_interval,
@@ -870,22 +859,6 @@ impl PageServerConf {
         )
     }
 
-    pub fn traces_path(&self) -> Utf8PathBuf {
-        self.workdir.join("traces")
-    }
-
-    pub fn trace_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-        connection_id: &ConnectionId,
-    ) -> Utf8PathBuf {
-        self.traces_path()
-            .join(tenant_shard_id.to_string())
-            .join(timeline_id.to_string())
-            .join(connection_id.to_string())
-    }
-
     /// Turns storage remote path of a file into its local path.
     pub fn local_path(&self, remote_path: &RemotePath) -> Utf8PathBuf {
         remote_path.with_base(&self.workdir)
@@ -915,8 +888,12 @@ impl PageServerConf {
     /// validating the input and failing on errors.
     ///
     /// This leaves any options not present in the file in the built-in defaults.
-    pub fn parse_and_validate(toml: &Document, workdir: &Utf8Path) -> anyhow::Result<Self> {
-        let mut builder = PageServerConfigBuilder::default();
+    pub fn parse_and_validate(
+        node_id: NodeId,
+        toml: &Document,
+        workdir: &Utf8Path,
+    ) -> anyhow::Result<Self> {
+        let mut builder = PageServerConfigBuilder::new(node_id);
         builder.workdir(workdir.to_owned());
 
         let mut t_conf = TenantConfOpt::default();
@@ -947,7 +924,8 @@ impl PageServerConf {
                 "tenant_config" => {
                     t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
-                "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
+                "id" => {}, // Ignoring `id` field in pageserver.toml - using identity.toml as the source of truth
+                            // Logging is not set up yet, so we can't do it.
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
                 "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
@@ -964,7 +942,6 @@ impl PageServerConf {
                     NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
                 }),
                 "metric_collection_interval" => builder.metric_collection_interval(parse_toml_duration(key, item)?),
-                "cached_metric_collection_interval" => builder.cached_metric_collection_interval(parse_toml_duration(key, item)?),
                 "metric_collection_endpoint" => {
                     let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
                     builder.metric_collection_endpoint(Some(endpoint));
@@ -1097,7 +1074,6 @@ impl PageServerConf {
             eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
             ),
             metric_collection_interval: Duration::from_secs(60),
-            cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
             metric_collection_bucket: None,
             synthetic_size_calculation_interval: Duration::from_secs(60),
@@ -1124,6 +1100,12 @@ impl PageServerConf {
             l0_flush: L0FlushConfig::default(),
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageserverIdentity {
+    pub id: NodeId,
 }
 
 // Helper functions to parse a toml Item
@@ -1276,7 +1258,6 @@ initial_superuser_name = 'zzzz'
 id = 10
 
 metric_collection_interval = '222 s'
-cached_metric_collection_interval = '22200 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
 
@@ -1296,7 +1277,7 @@ background_task_maximum_delay = '334 s'
         );
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
             .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
@@ -1331,9 +1312,6 @@ background_task_maximum_delay = '334 s'
                     ConfigurableSemaphore::default(),
                 metric_collection_interval: humantime::parse_duration(
                     defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
-                )?,
-                cached_metric_collection_interval: humantime::parse_duration(
-                    defaults::DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL
                 )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
                 metric_collection_bucket: None,
@@ -1381,7 +1359,7 @@ background_task_maximum_delay = '334 s'
         );
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
             .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
@@ -1413,7 +1391,6 @@ background_task_maximum_delay = '334 s'
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
                 metric_collection_interval: Duration::from_secs(222),
-                cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 metric_collection_bucket: None,
                 synthetic_size_calculation_interval: Duration::from_secs(333),
@@ -1472,12 +1449,13 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for the local FS");
+            let parsed_remote_storage_config =
+                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
+                    })
+                    .remote_storage_config
+                    .expect("Should have remote storage config for the local FS");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -1533,12 +1511,13 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for S3");
+            let parsed_remote_storage_config =
+                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
+                    })
+                    .remote_storage_config
+                    .expect("Should have remote storage config for S3");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -1557,34 +1536,6 @@ broker_endpoint = '{broker_endpoint}'
                 "Remote storage config should correctly parse the S3 config"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_tenant_config() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-
-        let broker_endpoint = "http://127.0.0.1:7777";
-        let trace_read_requests = true;
-
-        let config_string = format!(
-            r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{pg_distrib_dir}'
-broker_endpoint = '{broker_endpoint}'
-
-[tenant_config]
-trace_read_requests = {trace_read_requests}"#,
-        );
-
-        let toml = config_string.parse()?;
-
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
-        assert_eq!(
-            conf.default_tenant_conf.trace_read_requests, trace_read_requests,
-            "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
-        );
-
         Ok(())
     }
 
@@ -1645,7 +1596,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse()?;
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        let conf = PageServerConf::parse_and_validate(NodeId(333), &toml, &workdir)?;
 
         assert_eq!(conf.pg_distrib_dir, pg_distrib_dir);
         assert_eq!(
@@ -1661,7 +1612,11 @@ threshold = "20m"
                 .evictions_low_residence_duration_metric_threshold,
             Duration::from_secs(20 * 60)
         );
-        assert_eq!(conf.id, NodeId(222));
+
+        // Assert that the node id provided by the indentity file (threaded
+        // through the call to [`PageServerConf::parse_and_validate`] is
+        // used.
+        assert_eq!(conf.id, NodeId(333));
         assert_eq!(
             conf.disk_usage_based_eviction,
             Some(DiskUsageEvictionTaskConfig {
@@ -1670,7 +1625,7 @@ threshold = "20m"
                 period: Duration::from_secs(10),
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
-                eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
+                eviction_order: Default::default(),
             })
         );
 
@@ -1706,7 +1661,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse().unwrap();
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+        let conf = PageServerConf::parse_and_validate(NodeId(222), &toml, &workdir).unwrap();
 
         match &conf.default_tenant_conf.eviction_policy {
             EvictionPolicy::OnlyImitiate(t) => {
@@ -1725,7 +1680,7 @@ threshold = "20m"
 remote_storage = {}
         "#;
         let doc = toml_edit::Document::from_str(input).unwrap();
-        let err = PageServerConf::parse_and_validate(&doc, &workdir)
+        let err = PageServerConf::parse_and_validate(NodeId(222), &doc, &workdir)
             .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
         assert!(format!("{err}").contains("remote_storage"), "{err}");
     }

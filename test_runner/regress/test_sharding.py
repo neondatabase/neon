@@ -12,7 +12,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     StorageControllerApiException,
-    StorageScrubber,
     last_flush_lsn_upload,
     tenant_get_shards,
     wait_for_last_flush_lsn,
@@ -128,7 +127,7 @@ def test_sharding_smoke(
 
     # Check the scrubber isn't confused by sharded content, then disable
     # it during teardown because we'll have deleted by then
-    StorageScrubber(neon_env_builder).scan_metadata()
+    env.storage_scrubber.scan_metadata()
     neon_env_builder.scrub_on_exit = False
 
     env.storage_controller.pageserver_api().tenant_delete(tenant_id)
