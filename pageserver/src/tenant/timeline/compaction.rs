@@ -433,12 +433,11 @@ impl Timeline {
         Ok(())
     }
 
-    /// A post-compaction step to update the LayerVisibilityHint of layers covered by image layers.  This
-    /// should also be called when new branches are created.
+    /// Update the LayerVisibilityHint of layers covered by image layers, based on whether there is
+    /// an image layer between them and the most recent readable LSN (branch point or tip of timeline).  The
+    /// purpose of the visibility hint is to record which layers need to be available to service reads.
     ///
-    /// Sweep through the layer map, identifying layers which are covered by image layers
-    /// such that they do not need to be available to service reads. The resulting LayerVisibilityHint
-    /// result may be used as an input to eviction and secondary downloads to de-prioritize layers
+    /// The result may be used as an input to eviction and secondary downloads to de-prioritize layers
     /// that we know won't be needed for reads.
     pub(super) async fn update_layer_visibility(&self) {
         let head_lsn = self.get_last_record_lsn();

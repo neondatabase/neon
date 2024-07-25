@@ -878,7 +878,7 @@ impl LayerMap {
     ///
     /// This function is O(N) and should be called infrequently.  The caller is responsible for
     /// looking up and updating the Layer objects for these layer descriptors.
-    pub(crate) fn get_visibility<'a>(
+    pub fn get_visibility<'a>(
         &'a self,
         mut read_points: Vec<Lsn>,
     ) -> (
@@ -1037,7 +1037,13 @@ impl LayerMap {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::keyspace::KeySpace;
+    use crate::tenant::{storage_layer::LayerName, IndexPart};
+    use pageserver_api::{key::DBDIR_KEY, keyspace::KeySpace};
+    use std::collections::HashMap;
+    use utils::{
+        id::{TenantId, TimelineId},
+        shard::TenantShardId,
+    };
 
     use super::*;
 
@@ -1163,5 +1169,69 @@ mod tests {
                 assert_range_search_result_eq(result, expected);
             }
         }
+    }
+
+    #[test]
+    fn layer_visibility() {
+        // Load a large example layermap
+        let index_raw =
+            std::fs::read_to_string("test_data/indices/mixed_workload/index_part.json").unwrap();
+        let index: IndexPart = serde_json::from_str::<IndexPart>(&index_raw).unwrap();
+
+        let tenant_id = TenantId::generate();
+        let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+        let timeline_id = TimelineId::generate();
+
+        let mut layer_map = LayerMap::default();
+        let mut updates = layer_map.batch_update();
+        for (layer_name, layer_metadata) in index.layer_metadata {
+            let layer_desc = match layer_name {
+                LayerName::Image(layer_name) => PersistentLayerDesc {
+                    key_range: layer_name.key_range.clone(),
+                    lsn_range: layer_name.lsn_as_range(),
+                    tenant_shard_id,
+                    timeline_id,
+                    is_delta: false,
+                    file_size: layer_metadata.file_size,
+                },
+                LayerName::Delta(layer_name) => PersistentLayerDesc {
+                    key_range: layer_name.key_range,
+                    lsn_range: layer_name.lsn_range,
+                    tenant_shard_id,
+                    timeline_id,
+                    is_delta: true,
+                    file_size: layer_metadata.file_size,
+                },
+            };
+            updates.insert_historic(layer_desc);
+        }
+        updates.flush();
+
+        let read_points = vec![index.metadata.disk_consistent_lsn()];
+        let (layer_visibilities, shadow) = layer_map.get_visibility(read_points);
+        for (layer_desc, visibility) in &layer_visibilities {
+            tracing::info!("{layer_desc:?}: {visibility:?}");
+            eprintln!("{layer_desc:?}: {visibility:?}");
+        }
+
+        // The shadow should be non-empty, since there were some image layers
+        assert!(!shadow.ranges.is_empty());
+
+        // At least some layers should be marked covered
+        assert!(layer_visibilities
+            .iter()
+            .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
+
+        let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
+
+        // Sanity: the layer that holds latest data for the DBDIR key should always be visible
+        // (just using this key as a key that will always exist for any layermap fixture)
+        let dbdir_layer = layer_map
+            .search(DBDIR_KEY, index.metadata.disk_consistent_lsn())
+            .unwrap();
+        assert!(matches!(
+            layer_visibilities.get(&dbdir_layer.layer).unwrap(),
+            LayerVisibilityHint::Visible
+        ));
     }
 }
