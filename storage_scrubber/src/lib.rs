@@ -31,6 +31,7 @@ use remote_storage::{
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use storage_controller_client::control_api;
 use tokio::io::AsyncReadExt;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -251,6 +252,12 @@ pub struct ControllerClientConfig {
 
     /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
     pub controller_jwt: String,
+}
+
+impl ControllerClientConfig {
+    pub fn build_client(self) -> control_api::Client {
+        control_api::Client::new(self.controller_api, Some(self.controller_jwt))
+    }
 }
 
 pub struct ConsoleConfig {

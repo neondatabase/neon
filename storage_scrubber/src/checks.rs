@@ -40,6 +40,11 @@ impl TimelineAnalysis {
             garbage_keys: Vec::new(),
         }
     }
+
+    /// Whether a timeline is healthy.
+    pub(crate) fn is_healthy(&self) -> bool {
+        self.errors.is_empty() && self.warnings.is_empty()
+    }
 }
 
 pub(crate) async fn branch_cleanup_and_check_errors(

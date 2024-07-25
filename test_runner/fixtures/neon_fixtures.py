@@ -2585,7 +2585,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         return response.json()
 
-    def metadata_health_list_outdated(self, duration: str) -> List[TenantShardId]:
+    def metadata_health_list_outdated(self, duration: str):
         body: Dict[str, Any] = {"not_scrubbed_for": duration}
 
         response = self.request(
@@ -4346,10 +4346,11 @@ class StorageScrubber:
         assert stdout is not None
         return stdout
 
-    def scan_metadata(self) -> Any:
-        stdout = self.scrubber_cli(
-            ["scan-metadata", "--node-kind", "pageserver", "--json"], timeout=30
-        )
+    def scan_metadata(self, post_to_storage_controller: bool = False) -> Any:
+        args = ["scan-metadata", "--node-kind", "pageserver", "--json"]
+        if post_to_storage_controller:
+            args.append("--post")
+        stdout = self.scrubber_cli(args, timeout=30)
 
         try:
             return json.loads(stdout)

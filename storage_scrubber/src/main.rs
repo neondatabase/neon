@@ -1,7 +1,8 @@
 use anyhow::{anyhow, bail};
 use camino::Utf8PathBuf;
+use pageserver_api::controller_api::MetadataHealthUpdateRequest;
 use pageserver_api::shard::TenantShardId;
-use reqwest::Url;
+use reqwest::{Method, Url};
 use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use storage_scrubber::pageserver_physical_gc::GcMode;
 use storage_scrubber::scan_pageserver_metadata::scan_metadata;
@@ -59,6 +60,8 @@ enum Command {
         json: bool,
         #[arg(long = "tenant-id", num_args = 0..)]
         tenant_ids: Vec<TenantShardId>,
+        #[arg(long = "post", default_value_t = false)]
+        post_to_storage_controller: bool,
         #[arg(long, default_value = None)]
         /// For safekeeper node_kind only, points to db with debug dump
         dump_db_connstr: Option<String>,
@@ -114,11 +117,20 @@ async fn main() -> anyhow::Result<()> {
         chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
     ));
 
+    let controller_client_conf = cli.controller_api.map(|controller_api| {
+        ControllerClientConfig {
+            controller_api,
+            // Default to no key: this is a convenience when working in a development environment
+            controller_jwt: cli.controller_jwt.unwrap_or("".to_owned()),
+        }
+    });
+
     match cli.command {
         Command::ScanMetadata {
             json,
             tenant_ids,
             node_kind,
+            post_to_storage_controller,
             dump_db_connstr,
             dump_db_table,
         } => {
@@ -157,6 +169,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             } else {
+                if controller_client_conf.is_none() && post_to_storage_controller {
+                    return Err(anyhow!("Posting pageserver scan health status to storage controller requires `--controller-api` and `--controller-jwt` to run"));
+                }
                 match scan_metadata(bucket_config.clone(), tenant_ids).await {
                     Err(e) => {
                         tracing::error!("Failed: {e}");
@@ -168,6 +183,19 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             println!("{}", summary.summary_string());
                         }
+
+                        if let Some(conf) = controller_client_conf {
+                            let controller_client = conf.build_client();
+                            let body = summary.build_health_update_request();
+                            controller_client
+                                .dispatch::<MetadataHealthUpdateRequest, ()>(
+                                    Method::POST,
+                                    "/control/v1/metadata_health/update".to_string(),
+                                    Some(body),
+                                )
+                                .await?;
+                        }
+
                         if summary.is_fatal() {
                             Err(anyhow::anyhow!("Fatal scrub errors detected"))
                         } else if summary.is_empty() {
@@ -213,14 +241,6 @@ async fn main() -> anyhow::Result<()> {
             min_age,
             mode,
         } => {
-            let controller_client_conf = cli.controller_api.map(|controller_api| {
-                ControllerClientConfig {
-                    controller_api,
-                    // Default to no key: this is a convenience when working in a development environment
-                    controller_jwt: cli.controller_jwt.unwrap_or("".to_owned()),
-                }
-            });
-
             match (&controller_client_conf, mode) {
                 (Some(_), _) => {
                     // Any mode may run when controller API is set

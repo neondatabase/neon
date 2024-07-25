@@ -1,5 +1,5 @@
-use std::str::FromStr;
 use std::time::Duration;
+use std::{collections::HashSet, str::FromStr};
 
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
@@ -299,8 +299,8 @@ impl MetadataHealthRecord {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHealthUpdateRequest {
-    pub healthy_tenant_shards: Vec<TenantShardId>,
-    pub unhealthy_tenant_shards: Vec<TenantShardId>,
+    pub healthy_tenant_shards: HashSet<TenantShardId>,
+    pub unhealthy_tenant_shards: HashSet<TenantShardId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -9,12 +9,13 @@ use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimeline
 use aws_sdk_s3::Client;
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::remote_layer_path;
+use pageserver_api::controller_api::MetadataHealthUpdateRequest;
 use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use utils::id::TenantId;
 use utils::shard::ShardCount;
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub struct MetadataSummary {
     tenant_count: usize,
     timeline_count: usize,
@@ -23,19 +24,16 @@ pub struct MetadataSummary {
     with_warnings: HashSet<TenantShardTimelineId>,
     with_orphans: HashSet<TenantShardTimelineId>,
     indices_by_version: HashMap<usize, usize>,
+
+    #[serde(skip)]
+    pub(crate) healthy_tenant_shards: HashSet<TenantShardId>,
+    #[serde(skip)]
+    pub(crate) unhealthy_tenant_shards: HashSet<TenantShardId>,
 }
 
 impl MetadataSummary {
     fn new() -> Self {
-        Self {
-            tenant_count: 0,
-            timeline_count: 0,
-            timeline_shard_count: 0,
-            with_errors: HashSet::new(),
-            with_warnings: HashSet::new(),
-            with_orphans: HashSet::new(),
-            indices_by_version: HashMap::new(),
-        }
+        Self::default()
     }
 
     fn update_data(&mut self, data: &S3TimelineBlobData) {
@@ -54,6 +52,13 @@ impl MetadataSummary {
     }
 
     fn update_analysis(&mut self, id: &TenantShardTimelineId, analysis: &TimelineAnalysis) {
+        if analysis.is_healthy() {
+            self.healthy_tenant_shards.insert(id.tenant_shard_id);
+        } else {
+            self.healthy_tenant_shards.remove(&id.tenant_shard_id);
+            self.unhealthy_tenant_shards.insert(id.tenant_shard_id);
+        }
+
         if !analysis.errors.is_empty() {
             self.with_errors.insert(*id);
         }
@@ -100,6 +105,13 @@ Index versions: {version_summary}
 
     pub fn is_empty(&self) -> bool {
         self.timeline_shard_count == 0
+    }
+
+    pub fn build_health_update_request(&self) -> MetadataHealthUpdateRequest {
+        MetadataHealthUpdateRequest {
+            healthy_tenant_shards: self.healthy_tenant_shards.clone(),
+            unhealthy_tenant_shards: self.unhealthy_tenant_shards.clone(),
+        }
     }
 }
 
