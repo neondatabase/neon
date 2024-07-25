@@ -999,12 +999,6 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
         (pausepoint, "pause"),
     )
 
-    # noticed a surprising 409 if the other one would fail instead
-    # victim_http.configure_failpoints([
-    #     (pausepoint, "pause"),
-    #     ("timeline-detach-ancestor::before_starting_after_locking", "return"),
-    # ])
-
     # interleaving a create_timeline which could be reparented will produce two
     # permanently different reparentings: one node has reparented, other has
     # not
@@ -1043,12 +1037,6 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
             stuck_http.configure_failpoints((pausepoint, "off"))
             wait_until(10, 1.0, first_completed)
 
-            # if we would let victim fail, for some reason there'd be a 409 response instead of 500
-            # victim_http.configure_failpoints((pausepoint, "off"))
-            # with pytest.raises(PageserverApiException, match=".* 500 Internal Server Error failpoint: timeline-detach-ancestor::before_starting_after_locking") as exc:
-            #     fut.result()
-            # assert exc.value.status_code == 409
-
             env.storage_controller.pageserver_api().timeline_delete(
                 env.initial_tenant, first_branch
             )
@@ -1078,6 +1066,75 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
         finally:
             stuck_http.configure_failpoints((pausepoint, "off"))
             victim_http.configure_failpoints((pausepoint, "off"))
+
+
+def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
+    neon_env_builder: NeonEnvBuilder,
+):
+    shard_count = 2
+    neon_env_builder.num_pageservers = shard_count
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    env.storage_controller.reconcile_until_idle()
+    shards = env.storage_controller.locate(env.initial_tenant)
+    assert len(set(x["node_id"] for x in shards)) == shard_count
+
+    detached_branch = env.neon_cli.create_branch("detached_branch", ancestor_branch_name="main")
+
+    pausepoint = "timeline-detach-ancestor::before_starting_after_locking-pausable"
+    failpoint = "timeline-detach-ancestor::before_starting_after_locking"
+
+    stuck = pageservers[int(shards[0]["node_id"])]
+    stuck_http = stuck.http_client().without_status_retrying()
+    stuck_http.configure_failpoints(
+        (pausepoint, "pause"),
+    )
+
+    victim = pageservers[int(shards[-1]["node_id"])]
+    victim_http = victim.http_client().without_status_retrying()
+    victim_http.configure_failpoints([(pausepoint, "pause"), (failpoint, "return")])
+
+    def detach_timeline():
+        env.storage_controller.pageserver_api().detach_ancestor(env.initial_tenant, detached_branch)
+
+    def paused_at_failpoint():
+        stuck.assert_log_contains(f"at failpoint {pausepoint}")
+        victim.assert_log_contains(f"at failpoint {pausepoint}")
+
+    def first_completed():
+        detail = stuck_http.timeline_detail(shards[0]["shard_id"], detached_branch)
+        log.info(detail)
+        assert detail.get("ancestor_lsn") is None
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            fut = pool.submit(detach_timeline)
+            wait_until(10, 1.0, paused_at_failpoint)
+
+            # let stuck complete
+            stuck_http.configure_failpoints((pausepoint, "off"))
+            wait_until(10, 1.0, first_completed)
+
+            # if we would let victim fail, for some reason there'd be a 409 response instead of 500
+            victim_http.configure_failpoints((pausepoint, "off"))
+            with pytest.raises(
+                PageserverApiException,
+                match="500 Internal Server Error failpoint: timeline-detach-ancestor::before_starting_after_locking",
+            ) as exc:
+                fut.result()
+            assert exc.value.status_code == 500
+
+        finally:
+            stuck_http.configure_failpoints((pausepoint, "off"))
+            victim_http.configure_failpoints((pausepoint, "off"))
+
+    victim_http.configure_failpoints((failpoint, "off"))
+    detach_timeline()
 
 
 def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: NeonEnvBuilder):
