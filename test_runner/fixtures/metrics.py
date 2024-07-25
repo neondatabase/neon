@@ -133,6 +133,8 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *histogram("pageserver_remote_operation_seconds"),
     *histogram("pageserver_io_operations_seconds"),
     "pageserver_tenant_states_count",
+    "pageserver_circuit_breaker_broken_total",
+    "pageserver_circuit_breaker_unbroken_total",
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
