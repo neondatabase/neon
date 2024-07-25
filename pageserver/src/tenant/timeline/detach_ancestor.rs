@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use super::{layer_manager::LayerManager, FlushLayerError, Timeline};
 use crate::{
@@ -140,10 +140,6 @@ pub(super) async fn prepare(
                 return Err(NoAncestor);
             }
         }
-
-        // `detached` has previously been detached; let's inspect each of the current timelines and
-        // report back the timelines which have been reparented by our detach, or which are still
-        // reparentable
 
         let reparented_timelines = reparented_direct_children(detached, tenant)?;
         return Ok(Progress::Done(AncestorDetached {
@@ -347,58 +343,51 @@ pub(super) async fn prepare(
 fn reparented_direct_children(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
-) -> Result<Vec<TimelineId>, Error> {
+) -> Result<HashSet<TimelineId>, Error> {
     let mut all_direct_children = tenant
-            .timelines
-            .lock()
-            .unwrap()
-            .values()
-            .filter_map(|tl| {
-                let is_direct_child = matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached));
+        .timelines
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|tl| {
+            let is_direct_child = matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached));
 
-                if is_direct_child {
-                    Some((tl.ancestor_lsn, tl.clone()))
-                } else {
-                    if let Some(timeline) = tl.ancestor_timeline.as_ref() {
-                        assert_ne!(timeline.timeline_id, detached.timeline_id);
-                    }
-                    None
+            if is_direct_child {
+                Some(tl.clone())
+            } else {
+                if let Some(timeline) = tl.ancestor_timeline.as_ref() {
+                    assert_ne!(timeline.timeline_id, detached.timeline_id, "we cannot have two timelines with the same timeline_id live");
                 }
-            })
-                // Collect to avoid lock taking order problem with Tenant::timelines and
-                // Timeline::remote_client
-            .collect::<Vec<_>>();
+                None
+            }
+        })
+        // Collect to avoid lock taking order problem with Tenant::timelines and
+        // Timeline::remote_client
+        .collect::<Vec<_>>();
 
     let mut any_shutdown = false;
 
-    all_direct_children.retain(
-        |(_, tl)| match tl.remote_client.initialized_upload_queue() {
-            Ok(accessor) => accessor
-                .latest_uploaded_index_part()
-                .lineage
-                .is_reparented(),
-            Err(_shutdownalike) => {
-                // not 100% a shutdown, but let's bail early not to give inconsistent results in
-                // sharded enviroment.
-                any_shutdown = true;
-                true
-            }
-        },
-    );
+    all_direct_children.retain(|tl| match tl.remote_client.initialized_upload_queue() {
+        Ok(accessor) => accessor
+            .latest_uploaded_index_part()
+            .lineage
+            .is_reparented(),
+        Err(_shutdownalike) => {
+            // not 100% a shutdown, but let's bail early not to give inconsistent results in
+            // sharded enviroment.
+            any_shutdown = true;
+            true
+        }
+    });
 
     if any_shutdown {
         // it could be one or many being deleted; have client retry
         return Err(Error::ShuttingDown);
     }
 
-    let mut reparented = all_direct_children;
-    // why this instead of hashset? there is a reason, but I've forgotten it many times.
-    //
-    // maybe if this was a hashset we would not be able to distinguish some race condition.
-    reparented.sort_unstable_by_key(|(lsn, tl)| (*lsn, tl.timeline_id));
-    Ok(reparented
+    Ok(all_direct_children
         .into_iter()
-        .map(|(_, tl)| tl.timeline_id)
+        .map(|tl| tl.timeline_id)
         .collect())
 }
 
@@ -560,7 +549,7 @@ pub(super) async fn complete(
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
     _ctx: &RequestContext,
-) -> Result<Vec<TimelineId>, anyhow::Error> {
+) -> Result<HashSet<TimelineId>, anyhow::Error> {
     let PreparedTimelineDetach { layers } = prepared;
 
     let ancestor = detached
@@ -646,13 +635,18 @@ pub(super) async fn complete(
         });
 
     let reparenting_candidates = tasks.len();
-    let mut reparented = Vec::with_capacity(tasks.len());
+    let mut reparented = HashSet::with_capacity(tasks.len());
 
     while let Some(res) = tasks.join_next().await {
         match res {
             Ok(Some(timeline)) => {
                 tracing::info!(reparented=%timeline.timeline_id, "reparenting done");
-                reparented.push((timeline.ancestor_lsn, timeline.timeline_id));
+
+                assert!(
+                    reparented.insert(timeline.timeline_id),
+                    "duplicate reparenting? timeline_id={}",
+                    timeline.timeline_id
+                );
             }
             Ok(None) => {
                 // lets just ignore this for now. one or all reparented timelines could had
@@ -673,13 +667,6 @@ pub(super) async fn complete(
     if reparenting_candidates != reparented.len() {
         tracing::info!("failed to reparent some candidates");
     }
-
-    reparented.sort_unstable();
-
-    let reparented = reparented
-        .into_iter()
-        .map(|(_, timeline_id)| timeline_id)
-        .collect();
 
     Ok(reparented)
 }
