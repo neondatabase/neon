@@ -23,7 +23,7 @@ change the synthetic size or incur any costs to the user.
 The synthetic size is calculated for the whole project. It is not
 straightforward to attribute size to individual branches. See [What is
 the size of an individual branch?](#what-is-the-size-of-an-individual-branch)
-for discussion on those difficulties.
+for a discussion of those difficulties.
 
 The synthetic size is designed to:
 
