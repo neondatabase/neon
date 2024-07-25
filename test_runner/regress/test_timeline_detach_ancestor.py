@@ -931,7 +931,7 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     _, offset = other.assert_log_contains(".* gc_loop.*: 1 timelines need GC", offset)
 
 
-@pytest.mark.parametrize("mode", ["delete_reparentable_timeline"])
+@pytest.mark.parametrize("mode", ["delete_reparentable_timeline", "create_reparentable_timeline"])
 def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnvBuilder, mode: str):
     """
     Technically possible storage controller concurrent interleaving timeline
@@ -942,12 +942,6 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
     never agree. There is a solution though: the created reparentable timeline
     must be detached.
     """
-
-    assert (
-        mode == "delete_reparentable_timeline"
-    ), "only one now, but creating reparentable timelines cannot be supported even with gc blocking"
-    # perhaps it could be supported by always doing this for the shard0 first, and after that for others.
-    # when we run shard0 to completion, we can use it's timelines to restrict which can be reparented.
 
     shard_count = 2
     neon_env_builder.num_pageservers = shard_count
@@ -980,9 +974,16 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
     for ps, shard_id in [(pageservers[int(x["node_id"])], x["shard_id"]) for x in shards]:
         ps.http_client().timeline_checkpoint(shard_id, env.initial_timeline)
 
-    first_branch = env.neon_cli.create_branch(
-        "first_branch", ancestor_branch_name="main", ancestor_start_lsn=first_branch_lsn
-    )
+    def create_reparentable_timeline() -> TimelineId:
+        return env.neon_cli.create_branch(
+            "first_branch", ancestor_branch_name="main", ancestor_start_lsn=first_branch_lsn
+        )
+
+    if mode == "delete_reparentable_timeline":
+        first_branch = create_reparentable_timeline()
+    else:
+        first_branch = None
+
     detached_branch = env.neon_cli.create_branch(
         "detached_branch", ancestor_branch_name="main", ancestor_start_lsn=detached_branch_lsn
     )
@@ -1017,6 +1018,7 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
         assert detail.get("ancestor_lsn") is None
 
     def first_branch_gone():
+        assert first_branch is not None
         try:
             env.storage_controller.pageserver_api().timeline_detail(
                 env.initial_tenant, first_branch
@@ -1037,35 +1039,87 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
             stuck_http.configure_failpoints((pausepoint, "off"))
             wait_until(10, 1.0, first_completed)
 
-            env.storage_controller.pageserver_api().timeline_delete(
-                env.initial_tenant, first_branch
-            )
-            victim_http.configure_failpoints((pausepoint, "off"))
-            wait_until(10, 1.0, first_branch_gone)
+            if mode == "delete_reparentable_timeline":
+                assert first_branch is not None
+                env.storage_controller.pageserver_api().timeline_delete(
+                    env.initial_tenant, first_branch
+                )
+                victim_http.configure_failpoints((pausepoint, "off"))
+                wait_until(10, 1.0, first_branch_gone)
+            elif mode == "create_reparentable_timeline":
+                first_branch = create_reparentable_timeline()
+                victim_http.configure_failpoints((pausepoint, "off"))
 
             # it now passes, and we should get an error messages about mixed reparenting as the stuck still had something to reparent
+            # TODO: should it be a stuckness causing 500 internal server error? it probably should.
             fut.result()
 
             msg, offset = env.storage_controller.assert_log_contains(
                 ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*"
             )
-            log.info(f"expected error message: {msg}")
+            log.info(f"expected error message: {msg.rstrip()}")
             env.storage_controller.allowed_errors.append(
                 ".*: shards returned different results matching=0 .*"
             )
 
             detach_timeline()
 
-            # FIXME: perhaps the above should be automatically retried, if we get mixed results?
-            not_found = env.storage_controller.log_contains(
+            retried = env.storage_controller.log_contains(
                 ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*",
-                offset=offset,
+                offset,
             )
-
-            assert not_found is None
+            if mode == "delete_reparentable_timeline":
+                assert (
+                    retried is None
+                ), "detaching should had converged after both nodes saw the deletion"
+            elif mode == "create_reparentable_timeline":
+                assert retried is not None, "detaching should not have converged"
+                _, offset = retried
         finally:
             stuck_http.configure_failpoints((pausepoint, "off"))
             victim_http.configure_failpoints((pausepoint, "off"))
+
+    if mode == "create_reparentable_timeline":
+        assert first_branch is not None
+        # now we have mixed ancestry
+        assert (
+            TimelineId(
+                stuck_http.timeline_detail(shards[0]["shard_id"], first_branch)[
+                    "ancestor_timeline_id"
+                ]
+            )
+            == env.initial_timeline
+        )
+        assert (
+            TimelineId(
+                victim_http.timeline_detail(shards[-1]["shard_id"], first_branch)[
+                    "ancestor_timeline_id"
+                ]
+            )
+            == detached_branch
+        )
+
+        # make sure we are still able to repair this by detaching the ancestor on the storage controller in case it ever happens
+        # if the ancestor would be deleted, we would partially fail, making deletion stuck.
+        env.storage_controller.pageserver_api().detach_ancestor(env.initial_tenant, first_branch)
+
+        # and we should now have good results
+        not_found = env.storage_controller.log_contains(
+            ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*",
+            offset,
+        )
+
+        assert not_found is None
+        assert (
+            stuck_http.timeline_detail(shards[0]["shard_id"], first_branch)["ancestor_timeline_id"]
+            is None
+        )
+        assert (
+            victim_http.timeline_detail(shards[-1]["shard_id"], first_branch)[
+                "ancestor_timeline_id"
+            ]
+            is None
+        )
 
 
 def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
