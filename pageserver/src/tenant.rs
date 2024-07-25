@@ -1265,20 +1265,20 @@ impl Tenant {
                 .remote_client
                 .schedule_index_upload_for_archived_at_update(intended_archived_at)?;
             const MAX_WAIT: Duration = Duration::from_secs(10);
-            tokio::select! {
-                v = timeline.remote_client.wait_completion() => {
-                    v?;
-                    // Update the internal value after the remote operation succeeded.
-                    // This way, on a retry we'll never be in the situation where we think that
-                    // the state is already updated (instead we might think that the state is
-                    // not updated yet while it already is).
-                    timeline.is_archived.store(intended_archived_at.is_some(), Ordering::Relaxed);
-                },
-                _ = tokio::time::sleep(MAX_WAIT) => {
-                    tracing::warn!("reached timeout for waiting on upload queue");
-                    bail!("reached timeout for upload queue flush");
-                },
-            }
+            let Ok(v) =
+                tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
+            else {
+                tracing::warn!("reached timeout for waiting on upload queue");
+                bail!("reached timeout for upload queue flush");
+            };
+            v?;
+            // Update the internal value after the remote operation succeeded.
+            // This way, on a retry we'll never be in the situation where we think that
+            // the state is already updated (instead we might think that the state is
+            // not updated yet while it already is).
+            timeline
+                .is_archived
+                .store(intended_archived_at.is_some(), Ordering::Relaxed);
         }
         Ok(())
     }
