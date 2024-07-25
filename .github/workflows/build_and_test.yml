@@ -68,7 +68,8 @@ jobs:
           subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
 
       - name: push
-        run:
+        run: |
+          az acr login --name neoneastus2
           docker buildx imagetools create -t neoneastus2.azurecr.io/neondatabase/neon:5718 neondatabase/neon:5718
 
       - name: Checkout
