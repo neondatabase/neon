@@ -1141,6 +1141,10 @@ pub(super) async fn detach_and_reparent(
         if let Some(ancestor) = existing {
             Ancestor::Detached(ancestor, ancestor_lsn)
         } else {
+            assert!(
+                still_ongoing,
+                "cannot complete if the operation is not still ongoing"
+            );
             let direct_children =
                 reparented_direct_children(detached, tenant).map_err(Error::from)?;
             return Ok(DetachingAndReparenting::AlreadyDone(direct_children));
