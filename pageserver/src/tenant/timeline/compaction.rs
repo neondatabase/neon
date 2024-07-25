@@ -98,6 +98,13 @@ impl KeyHistoryRetention {
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
+        println!(
+            "lsn=gc_horizon logs=[{}]",
+            above_horizon_logs
+                .iter()
+                .map(|x| format!("{}", x.0))
+                .join(",")
+        );
         for (lsn, val) in above_horizon_logs {
             delta_writer.push((key, lsn, val));
         }
@@ -1378,6 +1385,7 @@ impl Timeline {
         let mut accumulated_values = Vec::new();
         let mut last_key: Option<Key> = None;
 
+        #[allow(clippy::too_many_arguments)]
         async fn flush_deltas(
             deltas: &mut Vec<(Key, Lsn, crate::repository::Value)>,
             last_key: Key,
@@ -1386,6 +1394,7 @@ impl Timeline {
             tline: &Arc<Timeline>,
             lowest_retain_lsn: Lsn,
             ctx: &RequestContext,
+            last_batch: bool,
         ) -> anyhow::Result<Option<ResidentLayer>> {
             // Check if we need to split the delta layer. We split at the original delta layer boundary to avoid
             // overlapping layers.
@@ -1406,7 +1415,7 @@ impl Timeline {
                 *current_delta_split_point += 1;
                 need_split = true;
             }
-            if !need_split {
+            if !need_split && !last_batch {
                 return Ok(None);
             }
             let deltas = std::mem::take(deltas);
@@ -1504,6 +1513,7 @@ impl Timeline {
                         self,
                         lowest_retain_lsn,
                         ctx,
+                        false,
                     )
                     .await?,
                 );
@@ -1543,9 +1553,11 @@ impl Timeline {
                 self,
                 lowest_retain_lsn,
                 ctx,
+                true,
             )
             .await?,
         );
+        assert!(delta_values.is_empty(), "unprocessed keys");
 
         let image_layer = if let Some(writer) = image_layer_writer {
             Some(writer.finish(self, ctx).await?)
