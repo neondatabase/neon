@@ -58,6 +58,7 @@ impl Error {
     where
         F: Fn(anyhow::Error) -> Error,
     {
+        use crate::tenant::remote_timeline_client::WaitCompletionError;
         use crate::tenant::upload_queue::NotInitialized;
         use remote_storage::TimeoutOrCancel;
 
@@ -65,6 +66,7 @@ impl Error {
             || TimeoutOrCancel::caused_by_cancel(&e)
             || e.downcast_ref::<remote_storage::DownloadError>()
                 .is_some_and(|e| e.is_cancelled())
+            || e.is::<WaitCompletionError>()
         {
             Error::ShuttingDown
         } else {
