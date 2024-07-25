@@ -69,7 +69,7 @@ jobs:
 
       - name: push
         run: |
-          docker login neoneastus2.azurecr.io
+          az acr login --name neoneastus2
           docker buildx imagetools create -t neoneastus2.azurecr.io/neondatabase/neon:5718 neondatabase/neon:5718
 
       - name: Checkout
