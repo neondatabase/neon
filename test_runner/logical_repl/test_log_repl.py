@@ -66,8 +66,7 @@ def fixture_clickhouse_instance(test_output_dir):
 
 
 @pytest.mark.remote_cluster
-def test_clickhouse(clickhouse_instance, remote_pg: RemotePostgres):
-    # pylint: disable=W0612,W0613
+def test_clickhouse(remote_pg: RemotePostgres):
     """
     Test the logical replication having ClickHouse as a client
     """
