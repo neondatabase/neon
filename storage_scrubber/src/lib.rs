@@ -319,27 +319,35 @@ fn default_prefix_in_bucket(node_kind: NodeKind) -> &'static str {
     }
 }
 
+fn make_root_target(
+    bucket_name: String,
+    prefix_in_bucket: String,
+    node_kind: NodeKind,
+) -> RootTarget {
+    let s3_target = S3Target {
+        bucket_name,
+        prefix_in_bucket,
+        delimiter: "/".to_string(),
+    };
+    match node_kind {
+        NodeKind::Pageserver => RootTarget::Pageserver(s3_target),
+        NodeKind::Safekeeper => RootTarget::Safekeeper(s3_target),
+    }
+}
+
 async fn init_remote(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
 ) -> anyhow::Result<(Arc<Client>, RootTarget)> {
     let bucket_region = Region::new(bucket_config.region);
-    let delimiter = "/".to_string();
     let s3_client = Arc::new(init_s3_client(bucket_region).await);
     let default_prefix = default_prefix_in_bucket(node_kind).to_string();
 
-    let s3_root = match node_kind {
-        NodeKind::Pageserver => RootTarget::Pageserver(S3Target {
-            bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
-            delimiter,
-        }),
-        NodeKind::Safekeeper => RootTarget::Safekeeper(S3Target {
-            bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
-            delimiter,
-        }),
-    };
+    let s3_root = make_root_target(
+        bucket_config.bucket,
+        bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
+        node_kind,
+    );
 
     Ok((s3_client, s3_root))
 }
@@ -347,12 +355,12 @@ async fn init_remote(
 async fn init_remote_generic(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
-) -> anyhow::Result<GenericRemoteStorage> {
+) -> anyhow::Result<(GenericRemoteStorage, RootTarget)> {
     let endpoint = env::var("AWS_ENDPOINT_URL").ok();
     let default_prefix = default_prefix_in_bucket(node_kind).to_string();
     let prefix_in_bucket = Some(bucket_config.prefix_in_bucket.unwrap_or(default_prefix));
     let storage = S3Config {
-        bucket_name: bucket_config.bucket,
+        bucket_name: bucket_config.bucket.clone(),
         bucket_region: bucket_config.region,
         prefix_in_bucket,
         endpoint,
@@ -366,7 +374,13 @@ async fn init_remote_generic(
         storage: RemoteStorageKind::AwsS3(storage),
         timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
     };
-    GenericRemoteStorage::from_config(&storage_config).await
+
+    // We already pass the prefix to the remote client above
+    let prefix_in_root_target = String::new();
+    let s3_root = make_root_target(bucket_config.bucket, prefix_in_root_target, node_kind);
+
+    let client = GenericRemoteStorage::from_config(&storage_config).await?;
+    Ok((client, s3_root))
 }
 
 async fn list_objects_with_retries(
