@@ -17,7 +17,7 @@ def query_clickhouse(
     client,
     query: str,
     digest: str,
-):
+) -> None:
     """
     Run the query on the client
     return answer if successful, raise an exception otherwise
