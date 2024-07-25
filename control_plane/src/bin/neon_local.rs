@@ -21,7 +21,9 @@ use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
-use pageserver_api::controller_api::{PlacementPolicy, TenantCreateRequest};
+use pageserver_api::controller_api::{
+    NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
+};
 use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
@@ -1250,7 +1252,68 @@ async fn handle_start_all(
             exit(1);
         }
     }
+
+    neon_start_status_check(env, retry_timeout).await?;
+
     Ok(())
+}
+
+async fn neon_start_status_check(
+    env: &local_env::LocalEnv,
+    retry_timeout: &Duration,
+) -> anyhow::Result<()> {
+    const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+    const NOTICE_AFTER_RETRIES: Duration = Duration::from_secs(5);
+
+    if env.control_plane_api.is_none() {
+        return Ok(());
+    }
+
+    let storcon = StorageController::from_env(env);
+
+    let retries = retry_timeout.as_millis() / RETRY_INTERVAL.as_millis();
+    let notice_after_retries = retry_timeout.as_millis() / NOTICE_AFTER_RETRIES.as_millis();
+
+    println!("\nRunning neon status check");
+
+    for retry in 0..retries {
+        if retry == notice_after_retries {
+            println!("\nNeon status check has not passed yet, continuing to wait")
+        }
+
+        let mut passed = true;
+        let mut nodes = storcon.node_list().await?;
+        let mut pageservers = env.pageservers.clone();
+
+        if nodes.len() != pageservers.len() {
+            continue;
+        }
+
+        nodes.sort_by_key(|ps| ps.id);
+        pageservers.sort_by_key(|ps| ps.id);
+
+        for (idx, pageserver) in pageservers.iter().enumerate() {
+            let node = &nodes[idx];
+            if node.id != pageserver.id {
+                passed = false;
+                break;
+            }
+
+            if !matches!(node.availability, NodeAvailabilityWrapper::Active) {
+                passed = false;
+                break;
+            }
+        }
+
+        if passed {
+            println!("\nNeon started and passed status check");
+            return Ok(());
+        }
+
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+
+    anyhow::bail!("\nNeon passed status check")
 }
 
 async fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {

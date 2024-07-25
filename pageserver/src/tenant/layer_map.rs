@@ -845,8 +845,8 @@ impl LayerMap {
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<PersistentLayerDesc>>> {
-        Ok(self.l0_delta_layers.to_vec())
+    pub fn get_level0_deltas(&self) -> Vec<Arc<PersistentLayerDesc>> {
+        self.l0_delta_layers.to_vec()
     }
 
     /// debugging function to print out the contents of the layer map

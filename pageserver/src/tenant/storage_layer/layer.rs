@@ -17,7 +17,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::repository::Key;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::task_mgr::TaskKind;
-use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::timeline::{CompactionError, GetVectoredError};
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
@@ -426,7 +426,7 @@ impl Layer {
     }
 
     /// Downloads if necessary and creates a guard, which will keep this layer from being evicted.
-    pub(crate) async fn download_and_keep_resident(&self) -> anyhow::Result<ResidentLayer> {
+    pub(crate) async fn download_and_keep_resident(&self) -> Result<ResidentLayer, DownloadError> {
         let downloaded = self.0.get_or_maybe_download(true, None).await?;
 
         Ok(ResidentLayer {
@@ -1862,12 +1862,24 @@ impl ResidentLayer {
         shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<usize> {
+    ) -> Result<usize, CompactionError> {
         use LayerKind::*;
 
-        match self.downloaded.get(&self.owner.0, ctx).await? {
-            Delta(_) => anyhow::bail!(format!("cannot filter() on a delta layer {self}")),
-            Image(i) => i.filter(shard_identity, writer, ctx).await,
+        match self
+            .downloaded
+            .get(&self.owner.0, ctx)
+            .await
+            .map_err(CompactionError::Other)?
+        {
+            Delta(_) => {
+                return Err(CompactionError::Other(anyhow::anyhow!(format!(
+                    "cannot filter() on a delta layer {self}"
+                ))));
+            }
+            Image(i) => i
+                .filter(shard_identity, writer, ctx)
+                .await
+                .map_err(CompactionError::Other),
         }
     }
 
