@@ -644,7 +644,7 @@ mod tests {
                 "pg_version": 14
             },
             "deleted_at": "2023-07-31T09:00:00.123",
-            "archived_at": "2023-04-29T09:00:00.123",
+            "archived_at": "2023-04-29T09:00:00.123"
         }"#;
 
         let expected = IndexPart {
