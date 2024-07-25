@@ -2987,6 +2987,8 @@ impl Service {
                 ?mismatching,
                 "shards returned different results"
             );
+
+            return Err(ApiError::InternalServerError(anyhow::anyhow!("pageservers returned mixed results for ancestor detach; manual intervention is required.")));
         }
 
         Ok(any.1)

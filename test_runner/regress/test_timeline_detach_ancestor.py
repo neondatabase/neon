@@ -1049,20 +1049,33 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
             elif mode == "create_reparentable_timeline":
                 first_branch = create_reparentable_timeline()
                 victim_http.configure_failpoints((pausepoint, "off"))
+            else:
+                raise RuntimeError("{mode}")
 
             # it now passes, and we should get an error messages about mixed reparenting as the stuck still had something to reparent
-            # TODO: should it be a stuckness causing 500 internal server error? it probably should.
-            fut.result()
+            mixed_results = "pageservers returned mixed results for ancestor detach; manual intervention is required."
+            with pytest.raises(PageserverApiException, match=mixed_results):
+                fut.result()
 
             msg, offset = env.storage_controller.assert_log_contains(
                 ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*"
             )
             log.info(f"expected error message: {msg.rstrip()}")
-            env.storage_controller.allowed_errors.append(
-                ".*: shards returned different results matching=0 .*"
+            env.storage_controller.allowed_errors.extend(
+                [
+                    ".*: shards returned different results matching=0 .*",
+                    f".*: InternalServerError\\({mixed_results}",
+                ]
             )
 
-            detach_timeline()
+            if mode == "create_reparentable_timeline":
+                with pytest.raises(PageserverApiException, match=mixed_results):
+                    detach_timeline()
+            else:
+                # it is a bit shame to flag it and then it suceeds, but most
+                # likely there would be a retry loop which would take care of
+                # this in cplane
+                detach_timeline()
 
             retried = env.storage_controller.log_contains(
                 ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*",
