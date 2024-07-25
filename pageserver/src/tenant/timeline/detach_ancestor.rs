@@ -121,16 +121,9 @@ impl Default for Options {
 ///
 /// Currently this is tracked at tenant level, but it could be moved to be on the roots
 /// of each timeline tree.
+#[derive(Default)]
 pub(crate) struct SharedState {
     inner: std::sync::Mutex<Option<(TimelineId, completion::Barrier)>>,
-}
-
-impl Default for SharedState {
-    fn default() -> Self {
-        SharedState {
-            inner: Default::default(),
-        }
-    }
 }
 
 impl SharedState {
