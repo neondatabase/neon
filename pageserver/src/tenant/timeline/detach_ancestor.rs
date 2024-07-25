@@ -1114,7 +1114,7 @@ pub(super) async fn detach_and_reparent(
     let ancestor = if let Some(ancestor) = detached.ancestor_timeline.as_ref() {
         assert!(
             recorded_branchpoint.is_none(),
-            "it should be impossible to get to here without having gone through the tenant reset"
+            "it should be impossible to get to here without having gone through the tenant reset; if the tenant was reset, then the ancestor_timeline would be None"
         );
         Ancestor::NotDetached(ancestor.clone(), detached.ancestor_lsn)
     } else if let Some((ancestor_id, ancestor_lsn)) = recorded_branchpoint {
