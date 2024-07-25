@@ -1,5 +1,5 @@
 pub(crate) mod analysis;
-mod compaction;
+pub(crate) mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
@@ -462,7 +462,7 @@ pub(crate) struct GcInfo {
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<Lsn>,
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -478,12 +478,21 @@ impl GcInfo {
     pub(crate) fn min_cutoff(&self) -> Lsn {
         self.cutoffs.select_min()
     }
+
+    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn) {
+        self.retain_lsns.push((child_lsn, child_id));
+        self.retain_lsns.sort_by_key(|i| i.0);
+    }
+
+    pub(super) fn remove_child(&mut self, child_id: TimelineId) {
+        self.retain_lsns.retain(|i| i.1 != child_id);
+    }
 }
 
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
 /// is a single number (the oldest LSN which we must retain), but it internally distinguishes
 /// between time-based and space-based retention for observability and consumption metrics purposes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct GcCutoffs {
     /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.
@@ -2313,6 +2322,11 @@ impl Timeline {
             )
         };
 
+        if let Some(ancestor) = &ancestor {
+            let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
+            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn());
+        }
+
         Arc::new_cyclic(|myself| {
             let metrics = TimelineMetrics::new(
                 &tenant_shard_id,
@@ -2485,7 +2499,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "layer flush task",
-            false,
             async move {
                 let _guard = guard;
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
@@ -2830,7 +2843,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "initial size calculation",
-            false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
                 let cancel = task_mgr::shutdown_token();
@@ -2999,7 +3011,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
-            false,
             async move {
                 let res = self_clone
                     .logical_size_calculation_task(lsn, cause, &ctx)
@@ -3166,7 +3177,7 @@ impl Timeline {
         let guard = self.layers.read().await;
 
         let resident = guard.likely_resident_layers().map(|layer| {
-            let last_activity_ts = layer.access_stats().latest_activity_or_now();
+            let last_activity_ts = layer.access_stats().latest_activity();
 
             HeatMapLayer::new(
                 layer.layer_desc().layer_name(),
@@ -4764,6 +4775,18 @@ impl Timeline {
     }
 }
 
+impl Drop for Timeline {
+    fn drop(&mut self) {
+        if let Some(ancestor) = &self.ancestor_timeline {
+            // This lock should never be poisoned, but in case it is we do a .map() instead of
+            // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
+            if let Ok(mut gc_info) = ancestor.gc_info.write() {
+                gc_info.remove_child(self.timeline_id)
+            }
+        }
+    }
+}
+
 /// Top-level failure to compact.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CompactionError {
@@ -4876,7 +4899,7 @@ impl Timeline {
                 // for compact_level0_phase1 creating an L0, which does not happen in practice
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
-            } else if LayerMap::is_l0(l.layer_desc()) {
+            } else if LayerMap::is_l0(&l.layer_desc().key_range) {
                 bail!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
             } else {
                 insert_layers.push(l.clone());
@@ -5081,7 +5104,11 @@ impl Timeline {
 
             let space_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
             let time_cutoff = gc_info.cutoffs.time;
-            let retain_lsns = gc_info.retain_lsns.clone();
+            let retain_lsns = gc_info
+                .retain_lsns
+                .iter()
+                .map(|(lsn, _child_id)| *lsn)
+                .collect();
 
             // Gets the maximum LSN that holds the valid lease.
             //
@@ -5443,7 +5470,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "download all remote layers task",
-            false,
             async move {
                 self_clone.download_all_remote_layers(request).await;
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
@@ -5594,7 +5620,7 @@ impl Timeline {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-                let last_activity_ts = layer.access_stats().latest_activity_or_now();
+                let last_activity_ts = layer.access_stats().latest_activity();
 
                 EvictionCandidate {
                     layer: layer.into(),

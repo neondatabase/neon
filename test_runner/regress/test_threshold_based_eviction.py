@@ -52,8 +52,8 @@ def test_threshold_based_eviction(
         "kind": "NoEviction"
     }
 
-    eviction_threshold = 5
-    eviction_period = 1
+    eviction_threshold = 10
+    eviction_period = 2
     ps_http.set_tenant_config(
         tenant_id,
         {

@@ -1538,7 +1538,6 @@ impl RemoteTimelineClient {
                 Some(self.tenant_shard_id),
                 Some(self.timeline_id),
                 "remote upload",
-                false,
                 async move {
                     self_rc.perform_upload_task(task).await;
                     Ok(())

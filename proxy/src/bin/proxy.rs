@@ -22,7 +22,9 @@ use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
 use proxy::rate_limiter::EndpointRateLimiter;
+use proxy::rate_limiter::LeakyBucketConfig;
 use proxy::rate_limiter::RateBucketInfo;
+use proxy::rate_limiter::WakeComputeRateLimiter;
 use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
@@ -390,9 +392,24 @@ async fn main() -> anyhow::Result<()> {
         proxy::metrics::CancellationSource::FromClient,
     ));
 
-    let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
-    RateBucketInfo::validate(&mut endpoint_rps_limit)?;
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(endpoint_rps_limit));
+    // bit of a hack - find the min rps and max rps supported and turn it into
+    // leaky bucket config instead
+    let max = args
+        .endpoint_rps_limit
+        .iter()
+        .map(|x| x.rps())
+        .max_by(f64::total_cmp)
+        .unwrap_or(EndpointRateLimiter::DEFAULT.max);
+    let rps = args
+        .endpoint_rps_limit
+        .iter()
+        .map(|x| x.rps())
+        .min_by(f64::total_cmp)
+        .unwrap_or(EndpointRateLimiter::DEFAULT.rps);
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+        LeakyBucketConfig { rps, max },
+        64,
+    ));
 
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
@@ -594,7 +611,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
-                Arc::new(EndpointRateLimiter::new(wake_compute_rps_limit));
+                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
             let api = console::provider::neon::Api::new(
                 endpoint,
                 caches,

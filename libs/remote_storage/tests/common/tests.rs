@@ -1,5 +1,6 @@
 use anyhow::Context;
 use camino::Utf8Path;
+use futures::StreamExt;
 use remote_storage::ListingMode;
 use remote_storage::RemotePath;
 use std::sync::Arc;
@@ -29,10 +30,10 @@ use super::{
 /// * with no prefix, it lists everything after its `${random_prefix_part}/` — that should be `${base_prefix_str}` value only
 /// * with `${base_prefix_str}/` prefix, it lists every `sub_prefix_${i}`
 ///
-/// With the real S3 enabled and `#[cfg(test)]` Rust configuration used, the S3 client test adds a `max-keys` param to limit the response keys.
-/// This way, we are able to test the pagination implicitly, by ensuring all results are returned from the remote storage and avoid uploading too many blobs to S3,
-/// since current default AWS S3 pagination limit is 1000.
-/// (see https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax)
+/// In the `MaybeEnabledStorageWithTestBlobs::setup`, we set the `max_keys_in_list_response` param to limit the keys in a single response.
+/// This way, we are able to test the pagination, by ensuring all results are returned from the remote storage and avoid uploading too many blobs to S3,
+/// as the current default AWS S3 pagination limit is 1000.
+/// (see <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>).
 ///
 /// Lastly, the test attempts to clean up and remove all uploaded S3 files.
 /// If any errors appear during the clean up, they get logged, but the test is not failed or stopped until clean up is finished.
@@ -81,6 +82,41 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .collect::<HashSet<_>>();
     let missing_uploaded_prefixes = expected_remote_prefixes
         .difference(&nested_remote_prefixes)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
+        "remote storage nested prefixes list mismatches with the uploads. Remote only prefixes: {remote_only_prefixes:?}, missing uploaded prefixes: {missing_uploaded_prefixes:?}",
+    );
+
+    // list_streaming
+
+    let prefix_with_slash = base_prefix.add_trailing_slash();
+    let mut nested_remote_prefixes_st = test_client.list_streaming(
+        Some(&prefix_with_slash),
+        ListingMode::WithDelimiter,
+        None,
+        &cancel,
+    );
+    let mut nested_remote_prefixes_combined = HashSet::new();
+    let mut segments = 0;
+    let mut segment_max_size = 0;
+    while let Some(st) = nested_remote_prefixes_st.next().await {
+        let st = st?;
+        segment_max_size = segment_max_size.max(st.prefixes.len());
+        nested_remote_prefixes_combined.extend(st.prefixes.into_iter());
+        segments += 1;
+    }
+    assert!(segments > 1, "less than 2 segments: {segments}");
+    assert!(
+        segment_max_size * 2 <= nested_remote_prefixes_combined.len(),
+        "double of segment_max_size={segment_max_size} larger number of remote prefixes of {}",
+        nested_remote_prefixes_combined.len()
+    );
+    let remote_only_prefixes = nested_remote_prefixes_combined
+        .difference(&expected_remote_prefixes)
+        .collect::<HashSet<_>>();
+    let missing_uploaded_prefixes = expected_remote_prefixes
+        .difference(&nested_remote_prefixes_combined)
         .collect::<HashSet<_>>();
     assert_eq!(
         remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
