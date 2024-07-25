@@ -78,8 +78,8 @@ pub(crate) struct ShardTimelineId {
     pub(crate) timeline_id: TimelineId,
 }
 
-/// This struct is a reference to [`Types::Timeline`]
-/// that keeps the [`Types::Timeline::gate`] open while it exists.
+/// This struct is a reference to [`Timeline`]
+/// that keeps the [`Timeline::gate`] open while it exists.
 ///
 /// The idea is that for every getpage request, [`crate::page_service`] acquires
 /// one of these through [`Cache::get`], uses it to serve that request, then drops
@@ -92,8 +92,8 @@ struct HandleInner<T: Types> {
     _gate_guard: utils::sync::gate::GateGuard,
 }
 
-/// This struct embedded into each [`Types::Timeline`] object to keep the [`Cache`]'s
-/// [`Weak<HandleInner>`] alive while the [`Types::Timeline`] is alive.
+/// This struct embedded into each [`Timeline`] object to keep the [`Cache`]'s
+/// [`Weak<HandleInner>`] alive while the [`Timeline`] is alive.
 pub struct PerTimelineState<T: Types> {
     // None = shutting down
     handles: Mutex<Option<HashMap<CacheId, Arc<HandleInner<T>>>>>,
@@ -109,7 +109,7 @@ impl<T: Types> Default for PerTimelineState<T> {
 
 /// We're abstract over the [`crate::tenant::mgr`] so we can test this module.
 pub(crate) trait TenantManager<T: Types> {
-    /// Invoked by [`Cache::get`] to resolve a [`ShardTimelineId`] to a [`Types::Timeline`].
+    /// Invoked by [`Cache::get`] to resolve a [`ShardTimelineId`] to a [`Timeline`].
     /// Errors are returned as [`GetError::TenantManager`].
     async fn resolve(
         &self,
@@ -143,13 +143,14 @@ impl<T: Types> Cache<T> {
     /// Get a [`Handle`] for the Timeline identified by `key`.
     ///
     /// The returned [`Handle`] must be short-lived so that
-    /// the [`Types::Timeline::gate`] is not held open longer than necessary.
+    /// the [`Timeline::gate`] is not held open longer than necessary.
     ///
-    /// Fails if the [`Types::Timeline::gate`] cannot be entered.
+    /// Note: this method will not fail if the timeline is
+    /// [`Timeline::is_stopping`] or [`Timeline::cancel`]led,
+    /// but the gate is still open.
     ///
-    /// Does NOT check for the shutdown state of [`Types::Timeline`].
-    /// Instead, the methods of [`Types::Timeline`] that are invoked through
-    /// the [`Handle`] are responsible for checking these conditions
+    /// The `Timeline`'s methods, which are invoked through the
+    /// returned [`Handle`], are responsible for checking these conditions
     /// and if so, return an error that causes the page service to
     /// close the connection.
     #[instrument(level = "trace", skip_all)]
@@ -327,10 +328,11 @@ impl<T: Types> Cache<T> {
 
 impl<T: Types> PerTimelineState<T> {
     /// After this method returns, [`Cache::get`] will never again return a [`Handle`]
-    /// to the [`Types::Timeline`] that embeds this per-timeline state.
-    /// Even if [`TenantManager::resolve`] would still resolve to it.
+    /// to this Timeline object, even if [`TenantManager::resolve`] would still resolve
+    /// to this Timeline object.
     ///
-    /// Already-alive [`Handle`]s for will remain open, usable, and keeping the [`ArcTimeline`] alive.
+    /// Already-alive [`Handle`]s for this Timeline will remain open
+    /// and keep the `Arc<Timeline>` allocation alive.
     /// The expectation is that
     /// 1. [`Handle`]s are short-lived (single call to [`Timeline`] method) and
     /// 2. [`Timeline`] methods invoked through [`Handle`] are sensitive
