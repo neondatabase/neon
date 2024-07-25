@@ -48,7 +48,7 @@ jobs:
 
   tag:
     needs: [ check-permissions ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
     permissions:
