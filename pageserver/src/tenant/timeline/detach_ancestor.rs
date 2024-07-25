@@ -1148,8 +1148,7 @@ pub(super) async fn detach_and_reparent(
         if let Some(ancestor) = existing {
             Ancestor::Detached(ancestor, ancestor_lsn)
         } else {
-            let direct_children =
-                reparented_direct_children(detached, tenant).map_err(Error::from)?;
+            let direct_children = reparented_direct_children(detached, tenant)?;
             return Ok(DetachingAndReparenting::AlreadyDone(direct_children));
         }
     } else {
