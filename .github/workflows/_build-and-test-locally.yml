@@ -278,9 +278,6 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          PAGESERVER_GET_VECTORED_IMPL: vectored
-          PAGESERVER_GET_IMPL: vectored
-          PAGESERVER_VALIDATE_VEC_GET: true
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
