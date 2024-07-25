@@ -206,11 +206,10 @@ impl DeleteTimelineFlow {
     // NB: If this fails half-way through, and is retried, the retry will go through
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
-    #[instrument(skip_all, fields(%inplace))]
+    #[instrument(skip_all)]
     pub async fn run(
         tenant: &Arc<Tenant>,
         timeline_id: TimelineId,
-        inplace: bool,
     ) -> Result<(), DeleteTimelineError> {
         super::debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -235,11 +234,7 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        if inplace {
-            Self::background(guard, tenant.conf, tenant, &timeline).await?
-        } else {
-            Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline);
-        }
+        Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline);
 
         Ok(())
     }
