@@ -22,33 +22,30 @@ use utils::{completion, generation::Generation, http::error::ApiError, id::Timel
 pub(crate) enum Error {
     #[error("no ancestors")]
     NoAncestor,
+
     #[error("too many ancestors")]
     TooManyAncestors,
+
     #[error("shutting down, please retry later")]
     ShuttingDown,
-    #[error("flushing failed")]
-    FlushAncestor(#[source] FlushLayerError),
-    #[error("layer download failed")]
-    RewrittenDeltaDownloadFailed(#[source] crate::tenant::storage_layer::layer::DownloadError),
-    #[error("copying LSN prefix locally failed")]
-    CopyDeltaPrefix(#[source] anyhow::Error),
-    #[error("upload rewritten layer")]
-    UploadRewritten(#[source] anyhow::Error),
+
+    #[error(transparent)]
+    NotFound(crate::tenant::GetTimelineError),
+
+    #[error("failed to reparent all candidate timelines, please retry")]
+    FailedToReparentAll,
 
     #[error("ancestor is already being detached by: {}", .0)]
     OtherTimelineDetachOngoing(TimelineId),
 
-    #[error("remote copying layer failed")]
-    CopyFailed(#[source] anyhow::Error),
+    #[error("preparing to timeline ancestor detach failed")]
+    Prepare(#[source] anyhow::Error),
 
-    #[error("wait for tenant to activate after restarting")]
-    WaitToActivate(#[source] GetActiveTenantError),
+    #[error("detaching and reparenting failed")]
+    DetachReparent(#[source] anyhow::Error),
 
-    #[error("detached timeline was not found after restart")]
-    DetachedNotFoundAfterRestart,
-
-    #[error("unexpected error")]
-    Unexpected(#[source] anyhow::Error),
+    #[error("completing ancestor detach failed")]
+    Complete(#[source] anyhow::Error),
 
     #[error("failpoint: {}", .0)]
     Failpoint(&'static str),
@@ -68,8 +65,6 @@ impl Error {
             || TimeoutOrCancel::caused_by_cancel(&e)
             || e.downcast_ref::<remote_storage::DownloadError>()
                 .is_some_and(|e| e.is_cancelled())
-            || e.downcast_ref::<crate::tenant::storage_layer::layer::DownloadError>()
-                .is_some_and(|e| e.is_cancelled())
         {
             Error::ShuttingDown
         } else {
@@ -81,26 +76,21 @@ impl Error {
 impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
         match value {
-            e @ Error::NoAncestor => ApiError::Conflict(e.to_string()),
-            // TODO: ApiError converts the anyhow using debug formatting ... just stop using ApiError?
-            e @ Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{}", e)),
+            Error::NoAncestor => ApiError::Conflict(value.to_string()),
+            Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{}", value)),
             Error::ShuttingDown => ApiError::ShuttingDown,
             Error::OtherTimelineDetachOngoing(_) => {
                 ApiError::ResourceUnavailable("other timeline detach is already ongoing".into())
             }
-            e @ Error::WaitToActivate(_) => {
-                let s = utils::error::report_compact_sources(&e).to_string();
-                ApiError::ResourceUnavailable(s.into())
-            }
-            // All of these contain shutdown errors, in fact, it's the most common
-            e @ Error::FlushAncestor(_)
-            | e @ Error::RewrittenDeltaDownloadFailed(_)
-            | e @ Error::CopyDeltaPrefix(_)
-            | e @ Error::UploadRewritten(_)
-            | e @ Error::CopyFailed(_)
-            | e @ Error::Unexpected(_)
-            | e @ Error::Failpoint(_) => ApiError::InternalServerError(e.into()),
-            Error::DetachedNotFoundAfterRestart => ApiError::NotFound(value.into()),
+            Error::FailedToReparentAll => ApiError::ResourceUnavailable(
+                "failed to reparent all candidate timelines, please retry".into(),
+            ),
+            Error::NotFound(e) => ApiError::from(e),
+            // these variants should have no cancellation errors because of Error::launder
+            Error::Prepare(_)
+            | Error::DetachReparent(_)
+            | Error::Complete(_)
+            | Error::Failpoint(_) => ApiError::InternalServerError(value.into()),
         }
     }
 }
@@ -115,39 +105,6 @@ impl From<crate::tenant::upload_queue::NotInitialized> for Error {
 impl From<super::layer_manager::Shutdown> for Error {
     fn from(_: super::layer_manager::Shutdown) -> Self {
         Error::ShuttingDown
-    }
-}
-
-impl From<FlushLayerError> for Error {
-    fn from(value: FlushLayerError) -> Self {
-        match value {
-            FlushLayerError::Cancelled => Error::ShuttingDown,
-            FlushLayerError::NotRunning(_) => {
-                // FIXME(#6424): technically statically unreachable right now, given how we never
-                // drop the sender
-                Error::ShuttingDown
-            }
-            FlushLayerError::CreateImageLayersError(_) | FlushLayerError::Other(_) => {
-                Error::FlushAncestor(value)
-            }
-        }
-    }
-}
-
-impl From<GetActiveTenantError> for Error {
-    fn from(value: GetActiveTenantError) -> Self {
-        use pageserver_api::models::TenantState;
-        use GetActiveTenantError::*;
-
-        match value {
-            Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) | SwitchedTenant => {
-                Error::ShuttingDown
-            }
-            WaitForActiveTimeout { .. } | NotFound(_) | Broken(_) | WillNotBecomeActive(_) => {
-                // NotFound seems out-of-place
-                Error::WaitToActivate(value)
-            }
-        }
     }
 }
 
@@ -288,7 +245,17 @@ pub(super) async fn prepare(
                 }
             };
 
-            res?;
+            res.map_err(|e| {
+                use FlushLayerError::*;
+                match e {
+                    Cancelled | NotRunning(_) => {
+                        // FIXME(#6424): technically statically unreachable right now, given how we never
+                        // drop the sender
+                        Error::ShuttingDown
+                    }
+                    CreateImageLayersError(_) | Other(_) => Error::Prepare(e.into()),
+                }
+            })?;
 
             // we do not need to wait for uploads to complete but we do need `struct Layer`,
             // copying delta prefix is unsupported currently for `InMemoryLayer`.
@@ -369,7 +336,7 @@ pub(super) async fn prepare(
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(e)) => return Err(e),
-                Err(je) => return Err(Unexpected(je.into())),
+                Err(je) => return Err(Error::Prepare(je.into())),
             }
         }
 
@@ -417,7 +384,7 @@ pub(super) async fn prepare(
             Ok(Err(failed)) => {
                 return Err(failed);
             }
-            Err(je) => return Err(Unexpected(je.into())),
+            Err(je) => return Err(Error::Prepare(je.into())),
         }
     }
 
@@ -439,7 +406,7 @@ async fn start_new_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attem
             crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
         )
         .await
-        .map_err(|e| Error::launder(e, Error::Unexpected))?;
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
 
     Ok(attempt)
 }
@@ -568,7 +535,6 @@ async fn upload_rewritten_layer(
     cancel: &CancellationToken,
     ctx: &RequestContext,
 ) -> Result<Option<Layer>, Error> {
-    use Error::UploadRewritten;
     let copied = copy_lsn_prefix(end_lsn, layer, target, ctx).await?;
 
     let Some(copied) = copied else {
@@ -579,7 +545,7 @@ async fn upload_rewritten_layer(
         .remote_client
         .upload_layer_file(&copied, cancel)
         .await
-        .map_err(|e| Error::launder(e, UploadRewritten))?;
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
 
     Ok(Some(copied.into()))
 }
@@ -590,10 +556,8 @@ async fn copy_lsn_prefix(
     target_timeline: &Arc<Timeline>,
     ctx: &RequestContext,
 ) -> Result<Option<ResidentLayer>, Error> {
-    use Error::{self, CopyDeltaPrefix, RewrittenDeltaDownloadFailed, ShuttingDown};
-
     if target_timeline.cancel.is_cancelled() {
-        return Err(ShuttingDown);
+        return Err(Error::ShuttingDown);
     }
 
     tracing::debug!(%layer, %end_lsn, "copying lsn prefix");
@@ -607,17 +571,22 @@ async fn copy_lsn_prefix(
         ctx,
     )
     .await
-    .map_err(CopyDeltaPrefix)?;
+    .with_context(|| format!("prepare to copy lsn prefix of ancestors {layer}"))
+    .map_err(Error::Prepare)?;
 
-    let resident = layer
-        .download_and_keep_resident()
-        .await
-        .map_err(|e| Error::launder(e, RewrittenDeltaDownloadFailed))?;
+    let resident = layer.download_and_keep_resident().await.map_err(|e| {
+        if e.is_cancelled() {
+            Error::ShuttingDown
+        } else {
+            Error::Prepare(e.into())
+        }
+    })?;
 
     let records = resident
         .copy_delta_prefix(&mut writer, end_lsn, ctx)
         .await
-        .map_err(CopyDeltaPrefix)?;
+        .with_context(|| format!("copy lsn prefix of ancestors {layer}"))
+        .map_err(Error::Prepare)?;
 
     drop(resident);
 
@@ -635,9 +604,9 @@ async fn copy_lsn_prefix(
         let (desc, path) = writer
             .finish(reused_highest_key, ctx)
             .await
-            .map_err(CopyDeltaPrefix)?;
+            .map_err(Error::Prepare)?;
         let copied = Layer::finish_creating(target_timeline.conf, target_timeline, desc, &path)
-            .map_err(CopyDeltaPrefix)?;
+            .map_err(Error::Prepare)?;
 
         tracing::debug!(%layer, %copied, "new layer produced");
 
@@ -653,8 +622,6 @@ async fn remote_copy(
     generation: Generation,
     cancel: &CancellationToken,
 ) -> Result<Layer, Error> {
-    use Error::CopyFailed;
-
     // depending if Layer::keep_resident we could hardlink
 
     let mut metadata = adopted.metadata();
@@ -673,7 +640,7 @@ async fn remote_copy(
         .copy_timeline_layer(adopted, &owned, cancel)
         .await
         .map(move |()| owned)
-        .map_err(|e| Error::launder(e, CopyFailed))
+        .map_err(|e| Error::launder(e, Error::Prepare))
 }
 
 pub(crate) enum DetachingAndReparenting {
@@ -717,7 +684,7 @@ pub(super) async fn detach_and_reparent(
     tenant: &Tenant,
     prepared: PreparedTimelineDetach,
     _ctx: &RequestContext,
-) -> Result<DetachingAndReparenting, anyhow::Error> {
+) -> Result<DetachingAndReparenting, Error> {
     let PreparedTimelineDetach { layers } = prepared;
 
     #[derive(Debug)]
@@ -802,7 +769,8 @@ pub(super) async fn detach_and_reparent(
                     (ancestor.timeline_id, ancestor_lsn),
                 )
                 .await
-                .context("publish layers and detach ancestor")?;
+                .context("publish layers and detach ancestor")
+                .map_err(|e| Error::launder(e, Error::DetachReparent))?;
 
             tracing::info!(
                 ancestor=%ancestor.timeline_id,

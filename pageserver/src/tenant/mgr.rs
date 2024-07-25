@@ -1929,25 +1929,45 @@ impl TenantManager {
         prepared: PreparedTimelineDetach,
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
-    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
+    ) -> Result<HashSet<TimelineId>, detach_ancestor::Error> {
+        use detach_ancestor::Error;
+
         let slot_guard =
-            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
+            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist).map_err(
+                |e| {
+                    use TenantSlotError::*;
+
+                    match e {
+                        MapState(TenantMapError::ShuttingDown) => Error::ShuttingDown,
+                        NotFound(_) | InProgress | MapState(_) => Error::DetachReparent(e.into()),
+                    }
+                },
+            )?;
 
         let tenant = {
-            let old_slot = slot_guard.get_old_value().expect("requested MustExist");
+            let old_slot = slot_guard
+                .get_old_value()
+                .as_ref()
+                .expect("requested MustExist");
 
             let Some(tenant) = old_slot.get_attached() else {
-                anyhow::bail!("Tenant is not in attached state");
+                return Err(Error::DetachReparent(anyhow::anyhow!(
+                    "Tenant is not in attached state"
+                )));
             };
 
             if !tenant.is_active() {
-                anyhow::bail!("Tenant is not active");
+                return Err(Error::DetachReparent(anyhow::anyhow!(
+                    "Tenant is not active"
+                )));
             }
 
             tenant.clone()
         };
 
-        let timeline = tenant.get_timeline(timeline_id, true)?;
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(Error::NotFound)?;
 
         let resp = timeline
             .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
@@ -1961,17 +1981,20 @@ impl TenantManager {
             let (_guard, progress) = utils::completion::channel();
             match tenant.shutdown(progress, ShutdownMode::Hard).await {
                 Ok(()) => {
-                    slot_guard.drop_old_value()?;
+                    slot_guard.drop_old_value().expect("it was just shutdown");
                 }
                 Err(_barrier) => {
                     slot_guard.revert();
-                    // this really should not happen, at all, unless shutdown was already going?
-                    anyhow::bail!("Cannot restart Tenant, already shutting down");
+                    // this really should not happen, at all, unless a shutdown without acquiring
+                    // tenant slot was already going? regardless, on restart the attempt tracking
+                    // will reset to retryable.
+                    return Err(Error::ShuttingDown);
                 }
             }
 
             let tenant_path = self.conf.tenant_path(&tenant_shard_id);
-            let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+            let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)
+                .map_err(|e| Error::DetachReparent(e.into()))?;
 
             let shard_identity = config.shard;
             let tenant = tenant_spawn(
@@ -1979,7 +2002,7 @@ impl TenantManager {
                 tenant_shard_id,
                 &tenant_path,
                 self.resources.clone(),
-                AttachedTenantConf::try_from(config)?,
+                AttachedTenantConf::try_from(config).map_err(Error::DetachReparent)?,
                 shard_identity,
                 None,
                 SpawnMode::Eager,
@@ -1995,7 +2018,15 @@ impl TenantManager {
                 *g = Some((attempt.timeline_id, attempt.new_barrier()));
             }
 
-            slot_guard.upsert(TenantSlot::Attached(tenant.clone()))?;
+            // if we bail out here, we will not allow a new attempt, which should be fine.
+            // pageserver should be shutting down regardless? tenant_reset would help, unless it
+            // runs into the same problem.
+            slot_guard
+                .upsert(TenantSlot::Attached(tenant.clone()))
+                .map_err(|e| match e {
+                    TenantSlotUpsertError::ShuttingDown(_) => Error::ShuttingDown,
+                    other => Error::DetachReparent(other.into()),
+                })?;
             tenant
         } else {
             tracing::info!("skipping tenant_reset as no changes made required it");
@@ -2036,9 +2067,7 @@ impl TenantManager {
         } else {
             // at least the latest versions have now been downloaded and refreshed; be ready to
             // retry another time.
-            Err(anyhow::anyhow!(
-                "failed to reparent all candidate timelines, please retry"
-            ))
+            Err(Error::FailedToReparentAll)
         }
     }
 
@@ -2361,6 +2390,9 @@ impl SlotGuard {
 
     /// Get any value that was present in the slot before we acquired ownership
     /// of it: in state transitions, this will be the old state.
+    ///
+    // FIXME: get_ prefix
+    // FIXME: this should be .as_ref() -- unsure why no clippy
     fn get_old_value(&self) -> &Option<TenantSlot> {
         &self.old_value
     }

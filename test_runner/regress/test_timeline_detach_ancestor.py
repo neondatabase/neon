@@ -1169,7 +1169,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
             match=".*failed to reparent all candidate timelines, please retry",
         ) as exc:
             http.detach_ancestor(env.initial_tenant, detached)
-        assert exc.value.status_code == 500
+        assert exc.value.status_code == 503
 
     # first round -- do more checking to make sure the gc gets paused
     try_detach()
@@ -1323,11 +1323,11 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
 
             http.configure_failpoints((failpoint, "off"))
 
-            with pytest.raises(PageserverApiException) as exc:
+            with pytest.raises(
+                PageserverApiException, match="NotFound: Timeline .* was not found"
+            ) as exc:
                 detach.result()
-
-            # FIXME: this should be 404 but because there is another Anyhow conversion it is 500
-            assert exc.value.status_code == 500
+            assert exc.value.status_code == 404
     finally:
         http.configure_failpoints((failpoint, "off"))
 
