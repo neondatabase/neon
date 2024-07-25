@@ -2125,14 +2125,24 @@ async fn secondary_download_handler(
 
     let timeout = wait.unwrap_or(Duration::MAX);
 
-    let status = match tokio::time::timeout(
+    let result = tokio::time::timeout(
         timeout,
         state.secondary_controller.download_tenant(tenant_shard_id),
     )
-    .await
-    {
-        // Download job ran to completion.
-        Ok(Ok(())) => StatusCode::OK,
+    .await;
+
+    let progress = secondary_tenant.progress.lock().unwrap().clone();
+
+    let status = match result {
+        Ok(Ok(())) => {
+            if progress.layers_downloaded >= progress.layers_total {
+                // Download job ran to completion
+                StatusCode::OK
+            } else {
+                // Download dropped out without errors because it ran out of time budget
+                StatusCode::ACCEPTED
+            }
+        }
         // Edge case: downloads aren't usually fallible: things like a missing heatmap are considered
         // okay.  We could get an error here in the unlikely edge case that the tenant
         // was detached between our check above and executing the download job.
@@ -2141,8 +2151,6 @@ async fn secondary_download_handler(
         // yet.  The caller will get a response body indicating status.
         Err(_) => StatusCode::ACCEPTED,
     };
-
-    let progress = secondary_tenant.progress.lock().unwrap().clone();
 
     json_response(status, progress)
 }
