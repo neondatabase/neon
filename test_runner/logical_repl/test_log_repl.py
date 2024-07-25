@@ -10,7 +10,7 @@ import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
-from fixtures.utils import subprocess_capture, wait_until
+from fixtures.utils import wait_until
 
 
 def query_clickhouse(
@@ -32,37 +32,6 @@ def query_clickhouse(
     if hash_res == digest:
         return
     raise ValueError("Hash mismatch")
-
-
-@pytest.fixture(name="clickhouse_instance", scope="function")
-def fixture_clickhouse_instance(test_output_dir):
-    """
-    Startup and teardown a docker container with Clickhouse
-    """
-    log.info("Starting ClickHouse container")
-    cmd = [
-        "docker",
-        "run",
-        "-d",
-        "-p",
-        "9000:9000",
-        "-p",
-        "8123:8123",
-        "-h",
-        "clickhouse",
-        "--name",
-        "clickhouse",
-        "clickhouse/clickhouse-server:24.6.3.64",
-    ]
-    subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
-    cmd = ["env"]
-    subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
-    cmd = ["docker", "ps"]
-    subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
-    yield
-    log.info("Stopping ClickHouse container")
-    cmd = ["docker", "rm", "-f", "clickhouse"]
-    subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
 
 
 @pytest.mark.remote_cluster
