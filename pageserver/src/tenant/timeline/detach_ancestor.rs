@@ -1287,6 +1287,7 @@ pub(super) async fn detach_and_reparent(
     }
 }
 
+/// Query against a locked `Tenant::timelines`.
 fn reparentable_timelines<'a, I>(
     timelines: I,
     detached: &'a Arc<Timeline>,
