@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail};
 use camino::Utf8PathBuf;
-use pageserver_api::controller_api::MetadataHealthUpdateRequest;
+use pageserver_api::controller_api::{MetadataHealthUpdateRequest, MetadataHealthUpdateResponse};
 use pageserver_api::shard::TenantShardId;
 use reqwest::{Method, Url};
 use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
@@ -184,16 +184,18 @@ async fn main() -> anyhow::Result<()> {
                             println!("{}", summary.summary_string());
                         }
 
-                        if let Some(conf) = controller_client_conf {
-                            let controller_client = conf.build_client();
-                            let body = summary.build_health_update_request();
-                            controller_client
-                                .dispatch::<MetadataHealthUpdateRequest, ()>(
-                                    Method::POST,
-                                    "/control/v1/metadata_health/update".to_string(),
-                                    Some(body),
-                                )
-                                .await?;
+                        if post_to_storage_controller {
+                            if let Some(conf) = controller_client_conf {
+                                let controller_client = conf.build_client();
+                                let body = summary.build_health_update_request();
+                                controller_client
+                                    .dispatch::<MetadataHealthUpdateRequest, MetadataHealthUpdateResponse>(
+                                        Method::POST,
+                                        "control/v1/metadata_health/update".to_string(),
+                                        Some(body),
+                                    )
+                                    .await?;
+                            }
                         }
 
                         if summary.is_fatal() {

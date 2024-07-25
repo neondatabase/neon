@@ -438,9 +438,11 @@ def test_scrubber_scan_pageserver_metadata(
     assert len(index.layer_metadata) > 0
     it = iter(index.layer_metadata.items())
 
-    scan_summary = env.storage_scrubber.scan_metadata()
+    scan_summary = env.storage_scrubber.scan_metadata(post_to_storage_controller=True)
     assert not scan_summary["with_warnings"]
     assert not scan_summary["with_errors"]
+
+    assert env.storage_controller.metadata_health_is_healthy()
 
     # Delete a layer file that is listed in the index.
     layer, metadata = next(it)
@@ -451,7 +453,17 @@ def test_scrubber_scan_pageserver_metadata(
     )
     log.info(f"delete response: {delete_response}")
 
-    # Check scan summary. Expect it to be a L0 layer so only emit warnings.
+    # Check scan summary without posting to storage controller. Expect it to be a L0 layer so only emit warnings.
     scan_summary = env.storage_scrubber.scan_metadata()
     log.info(f"{pprint.pformat(scan_summary)}")
     assert len(scan_summary["with_warnings"]) > 0
+
+    assert env.storage_controller.metadata_health_is_healthy()
+
+    # Now post to storage controller, expect seeing one unhealthy health record
+    scan_summary = env.storage_scrubber.scan_metadata(post_to_storage_controller=True)
+    log.info(f"{pprint.pformat(scan_summary)}")
+    assert len(scan_summary["with_warnings"]) > 0
+
+    unhealthy = env.storage_controller.metadata_health_list_unhealthy()["unhealthy_tenant_shards"]
+    assert len(unhealthy) == 1 and unhealthy[0] == str(tenant_shard_id)
