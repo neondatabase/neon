@@ -3,7 +3,7 @@ use crate::metrics::{
     METRICS_REGISTRY,
 };
 use crate::reconciler::ReconcileError;
-use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use crate::service::{LeadershipStatus, Service, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
 use futures::Future;
 use hyper::header::CONTENT_TYPE;
@@ -734,6 +734,41 @@ struct RequestMeta {
     at: Instant,
 }
 
+pub fn prologue_ledearship_status_check_middleware<
+    B: hyper::body::HttpBody + Send + Sync + 'static,
+>() -> Middleware<B, ApiError> {
+    Middleware::pre(move |req| async move {
+        let state = get_state(&req);
+        let leadership_status = state.service.get_leadership_status();
+        let allowed_routes = match leadership_status {
+            LeadershipStatus::Leader => Vec::default(),
+            LeadershipStatus::SteppedDown => {
+                // TODO: does it make sense to allow /status here?
+                ["/control/v1/step_down", "/status", "/metrics"].to_vec()
+            }
+            LeadershipStatus::Candidate => ["/ready", "/status", "/metrics"].to_vec(),
+        };
+
+        if allowed_routes.is_empty() {
+            return Ok(req);
+        }
+
+        let allowed = allowed_routes.contains(&req.uri().to_string().as_str());
+        match allowed {
+            true => Ok(req),
+            false => {
+                tracing::info!(
+                    "Request {} not allowed due to current leadership state",
+                    req.uri()
+                );
+                Err(ApiError::ResourceUnavailable(
+                    format!("Current leadership status is {leadership_status}").into(),
+                ))
+            }
+        }
+    })
+}
+
 fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
@@ -820,6 +855,7 @@ pub fn make_router(
     build_info: BuildInfo,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router()
+        .middleware(prologue_ledearship_status_check_middleware())
         .middleware(prologue_metrics_middleware())
         .middleware(epilogue_metrics_middleware());
     if auth.is_some() {
