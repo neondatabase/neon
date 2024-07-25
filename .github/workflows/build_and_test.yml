@@ -68,6 +68,10 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
 
+      - name: push
+        run:
+          docker buildx imagetools create -t neoneastus2.azurecr.io/neondatabase/neon:5718 neondatabase/neon:5718
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
