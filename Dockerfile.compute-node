@@ -676,6 +676,7 @@ RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.2.0.tar.
     echo "9118fc508a6e231e7a39acaa6f066fcd79af17a5db757b47d2eefbe14f7794f0 pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo update -p time --precise 0.3.36 && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
