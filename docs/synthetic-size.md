@@ -40,7 +40,7 @@ The synthetic size is designed to:
 - logical size is the size of a branch *at a given point in
   time*. It's the total size of all tables in all databases, as you
   see with "\l+" in psql for example, plus the Postgres SLRUs and some
-  small amount of metadata. NOTE that currently, Neon does not include
+  small amount of metadata. Note that currently, Neon does not include
   the SLRUs and metadata in the logical size. See comment to
   [`get_current_logical_size_non_incremental()`](/pageserver/src/pgdatadir_mapping.rs#L813-L814).
 
