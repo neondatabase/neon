@@ -1266,13 +1266,14 @@ pub(super) async fn detach_and_reparent(
     let reparented_all = reparenting_candidates == reparented.len();
 
     if reparented_all {
+        Ok(DetachingAndReparenting::Reparented(reparented))
+    } else {
         tracing::info!(
             reparented = reparented.len(),
             candidates = reparenting_candidates,
             "failed to reparent all candidates; they can be retried after the restart",
         );
-        Ok(DetachingAndReparenting::Reparented(reparented))
-    } else {
+
         let must_restart = !reparented.is_empty() || was_detached;
 
         Ok(DetachingAndReparenting::SomeReparentingFailed { must_restart })
