@@ -54,12 +54,10 @@ def fixture_clickhouse_instance(test_output_dir):
         "clickhouse",
         "clickhouse/clickhouse-server:24.6.3.64",
     ]
-    log.debug("start cmd: %s", " ".join(cmd))
     subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
     yield
     log.info("Stopping ClickHouse container")
     cmd = ["docker", "rm", "-f", "clickhouse"]
-    log.debug("stop cmd: %s", cmd)
     subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
 
 
