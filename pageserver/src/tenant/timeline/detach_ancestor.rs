@@ -676,9 +676,6 @@ pub(super) async fn prepare(
         .start_new_attempt(detached)
         .await?;
 
-    // FIXME: is the assumption that no one else is making these changes except us strong
-    // enough...? need a witness in the RemoteTimelineClient api?
-    //
     // if it wasn't persistently started already, mark the ancestor detach persistently started.
     detached
         .remote_client
