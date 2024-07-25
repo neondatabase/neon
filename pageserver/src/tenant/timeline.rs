@@ -4671,27 +4671,6 @@ impl Timeline {
             }
         }
 
-        // The writer.finish() above already did the fsync of the inodes.
-        // We just need to fsync the directory in which these inodes are linked,
-        // which we know to be the timeline directory.
-        if !image_layers.is_empty() {
-            // We use fatal_err() below because the after writer.finish() returns with success,
-            // the in-memory state of the filesystem already has the layer file in its final place,
-            // and subsequent pageserver code could think it's durable while it really isn't.
-            let timeline_dir = VirtualFile::open(
-                &self
-                    .conf
-                    .timeline_path(&self.tenant_shard_id, &self.timeline_id),
-                ctx,
-            )
-            .await
-            .fatal_err("VirtualFile::open for timeline dir fsync");
-            timeline_dir
-                .sync_all()
-                .await
-                .fatal_err("VirtualFile::sync_all timeline dir");
-        }
-
         let mut guard = self.layers.write().await;
 
         // FIXME: we could add the images to be uploaded *before* returning from here, but right
