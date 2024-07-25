@@ -653,10 +653,6 @@ pub(super) async fn prepare(
             ));
         }
 
-        // `detached` has previously been detached; let's inspect each of the current timelines and
-        // report back the timelines which have been reparented by our detach, or which are still
-        // reparentable
-
         let reparented_timelines = reparented_direct_children(detached, tenant)?;
         return Ok(Progress::Done(AncestorDetached {
             reparented_timelines,
@@ -1089,7 +1085,7 @@ impl DetachingAndReparenting {
         }
     }
 
-    pub(crate) fn completed(self) -> Option<Vec<TimelineId>> {
+    pub(crate) fn completed(self) -> Option<HashSet<TimelineId>> {
         use DetachingAndReparenting::*;
         match self {
             Reparented(x) | AlreadyDone(x) => Some(x),
@@ -1286,9 +1282,7 @@ pub(super) async fn detach_and_reparent(
             candidates = reparenting_candidates,
             "failed to reparent all candidates; they can be retried after the restart",
         );
-
         let must_restart = !reparented.is_empty() || was_detached;
-
         Ok(DetachingAndReparenting::SomeReparentingFailed { must_restart })
     }
 }

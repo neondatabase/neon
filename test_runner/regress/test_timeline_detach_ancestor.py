@@ -1203,7 +1203,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "off"))
 
     reparented_resp = http.detach_ancestor(env.initial_tenant, detached)
-    assert reparented_resp == timelines
+    assert reparented_resp == set(timelines)
     # no need to quiesce_tenants anymore, because completion does that
 
     reparented, not_reparented = reparenting_progress(timelines)
