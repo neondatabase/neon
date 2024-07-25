@@ -315,7 +315,6 @@ impl SharedState {
             self.inner.lock().unwrap().cancel(attempt);
         });
 
-        // the gate being entered does not matter much, but lets be strict
         if attempt.gate_entered.is_none() {
             let entered = timeline.gate.enter().map_err(|_| Error::ShuttingDown)?;
             attempt.gate_entered = Some(entered);
