@@ -584,7 +584,11 @@ impl SharedStateBuilder {
         timeline_id: &TimelineId,
         index_part: &crate::tenant::IndexPart,
     ) {
-        if index_part.gc_blocking.is_some() {
+        if index_part
+            .gc_blocking
+            .as_ref()
+            .is_some_and(|b| b.blocked_by_detach_ancestor())
+        {
             // if the loading a timeline fails, tenant loading must fail as it does right now, or
             // something more elaborate needs to be done with this tracking
             self.inprogress.insert(*timeline_id);
