@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 use std::{collections::HashSet, str::FromStr};
 
-
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
 /// in [`storage_controller::http`]
