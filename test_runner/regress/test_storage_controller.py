@@ -1837,3 +1837,24 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     # doesn't change.
     observed_state_again = env.storage_controller.step_down()
     assert observed_state == observed_state_again
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "leader"}
+        )
+        == 0
+    )
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "stepped_down"}
+        )
+        == 1
+    )
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "candidate"}
+        )
+        == 0
+    )

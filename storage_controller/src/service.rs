@@ -15,6 +15,7 @@ use crate::{
     },
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
+    metrics::LeadershipStatusGroup,
     persistence::{AbortShardSplitStatus, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
@@ -132,7 +133,8 @@ enum NodeOperations {
     Delete,
 }
 
-#[derive(Copy, Clone, strum_macros::Display)]
+#[derive(Copy, Clone, strum_macros::Display, measured::FixedCardinalityLabel)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum LeadershipStatus {
     Leader,
     SteppedDown,
@@ -213,6 +215,17 @@ impl ServiceState {
         scheduler: Scheduler,
         delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
     ) -> Self {
+        let status = &crate::metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_leadership_status;
+
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::Leader,
+            },
+            1,
+        );
+
         Self {
             // TODO: Starting up as Leader is a transient state. Once we enable rolling
             // upgrades on the k8s side, we should start up as Candidate.
@@ -241,6 +254,29 @@ impl ServiceState {
 
     fn step_down(&mut self) {
         self.leadership_status = LeadershipStatus::SteppedDown;
+
+        let status = &crate::metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_leadership_status;
+
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::SteppedDown,
+            },
+            1,
+        );
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::Leader,
+            },
+            0,
+        );
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::Candidate,
+            },
+            0,
+        );
     }
 }
 
