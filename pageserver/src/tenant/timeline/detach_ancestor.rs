@@ -1260,17 +1260,10 @@ pub(super) async fn detach_and_reparent(
                     timeline.timeline_id
                 );
             }
-            Ok(None) => {
-                // lets just ignore this for now. one or all reparented timelines could had
-                // started deletion, and that is fine. deleting a timeline is the most likely
-                // reason for this.
-            }
             Err(je) if je.is_cancelled() => unreachable!("not used"),
-            Err(je) if je.is_panic() => {
-                // ignore; it's better to continue with a single reparenting failing (or even
-                // all of them) in order to get to the goal state. we will retry this after
-                // restart.
-            }
+            // just ignore failures now, we can retry
+            Ok(None) => {}
+            Err(je) if je.is_panic() => {}
             Err(je) => tracing::error!("unexpected join error: {je:?}"),
         }
     }
