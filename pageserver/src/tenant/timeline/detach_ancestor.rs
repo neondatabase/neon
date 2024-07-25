@@ -1139,7 +1139,7 @@ pub(super) async fn detach_and_reparent(
     } else {
         // TODO: make sure there are no `?` before tenant_reset from after a questionmark from
         // here.
-        panic!("bug: complete called on a timeline which has not been detached or which has no live ancestor");
+        panic!("bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor");
     };
 
     // publish the prepared layers before we reparent any of the timelines, so that on restart
