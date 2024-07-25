@@ -230,7 +230,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     Ok(has_pending_task) => {
                         error_run_count = 0;
                         // schedule the next compaction immediately in case there is a pending compaction task
-                        if has_pending_task { Duration::from_secs(1) } else { period }
+                        if has_pending_task { Duration::from_secs(0) } else { period }
                     }
                 }
             };
