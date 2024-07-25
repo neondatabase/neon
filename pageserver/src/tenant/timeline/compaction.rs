@@ -15,6 +15,7 @@ use super::{
 };
 
 use anyhow::{anyhow, Context};
+use bytes::Bytes;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
@@ -69,17 +70,21 @@ impl KeyHistoryRetention {
         self,
         key: Key,
         delta_writer: &mut Vec<(Key, Lsn, Value)>,
-        image_writer: &mut ImageLayerWriter,
+        mut image_writer: Option<&mut ImageLayerWriter>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
-        for (_, KeyLogAtLsn(logs)) in self.below_horizon {
+        for (cutoff_lsn, KeyLogAtLsn(logs)) in self.below_horizon {
             if first_batch {
                 if logs.len() == 1 && logs[0].1.is_image() {
                     let Value::Image(img) = &logs[0].1 else {
                         unreachable!()
                     };
-                    image_writer.put_image(key, img.clone(), ctx).await?;
+                    if let Some(image_writer) = image_writer.as_mut() {
+                        image_writer.put_image(key, img.clone(), ctx).await?;
+                    } else {
+                        delta_writer.push((key, cutoff_lsn, Value::Image(img.clone())));
+                    }
                 } else {
                     for (lsn, val) in logs {
                         delta_writer.push((key, lsn, val));
@@ -1107,6 +1112,7 @@ impl Timeline {
         horizon: Lsn,
         retain_lsn_below_horizon: &[Lsn],
         delta_threshold_cnt: usize,
+        base_img_from_ancestor: Option<(Key, Lsn, Bytes)>,
     ) -> anyhow::Result<KeyHistoryRetention> {
         // Pre-checks for the invariants
         if cfg!(debug_assertions) {
@@ -1169,6 +1175,9 @@ impl Timeline {
                         // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
                         // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
                         // dropped.
+                        //
+                        // TODO: in case we have both delta + images for a given LSN and it does not exceed the delta
+                        // threshold, we could have kept delta instead to save space. This is an optimization for the future.
                         continue;
                     }
                 }
@@ -1186,7 +1195,11 @@ impl Timeline {
             "should have at least below + above horizon batches"
         );
         let mut replay_history: Vec<(Key, Lsn, Value)> = Vec::new();
+        if let Some((key, lsn, img)) = base_img_from_ancestor {
+            replay_history.push((key, lsn, Value::Image(img)));
+        }
         for (i, split_for_lsn) in split_history.into_iter().enumerate() {
+            // TODO: there could be image keys inside the splits, and we can compute records_since_last_image accordingly.
             records_since_last_image += split_for_lsn.len();
             let generate_image = if i == 0 {
                 // We always generate images for the first batch (below horizon / lowest retain_lsn)
@@ -1418,15 +1431,38 @@ impl Timeline {
             Ok(Some(delta_layer))
         }
 
-        let mut image_layer_writer = ImageLayerWriter::new(
-            self.conf,
-            self.timeline_id,
-            self.tenant_shard_id,
-            &(Key::MIN..Key::MAX), // covers the full key range
-            lowest_retain_lsn,
-            ctx,
-        )
-        .await?;
+        // Only create image layers when there is no ancestor branches. TODO: create covering image layer
+        // when some condition meet.
+        let mut image_layer_writer = if self.ancestor_timeline.is_none() {
+            Some(
+                ImageLayerWriter::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_shard_id,
+                    &(Key::MIN..Key::MAX), // covers the full key range
+                    lowest_retain_lsn,
+                    ctx,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        /// Returns None if there is no ancestor branch. Throw an error when the key is not found.
+        async fn get_ancestor_image(
+            tline: &Arc<Timeline>,
+            key: Key,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<Option<(Key, Lsn, Bytes)>> {
+            if tline.ancestor_timeline.is_none() {
+                return Ok(None);
+            };
+            // This function is implemented as a get of the current timeline at ancestor LSN, therefore reusing
+            // as much existing code as possible.
+            let img = tline.get(key, tline.ancestor_lsn, ctx).await?;
+            Ok(Some((key, tline.ancestor_lsn, img)))
+        }
 
         let mut delta_values = Vec::new();
         let delta_split_points = delta_split_points.into_iter().collect_vec();
@@ -1447,11 +1483,17 @@ impl Timeline {
                         gc_cutoff,
                         &retain_lsns_below_horizon,
                         COMPACTION_DELTA_THRESHOLD,
+                        get_ancestor_image(self, *last_key, ctx).await?,
                     )
                     .await?;
                 // Put the image into the image layer. Currently we have a single big layer for the compaction.
                 retention
-                    .pipe_to(*last_key, &mut delta_values, &mut image_layer_writer, ctx)
+                    .pipe_to(
+                        *last_key,
+                        &mut delta_values,
+                        image_layer_writer.as_mut(),
+                        ctx,
+                    )
                     .await?;
                 delta_layers.extend(
                     flush_deltas(
@@ -1480,11 +1522,17 @@ impl Timeline {
                 gc_cutoff,
                 &retain_lsns_below_horizon,
                 COMPACTION_DELTA_THRESHOLD,
+                get_ancestor_image(self, last_key, ctx).await?,
             )
             .await?;
         // Put the image into the image layer. Currently we have a single big layer for the compaction.
         retention
-            .pipe_to(last_key, &mut delta_values, &mut image_layer_writer, ctx)
+            .pipe_to(
+                last_key,
+                &mut delta_values,
+                image_layer_writer.as_mut(),
+                ctx,
+            )
             .await?;
         delta_layers.extend(
             flush_deltas(
@@ -1499,15 +1547,19 @@ impl Timeline {
             .await?,
         );
 
-        let image_layer = image_layer_writer.finish(self, ctx).await?;
+        let image_layer = if let Some(writer) = image_layer_writer {
+            Some(writer.finish(self, ctx).await?)
+        } else {
+            None
+        };
         info!(
             "produced {} delta layers and {} image layers",
             delta_layers.len(),
-            1
+            if image_layer.is_some() { 1 } else { 0 }
         );
         let mut compact_to = Vec::new();
         compact_to.extend(delta_layers);
-        compact_to.push(image_layer);
+        compact_to.extend(image_layer);
         // Step 3: Place back to the layer map.
         {
             let mut guard = self.layers.write().await;

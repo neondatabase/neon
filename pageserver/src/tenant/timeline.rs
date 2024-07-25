@@ -548,7 +548,6 @@ impl GetVectoredError {
     }
 }
 
-#[derive(Debug)]
 pub struct MissingKeyError {
     key: Key,
     shard: ShardNumber,
@@ -557,6 +556,12 @@ pub struct MissingKeyError {
     ancestor_lsn: Option<Lsn>,
     traversal_path: Vec<TraversalPathItem>,
     backtrace: Option<std::backtrace::Backtrace>,
+}
+
+impl std::fmt::Debug for MissingKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
 impl std::fmt::Display for MissingKeyError {
