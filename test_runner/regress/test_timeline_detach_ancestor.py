@@ -1095,12 +1095,20 @@ def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
         (pausepoint, "pause"),
     )
 
+    env.storage_controller.allowed_errors.append(
+        f".*Error processing HTTP request: .* failpoint: {failpoint}"
+    )
+    http = env.storage_controller.pageserver_api()
+
     victim = pageservers[int(shards[-1]["node_id"])]
+    victim.allowed_errors.append(
+        f".*Error processing HTTP request: InternalServerError\\(failpoint: {failpoint}"
+    )
     victim_http = victim.http_client().without_status_retrying()
     victim_http.configure_failpoints([(pausepoint, "pause"), (failpoint, "return")])
 
     def detach_timeline():
-        env.storage_controller.pageserver_api().detach_ancestor(env.initial_tenant, detached_branch)
+        http.detach_ancestor(env.initial_tenant, detached_branch)
 
     def paused_at_failpoint():
         stuck.assert_log_contains(f"at failpoint {pausepoint}")
@@ -1120,11 +1128,11 @@ def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
             stuck_http.configure_failpoints((pausepoint, "off"))
             wait_until(10, 1.0, first_completed)
 
-            # if we would let victim fail, for some reason there'd be a 409 response instead of 500
             victim_http.configure_failpoints((pausepoint, "off"))
+
             with pytest.raises(
                 PageserverApiException,
-                match=".*failpoint: timeline-detach-ancestor::before_starting_after_locking",
+                match=f".*failpoint: {failpoint}",
             ) as exc:
                 fut.result()
             assert exc.value.status_code == 500
