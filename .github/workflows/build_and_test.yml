@@ -56,6 +56,7 @@ jobs:
     steps:
       - name: Install az cli
         run: |
+          apt install -y python3-pip
           pip install azure
 
       - uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a # v2.1.1
