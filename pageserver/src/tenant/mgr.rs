@@ -2022,6 +2022,7 @@ impl TenantManager {
 
         slot_guard.upsert(TenantSlot::Attached(tenant.clone()))?;
 
+        // finally ask the restarted tenant to complete the detach
         tenant
             .ongoing_timeline_detach
             .complete(attempt, &tenant)
