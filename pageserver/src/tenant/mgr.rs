@@ -1930,33 +1930,7 @@ impl TenantManager {
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, anyhow::Error> {
-        // FIXME: this is unnecessary, slotguard already has these semantics
-        struct RevertOnDropSlot(Option<SlotGuard>);
-
-        impl Drop for RevertOnDropSlot {
-            fn drop(&mut self) {
-                if let Some(taken) = self.0.take() {
-                    taken.revert();
-                }
-            }
-        }
-
-        impl RevertOnDropSlot {
-            fn into_inner(mut self) -> SlotGuard {
-                self.0.take().unwrap()
-            }
-        }
-
-        impl std::ops::Deref for RevertOnDropSlot {
-            type Target = SlotGuard;
-
-            fn deref(&self) -> &Self::Target {
-                self.0.as_ref().unwrap()
-            }
-        }
-
         let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
-        let slot_guard = RevertOnDropSlot(Some(slot_guard));
 
         let tenant = {
             let Some(old_slot) = slot_guard.get_old_value() else {
@@ -1982,7 +1956,7 @@ impl TenantManager {
             .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
             .await?;
 
-        let mut slot_guard = slot_guard.into_inner();
+        let mut slot_guard = slot_guard;
 
         let tenant = if resp.reset_tenant_required() {
             attempt.before_reset_tenant();
