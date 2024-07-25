@@ -2555,8 +2555,11 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         try:
             self.node_status(node_id)
-        except StorageControllerApiException:
-            return False
+        except StorageControllerApiException as e:
+            if e.status_code == 404:
+                return False
+            else:
+                raise e
 
         return True
 
