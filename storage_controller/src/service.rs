@@ -403,6 +403,21 @@ struct ShardUpdate {
     generation: Option<Generation>,
 }
 
+enum StopReconciliationsReason {
+    ShuttingDown,
+    SteppingDown,
+}
+
+impl std::fmt::Display for StopReconciliationsReason {
+    fn fmt(&self, writer: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Self::ShuttingDown => "Shutting down",
+            Self::SteppingDown => "Stepping down",
+        };
+        write!(writer, "{}", s)
+    }
+}
+
 pub(crate) enum ReconcileResultRequest {
     ReconcileResult(ReconcileResult),
     Stop,
@@ -5603,17 +5618,22 @@ impl Service {
         Ok(std::cmp::max(waiter_count, reconciles_spawned))
     }
 
-    pub async fn shutdown(&self) {
+    async fn stop_reconciliations(&self, reason: StopReconciliationsReason) {
         // Cancel all on-going reconciles and wait for them to exit the gate.
-        tracing::info!("Shutting down: cancelling and waiting for in-flight reconciles");
+        tracing::info!("{reason}: cancelling and waiting for in-flight reconciles");
         self.reconcilers_cancel.cancel();
         self.reconcilers_gate.close().await;
 
         // Signal the background loop in [`Service::process_results`] to exit once
         // it has proccessed the results from all the reconciles we cancelled earlier.
-        tracing::info!("Shutting down: processing results from previously in-flight reconciles");
+        tracing::info!("{reason}: processing results from previously in-flight reconciles");
         self.result_tx.send(ReconcileResultRequest::Stop).ok();
         self.result_tx.closed().await;
+    }
+
+    pub async fn shutdown(&self) {
+        self.stop_reconciliations(StopReconciliationsReason::ShuttingDown)
+            .await;
 
         // Background tasks hold gate guards: this notifies them of the cancellation and
         // waits for them all to complete.
