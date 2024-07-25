@@ -1168,6 +1168,12 @@ pub(super) async fn detach_and_reparent(
                 .await
                 .context("publish layers and detach ancestor")?;
 
+            tracing::info!(
+                ancestor=%ancestor.timeline_id,
+                %ancestor_lsn,
+                inherited_layers=%layers.len(),
+                "detached from ancestor"
+            );
             (ancestor, ancestor_lsn, true)
         }
         Ancestor::Detached(ancestor, ancestor_lsn) => (ancestor, ancestor_lsn, false),
