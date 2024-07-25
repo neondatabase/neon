@@ -155,7 +155,9 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
 
 
 @pytest.mark.timeout(10000)
-def test_gc_feedback_with_snapshots(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
+def test_gc_feedback_with_snapshots(
+    neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker
+):
     """
     Compared with `test_gc_feedback`, we create a branch in the middle of the benchmark, and the
     bottom-most compaction should collect as much garbage as possible below the GC horizon. Ideally,
