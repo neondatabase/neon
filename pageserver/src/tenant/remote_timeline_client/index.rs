@@ -354,7 +354,8 @@ impl GcBlocking {
         self.with_reason(GcBlockingReason::DetachAncestor)
     }
 
-    /// Returns a version of self without the reason of detach_ancestor.
+    /// Returns a version of self without the reason of detach_ancestor. Assumption is that if
+    /// there are no more reasons, we can unblock the gc.
     pub(super) fn without_detach_ancestor(&self) -> Option<Self> {
         self.without_reason(GcBlockingReason::DetachAncestor)
     }
