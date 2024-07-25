@@ -57,7 +57,7 @@ def fixture_clickhouse_instance(test_output_dir):
     subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
     cmd = ["netstat", "-lnt"]
     subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
-    cmd = ["ip", "a"]
+    cmd = ["docker", "ps"]
     subprocess_capture(test_output_dir, cmd, check=True, capture_stdout=True)
     yield
     log.info("Stopping ClickHouse container")
