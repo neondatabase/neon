@@ -449,6 +449,7 @@ class TokenScope(str, Enum):
     GENERATIONS_API = "generations_api"
     SAFEKEEPER_DATA = "safekeeperdata"
     TENANT = "tenant"
+    SCRUBBER = "scrubber"
 
 
 class NeonEnvBuilder:
@@ -2562,6 +2563,38 @@ class NeonStorageController(MetricsGetter, LogUtils):
                     raise e
 
                 time.sleep(backoff)
+
+    def metadata_health_update(self, healthy: List[TenantShardId], unhealthy: List[TenantShardId]):
+        body: Dict[str, Any] = {
+            "healthy_tenant_shards": [str(t) for t in healthy],
+            "unhealthy_tenant_shards": [str(t) for t in unhealthy],
+        }
+
+        self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/update",
+            json=body,
+            headers=self.headers(TokenScope.SCRUBBER),
+        )
+
+    def metadata_health_list_unhealthy(self):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/unhealthy",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def metadata_health_list_outdated(self, duration: str) -> List[TenantShardId]:
+        body: Dict[str, Any] = {"not_scrubbed_for": duration}
+
+        response = self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/outdated",
+            json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
 
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):

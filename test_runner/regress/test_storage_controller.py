@@ -3,7 +3,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -1699,3 +1699,101 @@ def test_storage_controller_node_deletion(
     assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
     env.storage_controller.reconcile_all()  # FIXME: workaround for optimizations happening on startup, see FIXME above.
     env.storage_controller.consistency_check()
+
+
+@pytest.mark.parametrize("shard_count", [None, 2])
+def test_storage_controller_metadata_health(
+    neon_env_builder: NeonEnvBuilder,
+    shard_count: Optional[int],
+):
+    """
+    Create three tenants A, B, C.
+
+    Phase 1:
+    - A: Post healthy status.
+    - B: Post unhealthy status.
+    - C: No updates.
+
+    Phase 2:
+    - B: Post healthy status.
+    - C: Post healthy status.
+
+    Phase 3:
+    - A: Post unhealthy status.
+    """
+
+    def update_and_query_metadata_health(
+        env: NeonEnv, healthy: List[TenantShardId], unhealthy: List[TenantShardId]
+    ) -> Tuple[Set[str], Set[str]]:
+        """
+        Update metadata health. Then list tenant shards with unhealthy and
+        outdated metadata health status.
+        """
+        env.storage_controller.metadata_health_update(healthy, unhealthy)
+        result = env.storage_controller.metadata_health_list_unhealthy()
+        unhealthy_res = set(result["unhealthy_tenant_shards"])
+        result = env.storage_controller.metadata_health_list_outdated("1h")
+        outdated_res = set(record["tenant_shard_id"] for record in result["health_records"])
+
+        return unhealthy_res, outdated_res
+
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_start()
+
+    # Mock tenant (`initial_tenant``) with healthy scrubber scan result
+    tenant_a_shard_ids = (
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(env.initial_tenant, 0, 0)]
+    )
+
+    # Mock tenant with unhealthy scrubber scan result
+    tenant_b, _ = env.neon_cli.create_tenant(shard_count=shard_count)
+    tenant_b_shard_ids = (
+        env.storage_controller.tenant_shard_split(tenant_b, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(tenant_b, 0, 0)]
+    )
+
+    # Mock tenant that never gets a health update from scrubber
+    tenant_c, _ = env.neon_cli.create_tenant(shard_count=shard_count)
+
+    tenant_c_shard_ids = (
+        env.storage_controller.tenant_shard_split(tenant_c, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(tenant_c, 0, 0)]
+    )
+
+    # post "fake" updates to storage controller db
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=tenant_a_shard_ids, unhealthy=tenant_b_shard_ids
+    )
+
+    log.info(f"After Phase 1: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == len(tenant_b_shard_ids)
+    for t in tenant_b_shard_ids:
+        assert str(t) in unhealthy
+    assert len(outdated) == len(tenant_c_shard_ids)
+    for t in tenant_c_shard_ids:
+        assert str(t) in outdated
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=tenant_b_shard_ids + tenant_c_shard_ids, unhealthy=[]
+    )
+
+    log.info(f"After Phase 2: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == 0
+    assert len(outdated) == 0
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=[], unhealthy=tenant_a_shard_ids
+    )
+
+    log.info(f"After Phase 3: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == len(tenant_a_shard_ids)
+    for t in tenant_a_shard_ids:
+        assert str(t) in unhealthy
+    assert len(outdated) == 0
