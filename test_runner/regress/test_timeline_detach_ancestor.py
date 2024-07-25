@@ -1124,7 +1124,7 @@ def test_retryable_500_hit_through_storcon_during_timeline_detach_ancestor(
             victim_http.configure_failpoints((pausepoint, "off"))
             with pytest.raises(
                 PageserverApiException,
-                match="500 Internal Server Error failpoint: timeline-detach-ancestor::before_starting_after_locking",
+                match=".*failpoint: timeline-detach-ancestor::before_starting_after_locking",
             ) as exc:
                 fut.result()
             assert exc.value.status_code == 500
