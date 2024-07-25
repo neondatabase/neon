@@ -52,6 +52,9 @@ jobs:
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Install az cli
