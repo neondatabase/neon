@@ -41,7 +41,7 @@ The synthetic size is designed to:
   time*. It's the total size of all tables in all databases, as you
   see with "\l+" in psql for example, plus the Postgres SLRUs and some
   small amount of metadata. Note that currently, Neon does not include
-  the SLRUs and metadata in the logical size. See comment to
+  the SLRUs and metadata in the logical size. Refer to the comment in
   [`get_current_logical_size_non_incremental()`](/pageserver/src/pgdatadir_mapping.rs#L813-L814).
 
 - a "point in time" is defined as an LSN value. You can convert a
