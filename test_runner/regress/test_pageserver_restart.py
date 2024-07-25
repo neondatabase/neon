@@ -15,6 +15,10 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     neon_env_builder.enable_scrub_on_exit()
 
+    # We inject a delay of 15 seconds for tenant activation below.
+    # Hence, bump the max delay here to not skip over the activation.
+    neon_env_builder.pageserver_config_override = 'background_task_maximum_delay="20s"'
+
     env = neon_env_builder.init_start()
 
     endpoint = env.endpoints.create_start("main")
@@ -70,7 +74,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     # pageserver does if a compute node connects and sends a request for the tenant
     # while it's still in Loading state. (It waits for the loading to finish, and then
     # processes the request.)
-    tenant_load_delay_ms = 5000
+    tenant_load_delay_ms = 15000
     env.pageserver.stop()
     env.pageserver.start(
         extra_env_vars={"FAILPOINTS": f"before-attaching-tenant=return({tenant_load_delay_ms})"}
