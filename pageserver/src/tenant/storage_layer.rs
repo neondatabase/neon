@@ -452,7 +452,7 @@ pub enum ValueReconstructResult {
 /// of layers (for example when creating a branch that makes some previously covered layers visible).  It should
 /// be used for cache management but not for correctness-critical checks.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LayerVisibilityHint {
+pub enum LayerVisibilityHint {
     /// A Visible layer might be read while serving a read, because there is not an image layer between it
     /// and a readable LSN (the tip of the branch or a child's branch point)
     Visible,

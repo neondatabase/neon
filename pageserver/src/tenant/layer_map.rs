@@ -878,7 +878,7 @@ impl LayerMap {
     ///
     /// This function is O(N) and should be called infrequently.  The caller is responsible for
     /// looking up and updating the Layer objects for these layer descriptors.
-    pub(crate) fn get_visibility(
+    pub fn get_visibility(
         &self,
         mut read_points: Vec<Lsn>,
     ) -> (
@@ -959,7 +959,7 @@ impl LayerMap {
                 Item::ReadPoint { lsn } => (*lsn, 0),
                 Item::Layer(layer) => {
                     if layer.is_delta() {
-                        (layer.get_lsn_range().end, 1)
+                        (Lsn(layer.get_lsn_range().end.0 - 1), 1)
                     } else {
                         (layer.image_layer_lsn(), 2)
                     }
@@ -979,10 +979,13 @@ impl LayerMap {
             maybe_covered_deltas.retain(|d| {
                 if *reached_lsn >= d.lsn_range.start && is_readpoint {
                     // We encountered a readpoint within the delta layer: it is visible
+
+                    eprintln!("confirm visible delta @ {}", d.lsn_range.end);
                     results.push((d.clone(), LayerVisibilityHint::Visible));
                     false
                 } else if *reached_lsn < d.lsn_range.start {
                     // We passed the layer's range without encountering a read point: it is not visible
+                    eprintln!("confirm covered delta @ {}", d.lsn_range.end);
                     results.push((d.clone(), LayerVisibilityHint::Covered));
                     false
                 } else {
@@ -1000,20 +1003,32 @@ impl LayerMap {
                 Item::Layer(layer) => {
                     let visibility = if layer.is_delta() {
                         if shadow.contains(layer.get_key_range()) {
-                            LayerVisibilityHint::Visible
-                        } else {
                             // If a layer isn't visible based on current state, we must defer deciding whether
                             // it is truly not visible until we have advanced past the delta's range: we might
                             // encounter another branch point within this delta layer's LSN range.
+                            eprintln!("maybe covered delta @ {}", layer.lsn_range.end);
                             maybe_covered_deltas.push(layer);
                             continue;
+                        } else {
+                            eprintln!("visible delta @ {}", layer.lsn_range.end);
+                            LayerVisibilityHint::Visible
                         }
-                    } else if shadow.cover(layer.get_key_range()) {
-                        // An image layer in a region which wasn't fully covered yet: this layer is visible, but layers below it will be covered
-                        LayerVisibilityHint::Visible
                     } else {
-                        // An image layer in a region that was already covered
-                        LayerVisibilityHint::Covered
+                        let modified = shadow.cover(layer.get_key_range());
+                        eprintln!(
+                            "Extended shadow with {}..{} - modified={modified}",
+                            layer.get_key_range().start,
+                            layer.get_key_range().end,
+                        );
+                        if modified {
+                            // An image layer in a region which wasn't fully covered yet: this layer is visible, but layers below it will be covered
+                            eprintln!("visible image @ {}", layer.image_layer_lsn());
+                            LayerVisibilityHint::Visible
+                        } else {
+                            // An image layer in a region that was already covered
+                            eprintln!("covered image @ {}", layer.image_layer_lsn());
+                            LayerVisibilityHint::Covered
+                        }
                     };
 
                     results.push((layer, visibility));
@@ -1034,7 +1049,13 @@ impl LayerMap {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::keyspace::KeySpace;
+    use crate::tenant::{storage_layer::LayerName, IndexPart};
+    use pageserver_api::{key::DBDIR_KEY, keyspace::KeySpace};
+    use std::{collections::HashMap, path::PathBuf};
+    use utils::{
+        id::{TenantId, TimelineId},
+        shard::TenantShardId,
+    };
 
     use super::*;
 
@@ -1160,5 +1181,194 @@ mod tests {
                 assert_range_search_result_eq(result, expected);
             }
         }
+    }
+
+    #[test]
+    fn layer_visibility_basic() {
+        // A simple synthetic input, as a smoke test.
+        let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
+        let timeline_id = TimelineId::generate();
+        let mut layer_map = LayerMap::default();
+        let mut updates = layer_map.batch_update();
+
+        const FAKE_LAYER_SIZE: u64 = 1024;
+
+        let inject_delta = |updates: &mut BatchedUpdates,
+                            key_start: i128,
+                            key_end: i128,
+                            lsn_start: u64,
+                            lsn_end: u64| {
+            let desc = PersistentLayerDesc::new_delta(
+                tenant_shard_id,
+                timeline_id,
+                Range {
+                    start: Key::from_i128(key_start),
+                    end: Key::from_i128(key_end),
+                },
+                Range {
+                    start: Lsn(lsn_start),
+                    end: Lsn(lsn_end),
+                },
+                1024,
+            );
+            updates.insert_historic(desc.clone());
+            desc
+        };
+
+        let inject_image =
+            |updates: &mut BatchedUpdates, key_start: i128, key_end: i128, lsn: u64| {
+                let desc = PersistentLayerDesc::new_img(
+                    tenant_shard_id,
+                    timeline_id,
+                    Range {
+                        start: Key::from_i128(key_start),
+                        end: Key::from_i128(key_end),
+                    },
+                    Lsn(lsn),
+                    FAKE_LAYER_SIZE,
+                );
+                updates.insert_historic(desc.clone());
+                desc
+            };
+
+        // A delta ahead of any image layer
+        let ahead_layer = inject_delta(&mut updates, 10, 20, 101, 110);
+
+        // An image layer is visible and covers some layers beneath itself
+        let visible_covering_img = inject_image(&mut updates, 5, 25, 100);
+
+        // A delta layer covered by the image layer: should be covered
+        let covered_delta = inject_delta(&mut updates, 10, 20, 90, 100);
+
+        // A delta layer partially covered by an image layer: should be visible
+        let partially_covered_delta = inject_delta(&mut updates, 1, 7, 90, 100);
+
+        // A delta layer not covered by an image layer: should be visible
+        let not_covered_delta = inject_delta(&mut updates, 1, 4, 90, 100);
+
+        // An image layer covered by the image layer above: should be covered
+        let covered_image = inject_image(&mut updates, 10, 20, 89);
+
+        // An image layer partially covered by an image layer: should be visible
+        let partially_covered_image = inject_image(&mut updates, 1, 7, 89);
+
+        // An image layer not covered by an image layer: should be visible
+        let not_covered_image = inject_image(&mut updates, 1, 4, 89);
+
+        updates.flush();
+
+        let read_points = vec![Lsn(1000)];
+
+        let (layer_visibilities, shadow) = layer_map.get_visibility(read_points);
+        let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            layer_visibilities.get(&ahead_layer),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&visible_covering_img),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_delta),
+            Some(&LayerVisibilityHint::Covered)
+        );
+        assert_eq!(
+            layer_visibilities.get(&partially_covered_delta),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&not_covered_delta),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_image),
+            Some(&LayerVisibilityHint::Covered)
+        );
+        assert_eq!(
+            layer_visibilities.get(&partially_covered_image),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&not_covered_image),
+            Some(&LayerVisibilityHint::Visible)
+        );
+
+        // Shadow should include all the images
+        let expected_shadow = KeySpace {
+            ranges: vec![Key::from_i128(1)..Key::from_i128(25)],
+        };
+        assert_eq!(shadow, expected_shadow);
+    }
+
+    fn fixture_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    #[test]
+    fn layer_visibility_realistic() {
+        // Load a large example layermap
+        let index_raw = std::fs::read_to_string(fixture_path(
+            "test_data/indices/mixed_workload/index_part.json",
+        ))
+        .unwrap();
+        let index: IndexPart = serde_json::from_str::<IndexPart>(&index_raw).unwrap();
+
+        let tenant_id = TenantId::generate();
+        let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+        let timeline_id = TimelineId::generate();
+
+        let mut layer_map = LayerMap::default();
+        let mut updates = layer_map.batch_update();
+        for (layer_name, layer_metadata) in index.layer_metadata {
+            let layer_desc = match layer_name {
+                LayerName::Image(layer_name) => PersistentLayerDesc {
+                    key_range: layer_name.key_range.clone(),
+                    lsn_range: layer_name.lsn_as_range(),
+                    tenant_shard_id,
+                    timeline_id,
+                    is_delta: false,
+                    file_size: layer_metadata.file_size,
+                },
+                LayerName::Delta(layer_name) => PersistentLayerDesc {
+                    key_range: layer_name.key_range,
+                    lsn_range: layer_name.lsn_range,
+                    tenant_shard_id,
+                    timeline_id,
+                    is_delta: true,
+                    file_size: layer_metadata.file_size,
+                },
+            };
+            updates.insert_historic(layer_desc);
+        }
+        updates.flush();
+
+        let read_points = vec![index.metadata.disk_consistent_lsn()];
+        let (layer_visibilities, shadow) = layer_map.get_visibility(read_points);
+        for (layer_desc, visibility) in &layer_visibilities {
+            tracing::info!("{layer_desc:?}: {visibility:?}");
+            eprintln!("{layer_desc:?}: {visibility:?}");
+        }
+
+        // The shadow should be non-empty, since there were some image layers
+        assert!(!shadow.ranges.is_empty());
+
+        // At least some layers should be marked covered
+        assert!(layer_visibilities
+            .iter()
+            .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
+
+        let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
+
+        // Sanity: the layer that holds latest data for the DBDIR key should always be visible
+        // (just using this key as a key that will always exist for any layermap fixture)
+        let dbdir_layer = layer_map
+            .search(DBDIR_KEY, index.metadata.disk_consistent_lsn())
+            .unwrap();
+        assert!(matches!(
+            layer_visibilities.get(&dbdir_layer.layer).unwrap(),
+            LayerVisibilityHint::Visible
+        ));
     }
 }
