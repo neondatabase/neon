@@ -185,7 +185,7 @@ impl Eq for NodeAvailability {}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum NodeAvailabilityWrapper {
     Active,
-    Unavailable,
+    WarmingUp,
     Offline,
 }
 
@@ -195,7 +195,7 @@ impl From<NodeAvailabilityWrapper> for NodeAvailability {
             // Assume the worst utilisation score to begin with. It will later be updated by
             // the heartbeats.
             NodeAvailabilityWrapper::Active => NodeAvailability::Active(UtilizationScore::worst()),
-            NodeAvailabilityWrapper::Unavailable => NodeAvailability::WarmingUp(Instant::now()),
+            NodeAvailabilityWrapper::WarmingUp => NodeAvailability::WarmingUp(Instant::now()),
             NodeAvailabilityWrapper::Offline => NodeAvailability::Offline,
         }
     }
@@ -205,7 +205,7 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
     fn from(val: NodeAvailability) -> Self {
         match val {
             NodeAvailability::Active(_) => NodeAvailabilityWrapper::Active,
-            NodeAvailability::WarmingUp(_) => NodeAvailabilityWrapper::Unavailable,
+            NodeAvailability::WarmingUp(_) => NodeAvailabilityWrapper::WarmingUp,
             NodeAvailability::Offline => NodeAvailabilityWrapper::Offline,
         }
     }
