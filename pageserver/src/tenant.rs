@@ -1620,7 +1620,7 @@ impl Tenant {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(), timeline::CompactionError> {
+    ) -> Result<(), timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
             return Ok(());
@@ -1665,12 +1665,14 @@ impl Tenant {
                 .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await
-                .map_err(|e| {
-                    self.compaction_circuit_breaker
-                        .lock()
-                        .unwrap()
-                        .fail(&CIRCUIT_BREAKERS_BROKEN, &e);
-                    e
+                .inspect_err(|e| match e {
+                    timeline::CompactionError::ShuttingDown => (),
+                    timeline::CompactionError::Other(e) => {
+                        self.compaction_circuit_breaker
+                            .lock()
+                            .unwrap()
+                            .fail(&CIRCUIT_BREAKERS_BROKEN, e);
+                    }
                 })?;
         }
 
@@ -4568,7 +4570,7 @@ mod tests {
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .into_iter()
             .map(|desc| layer_map.get_from_desc(&desc))
             .collect::<Vec<_>>();
@@ -5787,7 +5789,7 @@ mod tests {
             .read()
             .await
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .len();
 
         tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
@@ -5797,7 +5799,7 @@ mod tests {
             .read()
             .await
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .len();
 
         assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
@@ -7470,7 +7472,10 @@ mod tests {
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![Lsn(0x10), Lsn(0x20)],
+                retain_lsns: vec![
+                    (Lsn(0x10), tline.timeline_id),
+                    (Lsn(0x20), tline.timeline_id),
+                ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
                     space: Lsn(0x30),
