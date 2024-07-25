@@ -47,7 +47,6 @@ def test_sharding_smoke(
     # Use S3-compatible remote storage so that we can scrub: this test validates
     # that the scrubber doesn't barf when it sees a sharded tenant.
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
 
     neon_env_builder.preserve_database_files = True
 
@@ -128,7 +127,6 @@ def test_sharding_smoke(
     # Check the scrubber isn't confused by sharded content, then disable
     # it during teardown because we'll have deleted by then
     env.storage_scrubber.scan_metadata()
-    neon_env_builder.scrub_on_exit = False
 
     env.storage_controller.pageserver_api().tenant_delete(tenant_id)
     assert_prefix_empty(
@@ -373,7 +371,6 @@ def test_sharding_split_smoke(
     # Use S3-compatible remote storage so that we can scrub: this test validates
     # that the scrubber doesn't barf when it sees a sharded tenant.
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
 
     neon_env_builder.preserve_database_files = True
 
