@@ -270,7 +270,7 @@ pub(super) async fn prepare(
             // we are safe to inspect the latest uploaded, because we can only witness this after
             // restart is complete and ancestor is no more.
             let latest = accessor.latest_uploaded_index_part();
-            if !latest.lineage.is_detached_from_original_ancestor() {
+            if !latest.lineage.is_detached_from_ancestor() {
                 return Err(NoAncestor);
             }
         }
