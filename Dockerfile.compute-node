@@ -695,7 +695,7 @@ FROM rust-extensions-build AS pg-graphql-pg-build
 ARG PG_VERSION
 
 RUN wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.5.7.tar.gz -O pg_graphql.tar.gz && \
-    echo "bd8dc7230282b3efa9ae5baf053a54151ed0e2b3e567a5b31019cb97ae0e33263c1bcc28580be5a444ac4c8ece5c4be2aea4166881c7c53750e2d0c765776edc pg_graphql.tar.gz" | sha256sum --check && \
+    echo "2b3e567a5b31019cb97ae0e33263c1bcc28580be5a444ac4c8ece5c4be2aea41 pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
@@ -718,7 +718,8 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/26806147b17b60763039c6a6
     echo "e64e55aaa38c259512d3e27c572da22c4637418cf124caba904cd50944e5004e pg_tiktoken.tar.gz" | sha256sum --check && \
     mkdir pg_tiktoken-src && cd pg_tiktoken-src && tar xzf ../pg_tiktoken.tar.gz --strip-components=1 -C . && \
     # TODO update pgrx version in the pg_tiktoken repo and remove this line
-    sed -i 's/pgrx = { version = "=0.10.2", features = [ "unsafe-postgres" ] }/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = { version = "=0.10.2",/pgrx = { version = "0.11.3",/g' Cargo.toml && \
+    sed -i 's/pgrx-tests = "=0.10.2"/pgrx-tests = "0.11.3"/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_tiktoken.control
 
