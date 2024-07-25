@@ -13,7 +13,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PageserverAvailability,
-    PageserverSchedullingPolicy,
+    PageserverSchedulingPolicy,
     PgBin,
     StorageControllerApiException,
     TokenScope,
@@ -1603,7 +1603,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.poll_node_status(
             ps.id,
             PageserverAvailability.ACTIVE,
-            PageserverSchedullingPolicy.PAUSE_FOR_RESTART,
+            PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
             max_attempts=6,
             backoff=5,
         )
@@ -1619,7 +1619,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.poll_node_status(
             ps.id,
             PageserverAvailability.ACTIVE,
-            PageserverSchedullingPolicy.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
             max_attempts=10,
             backoff=1,
         )
@@ -1630,7 +1630,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.poll_node_status(
             ps.id,
             PageserverAvailability.ACTIVE,
-            PageserverSchedullingPolicy.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
             max_attempts=6,
             backoff=5,
         )
@@ -1681,7 +1681,7 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.poll_node_status(
         ps_id_to_drain,
         PageserverAvailability.ACTIVE,
-        PageserverSchedullingPolicy.DRAINING,
+        PageserverSchedulingPolicy.DRAINING,
         max_attempts=6,
         backoff=2,
     )
@@ -1691,7 +1691,7 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.poll_node_status(
         ps_id_to_drain,
         PageserverAvailability.ACTIVE,
-        PageserverSchedullingPolicy.ACTIVE,
+        PageserverSchedulingPolicy.ACTIVE,
         max_attempts=6,
         backoff=2,
     )

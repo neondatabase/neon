@@ -12,7 +12,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PageserverAvailability,
-    PageserverSchedullingPolicy,
+    PageserverSchedulingPolicy,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
@@ -282,7 +282,7 @@ def test_storage_controller_many_tenants(
         env.storage_controller.poll_node_status(
             ps.id,
             PageserverAvailability.ACTIVE,
-            PageserverSchedullingPolicy.PAUSE_FOR_RESTART,
+            PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
             max_attempts=24,
             backoff=5,
         )
@@ -298,7 +298,7 @@ def test_storage_controller_many_tenants(
         env.storage_controller.poll_node_status(
             ps.id,
             PageserverAvailability.ACTIVE,
-            PageserverSchedullingPolicy.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
             max_attempts=24,
             backoff=1,
         )
@@ -309,7 +309,7 @@ def test_storage_controller_many_tenants(
         env.storage_controller.poll_node_status(
             ps.id,
             PageserverAvailability.ACTIVE,
-            PageserverSchedullingPolicy.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
             max_attempts=24,
             backoff=5,
         )

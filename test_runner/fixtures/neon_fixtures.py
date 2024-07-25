@@ -2157,7 +2157,7 @@ class PageserverAvailability(str, Enum):
     OFFLINE = "Offline"
 
 
-class PageserverSchedullingPolicy(str, Enum):
+class PageserverSchedulingPolicy(str, Enum):
     ACTIVE = "Active"
     DRAINING = "Draining"
     FILLING = "Filling"
@@ -2564,7 +2564,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self,
         node_id: int,
         desired_availability: Optional[PageserverAvailability],
-        desired_scheduling_policy: Optional[PageserverSchedullingPolicy],
+        desired_scheduling_policy: Optional[PageserverSchedulingPolicy],
         max_attempts: int,
         backoff: int,
     ):
