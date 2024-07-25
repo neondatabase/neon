@@ -81,6 +81,7 @@ use crate::{
         ReconcilerWaiter, TenantShard,
     },
 };
+use serde::{Deserialize, Serialize};
 
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -236,6 +237,10 @@ impl ServiceState {
 
     fn get_leadership_status(&self) -> LeadershipStatus {
         self.leadership_status
+    }
+
+    fn step_down(&mut self) {
+        self.leadership_status = LeadershipStatus::SteppedDown;
     }
 }
 
@@ -439,6 +444,10 @@ pub(crate) enum ReconcileResultRequest {
     ReconcileResult(ReconcileResult),
     Stop,
 }
+
+// TODO: move this into the storcon peer client when that gets added
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub(crate) struct GlobalObservedState(HashMap<TenantShardId, ObservedState>);
 
 impl Service {
     pub fn get_config(&self) -> &Config {
@@ -6043,5 +6052,24 @@ impl Service {
 
     pub(crate) fn get_leadership_status(&self) -> LeadershipStatus {
         self.inner.read().unwrap().get_leadership_status()
+    }
+
+    pub(crate) async fn step_down(&self) -> GlobalObservedState {
+        tracing::info!("Received step down request from peer");
+
+        self.inner.write().unwrap().step_down();
+        // TODO: would it make sense to have a time-out for this?
+        self.stop_reconciliations(StopReconciliationsReason::SteppingDown)
+            .await;
+
+        let mut global_observed = GlobalObservedState::default();
+        let locked = self.inner.read().unwrap();
+        for (tid, tenant_shard) in locked.tenants.iter() {
+            global_observed
+                .0
+                .insert(*tid, tenant_shard.observed.clone());
+        }
+
+        global_observed
     }
 }
