@@ -4,12 +4,10 @@ Test the logical replication in Neon with the different consumers
 
 import hashlib
 import time
-from datetime import datetime, timedelta
 
 import clickhouse_connect
 import psycopg2
 import pytest
-from clickhouse_connect.driver.exceptions import DatabaseError
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import subprocess_capture, wait_until
