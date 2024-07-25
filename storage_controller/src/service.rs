@@ -131,6 +131,14 @@ enum NodeOperations {
     Delete,
 }
 
+#[derive(Copy, Clone, strum_macros::Display)]
+pub(crate) enum LeadershipStatus {
+    Leader,
+    SteppedDown,
+    #[allow(unused)]
+    Candidate,
+}
+
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 
 // Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
@@ -140,6 +148,8 @@ const MAX_DELAYED_RECONCILES: usize = 10000;
 
 // Top level state available to all HTTP handlers
 struct ServiceState {
+    leadership_status: LeadershipStatus,
+
     tenants: BTreeMap<TenantShardId, TenantShard>,
 
     nodes: Arc<HashMap<NodeId, Node>>,
@@ -203,6 +213,9 @@ impl ServiceState {
         delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
     ) -> Self {
         Self {
+            // TODO: Starting up as Leader is a transient state. Once we enable rolling
+            // upgrades on the k8s side, we should start up as Candidate.
+            leadership_status: LeadershipStatus::Leader,
             tenants,
             nodes: Arc::new(nodes),
             scheduler,
@@ -219,6 +232,10 @@ impl ServiceState {
         &mut Scheduler,
     ) {
         (&mut self.nodes, &mut self.tenants, &mut self.scheduler)
+    }
+
+    fn get_leadership_status(&self) -> LeadershipStatus {
+        self.leadership_status
     }
 }
 
@@ -6022,5 +6039,9 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn get_leadership_status(&self) -> LeadershipStatus {
+        self.inner.read().unwrap().get_leadership_status()
     }
 }
