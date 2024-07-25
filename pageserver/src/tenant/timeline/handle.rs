@@ -27,13 +27,6 @@ use utils::shard::ShardNumber;
 
 use crate::tenant::mgr::ShardSelector;
 
-/// The requirement for Debug is so that #[derive(Debug)] works in some places.
-pub(crate) trait Types: Sized + std::fmt::Debug {
-    type TenantManagerError: Sized + std::fmt::Debug;
-    type TenantManager: TenantManager<Self> + Sized;
-    type Timeline: ArcTimeline<Self> + Sized;
-}
-
 /// Uniquely identifies a [`Cache`] instance over the lifetime of the process.
 /// Required so [`Cache::drop`] can take out the handles from the [`PerTimelineState`].
 /// Alternative to this would be to allocate [`Cache`] in a `Box` and identify it by the pointer.
@@ -56,14 +49,20 @@ impl CacheId {
 ///
 /// Without this, we'd have to go through the [`crate::tenant::mgr`] for each
 /// getpage request.
-pub(crate) struct Cache<T: Types> {
+pub(crate) struct Cache<T>
+where
+    T: ArcTimeline<T>,
+{
     id: CacheId,
     map: Map<T>,
 }
 
 type Map<T> = HashMap<ShardTimelineId, Weak<HandleInner<T>>>;
 
-impl<T: Types> Default for Cache<T> {
+impl<T> Default for Cache<T>
+where
+    T: ArcTimeline<T>,
+{
     fn default() -> Self {
         Self {
             id: CacheId::next(),
@@ -84,22 +83,25 @@ pub(crate) struct ShardTimelineId {
 /// The idea is that for every getpage request, [`crate::page_service`] acquires
 /// one of these through [`Cache::get`], uses it to serve that request, then drops
 /// the handle.
-pub(crate) struct Handle<T: Types>(Arc<HandleInner<T>>);
-struct HandleInner<T: Types> {
+pub(crate) struct Handle<T>(Arc<HandleInner<T>>);
+struct HandleInner<T> {
     shut_down: AtomicBool,
-    timeline: T::Timeline,
+    timeline: T,
     // The timeline's gate held open.
     _gate_guard: utils::sync::gate::GateGuard,
 }
 
 /// This struct embedded into each [`Timeline`] object to keep the [`Cache`]'s
 /// [`Weak<HandleInner>`] alive while the [`Timeline`] is alive.
-pub struct PerTimelineState<T: Types> {
+pub struct PerTimelineState<T> {
     // None = shutting down
     handles: Mutex<Option<HashMap<CacheId, Arc<HandleInner<T>>>>>,
 }
 
-impl<T: Types> Default for PerTimelineState<T> {
+impl<T> Default for PerTimelineState<T>
+where
+    T: ArcTimeline<T>,
+{
     fn default() -> Self {
         Self {
             handles: Mutex::new(Some(Default::default())),
@@ -108,17 +110,21 @@ impl<T: Types> Default for PerTimelineState<T> {
 }
 
 /// We're abstract over the [`crate::tenant::mgr`] so we can test this module.
-pub(crate) trait TenantManager<T: Types> {
+pub(crate) trait TenantManager<T>
+where
+    T: ArcTimeline<T>,
+{
+    type Error;
     /// Invoked by [`Cache::get`] to resolve a [`ShardTimelineId`] to a [`Timeline`].
     /// Errors are returned as [`GetError::TenantManager`].
     async fn resolve(
         &self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<T::Timeline, T::TenantManagerError>;
+    ) -> Result<T, Self::Error>;
 }
 
-pub(crate) trait ArcTimeline<T: Types>: Clone {
+pub(crate) trait ArcTimeline<T>: Clone {
     fn gate(&self) -> &utils::sync::gate::Gate;
     fn shard_timeline_id(&self) -> ShardTimelineId;
     fn get_shard_identity(&self) -> &ShardIdentity;
@@ -127,19 +133,25 @@ pub(crate) trait ArcTimeline<T: Types>: Clone {
 
 /// Errors returned by [`Cache::get`].
 #[derive(Debug)]
-pub(crate) enum GetError<T: Types> {
-    TenantManager(T::TenantManagerError),
+pub(crate) enum GetError<E> {
+    TenantManager(E),
     TimelineGateClosed,
     PerTimelineStateShutDown,
 }
 
-enum RoutingResult<T: Types> {
+enum RoutingResult<T>
+where
+    T: ArcTimeline<T>,
+{
     FastPath(Handle<T>),
     SlowPath(ShardTimelineId),
     NeedConsultTenantManager,
 }
 
-impl<T: Types> Cache<T> {
+impl<T> Cache<T>
+where
+    T: ArcTimeline<T>,
+{
     /// Get a [`Handle`] for the Timeline identified by `key`.
     ///
     /// The returned [`Handle`] must be short-lived so that
@@ -154,12 +166,15 @@ impl<T: Types> Cache<T> {
     /// and if so, return an error that causes the page service to
     /// close the connection.
     #[instrument(level = "trace", skip_all)]
-    pub(crate) async fn get(
+    pub(crate) async fn get<M>(
         &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-        tenant_manager: &T::TenantManager,
-    ) -> Result<Handle<T>, GetError<T>> {
+        tenant_manager: &M,
+    ) -> Result<Handle<T>, GetError<M::Error>>
+    where
+        M: TenantManager<T>,
+    {
         // terminates because each iteration removes an element from the map
         loop {
             let handle = self
@@ -181,12 +196,15 @@ impl<T: Types> Cache<T> {
     }
 
     #[instrument(level = "trace", skip_all)]
-    async fn get_impl(
+    async fn get_impl<M>(
         &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-        tenant_manager: &T::TenantManager,
-    ) -> Result<Handle<T>, GetError<T>> {
+        tenant_manager: &M,
+    ) -> Result<Handle<T>, GetError<M::Error>>
+    where
+        M: TenantManager<T>,
+    {
         let miss: ShardSelector = {
             let routing_state = self.shard_routing(timeline_id, shard_selector);
             match routing_state {
@@ -259,12 +277,15 @@ impl<T: Types> Cache<T> {
 
     #[instrument(level = "trace", skip_all)]
     #[inline(always)]
-    async fn get_miss(
+    async fn get_miss<M>(
         &mut self,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-        tenant_manager: &T::TenantManager,
-    ) -> Result<Handle<T>, GetError<T>> {
+        tenant_manager: &M,
+    ) -> Result<Handle<T>, GetError<M::Error>>
+    where
+        M: TenantManager<T>,
+    {
         match tenant_manager.resolve(timeline_id, shard_selector).await {
             Ok(timeline) => {
                 let key = timeline.shard_timeline_id();
@@ -326,7 +347,10 @@ impl<T: Types> Cache<T> {
     }
 }
 
-impl<T: Types> PerTimelineState<T> {
+impl<T> PerTimelineState<T>
+where
+    T: ArcTimeline<T>,
+{
     /// After this method returns, [`Cache::get`] will never again return a [`Handle`]
     /// to this Timeline object, even if [`TenantManager::resolve`] would still resolve
     /// to this Timeline object.
@@ -361,22 +385,25 @@ impl<T: Types> PerTimelineState<T> {
     }
 }
 
-impl<T: Types> std::ops::Deref for Handle<T> {
-    type Target = T::Timeline;
+impl<T> std::ops::Deref for Handle<T> {
+    type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.0.timeline
     }
 }
 
 #[cfg(test)]
-impl<T: Types> Drop for HandleInner<T> {
+impl<T> Drop for HandleInner<T> {
     fn drop(&mut self) {
         trace!("HandleInner dropped");
     }
 }
 
 // When dropping a [`Cache`], prune its handles in the [`PerTimelineState`].
-impl<T: Types> Drop for Cache<T> {
+impl<T> Drop for Cache<T>
+where
+    T: ArcTimeline<T>,
+{
     fn drop(&mut self) {
         for (_, weak) in self.map.drain() {
             if let Some(strong) = weak.upgrade() {
@@ -409,14 +436,6 @@ mod tests {
 
     const FOREVER: std::time::Duration = std::time::Duration::from_secs(u64::MAX);
 
-    #[derive(Debug)]
-    struct TestTypes;
-    impl Types for TestTypes {
-        type TenantManagerError = anyhow::Error;
-        type TenantManager = StubManager;
-        type Timeline = Arc<StubTimeline>;
-    }
-
     struct StubManager {
         shards: Vec<Arc<StubTimeline>>,
     }
@@ -425,7 +444,7 @@ mod tests {
         gate: utils::sync::gate::Gate,
         id: TimelineId,
         shard: ShardIdentity,
-        per_timeline_state: PerTimelineState<TestTypes>,
+        per_timeline_state: PerTimelineState<Arc<StubTimeline>>,
         myself: Weak<StubTimeline>,
     }
 
@@ -435,7 +454,7 @@ mod tests {
         }
     }
 
-    impl ArcTimeline<TestTypes> for Arc<StubTimeline> {
+    impl ArcTimeline<Arc<StubTimeline>> for Arc<StubTimeline> {
         fn gate(&self) -> &utils::sync::gate::Gate {
             &self.gate
         }
@@ -451,12 +470,13 @@ mod tests {
             &self.shard
         }
 
-        fn per_timeline_state(&self) -> &PerTimelineState<TestTypes> {
+        fn per_timeline_state(&self) -> &PerTimelineState<Arc<StubTimeline>> {
             &self.per_timeline_state
         }
     }
 
-    impl TenantManager<TestTypes> for StubManager {
+    impl TenantManager<Arc<StubTimeline>> for StubManager {
+        type Error = anyhow::Error;
         async fn resolve(
             &self,
             timeline_id: TimelineId,
@@ -501,7 +521,7 @@ mod tests {
         };
         let key = DBDIR_KEY;
 
-        let mut cache = Cache::<TestTypes>::default();
+        let mut cache = Cache::default();
 
         //
         // fill the cache
@@ -661,7 +681,7 @@ mod tests {
         };
         let key = DBDIR_KEY;
 
-        let mut cache = Cache::<TestTypes>::default();
+        let mut cache = Cache::default();
 
         cache
             .get(timeline_a.id, ShardSelector::Page(key), &mgr)
@@ -744,7 +764,7 @@ mod tests {
         });
         let child_shards_by_shard_number = [child0.clone(), child1.clone()];
 
-        let mut cache = Cache::<TestTypes>::default();
+        let mut cache = Cache::default();
 
         // fill the cache with the parent
         for i in 0..2 {
@@ -861,7 +881,8 @@ mod tests {
         // Simulate 10 connections that's opened, used, and closed
         let mut used_handles = vec![];
         for _ in 0..10 {
-            let mut cache = Cache::<TestTypes>::default();
+            let mut cache = Cache::default();
+
             let handle = {
                 let handle = cache
                     .get(timeline_id, ShardSelector::Page(key), &mgr)

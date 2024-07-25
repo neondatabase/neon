@@ -294,7 +294,7 @@ struct TimelineHandles {
     /// to see is the number of shards divided by the number of pageservers (typically < 2),
     /// or the ratio used when splitting shards (i.e. how many children created from one)
     /// parent shard, where a "large" number might be ~8.
-    handles: timeline::handle::Cache<TenantManagerTypes>,
+    handles: timeline::handle::Cache<Arc<Timeline>>,
 }
 
 impl TimelineHandles {
@@ -312,7 +312,7 @@ impl TimelineHandles {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         shard_selector: ShardSelector,
-    ) -> Result<timeline::handle::Handle<TenantManagerTypes>, GetActiveTimelineError> {
+    ) -> Result<timeline::handle::Handle<Arc<Timeline>>, GetActiveTimelineError> {
         if *self.wrapper.tenant_id.get_or_init(|| tenant_id) != tenant_id {
             return Err(GetActiveTimelineError::Tenant(
                 GetActiveTenantError::SwitchedTenant,
@@ -343,16 +343,7 @@ pub(crate) struct TenantManagerWrapper {
     tenant_id: once_cell::sync::OnceCell<TenantId>,
 }
 
-#[derive(Debug)]
-pub(crate) struct TenantManagerTypes;
-
-impl timeline::handle::Types for TenantManagerTypes {
-    type TenantManagerError = GetActiveTimelineError;
-    type TenantManager = TenantManagerWrapper;
-    type Timeline = Arc<Timeline>;
-}
-
-impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
+impl timeline::handle::ArcTimeline<Arc<Timeline>> for Arc<Timeline> {
     fn gate(&self) -> &utils::sync::gate::Gate {
         &self.gate
     }
@@ -361,7 +352,7 @@ impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
         Timeline::shard_timeline_id(self)
     }
 
-    fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState<TenantManagerTypes> {
+    fn per_timeline_state(&self) -> &timeline::handle::PerTimelineState<Arc<Timeline>> {
         &self.handles
     }
 
@@ -370,7 +361,8 @@ impl timeline::handle::ArcTimeline<TenantManagerTypes> for Arc<Timeline> {
     }
 }
 
-impl timeline::handle::TenantManager<TenantManagerTypes> for TenantManagerWrapper {
+impl timeline::handle::TenantManager<Arc<Timeline>> for TenantManagerWrapper {
+    type Error = GetActiveTimelineError;
     async fn resolve(
         &self,
         timeline_id: TimelineId,
