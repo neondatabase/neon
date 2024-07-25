@@ -30,12 +30,12 @@ def query_clickhouse(
     hash_res = m.hexdigest()
     log.debug("Hash: %s", hash_res)
     if hash_res == digest:
-        return res
+        return
     raise ValueError("Hash mismatch")
 
 
-@pytest.fixture(scope="function")
-def clickhouse_instance(test_output_dir):
+@pytest.fixture(name="clickhouse_instance", scope="function")
+def fixture_clickhouse_instance(test_output_dir):
     """
     Startup and teardown a docker container with Clickhouse
     """
@@ -65,6 +65,7 @@ def clickhouse_instance(test_output_dir):
 
 @pytest.mark.remote_cluster
 def test_clickhouse(clickhouse_instance, remote_pg: RemotePostgres):
+    # pylint: disable=W0612,W0613
     """
     Test the logical replication having ClickHouse as a client
     """
