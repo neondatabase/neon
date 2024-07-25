@@ -2585,7 +2585,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         return response.json()
 
-    def metadata_health_list_outdated(self, duration: str) -> List[TenantShardId]:
+    def metadata_health_list_outdated(self, duration: str):
         body: Dict[str, Any] = {"not_scrubbed_for": duration}
 
         response = self.request(
