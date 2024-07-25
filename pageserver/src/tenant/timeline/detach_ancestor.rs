@@ -1237,12 +1237,16 @@ pub(super) async fn detach_and_reparent(
     }
 
     let reparenting_candidates = tasks.len();
-    let mut reparented = Vec::with_capacity(tasks.len());
+    let mut reparented = HashSet::with_capacity(tasks.len());
 
     while let Some(res) = tasks.join_next().await {
         match res {
             Ok(Some(timeline)) => {
-                reparented.push((timeline.ancestor_lsn, timeline.timeline_id));
+                assert!(
+                    reparented.insert(timeline.timeline_id),
+                    "duplicate reparenting? timeline_id={}",
+                    timeline.timeline_id
+                );
             }
             Ok(None) => {
                 // lets just ignore this for now. one or all reparented timelines could had
@@ -1267,14 +1271,6 @@ pub(super) async fn detach_and_reparent(
             candidates = reparenting_candidates,
             "failed to reparent all candidates; they can be retried after the restart",
         );
-
-        reparented.sort_unstable();
-
-        let reparented = reparented
-            .into_iter()
-            .map(|(_, timeline_id)| timeline_id)
-            .collect();
-
         Ok(DetachingAndReparenting::Reparented(reparented))
     } else {
         let must_restart = !reparented.is_empty() || was_detached;
