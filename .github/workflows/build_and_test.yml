@@ -56,6 +56,7 @@ jobs:
     steps:
       - name: Install az cli
         run: |
+          apt update
           apt install -y python3-pip
           pip install azure
 
