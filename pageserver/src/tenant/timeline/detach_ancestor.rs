@@ -153,11 +153,6 @@ impl SharedState {
         fut: F,
     ) -> T {
         // this needs to wrap the sleeping so that we can quickly let ancestor_detach continue
-        //
-        // FIXME: with the on_gc_task_start this might be unnecessary? no, how would we otherwise
-        // know about gc attempt ending in a failure and sleeping 300s. perhaps the
-        // on_gc_task_start is unnecessary? no, it is needed to know if we ever need to wait for
-        // to start?
         fut.await
     }
 
