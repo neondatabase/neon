@@ -116,7 +116,7 @@ jobs:
         with:
           channel-id: "C06KHQVQ7U3" # on-call-qa-staging-stream
           slack-message: |
-            Testing Postgres clients: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ job.status }}> (<${{ steps.create-allure-report.outputs.report-url }}|test report>)
+            Testing the logical replication: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ job.status }}> (<${{ steps.create-allure-report.outputs.report-url }}|test report>)
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
