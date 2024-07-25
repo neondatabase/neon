@@ -5,7 +5,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use self::split_state::SplitState;
-use anyhow::bail;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
@@ -897,6 +896,24 @@ pub(crate) struct MetadataHealthPersistence {
 }
 
 impl MetadataHealthPersistence {
+    pub fn new(
+        tenant_shard_id: TenantShardId,
+        healthy: bool,
+        last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_number = tenant_shard_id.shard_number.0 as i32;
+        let shard_count = tenant_shard_id.shard_count.literal() as i32;
+
+        MetadataHealthPersistence {
+            tenant_id,
+            shard_number,
+            shard_count,
+            healthy,
+            last_scrubbed_at,
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn get_tenant_shard_id(&self) -> Result<TenantShardId, hex::FromHexError> {
         Ok(TenantShardId {
@@ -904,28 +921,6 @@ impl MetadataHealthPersistence {
             shard_number: ShardNumber(self.shard_number as u8),
             shard_count: ShardCount::new(self.shard_count as u8),
         })
-    }
-}
-
-impl TryFrom<MetadataHealthRecord> for MetadataHealthPersistence {
-    type Error = anyhow::Error;
-
-    fn try_from(value: MetadataHealthRecord) -> Result<Self, Self::Error> {
-        match (value.healthy, value.last_scrubbed_at) {
-            (Some(healthy), Some(last_scrubbed_at)) => {
-                let tenant_id = value.tenant_shard_id.tenant_id.to_string();
-                let shard_number = value.tenant_shard_id.shard_number.0 as i32;
-                let shard_count = value.tenant_shard_id.shard_count.literal() as i32;
-                Ok(MetadataHealthPersistence {
-                    tenant_id,
-                    shard_number,
-                    shard_count,
-                    healthy,
-                    last_scrubbed_at,
-                })
-            }
-            _ => bail!("healthy and last_scrubbed_at must not be None."),
-        }
     }
 }
 

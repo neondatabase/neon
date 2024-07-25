@@ -570,10 +570,7 @@ async fn handle_metadata_health_update(mut req: Request<Body>) -> Result<Respons
     let update_req = json_request::<MetadataHealthUpdateRequest>(&mut req).await?;
     let state = get_state(&req);
 
-    state
-        .service
-        .metadata_health_update(update_req.health_records)
-        .await?;
+    state.service.metadata_health_update(update_req).await?;
 
     json_response(StatusCode::OK, MetadataHealthUpdateResponse {})
 }

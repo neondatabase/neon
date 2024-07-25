@@ -15,7 +15,7 @@ use crate::{
     },
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
-    persistence::{AbortShardSplitStatus, TenantFilter},
+    persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
@@ -32,11 +32,11 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
-        MetadataHealthRecord, NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy,
-        PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
-        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
-        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-        TenantShardMigrateResponse, UtilizationScore,
+        MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
+        NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest,
+        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
+        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
+        TenantShardMigrateRequest, TenantShardMigrateResponse, UtilizationScore,
     },
     models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
@@ -5974,17 +5974,24 @@ impl Service {
     /// Updates scrubber metadata health check results.
     pub(crate) async fn metadata_health_update(
         &self,
-        health_records: Vec<MetadataHealthRecord>,
+        update_req: MetadataHealthUpdateRequest,
     ) -> Result<(), ApiError> {
+        let now = chrono::offset::Utc::now();
         let persistence_records = {
             let locked = self.inner.read().unwrap();
-            health_records
+            let healthy_it = update_req
+                .healthy_tenant_shards
                 .into_iter()
                 // Retain only health records associated with tenant shards managed by storage controller.
-                .filter(|r| locked.tenants.contains_key(&r.tenant_shard_id))
-                .map(|r| r.try_into())
-                .try_collect()
-                .map_err(ApiError::InternalServerError)?
+                .filter(|tenant_shard_id| locked.tenants.contains_key(tenant_shard_id))
+                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, true, now));
+            let unhealthy_it = update_req
+                .unhealthy_tenant_shards
+                .into_iter()
+                .filter(|tenant_shard_id| locked.tenants.contains_key(tenant_shard_id))
+                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, false, now));
+
+            healthy_it.chain(unhealthy_it).collect()
         };
 
         self.persistence

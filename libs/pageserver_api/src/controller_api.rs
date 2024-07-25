@@ -284,7 +284,7 @@ pub enum PlacementPolicy {
 pub struct TenantShardMigrateResponse {}
 
 /// Metadata health record posted from scrubber.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHealthRecord {
     pub tenant_shard_id: TenantShardId,
     pub healthy: Option<bool>,
@@ -299,7 +299,8 @@ impl MetadataHealthRecord {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHealthUpdateRequest {
-    pub health_records: Vec<MetadataHealthRecord>,
+    pub healthy_tenant_shards: Vec<TenantShardId>,
+    pub unhealthy_tenant_shards: Vec<TenantShardId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
