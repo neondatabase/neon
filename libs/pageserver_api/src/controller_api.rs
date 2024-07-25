@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{collections::HashSet, str::FromStr};
+
 
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
@@ -151,11 +152,16 @@ impl UtilizationScore {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Clone, Copy, Debug)]
 #[serde(into = "NodeAvailabilityWrapper")]
 pub enum NodeAvailability {
     // Normal, happy state
     Active(UtilizationScore),
+    // Node is warming up, but we expect it to become available soon. Covers
+    // the time span between the re-attach response being composed on the storage controller
+    // and the first successful heartbeat after the processing of the re-attach response
+    // finishes on the pageserver.
+    WarmingUp(Instant),
     // Offline: Tenants shouldn't try to attach here, but they may assume that their
     // secondary locations on this node still exist.  Newly added nodes are in this
     // state until we successfully contact them.
@@ -165,7 +171,10 @@ pub enum NodeAvailability {
 impl PartialEq for NodeAvailability {
     fn eq(&self, other: &Self) -> bool {
         use NodeAvailability::*;
-        matches!((self, other), (Active(_), Active(_)) | (Offline, Offline))
+        matches!(
+            (self, other),
+            (Active(_), Active(_)) | (Offline, Offline) | (WarmingUp(_), WarmingUp(_))
+        )
     }
 }
 
@@ -177,6 +186,7 @@ impl Eq for NodeAvailability {}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum NodeAvailabilityWrapper {
     Active,
+    WarmingUp,
     Offline,
 }
 
@@ -186,6 +196,7 @@ impl From<NodeAvailabilityWrapper> for NodeAvailability {
             // Assume the worst utilisation score to begin with. It will later be updated by
             // the heartbeats.
             NodeAvailabilityWrapper::Active => NodeAvailability::Active(UtilizationScore::worst()),
+            NodeAvailabilityWrapper::WarmingUp => NodeAvailability::WarmingUp(Instant::now()),
             NodeAvailabilityWrapper::Offline => NodeAvailability::Offline,
         }
     }
@@ -195,6 +206,7 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
     fn from(val: NodeAvailability) -> Self {
         match val {
             NodeAvailability::Active(_) => NodeAvailabilityWrapper::Active,
+            NodeAvailability::WarmingUp(_) => NodeAvailabilityWrapper::WarmingUp,
             NodeAvailability::Offline => NodeAvailabilityWrapper::Offline,
         }
     }

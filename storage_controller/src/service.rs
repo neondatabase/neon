@@ -100,9 +100,13 @@ pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a node may be unresponsive to heartbeats before we declare it offline.
 /// This must be long enough to cover node restarts as well as normal operations: in future
-/// it should be separated into distinct timeouts for startup vs. normal operation
-/// (`<https://github.com/neondatabase/neon/issues/7552>`)
-pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
+pub const MAX_OFFLINE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
+
+/// How long a node may be unresponsive to heartbeats during start up before we declare it
+/// offline. This is much more lenient than [`MAX_OFFLINE_INTERVAL_DEFAULT`] since the pageserver's
+/// handling of the re-attach response may take a long time and blocks heartbeats from
+/// being handled on the pageserver side.
+pub const MAX_WARMING_UP_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
 
 #[derive(Clone, strum_macros::Display)]
 enum TenantOperations {
@@ -236,7 +240,12 @@ pub struct Config {
     /// Grace period within which a pageserver does not respond to heartbeats, but is still
     /// considered active. Once the grace period elapses, the next heartbeat failure will
     /// mark the pagseserver offline.
-    pub max_unavailable_interval: Duration,
+    pub max_offline_interval: Duration,
+
+    /// Extended grace period within which pageserver may not respond to heartbeats.
+    /// This extended grace period kicks in after the node has been drained for restart
+    /// and/or upon handling the re-attach request from a node.
+    pub max_warming_up_interval: Duration,
 
     /// How many Reconcilers may be spawned concurrently
     pub reconciler_concurrency: usize,
@@ -269,7 +278,7 @@ pub struct Service {
     config: Config,
     persistence: Arc<Persistence>,
     compute_hook: Arc<ComputeHook>,
-    result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
+    result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
     heartbeater: Heartbeater,
 
@@ -299,8 +308,14 @@ pub struct Service {
     // Process shutdown will fire this token
     cancel: CancellationToken,
 
+    // Child token of [`Service::cancel`] used by reconcilers
+    reconcilers_cancel: CancellationToken,
+
     // Background tasks will hold this gate
     gate: Gate,
+
+    // Reconcilers background tasks will hold this gate
+    reconcilers_gate: Gate,
 
     /// This waits for initial reconciliation with pageservers to complete.  Until this barrier
     /// passes, it isn't safe to do any actions that mutate tenants.
@@ -386,6 +401,11 @@ struct ShardUpdate {
 
     /// If this is None, generation is not updated.
     generation: Option<Generation>,
+}
+
+pub(crate) enum ReconcileResultRequest {
+    ReconcileResult(ReconcileResult),
+    Stop,
 }
 
 impl Service {
@@ -587,6 +607,9 @@ impl Service {
                         online_nodes.insert(node_id, utilization);
                     }
                     PageserverState::Offline => {}
+                    PageserverState::WarmingUp { .. } => {
+                        unreachable!("Nodes are never marked warming-up during startup reconcile")
+                    }
                 }
             }
         }
@@ -741,7 +764,7 @@ impl Service {
         const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
 
         let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
-        while !self.cancel.is_cancelled() {
+        while !self.reconcilers_cancel.is_cancelled() {
             tokio::select! {
               _ = interval.tick() => {
                 let reconciles_spawned = self.reconcile_all();
@@ -754,7 +777,7 @@ impl Service {
                     }
                 }
             }
-              _ = self.cancel.cancelled() => return
+              _ = self.reconcilers_cancel.cancelled() => return
             }
         }
     }
@@ -779,63 +802,54 @@ impl Service {
             let res = self.heartbeater.heartbeat(nodes).await;
             if let Ok(deltas) = res {
                 for (node_id, state) in deltas.0 {
-                    let (new_node, new_availability) = match state {
-                        PageserverState::Available {
-                            utilization, new, ..
-                        } => (
-                            new,
-                            NodeAvailability::Active(UtilizationScore(
-                                utilization.utilization_score,
-                            )),
+                    let new_availability = match state {
+                        PageserverState::Available { utilization, .. } => NodeAvailability::Active(
+                            UtilizationScore(utilization.utilization_score),
                         ),
-                        PageserverState::Offline => (false, NodeAvailability::Offline),
+                        PageserverState::WarmingUp { started_at } => {
+                            NodeAvailability::WarmingUp(started_at)
+                        }
+                        PageserverState::Offline => {
+                            // The node might have been placed in the WarmingUp state
+                            // while the heartbeat round was on-going. Hence, filter out
+                            // offline transitions for WarmingUp nodes that are still within
+                            // their grace period.
+                            if let Ok(NodeAvailability::WarmingUp(started_at)) =
+                                self.get_node(node_id).await.map(|n| n.get_availability())
+                            {
+                                let now = Instant::now();
+                                if now - started_at >= self.config.max_warming_up_interval {
+                                    NodeAvailability::Offline
+                                } else {
+                                    NodeAvailability::WarmingUp(started_at)
+                                }
+                            } else {
+                                NodeAvailability::Offline
+                            }
+                        }
                     };
 
-                    if new_node {
-                        // When the heartbeats detect a newly added node, we don't wish
-                        // to attempt to reconcile the shards assigned to it. The node
-                        // is likely handling it's re-attach response, so reconciling now
-                        // would be counterproductive.
-                        //
-                        // Instead, update the in-memory state with the details learned about the
-                        // node.
-                        let mut locked = self.inner.write().unwrap();
-                        let (nodes, _tenants, scheduler) = locked.parts_mut();
+                    // This is the code path for geniune availability transitions (i.e node
+                    // goes unavailable and/or comes back online).
+                    let res = self
+                        .node_configure(node_id, Some(new_availability), None)
+                        .await;
 
-                        let mut new_nodes = (**nodes).clone();
-
-                        if let Some(node) = new_nodes.get_mut(&node_id) {
-                            node.set_availability(new_availability);
-                            scheduler.node_upsert(node);
+                    match res {
+                        Ok(()) => {}
+                        Err(ApiError::NotFound(_)) => {
+                            // This should be rare, but legitimate since the heartbeats are done
+                            // on a snapshot of the nodes.
+                            tracing::info!("Node {} was not found after heartbeat round", node_id);
                         }
-
-                        locked.nodes = Arc::new(new_nodes);
-                    } else {
-                        // This is the code path for geniune availability transitions (i.e node
-                        // goes unavailable and/or comes back online).
-                        let res = self
-                            .node_configure(node_id, Some(new_availability), None)
-                            .await;
-
-                        match res {
-                            Ok(()) => {}
-                            Err(ApiError::NotFound(_)) => {
-                                // This should be rare, but legitimate since the heartbeats are done
-                                // on a snapshot of the nodes.
-                                tracing::info!(
-                                    "Node {} was not found after heartbeat round",
-                                    node_id
-                                );
-                            }
-                            Err(err) => {
-                                // Transition to active involves reconciling: if a node responds to a heartbeat then
-                                // becomes unavailable again, we may get an error here.
-                                tracing::error!(
-                                    "Failed to update node {} after heartbeat round: {}",
-                                    node_id,
-                                    err
-                                );
-                            }
+                        Err(err) => {
+                            // Transition to active involves reconciling: if a node responds to a heartbeat then
+                            // becomes unavailable again, we may get an error here.
+                            tracing::error!(
+                                "Failed to update node {} after heartbeat round: {}",
+                                node_id,
+                                err
+                            );
                         }
                     }
                 }
@@ -934,7 +948,7 @@ impl Service {
 
     async fn process_results(
         &self,
-        mut result_rx: tokio::sync::mpsc::UnboundedReceiver<ReconcileResult>,
+        mut result_rx: tokio::sync::mpsc::UnboundedReceiver<ReconcileResultRequest>,
         mut bg_compute_hook_result_rx: tokio::sync::mpsc::Receiver<
             Result<(), (TenantShardId, NotifyError)>,
         >,
@@ -944,8 +958,8 @@ impl Service {
             tokio::select! {
                 r = result_rx.recv() => {
                     match r {
-                        Some(result) => {self.process_result(result);},
-                        None => {break;}
+                        Some(ReconcileResultRequest::ReconcileResult(result)) => {self.process_result(result);},
+                        None | Some(ReconcileResultRequest::Stop) => {break;}
                     }
                 }
                 _ = async{
@@ -971,9 +985,6 @@ impl Service {
                 }
             };
         }
-
-        // We should only fall through on shutdown
-        assert!(self.cancel.is_cancelled());
     }
 
     async fn process_aborts(
@@ -1150,9 +1161,12 @@ impl Service {
             tokio::sync::mpsc::channel(MAX_DELAYED_RECONCILES);
 
         let cancel = CancellationToken::new();
+        let reconcilers_cancel = cancel.child_token();
+
         let heartbeater = Heartbeater::new(
             config.jwt_token.clone(),
-            config.max_unavailable_interval,
+            config.max_offline_interval,
+            config.max_warming_up_interval,
             cancel.clone(),
         );
         let this = Arc::new(Self {
@@ -1174,7 +1188,9 @@ impl Service {
             abort_tx,
             startup_complete: startup_complete.clone(),
             cancel,
+            reconcilers_cancel,
             gate: Gate::default(),
+            reconcilers_gate: Gate::default(),
             tenant_op_locks: Default::default(),
             node_op_locks: Default::default(),
         });
@@ -1664,21 +1680,23 @@ impl Service {
                     | NodeSchedulingPolicy::Filling
             );
 
-            if !node.is_available() || reset_scheduling {
-                let mut new_nodes = (**nodes).clone();
-                if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
-                    if !node.is_available() {
-                        node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
-                    }
-
-                    if reset_scheduling {
-                        node.set_scheduling(NodeSchedulingPolicy::Active);
-                    }
-
-                    scheduler.node_upsert(node);
-                    let new_nodes = Arc::new(new_nodes);
-                    *nodes = new_nodes;
+            let mut new_nodes = (**nodes).clone();
+            if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
+                if reset_scheduling {
+                    node.set_scheduling(NodeSchedulingPolicy::Active);
                 }
+
+                tracing::info!("Marking {} warming-up on reattach", reattach_req.node_id);
+                node.set_availability(NodeAvailability::WarmingUp(std::time::Instant::now()));
+
+                scheduler.node_upsert(node);
+                let new_nodes = Arc::new(new_nodes);
+                *nodes = new_nodes;
+            } else {
+                tracing::error!(
+                    "Reattaching node {} was removed while processing the request",
+                    reattach_req.node_id
+                );
             }
         }
 
@@ -4719,6 +4737,15 @@ impl Service {
 
                 // TODO: in the background, we should balance work back onto this pageserver
             }
+            // No action required for the intermediate unavailable state.
+            // When we transition into active or offline from the unavailable state,
+            // the correct handling above will kick in.
+            AvailabilityTransition::ToWarmingUpFromActive => {
+                tracing::info!("Node {} transition to unavailable from active", node_id);
+            }
+            AvailabilityTransition::ToWarmingUpFromOffline => {
+                tracing::info!("Node {} transition to unavailable from offline", node_id);
+            }
             AvailabilityTransition::Unchanged => {
                 tracing::debug!("Node {} no availability change during config", node_id);
             }
@@ -5117,7 +5144,7 @@ impl Service {
             }
         };
 
-        let Ok(gate_guard) = self.gate.enter() else {
+        let Ok(gate_guard) = self.reconcilers_gate.enter() else {
             // Gate closed: we're shutting down, drop out.
             return None;
         };
@@ -5130,7 +5157,7 @@ impl Service {
             &self.persistence,
             units,
             gate_guard,
-            &self.cancel,
+            &self.reconcilers_cancel,
         )
     }
 
@@ -5577,17 +5604,21 @@ impl Service {
     }
 
     pub async fn shutdown(&self) {
-        // Note that this already stops processing any results from reconciles: so
-        // we do not expect that our [`TenantShard`] objects will reach a neat
-        // final state.
+        // Cancel all on-going reconciles and wait for them to exit the gate.
+        tracing::info!("Shutting down: cancelling and waiting for in-flight reconciles");
+        self.reconcilers_cancel.cancel();
+        self.reconcilers_gate.close().await;
+
+        // Signal the background loop in [`Service::process_results`] to exit once
+        // it has proccessed the results from all the reconciles we cancelled earlier.
+        tracing::info!("Shutting down: processing results from previously in-flight reconciles");
+        self.result_tx.send(ReconcileResultRequest::Stop).ok();
+        self.result_tx.closed().await;
+
+        // Background tasks hold gate guards: this notifies them of the cancellation and
+        // waits for them all to complete.
+        tracing::info!("Shutting down: cancelling and waiting for background tasks to exit");
         self.cancel.cancel();
-
-        // The cancellation tokens in [`crate::reconciler::Reconciler`] are children
-        // of our cancellation token, so we do not need to explicitly cancel each of
-        // them.
-
-        // Background tasks and reconcilers hold gate guards: this waits for them all
-        // to complete.
         self.gate.close().await;
     }
 

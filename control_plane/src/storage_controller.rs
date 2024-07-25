@@ -5,8 +5,9 @@ use crate::{
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::{
     controller_api::{
-        NodeConfigureRequest, NodeRegisterRequest, TenantCreateRequest, TenantCreateResponse,
-        TenantLocateResponse, TenantShardMigrateRequest, TenantShardMigrateResponse,
+        NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
+        TenantCreateResponse, TenantLocateResponse, TenantShardMigrateRequest,
+        TenantShardMigrateResponse,
     },
     models::{
         TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
@@ -353,8 +354,10 @@ impl StorageController {
             "--dev",
             "--database-url",
             &database_url,
-            "--max-unavailable-interval",
-            &humantime::Duration::from(self.config.max_unavailable).to_string(),
+            "--max-offline-interval",
+            &humantime::Duration::from(self.config.max_offline).to_string(),
+            "--max-warming-up-interval",
+            &humantime::Duration::from(self.config.max_warming_up).to_string(),
         ]
         .into_iter()
         .map(|s| s.to_string())
@@ -621,6 +624,15 @@ impl StorageController {
             Method::PUT,
             format!("control/v1/node/{}/config", req.node_id),
             Some(req),
+        )
+        .await
+    }
+
+    pub async fn node_list(&self) -> anyhow::Result<Vec<NodeDescribeResponse>> {
+        self.dispatch::<(), Vec<NodeDescribeResponse>>(
+            Method::GET,
+            "control/v1/node".to_string(),
+            None,
         )
         .await
     }
