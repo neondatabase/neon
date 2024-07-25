@@ -59,6 +59,12 @@ jobs:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init --user root
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.6.3.64
+        ports:
+          - 9000:9000
+          - 8123:8123
 
     steps:
       - uses: actions/checkout@v4
