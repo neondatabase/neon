@@ -2868,7 +2868,6 @@ impl Service {
         }
 
         // no shard needs to go first/last; the operation should be idempotent
-        // TODO: it would be great to ensure that all shards return the same error
         let mut results = self
             .tenant_for_shards(targets, |tenant_shard_id, node| {
                 futures::FutureExt::boxed(detach_one(
@@ -2887,6 +2886,7 @@ impl Service {
             .filter(|(_, res)| res != &any.1)
             .collect::<Vec<_>>();
         if !mismatching.is_empty() {
+            // this can be hit by races which should not happen because operation lock on cplane
             let matching = results.len() - mismatching.len();
             tracing::error!(
                 matching,

@@ -1832,7 +1832,6 @@ async fn timeline_detach_ancestor_handler(
             detach_ancestor::Progress::Done(resp) => resp,
         };
 
-        // FIXME: if the ordering is really needed and not a hashset, move it here?
         json_response(StatusCode::OK, resp)
     }
     .instrument(span)

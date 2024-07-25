@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use super::{layer_manager::LayerManager, FlushLayerError, Timeline};
 use crate::{
@@ -647,16 +647,7 @@ pub(super) async fn prepare(
             ));
         }
 
-        // `detached` has previously been detached; let's inspect each of the current timelines and
-        // report back the timelines which have been reparented by our detach, or which are still
-        // reparentable
-
         let reparented_timelines = reparented_direct_children(detached, tenant)?;
-
-        // IDEA? add the non-reparented in to the response -- these would be the reparentable, but
-        // no longer reparentable because they appeared *after* gc blocking was released.
-        //
-        // will not be needed once we have the locking in.
         return Ok(Progress::Done(AncestorDetached {
             reparented_timelines,
         }));
@@ -862,7 +853,7 @@ pub(super) async fn prepare(
 fn reparented_direct_children(
     detached: &Arc<Timeline>,
     tenant: &Tenant,
-) -> Result<Vec<TimelineId>, Error> {
+) -> Result<HashSet<TimelineId>, Error> {
     let mut all_direct_children = tenant
         .timelines
         .lock()
@@ -872,7 +863,7 @@ fn reparented_direct_children(
             let is_direct_child = matches!(tl.ancestor_timeline.as_ref(), Some(ancestor) if Arc::ptr_eq(ancestor, detached));
 
             if is_direct_child {
-                Some((tl.ancestor_lsn, tl.clone()))
+                Some(tl.clone())
             } else {
                 if let Some(timeline) = tl.ancestor_timeline.as_ref() {
                     assert_ne!(timeline.timeline_id, detached.timeline_id);
@@ -886,34 +877,27 @@ fn reparented_direct_children(
 
     let mut any_shutdown = false;
 
-    all_direct_children.retain(
-        |(_, tl)| match tl.remote_client.initialized_upload_queue() {
-            Ok(accessor) => accessor
-                .latest_uploaded_index_part()
-                .lineage
-                .is_reparented(),
-            Err(_shutdownalike) => {
-                // not 100% a shutdown, but let's bail early not to give inconsistent results in
-                // sharded enviroment.
-                any_shutdown = true;
-                true
-            }
-        },
-    );
+    all_direct_children.retain(|tl| match tl.remote_client.initialized_upload_queue() {
+        Ok(accessor) => accessor
+            .latest_uploaded_index_part()
+            .lineage
+            .is_reparented(),
+        Err(_shutdownalike) => {
+            // not 100% a shutdown, but let's bail early not to give inconsistent results in
+            // sharded enviroment.
+            any_shutdown = true;
+            true
+        }
+    });
 
     if any_shutdown {
         // it could be one or many being deleted; have client retry
         return Err(Error::ShuttingDown);
     }
 
-    let mut reparented = all_direct_children;
-    // why this instead of hashset? there is a reason, but I've forgotten it many times.
-    //
-    // maybe if this was a hashset we would not be able to distinguish some race condition.
-    reparented.sort_unstable_by_key(|(lsn, tl)| (*lsn, tl.timeline_id));
-    Ok(reparented
+    Ok(all_direct_children
         .into_iter()
-        .map(|(_, tl)| tl.timeline_id)
+        .map(|tl| tl.timeline_id)
         .collect())
 }
 
@@ -1070,7 +1054,7 @@ async fn remote_copy(
 pub(crate) enum DetachingAndReparenting {
     /// All of the following timeline ids were reparented and the timeline ancestor detach must be
     /// marked as completed.
-    Reparented(Vec<TimelineId>),
+    Reparented(HashSet<TimelineId>),
 
     /// Some of the reparentings failed. The timeline ancestor detach must **not** be marked as
     /// completed.
@@ -1080,7 +1064,7 @@ pub(crate) enum DetachingAndReparenting {
 
     /// Detaching and reparentings were completed in a previous attempt. Timeline ancestor detach
     /// must be marked as completed.
-    AlreadyDone(Vec<TimelineId>),
+    AlreadyDone(HashSet<TimelineId>),
 }
 
 impl DetachingAndReparenting {
@@ -1093,7 +1077,7 @@ impl DetachingAndReparenting {
         }
     }
 
-    pub(crate) fn completed(self) -> Option<Vec<TimelineId>> {
+    pub(crate) fn completed(self) -> Option<HashSet<TimelineId>> {
         use DetachingAndReparenting::*;
         match self {
             Reparented(x) | AlreadyDone(x) => Some(x),
