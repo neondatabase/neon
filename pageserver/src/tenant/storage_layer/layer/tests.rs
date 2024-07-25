@@ -1,3 +1,5 @@
+use std::time::UNIX_EPOCH;
+
 use pageserver_api::key::CONTROLFILE_KEY;
 use tokio::task::JoinSet;
 use utils::{
@@ -7,7 +9,7 @@ use utils::{
 
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
-use crate::context::DownloadBehavior;
+use crate::{context::DownloadBehavior, tenant::storage_layer::LayerVisibilityHint};
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
 
 /// Used in tests to advance a future to wanted await point, and not futher.
@@ -826,9 +828,9 @@ async fn eviction_cancellation_on_drop() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn layer_size() {
-    assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2048);
+    assert_eq!(std::mem::size_of::<LayerAccessStats>(), 8);
     assert_eq!(std::mem::size_of::<PersistentLayerDesc>(), 104);
-    assert_eq!(std::mem::size_of::<LayerInner>(), 2352);
+    assert_eq!(std::mem::size_of::<LayerInner>(), 312);
     // it also has the utf8 path
 }
 
@@ -967,4 +969,47 @@ fn spawn_blocking_pool_helper_actually_works() {
 
         println!("joined");
     });
+}
+
+/// Drop the low bits from a time, to emulate the precision loss in LayerAccessStats
+fn lowres_time(hires: SystemTime) -> SystemTime {
+    let ts = hires.duration_since(UNIX_EPOCH).unwrap().as_secs();
+    UNIX_EPOCH + Duration::from_secs(ts)
+}
+
+#[test]
+fn access_stats() {
+    let access_stats = LayerAccessStats::default();
+    // Default is visible
+    assert_eq!(access_stats.visibility(), LayerVisibilityHint::Visible);
+
+    access_stats.set_visibility(LayerVisibilityHint::Covered);
+    assert_eq!(access_stats.visibility(), LayerVisibilityHint::Covered);
+    access_stats.set_visibility(LayerVisibilityHint::Visible);
+    assert_eq!(access_stats.visibility(), LayerVisibilityHint::Visible);
+
+    let rtime = UNIX_EPOCH + Duration::from_secs(2000000000);
+    access_stats.record_residence_event_at(rtime);
+    assert_eq!(access_stats.latest_activity(), lowres_time(rtime));
+
+    let atime = UNIX_EPOCH + Duration::from_secs(2100000000);
+    access_stats.record_access_at(atime);
+    assert_eq!(access_stats.latest_activity(), lowres_time(atime));
+
+    // Setting visibility doesn't clobber access time
+    access_stats.set_visibility(LayerVisibilityHint::Covered);
+    assert_eq!(access_stats.latest_activity(), lowres_time(atime));
+    access_stats.set_visibility(LayerVisibilityHint::Visible);
+    assert_eq!(access_stats.latest_activity(), lowres_time(atime));
+}
+
+#[test]
+fn access_stats_2038() {
+    // The access stats structure uses a timestamp representation that will run out
+    // of bits in 2038.  One year before that, this unit test will start failing.
+
+    let one_year_from_now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
+        + Duration::from_secs(3600 * 24 * 365);
+
+    assert!(one_year_from_now.as_secs() < (2 << 31));
 }

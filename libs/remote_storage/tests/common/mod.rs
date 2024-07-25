@@ -152,7 +152,7 @@ pub(crate) async fn upload_remote_data(
     let mut upload_tasks = JoinSet::new();
     let cancel = CancellationToken::new();
 
-    for i in 1..upload_tasks_count + 1 {
+    for i in 1..=upload_tasks_count {
         let task_client = Arc::clone(client);
         let cancel = cancel.clone();
 
