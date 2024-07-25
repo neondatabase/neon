@@ -83,7 +83,6 @@ jobs:
           api_key: ${{ secrets.NEON_STAGING_API_KEY }}
           postgres_version: ${{ env.DEFAULT_PG_VERSION }}
 
-
       - name: Run tests
         uses: ./.github/actions/run-python-test-set
         with:
