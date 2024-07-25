@@ -1930,14 +1930,11 @@ impl TenantManager {
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, anyhow::Error> {
-        let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        let slot_guard =
+            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
 
         let tenant = {
-            let Some(old_slot) = slot_guard.get_old_value() else {
-                anyhow::bail!(
-                    "Tenant not found when trying to complete detaching timeline ancestor"
-                );
-            };
+            let old_slot = slot_guard.get_old_value().expect("requested MustExist");
 
             let Some(tenant) = old_slot.get_attached() else {
                 anyhow::bail!("Tenant is not in attached state");
