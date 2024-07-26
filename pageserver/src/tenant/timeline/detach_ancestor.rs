@@ -380,20 +380,26 @@ pub(super) async fn prepare(
             let timeline = detached.clone();
             let ctx = ctx.detached_child(TaskKind::DetachAncestor, DownloadBehavior::Download);
 
-            tasks.spawn(async move {
-                let _permit = limiter.acquire().await;
-                let copied =
-                    upload_rewritten_layer(end_lsn, &layer, &timeline, &timeline.cancel, &ctx)
-                        .await?;
-                Ok(copied)
-            });
+            let span = tracing::info_span!("upload_rewritten_layer", %layer);
+            tasks.spawn(
+                async move {
+                    let _permit = limiter.acquire().await;
+                    let copied =
+                        upload_rewritten_layer(end_lsn, &layer, &timeline, &timeline.cancel, &ctx)
+                            .await?;
+                    if let Some(copied) = copied.as_ref() {
+                        tracing::info!(%copied, "rewrote and uploaded");
+                    }
+                    Ok(copied)
+                }
+                .instrument(span),
+            );
         }
 
         while let Some(res) = tasks.join_next().await {
             match res {
                 Ok(Ok(Some(copied))) => {
                     wrote_any = true;
-                    tracing::info!(layer=%copied, "rewrote and uploaded");
                     new_layers.push(copied);
                 }
                 Ok(Ok(None)) => {}
