@@ -52,9 +52,6 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Error processing HTTP request: Forbidden",
     # intentional failpoints
     ".*failpoint ",
-    # FIXME: These need investigation
-    ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
-    ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
     # Tenant::delete_timeline() can cause any of the four following errors.
     # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
     ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
