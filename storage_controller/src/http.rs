@@ -747,27 +747,33 @@ pub fn prologue_ledearship_status_check_middleware<
     Middleware::pre(move |req| async move {
         let state = get_state(&req);
         let leadership_status = state.service.get_leadership_status();
-        let allowed_routes = match leadership_status {
-            LeadershipStatus::Leader => Vec::default(),
-            LeadershipStatus::SteppedDown => {
-                // TODO: does it make sense to allow /status here?
-                ["/control/v1/step_down", "/status", "/metrics"].to_vec()
-            }
-            LeadershipStatus::Candidate => ["/ready", "/status", "/metrics"].to_vec(),
-        };
 
-        if allowed_routes.is_empty() {
-            return Ok(req);
+        enum AllowedRoutes<'a> {
+            All,
+            Some(Vec<&'a str>),
         }
 
-        let allowed = allowed_routes.contains(&req.uri().to_string().as_str());
-        match allowed {
-            true => Ok(req),
-            false => {
+        let allowed_routes = match leadership_status {
+            LeadershipStatus::Leader => AllowedRoutes::All,
+            LeadershipStatus::SteppedDown => {
+                // TODO: does it make sense to allow /status here?
+                AllowedRoutes::Some(["/control/v1/step_down", "/status", "/metrics"].to_vec())
+            }
+            LeadershipStatus::Candidate => {
+                AllowedRoutes::Some(["/ready", "/status", "/metrics"].to_vec())
+            }
+        };
+
+        let uri = req.uri().to_string();
+        match allowed_routes {
+            AllowedRoutes::All => Ok(req),
+            AllowedRoutes::Some(allowed) if allowed.contains(&uri.as_str()) => Ok(req),
+            _ => {
                 tracing::info!(
                     "Request {} not allowed due to current leadership state",
                     req.uri()
                 );
+
                 Err(ApiError::ResourceUnavailable(
                     format!("Current leadership status is {leadership_status}").into(),
                 ))
