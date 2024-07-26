@@ -133,11 +133,20 @@ enum NodeOperations {
     Delete,
 }
 
+/// The leadership status for the storage controller process.
+/// Allowed transitions are:
+/// 1. Leader -> SteppedDown
+/// 2. Candidate -> Leader
 #[derive(Copy, Clone, strum_macros::Display, measured::FixedCardinalityLabel)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum LeadershipStatus {
+    /// This is the steady state where the storage controller can produce
+    /// side effects in the cluster.
     Leader,
+    /// We've been notified to step down by another candidate. No reconciliations
+    /// take place in this state.
     SteppedDown,
+    /// Initial state for a new storage controller instance. Will attempt to assume leadership.
     #[allow(unused)]
     Candidate,
 }
