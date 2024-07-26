@@ -499,14 +499,14 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     }
 
     /// Iterate all the layers
-    pub fn iter(&self) -> impl '_ + Iterator<Item = Value> {
+    pub fn iter(&self) -> impl '_ + Iterator<Item = &Value> {
         // NOTE we can actually perform this without rebuilding,
         //      but it's not necessary for now.
         if !self.buffer.is_empty() {
             panic!("rebuild pls")
         }
 
-        self.layers.values().cloned()
+        self.layers.values()
     }
 
     /// Return a reference to a queryable map, assuming all updates

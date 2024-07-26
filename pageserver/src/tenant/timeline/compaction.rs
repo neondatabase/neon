@@ -1596,7 +1596,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
             .filter(|l| {
                 overlaps_with(&l.lsn_range, lsn_range) && overlaps_with(&l.key_range, key_range)
             })
-            .map(OwnArc)
+            .map(|l| OwnArc(l.clone()))
             .collect();
         Ok(result)
     }

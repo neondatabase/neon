@@ -543,7 +543,7 @@ impl LayerMap {
         true
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<PersistentLayerDesc>> {
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = &Arc<PersistentLayerDesc>> {
         self.historic.iter()
     }
 
