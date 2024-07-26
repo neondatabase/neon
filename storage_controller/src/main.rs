@@ -81,6 +81,9 @@ struct Cli {
     #[arg(long, default_value = "5s")]
     db_connect_timeout: humantime::Duration,
 
+    #[arg(long, default_value = "false")]
+    start_as_candidate: bool,
+
     /// `neon_local` sets this to the path of the neon_local repo dir.
     /// Only relevant for testing.
     // TODO: make `cfg(feature = "testing")`
@@ -273,6 +276,7 @@ async fn async_main() -> anyhow::Result<()> {
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
+        start_as_candidate: args.start_as_candidate,
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations
