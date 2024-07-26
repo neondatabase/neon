@@ -27,7 +27,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
             ".*will not become active. Current state: Broken.*",
             ".*failed to load metadata.*",
             ".*load failed.*load local timeline.*",
-            ".*layer loading failed permanently: load layer: .*",
+            ".*: layer load failed, assuming permanent failure:.*",
         ]
     )
 

@@ -1651,8 +1651,9 @@ impl Drop for DownloadedLayer {
 }
 
 impl DownloadedLayer {
-    /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`], or fails to
-    /// initialize it permanently.
+    /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`].
+    /// Failure to load the layer is sticky, i.e., future `get()` calls will return
+    /// the initial load failure immediately.
     ///
     /// `owner` parameter is a strong reference at the same `LayerInner` as the
     /// `DownloadedLayer::owner` would be when upgraded. Given how this method ends up called,
@@ -1683,7 +1684,7 @@ impl DownloadedLayer {
                     ctx,
                 )
                 .await
-                .map(|res| res.map(LayerKind::Delta))
+                .map(LayerKind::Delta)
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
@@ -1700,32 +1701,29 @@ impl DownloadedLayer {
                     ctx,
                 )
                 .await
-                .map(|res| res.map(LayerKind::Image))
+                .map(LayerKind::Image)
             };
 
             match res {
-                Ok(Ok(layer)) => Ok(Ok(layer)),
-                Ok(Err(transient)) => Err(transient),
-                Err(permanent) => {
+                Ok(layer) => Ok(layer),
+                Err(err) => {
                     LAYER_IMPL_METRICS.inc_permanent_loading_failures();
-                    // TODO(#5815): we are not logging all errors, so temporarily log them **once**
-                    // here as well
-                    let permanent = permanent.context("load layer");
-                    tracing::error!("layer loading failed permanently: {permanent:#}");
-                    Ok(Err(permanent))
+                    // We log this message once over the lifetime of `Self`
+                    // => Ok and good to log backtrace and path here.
+                    tracing::error!(
+                        "layer load failed, assuming permanent failure: {}: {err:?}",
+                        owner.path
+                    );
+                    Err(err)
                 }
             }
         };
         self.kind
-            .get_or_try_init(init)
-            // return transient errors using `?`
-            .await?
+            .get_or_init(init)
+            .await
             .as_ref()
-            .map_err(|e| {
-                // errors are not clonabled, cannot but stringify
-                // test_broken_timeline matches this string
-                anyhow::anyhow!("layer loading failed: {e:#}")
-            })
+            // We already logged the full backtrace above, once. Don't repeat that here.
+            .map_err(|e| anyhow::anyhow!("layer load failed earlier: {e}"))
     }
 
     async fn get_value_reconstruct_data(
@@ -1760,7 +1758,11 @@ impl DownloadedLayer {
     ) -> Result<(), GetVectoredError> {
         use LayerKind::*;
 
-        match self.get(owner, ctx).await.map_err(GetVectoredError::from)? {
+        match self
+            .get(owner, ctx)
+            .await
+            .map_err(GetVectoredError::Other)?
+        {
             Delta(d) => {
                 d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
                     .await
