@@ -98,13 +98,6 @@ impl KeyHistoryRetention {
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
-        println!(
-            "lsn=gc_horizon logs=[{}]",
-            above_horizon_logs
-                .iter()
-                .map(|x| format!("{}", x.0))
-                .join(",")
-        );
         for (lsn, val) in above_horizon_logs {
             delta_writer.push((key, lsn, val));
         }
