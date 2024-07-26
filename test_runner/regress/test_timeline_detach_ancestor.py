@@ -1163,13 +1163,16 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # tracked offset in the pageserver log which is at least at the most recent activation
     offset = None
 
-    for nth_round in range(3):
+    def another_detach():
         with pytest.raises(
-            PageserverApiException,
-            match=".*failed to reparent all candidate timelines, please retry",
-        ) as exc:
-            http.detach_ancestor(env.initial_tenant, detached)
+                PageserverApiException,
+                match=".*failed to reparent all candidate timelines, please retry",
+            ) as exc:
+                http.detach_ancestor(env.initial_tenant, detached)
         assert exc.value.status_code == 500
+
+    for nth_round in range(3):
+        another_detach()
 
         assert (
             http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
