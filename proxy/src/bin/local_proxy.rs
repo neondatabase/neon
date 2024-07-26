@@ -7,7 +7,7 @@ use proxy::{
     console::locks::ApiLocks,
     http::health_server::AppMetrics,
     metrics::Metrics,
-    rate_limiter::{BucketRateLimiter, EndpointRateLimiter, RateBucketInfo},
+    rate_limiter::{BucketRateLimiter, EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo},
     scram::threadpool::ThreadPool,
     serverless::{self, cancel_set::CancelSet, GlobalConnPoolOptions},
 };
@@ -124,9 +124,15 @@ async fn main() -> anyhow::Result<()> {
     let _ctl_listener = TcpListener::bind(args.ctl).await?;
     let shutdown = CancellationToken::new();
 
-    let mut user_rps_limit = args.user_rps_limit.clone();
-    RateBucketInfo::validate(&mut user_rps_limit)?;
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(user_rps_limit));
+    // let mut user_rps_limit = args.user_rps_limit.clone();
+    // RateBucketInfo::validate(&mut user_rps_limit)?;
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+        LeakyBucketConfig {
+            rps: 10.0,
+            max: 100.0,
+        },
+        16,
+    ));
 
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone()));
