@@ -302,6 +302,8 @@ impl SharedState {
             .get(&attempt.timeline_id)
             .cloned()
         else {
+            // no need to cancel the attempt, because timeline deletion and/or tenant restart has
+            // already marked it unblocked.
             return Err(Error::DetachedNotFoundAfterRestart);
         };
 
