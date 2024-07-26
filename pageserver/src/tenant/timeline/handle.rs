@@ -1,14 +1,109 @@
-//! # Memory Management
+//! An efficient way to keep the timeline gate open without preventing
+//! timeline shutdown for longer than a single call to a timeline method.
 //!
-//! Before Timeline shutdown we have a reference cycle
-//! [`HandleInner::timeline`] => [`Timeline::handles`] => [`HandleInner`]..
+//! # Motivation
 //!
-//! We do this so the hot path need only do one, uncontended, atomic increment,
-//! the [`Cache::get`]'s [`Weak<HandleInner>::upgrade`]` call.
+//! On a single page service connection, we're typically serving a single TenantTimelineId.
 //!
-//! The reference cycle breaks when the [`HandleInner`] gets dropped.
-//! The expectation is that [`HandleInner`]s are short-lived.
-//! See [`PerTimelineState::shutdown`] for more details on this expectation.
+//! Without sharding, there is a single Timeline object to which we dispatch
+//! all requests. For example, a getpage request gets dispatched to the
+//! Timeline::get method of the Timeline object that represents the
+//! (tenant,timeline) of that connection.
+//!
+//! With sharding, for each request that comes in on the connection,
+//! we first have to perform shard routing based on the requested key (=~ page number).
+//! The result of shard routing is a Timeline object.
+//! We then dispatch the request to that Timeline object.
+//!
+//! Regardless of whether the tenant is sharded or not, we want to ensure that
+//! we hold the Timeline gate open while we're invoking the method on the
+//! Timeline object.
+//!
+//! However, we want to avoid the overhead of entering the gate for every
+//! method invocation.
+//!
+//! Further, for shard routing, we want to avoid calling the tenant manager to
+//! resolve the shard for every request. Instead, we want to cache the
+//! routing result so we can bypass the tenant manager for all subsequent requests
+//! that get routed to that shard.
+//!
+//! Regardless of how we accomplish the above, it should not
+//! prevent the Timeline from shutting down promptly.
+//!
+//! # Design
+//!
+//! There are three user-facing data structures:
+//! - `PerTimelineState`: a struct embedded into each Timeline struct. Lifetime == Timeline lifetime.
+//! - `Cache`: a struct private to each connection handler; Lifetime == connection lifetime.
+//! - `Handle`: a smart pointer that holds the Timeline gate open and derefs to `&Timeline`.
+//!   Lifetime: for a single request dispatch on the Timeline (i.e., one getpage request)
+//!
+//! The `Handle` is just a wrapper around an `Arc<HandleInner>`.
+//!
+//! There is one long-lived `Arc<HandleInner>`, which is stored in the `PerTimelineState`.
+//! The `Cache` stores a `Weak<HandleInner>` for each cached Timeline.
+//!
+//! To dispatch a request, the page service connection calls `Cache::get`.
+//!
+//! A cache miss means we consult the tenant manager for shard routing,
+//! resulting in an `Arc<Timeline>`. We enter its gate _once_ and construct an
+//! `Arc<HandleInner>`. We store a `Weak<HandleInner>` in the cache
+//! and the `Arc<HandleInner>` in the `PerTimelineState`.
+//!
+//! For subsequent requests, `Cache::get` will perform a "fast path" shard routing
+//! and find the `Weak<HandleInner>` in the cache.
+//! We upgrade the `Weak<HandleInner>` to an `Arc<HandleInner>` and wrap it in the user-facing `Handle` type.
+//!
+//! The request handler dispatches the request to the right `<Handle as Deref<Target = Timeline>>::$request_method`.
+//! It then drops the `Handle`, which drops the `Arc<HandleInner>`.
+//!
+//! # Memory Management / How The Reference Cycle Is Broken
+//!
+//! The attentive reader may have noticed the strong reference cycle
+//! from `Arc<HandleInner>` to `PerTimelineState` to `Arc<Timeline>`.
+//!
+//! This cycle is intentional: while it exists, the `Cache` can upgrade its
+//! `Weak<HandleInner>` to an `Arc<HandleInner>` in a single atomic operation.
+//!
+//! The cycle is broken by either
+//! - `PerTimelineState::shutdown` or
+//! - dropping the `Cache`.
+//!
+//! Concurrently existing `Handle`s will extend the existence of the cycle.
+//! However, since `Handle`s are short-lived and new `Handle`s are not
+//! handed out after either `PerTimelineState::shutdown` or `Cache` drop,
+//! that extension of the cycle is bounded.
+//!
+//! # Fast Path for Shard Routing
+//!
+//! The `Cache` has a fast path for shard routing to avoid calling into
+//! the tenant manager for every request.
+//!
+//! The `Cache` maintains a hash map of `ShardTimelineId` to `Weak<HandleInner>`.
+//!
+//! The current implementation uses the first entry in the hash map
+//! to determine the `ShardParameters` and derive the correct
+//! `ShardIndex` for the requested key.
+//!
+//! It then looks up the hash map for that `ShardTimelineId := {ShardIndex,TimelineId}`.
+//!
+//! If the lookup is successful and the `Weak<HandleInner>` can be upgraded,
+//! it's a hit.
+//!
+//! ## Cache invalidation
+//!
+//! The insight is that cache invalidation is sufficient and most efficiently done lazily.
+//! The only reasons why an entry in the cache can become stale are:
+//! 1. The `PerTimelineState` / Timeline is shutting down e.g. because the shard is
+//!    being detached, timeline or shard deleted, or pageserver is shutting down.
+//! 2. We're doing a shard split and new traffic should be routed to the child shards.
+//!
+//! Regarding (1), we will eventually fail to upgrade the `Weak<HandleInner>` once the
+//! timeline has shut down, and when that happens, we remove the entry from the cache.
+//!
+//! Regarding (2), the insight is that it is toally fine to keep dispatching requests
+//! to the parent shard during a shard split. Eventually, the shard split task will
+//! shut down the parent => case (1).
 
 use std::collections::hash_map;
 use std::collections::HashMap;
@@ -51,11 +146,7 @@ impl CacheId {
     }
 }
 
-/// [`crate::page_service`] uses this to repeatedly, cheaply, get [`Handle`]s to
-/// the right [`Timeline`] for a given [`ShardTimelineId`].
-///
-/// Without this, we'd have to go through the [`crate::tenant::mgr`] for each
-/// getpage request.
+/// See module-level comment.
 pub(crate) struct Cache<T: Types> {
     id: CacheId,
     map: Map<T>,
@@ -78,12 +169,7 @@ pub(crate) struct ShardTimelineId {
     pub(crate) timeline_id: TimelineId,
 }
 
-/// This struct is a reference to [`Types::Timeline`]
-/// that keeps the [`Types::Timeline::gate`] open while it exists.
-///
-/// The idea is that for every getpage request, [`crate::page_service`] acquires
-/// one of these through [`Cache::get`], uses it to serve that request, then drops
-/// the handle.
+/// See module-level comment.
 pub(crate) struct Handle<T: Types>(Arc<HandleInner<T>>);
 struct HandleInner<T: Types> {
     shut_down: AtomicBool,
@@ -92,8 +178,9 @@ struct HandleInner<T: Types> {
     _gate_guard: utils::sync::gate::GateGuard,
 }
 
-/// This struct embedded into each [`Types::Timeline`] object to keep the [`Cache`]'s
-/// [`Weak<HandleInner>`] alive while the [`Types::Timeline`] is alive.
+/// Embedded in each [`Types::Timeline`] as the anchor for the only long-lived strong ref to `HandleInner`.
+///
+/// See module-level comment for details.
 pub struct PerTimelineState<T: Types> {
     // None = shutting down
     handles: Mutex<Option<HashMap<CacheId, Arc<HandleInner<T>>>>>,
@@ -107,7 +194,7 @@ impl<T: Types> Default for PerTimelineState<T> {
     }
 }
 
-/// We're abstract over the [`crate::tenant::mgr`] so we can test this module.
+/// Abstract view of [`crate::tenant::mgr`], for testability.
 pub(crate) trait TenantManager<T: Types> {
     /// Invoked by [`Cache::get`] to resolve a [`ShardTimelineId`] to a [`Types::Timeline`].
     /// Errors are returned as [`GetError::TenantManager`].
@@ -118,6 +205,7 @@ pub(crate) trait TenantManager<T: Types> {
     ) -> Result<T::Timeline, T::TenantManagerError>;
 }
 
+/// Abstract view of an [`Arc<Timeline>`], for testability.
 pub(crate) trait ArcTimeline<T: Types>: Clone {
     fn gate(&self) -> &utils::sync::gate::Gate;
     fn shard_timeline_id(&self) -> ShardTimelineId;
@@ -133,6 +221,7 @@ pub(crate) enum GetError<T: Types> {
     PerTimelineStateShutDown,
 }
 
+/// Internal type used in [`Cache::get`].
 enum RoutingResult<T: Types> {
     FastPath(Handle<T>),
     SlowPath(ShardTimelineId),
@@ -140,12 +229,7 @@ enum RoutingResult<T: Types> {
 }
 
 impl<T: Types> Cache<T> {
-    /// Get a [`Handle`] for the Timeline identified by `key`.
-    ///
-    /// The returned [`Handle`] must be short-lived so that
-    /// the [`Types::Timeline::gate`] is not held open longer than necessary.
-    ///
-    /// Fails if the [`Types::Timeline::gate`] cannot be entered.
+    /// See module-level comment for details.
     ///
     /// Does NOT check for the shutdown state of [`Types::Timeline`].
     /// Instead, the methods of [`Types::Timeline`] that are invoked through
@@ -331,12 +415,7 @@ impl<T: Types> PerTimelineState<T> {
     /// Even if [`TenantManager::resolve`] would still resolve to it.
     ///
     /// Already-alive [`Handle`]s for will remain open, usable, and keeping the [`ArcTimeline`] alive.
-    /// The expectation is that
-    /// 1. [`Handle`]s are short-lived (single call to [`Timeline`] method) and
-    /// 2. [`Timeline`] methods invoked through [`Handle`] are sensitive
-    ///    to [`Timeline::cancel`] and [`Timeline::is_stopping`].
-    /// Thus, the [`Arc<Timeline>`] allocation's lifetime will only be minimally
-    /// extended by the already-alive [`Handle`]s.
+    /// That's ok because they're short-lived. See module-level comment for details.
     #[instrument(level = "trace", skip_all)]
     pub(super) fn shutdown(&self) {
         let handles = self
@@ -373,7 +452,7 @@ impl<T: Types> Drop for HandleInner<T> {
     }
 }
 
-// When dropping a [`Cache`], prune its handles in the [`PerTimelineState`].
+// When dropping a [`Cache`], prune its handles in the [`PerTimelineState`] to break the reference cycle.
 impl<T: Types> Drop for Cache<T> {
     fn drop(&mut self) {
         for (_, weak) in self.map.drain() {
