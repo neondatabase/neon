@@ -669,7 +669,7 @@ impl RemoteTimelineClient {
             self.schedule_index_upload(upload_queue)?;
         }
 
-        let need_wait = need_change(&upload_queue.clean.0.archived_at, state);
+        let need_wait = need_change(&upload_queue.clean.0.archived_at, state).is_some();
         Ok(need_wait)
     }
 
