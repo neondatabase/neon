@@ -806,7 +806,7 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     after starting the detach.
 
     What remains not tested by this:
-    - shutdown winning over complete
+    - shutdown winning over complete, see test_timeline_is_deleted_before_timeline_detach_ancestor_completes
     """
 
     if sharded and mode == "delete_tenant":
