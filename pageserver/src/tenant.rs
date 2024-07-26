@@ -1227,7 +1227,7 @@ impl Tenant {
         Ok(timeline_preloads)
     }
 
-    pub async fn apply_timeline_archival_config(
+    pub(crate) async fn apply_timeline_archival_config(
         &self,
         timeline_id: TimelineId,
         state: TimelineArchivalState,
