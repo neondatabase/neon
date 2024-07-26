@@ -226,6 +226,7 @@ impl ServiceState {
         tenants: BTreeMap<TenantShardId, TenantShard>,
         scheduler: Scheduler,
         delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
+        initial_leadership_status: LeadershipStatus,
     ) -> Self {
         let status = &crate::metrics::METRICS_REGISTRY
             .metrics_group
@@ -233,15 +234,13 @@ impl ServiceState {
 
         status.set(
             LeadershipStatusGroup {
-                status: LeadershipStatus::Leader,
+                status: initial_leadership_status,
             },
             1,
         );
 
         Self {
-            // TODO: Starting up as Leader is a transient state. Once we enable rolling
-            // upgrades on the k8s side, we should start up as Candidate.
-            leadership_status: LeadershipStatus::Leader,
+            leadership_status: initial_leadership_status,
             tenants,
             nodes: Arc::new(nodes),
             scheduler,
@@ -332,6 +331,8 @@ pub struct Config {
     // by more than the configured amount, then the secondary is not
     // upgraded to primary.
     pub max_secondary_lag_bytes: Option<u64>,
+
+    pub start_as_candidate: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -1274,12 +1275,20 @@ impl Service {
             config.max_warming_up_interval,
             cancel.clone(),
         );
+
+        let initial_leadership_status = if config.start_as_candidate {
+            LeadershipStatus::Candidate
+        } else {
+            LeadershipStatus::Leader
+        };
+
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
                 nodes,
                 tenants,
                 scheduler,
                 delayed_reconcile_rx,
+                initial_leadership_status,
             ))),
             config: config.clone(),
             persistence,
