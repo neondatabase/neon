@@ -485,6 +485,9 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         lambda: assert_prefix_empty(neon_env_builder.pageserver_remote_storage),
     )
 
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
+
 
 @pytest.mark.parametrize(
     "stuck_failpoint",
@@ -702,6 +705,9 @@ def test_timeline_delete_works_for_remote_smoke(
     # for some reason the check above doesnt immediately take effect for the below.
     # Assume it is mock server inconsistency and check twice.
     wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder.pageserver_remote_storage))
+
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
 
 
 def test_delete_orphaned_objects(
