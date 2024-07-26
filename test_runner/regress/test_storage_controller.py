@@ -12,6 +12,8 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    PageserverAvailability,
+    PageserverSchedulingPolicy,
     PgBin,
     StorageControllerApiException,
     TokenScope,
@@ -918,6 +920,8 @@ def test_storage_controller_tenant_deletion(
 
 class Failure:
     pageserver_id: int
+    offline_timeout: int
+    must_detect_after: int
 
     def apply(self, env: NeonEnv):
         raise NotImplementedError()
@@ -930,9 +934,11 @@ class Failure:
 
 
 class NodeStop(Failure):
-    def __init__(self, pageserver_ids, immediate):
+    def __init__(self, pageserver_ids, immediate, offline_timeout, must_detect_after):
         self.pageserver_ids = pageserver_ids
         self.immediate = immediate
+        self.offline_timeout = offline_timeout
+        self.must_detect_after = must_detect_after
 
     def apply(self, env: NeonEnv):
         for ps_id in self.pageserver_ids:
@@ -948,10 +954,42 @@ class NodeStop(Failure):
         return self.pageserver_ids
 
 
+class NodeRestartWithSlowReattach(Failure):
+    def __init__(self, pageserver_id, offline_timeout, must_detect_after):
+        self.pageserver_id = pageserver_id
+        self.offline_timeout = offline_timeout
+        self.must_detect_after = must_detect_after
+        self.thread = None
+
+    def apply(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.stop(immediate=False)
+
+        def start_ps():
+            pageserver.start(
+                extra_env_vars={"FAILPOINTS": "control-plane-client-re-attach=return(30000)"}
+            )
+
+        self.thread = threading.Thread(target=start_ps)
+        self.thread.start()
+
+    def clear(self, env: NeonEnv):
+        if self.thread is not None:
+            self.thread.join()
+
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.http_client().configure_failpoints(("control-plane-client-re-attach", "off"))
+
+    def nodes(self):
+        return [self.pageserver_id]
+
+
 class PageserverFailpoint(Failure):
-    def __init__(self, failpoint, pageserver_id):
+    def __init__(self, failpoint, pageserver_id, offline_timeout, must_detect_after):
         self.failpoint = failpoint
         self.pageserver_id = pageserver_id
+        self.offline_timeout = offline_timeout
+        self.must_detect_after = must_detect_after
 
     def apply(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
@@ -987,15 +1025,28 @@ def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
 @pytest.mark.parametrize(
     "failure",
     [
-        NodeStop(pageserver_ids=[1], immediate=False),
-        NodeStop(pageserver_ids=[1], immediate=True),
-        NodeStop(pageserver_ids=[1, 2], immediate=True),
-        PageserverFailpoint(pageserver_id=1, failpoint="get-utilization-http-handler"),
+        NodeStop(pageserver_ids=[1], immediate=False, offline_timeout=20, must_detect_after=5),
+        NodeStop(pageserver_ids=[1], immediate=True, offline_timeout=20, must_detect_after=5),
+        NodeStop(pageserver_ids=[1, 2], immediate=True, offline_timeout=20, must_detect_after=5),
+        PageserverFailpoint(
+            pageserver_id=1,
+            failpoint="get-utilization-http-handler",
+            offline_timeout=20,
+            must_detect_after=5,
+        ),
+        # Instrument a scenario where the node is slow to re-attach. The re-attach request itself
+        # should serve as a signal to the storage controller to use a more lenient heartbeat timeout.
+        NodeRestartWithSlowReattach(pageserver_id=1, offline_timeout=60, must_detect_after=15),
     ],
 )
 def test_storage_controller_heartbeats(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, failure: Failure
 ):
+    neon_env_builder.storage_controller_config = {
+        "max_offline": "10s",
+        "max_warming_up": "20s",
+    }
+
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
@@ -1061,9 +1112,12 @@ def test_storage_controller_heartbeats(
             if node["id"] in offline_node_ids:
                 assert node["availability"] == "Offline"
 
-    # A node is considered offline if the last successful heartbeat
-    # was more than 10 seconds ago (hardcoded in the storage controller).
-    wait_until(20, 1, nodes_offline)
+    start = time.time()
+    wait_until(failure.offline_timeout, 1, nodes_offline)
+    detected_after = time.time() - start
+    log.info(f"Detected node failures after {detected_after}s")
+
+    assert detected_after >= failure.must_detect_after
 
     # .. expecting the tenant on the offline node to be migrated
     def tenant_migrated():
@@ -1546,7 +1600,13 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        env.storage_controller.poll_node_status(ps.id, "PauseForRestart", max_attempts=6, backoff=5)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
+            max_attempts=6,
+            backoff=5,
+        )
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
@@ -1556,12 +1616,24 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         assert sum(shard_counts.values()) == total_shards
 
         ps.restart()
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=10, backoff=1)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
+            max_attempts=10,
+            backoff=1,
+        )
 
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=6, backoff=5)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
+            max_attempts=6,
+            backoff=5,
+        )
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
@@ -1606,11 +1678,23 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
         backoff=2,
     )
 
-    env.storage_controller.poll_node_status(ps_id_to_drain, "Draining", max_attempts=6, backoff=2)
+    env.storage_controller.poll_node_status(
+        ps_id_to_drain,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.DRAINING,
+        max_attempts=6,
+        backoff=2,
+    )
 
     env.storage_controller.cancel_node_drain(ps_id_to_drain)
 
-    env.storage_controller.poll_node_status(ps_id_to_drain, "Active", max_attempts=6, backoff=2)
+    env.storage_controller.poll_node_status(
+        ps_id_to_drain,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.ACTIVE,
+        max_attempts=6,
+        backoff=2,
+    )
 
 
 @pytest.mark.parametrize("while_offline", [True, False])
