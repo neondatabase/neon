@@ -943,7 +943,7 @@ impl LayerMap {
             Layer(&'a Arc<PersistentLayerDesc>),
         }
 
-        let mut items: BTreeMap<_, Item<'a>> = BTreeMap::new();
+        let mut items: BTreeMap<std::cmp::Reverse<_>, Item<'a>> = BTreeMap::new();
 
         //let mut items: Vec<Item<'a>> = Vec::with_capacity(self.historic.len() + read_points.len());
 
@@ -952,20 +952,20 @@ impl LayerMap {
         // 2. Consider ReadPoints before image layers if they're at the same LSN
         items.extend(self.iter_historic_layers().map(|l| {
             (
-                {
+                std::cmp::Reverse({
                     if l.is_delta() {
                         (l.get_lsn_range().end, 1)
                     } else {
                         (l.image_layer_lsn(), 2)
                     }
-                },
+                }),
                 Item::Layer(l),
             )
         }));
         items.extend(
             read_points
                 .into_iter()
-                .map(|lsn| ((lsn, 0), Item::ReadPoint { lsn })),
+                .map(|lsn| (std::cmp::Reverse((lsn, 0)), Item::ReadPoint { lsn })),
         );
 
         let mut results: Vec<(&'a Arc<PersistentLayerDesc>, LayerVisibilityHint)> =
@@ -986,6 +986,8 @@ impl LayerMap {
                         false
                     } else if *reached_lsn < d.lsn_range.start {
                         // We passed the layer's range without encountering a read point: it is not visible
+
+                        eprintln!("covered maybe @ {}", reached_lsn);
                         results.push((d, LayerVisibilityHint::Covered));
                         false
                     } else {
@@ -996,14 +998,19 @@ impl LayerMap {
             }
 
             match item {
-                Item::ReadPoint { lsn: _lsn } => {
+                Item::ReadPoint { lsn } => {
                     // TODO: propagate the child timeline's shadow from their own run of this function, so that we don't have
                     // to assume that the whole key range is visible at the branch point.
+                    eprintln!("reset @ {lsn}");
                     shadow.reset();
                 }
                 Item::Layer(layer) => {
                     let visibility = if layer.is_delta() {
-                        if shadow.contains(&layer.key_range) {
+                        if !shadow.contains(&layer.key_range) {
+                            eprintln!("shadow doesn't cover {}..{} @ {}",
+                            layer.get_key_range().start,
+                            layer.get_key_range().end,
+                            layer.get_lsn_range().end);
                             LayerVisibilityHint::Visible
                         } else {
                             // If a layer isn't visible based on current state, we must defer deciding whether
@@ -1014,9 +1021,14 @@ impl LayerMap {
                         }
                     } else if shadow.cover(layer.get_key_range()) {
                         // An image layer in a region which wasn't fully covered yet: this layer is visible, but layers below it will be covered
+                        eprintln!("inserted coverage    {}..{} @ {}", 
+                            layer.get_key_range().start,
+                            layer.get_key_range().end,
+                            layer.image_layer_lsn());
                         LayerVisibilityHint::Visible
                     } else {
                         // An image layer in a region that was already covered
+                        eprintln!("covered image @ {}", layer.image_layer_lsn());
                         LayerVisibilityHint::Covered
                     };
 
@@ -1031,6 +1043,8 @@ impl LayerMap {
                 .into_iter()
                 .map(|d| (d, LayerVisibilityHint::Covered)),
         );
+
+        eprintln!("shadow: {:?}", shadow.inner);
 
         (results, shadow.to_keyspace())
     }
@@ -1215,13 +1229,13 @@ mod tests {
             eprintln!("{layer_desc:?}: {visibility:?}");
         }
 
-        // The shadow should be non-empty, since there were some image layers
-        assert!(!shadow.ranges.is_empty());
-
         // At least some layers should be marked covered
         assert!(layer_visibilities
             .iter()
             .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
+
+        // The shadow should be non-empty, since there were some image layers
+        assert!(!shadow.ranges.is_empty());
 
         let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
 
