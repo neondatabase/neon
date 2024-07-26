@@ -15,7 +15,6 @@ use anyhow::{bail, Context};
 use arc_swap::ArcSwap;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
-use chrono::Utc;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
@@ -1236,6 +1235,21 @@ impl Tenant {
             .get_timeline(timeline_id, false)
             .context("Cannot apply timeline archival config to inexistent timeline")?;
 
+        let upload_needed = timeline
+            .remote_client
+            .schedule_index_upload_for_timeline_archival_state(state)?;
+
+        if upload_needed {
+            const MAX_WAIT: Duration = Duration::from_secs(10);
+            let Ok(v) =
+                tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
+            else {
+                tracing::warn!("reached timeout for waiting on upload queue");
+                bail!("reached timeout for upload queue flush");
+            };
+            v?;
+        }
+        /*
         let is_archived = timeline.is_archived();
 
         let upload_needed = match (is_archived, state) {
@@ -1267,7 +1281,7 @@ impl Tenant {
                 bail!("reached timeout for upload queue flush");
             };
             v?;
-        }
+        } */
         Ok(())
     }
 

@@ -187,7 +187,7 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
-use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::{AuxFilePolicy, TimelineArchivalState};
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -633,15 +633,44 @@ impl RemoteTimelineClient {
     }
 
     /// Launch an index-file upload operation in the background, with only the `archived_at` field updated.
-    pub(crate) fn schedule_index_upload_for_archived_at_update(
+    ///
+    /// Returns whether it is required to wait for the queue to be empty to ensure that the change is uploaded,
+    /// so either if the change is already sitting in the queue, but not commited yet, or the change has not
+    /// been in the queue yet.
+    pub(crate) fn schedule_index_upload_for_timeline_archival_state(
         self: &Arc<Self>,
-        archived_at: Option<NaiveDateTime>,
-    ) -> anyhow::Result<()> {
+        state: TimelineArchivalState,
+    ) -> anyhow::Result<bool> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
-        upload_queue.dirty.archived_at = archived_at;
-        self.schedule_index_upload(upload_queue)?;
-        Ok(())
+
+        /// Returns Some(_) if a change is needed, and Some(true) if it's a
+        /// change needed to set archived_at.
+        fn need_change(
+            archived_at: &Option<NaiveDateTime>,
+            state: TimelineArchivalState,
+        ) -> Option<bool> {
+            match (archived_at, state) {
+                (Some(_), TimelineArchivalState::Archived)
+                | (None, TimelineArchivalState::Unarchived) => {
+                    // Nothing to do
+                    tracing::info!("intended state matches present state");
+                    None
+                }
+                (None, TimelineArchivalState::Archived) => Some(true),
+                (Some(_), TimelineArchivalState::Unarchived) => Some(false),
+            }
+        }
+        let need_upload_scheduled = need_change(&upload_queue.dirty.archived_at, state);
+
+        if let Some(archived_at_set) = need_upload_scheduled {
+            let intended_archived_at = archived_at_set.then(|| Utc::now().naive_utc());
+            upload_queue.dirty.archived_at = intended_archived_at;
+            self.schedule_index_upload(upload_queue)?;
+        }
+
+        let need_wait = need_change(&upload_queue.clean.0.archived_at, state);
+        Ok(need_wait)
     }
 
     ///
