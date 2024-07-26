@@ -1650,14 +1650,6 @@ impl Drop for DownloadedLayer {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum LoadError {
-    #[error(transparent)]
-    Io(anyhow::Error),
-    #[error(transparent)]
-    Corruption(anyhow::Error),
-}
-
 impl DownloadedLayer {
     /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`], or fails to
     /// initialize it permanently.
@@ -1669,7 +1661,7 @@ impl DownloadedLayer {
         &'a self,
         owner: &Arc<LayerInner>,
         ctx: &RequestContext,
-    ) -> Result<&'a LayerKind, LoadError> {
+    ) -> anyhow::Result<&'a LayerKind> {
         let init = || async {
             assert_eq!(
                 Weak::as_ptr(&self.owner),
@@ -1758,7 +1750,6 @@ impl DownloadedLayer {
         match self
             .get(owner, ctx)
             .await
-            .context("get layer") /* TODO avoid this */
             .map_err(GetVectoredError::Other)?
         {
             Delta(d) => {

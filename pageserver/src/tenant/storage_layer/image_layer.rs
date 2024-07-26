@@ -43,7 +43,7 @@ use crate::tenant::vectored_blob_io::{
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
@@ -69,7 +69,6 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::layer::LoadError;
 use super::layer_name::ImageLayerName;
 use super::{
     AsLayerDesc, Layer, LayerName, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
@@ -385,33 +384,23 @@ impl ImageLayerInner {
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
-    ) -> Result<Self, LoadError> {
-        let file = match VirtualFile::open(path, ctx).await {
-            Ok(file) => file,
-            Err(e) => {
-                return Err(LoadError::Io(
-                    anyhow::Error::new(e).context("open layer file"),
-                ));
-            }
-        };
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path, ctx)
+            .await
+            .context("open layer file")?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
-        let summary_blk = match block_reader.read_blk(0, ctx).await {
-            Ok(blk) => blk,
-            Err(e) => {
-                return Err(LoadError::Io(
-                    anyhow::Error::new(e).context("read first block"),
-                ));
-            }
-        };
+        let summary_blk = block_reader
+            .read_blk(0, ctx)
+            .await
+            .context("read first block")?;
 
         // length is the only way how this could fail, so it's not actually likely at all unless
         // read_blk returns wrong sized block.
         //
         // TODO: confirm and make this into assertion
-        let actual_summary = Summary::des_prefix(summary_blk.as_ref())
-            .context("deserialize first block")
-            .map_err(LoadError::Corruption)?;
+        let actual_summary =
+            Summary::des_prefix(summary_blk.as_ref()).context("deserialize first block")?;
 
         if let Some(mut expected_summary) = summary {
             // production code path
@@ -421,11 +410,11 @@ impl ImageLayerInner {
             expected_summary.timeline_id = actual_summary.timeline_id;
 
             if actual_summary != expected_summary {
-                return Err(LoadError::Corruption(anyhow::anyhow!(
+                bail!(
                     "in-file summary does not match expected summary. actual = {:?} expected = {:?}",
                     actual_summary,
                     expected_summary
-                )));
+                );
             }
         }
 
