@@ -330,20 +330,14 @@ impl Persistence {
     /// Ordering: call this _after_ deleting the tenant on pageservers, but _before_ dropping state for
     /// the tenant from memory on this server.
     pub(crate) async fn delete_tenant(&self, del_tenant_id: TenantId) -> DatabaseResult<()> {
-        use crate::schema::metadata_health;
-        use crate::schema::tenant_shards;
+        use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(
             DatabaseOperation::DeleteTenant,
             move |conn| -> DatabaseResult<()> {
-                diesel::delete(tenant_shards::table)
-                    .filter(tenant_shards::tenant_id.eq(del_tenant_id.to_string()))
+                // `metadata_health` status (if exists) is also deleted based on the cascade behavior.
+                diesel::delete(tenant_shards)
+                    .filter(tenant_id.eq(del_tenant_id.to_string()))
                     .execute(conn)?;
-
-                // Delete metadata health status as well
-                diesel::delete(metadata_health::table)
-                    .filter(metadata_health::tenant_id.eq(del_tenant_id.to_string()))
-                    .execute(conn)?;
-
                 Ok(())
             },
         )
