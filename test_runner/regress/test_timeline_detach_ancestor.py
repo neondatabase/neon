@@ -1221,7 +1221,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     assert metric == 0
 
 
-def test_deletion_after_timeline_ancestor_detach_before_completion(
+def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
     neon_env_builder: NeonEnvBuilder,
 ):
     env = neon_env_builder.init_start()
