@@ -754,15 +754,7 @@ impl Persistence {
     pub(crate) async fn list_outdated_metadata_health_records(
         &self,
         earlier: chrono::DateTime<chrono::Utc>,
-    ) -> DatabaseResult<
-        Vec<(
-            String,
-            i32,
-            i32,
-            Option<bool>,
-            Option<chrono::DateTime<chrono::Utc>>,
-        )>,
-    > {
+    ) -> DatabaseResult<Vec<MetadataHealthNullable>> {
         use crate::schema::metadata_health;
         use crate::schema::tenant_shards;
 
@@ -795,13 +787,7 @@ impl Persistence {
                 let sql = diesel::debug_query::<diesel::pg::Pg, _>(&query);
                 tracing::info!("Executed query: {}", sql);
 
-                let res = query.load::<(
-                    String,
-                    i32,
-                    i32,
-                    Option<bool>,
-                    Option<chrono::DateTime<chrono::Utc>>,
-                )>(conn)?;
+                let res = query.load::<MetadataHealthNullable>(conn)?;
 
                 Ok(res)
             },
@@ -891,6 +877,21 @@ pub(crate) struct MetadataHealthPersistence {
 
     pub(crate) healthy: bool,
     pub(crate) last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Tenant metadata health status with optional health marker and timestamp.
+#[derive(Queryable, Selectable, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[diesel(table_name = crate::schema::metadata_health)]
+pub(crate) struct MetadataHealthNullable {
+    #[serde(default)]
+    pub(crate) tenant_id: String,
+    #[serde(default)]
+    pub(crate) shard_number: i32,
+    #[serde(default)]
+    pub(crate) shard_count: i32,
+
+    pub(crate) healthy: Option<bool>,
+    pub(crate) last_scrubbed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl MetadataHealthPersistence {
