@@ -97,7 +97,7 @@ def test_ancestor_detach_branched_from(
         client.timeline_checkpoint(env.initial_tenant, env.initial_timeline)
 
         ep.safe_psql("INSERT INTO foo SELECT i::bigint FROM generate_series(8192, 16383) g(i);")
-        wait_for_last_flush_lsn(env, ep, env.initial_tenant, env.initial_timeline)
+        flush_ep_to_pageserver(env, ep, env.initial_tenant, env.initial_timeline)
 
     deltas = client.layer_map_info(env.initial_tenant, env.initial_timeline).delta_layers()
     # there is also the in-mem layer, but ignore it for now
@@ -452,6 +452,7 @@ def test_compaction_induced_by_detaches_in_history(
         }
     )
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+    env.pageserver.allowed_errors.append(".*await_initial_logical_size: can't get semaphore cancel token, skipping")
     client = env.pageserver.http_client()
 
     def delta_layers(timeline_id: TimelineId):
@@ -524,6 +525,8 @@ def test_compaction_induced_by_detaches_in_history(
     assert len([filter(lambda x: x.l0, delta_layers(branch_timeline_id))]) == 1
 
     skip_main = branches[1:]
+
+
     branch_lsn = client.timeline_detail(env.initial_tenant, branch_timeline_id)["ancestor_lsn"]
 
     # take the fullbackup before and after inheriting the new L0s
@@ -531,6 +534,11 @@ def test_compaction_induced_by_detaches_in_history(
     pg_bin.take_fullbackup(
         env.pageserver, env.initial_tenant, branch_timeline_id, branch_lsn, fullbackup_before
     )
+
+    # force initial logical sizes, so we can evict all layers from all
+    # timelines and exercise on-demand download for copy lsn prefix
+    client.timeline_detail(env.initial_tenant, env.initial_timeline, force_await_initial_logical_size=True)
+    client.evict_all_layers(env.initial_tenant, env.initial_timeline)
 
     for _, timeline_id in skip_main:
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
