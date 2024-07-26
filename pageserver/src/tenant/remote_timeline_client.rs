@@ -449,6 +449,17 @@ impl RemoteTimelineClient {
             .unwrap_or(false)
     }
 
+    /// Returns whether the timeline is archived.
+    /// Return None if the remote index_part hasn't been downloaded yet.
+    pub(crate) fn is_archived(&self) -> Option<bool> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|q| q.clean.0.archived_at.is_some())
+            .ok()
+    }
+
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
         let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
             current_remote_index_part

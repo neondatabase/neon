@@ -49,7 +49,7 @@ use utils::{
 };
 
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use std::{
@@ -388,8 +388,6 @@ pub struct Timeline {
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
     pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
-
-    pub is_archived: AtomicBool,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -1993,8 +1991,8 @@ impl Timeline {
         self.current_state() == TimelineState::Active
     }
 
-    pub(crate) fn is_archived(&self) -> bool {
-        self.is_archived.load(AtomicOrdering::Relaxed)
+    pub(crate) fn is_archived(&self) -> Option<bool> {
+        self.remote_client.is_archived()
     }
 
     pub(crate) fn is_stopping(&self) -> bool {
@@ -2421,8 +2419,6 @@ impl Timeline {
                     EvictionTaskTimelineState::default(),
                 ),
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
-
-                is_archived: AtomicBool::new(false),
 
                 cancel,
                 gate: Gate::default(),

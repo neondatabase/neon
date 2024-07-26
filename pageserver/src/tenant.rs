@@ -599,10 +599,6 @@ impl Tenant {
             timeline
                 .last_aux_file_policy
                 .store(index_part.last_aux_file_policy());
-
-            timeline
-                .is_archived
-                .store(index_part.archived_at.is_some(), Ordering::Relaxed);
         } else {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
@@ -1243,14 +1239,15 @@ impl Tenant {
         let is_archived = timeline.is_archived();
 
         let upload_needed = match (is_archived, state) {
-            (true, TimelineArchivalState::Archived)
-            | (false, TimelineArchivalState::Unarchived) => {
+            (Some(true), TimelineArchivalState::Archived)
+            | (Some(false), TimelineArchivalState::Unarchived) => {
                 // Nothing to do
                 tracing::info!("intended state matches present state");
                 None
             }
-            (false, TimelineArchivalState::Archived) => Some(Some(Utc::now().naive_utc())),
-            (true, TimelineArchivalState::Unarchived) => Some(None),
+            (Some(false), TimelineArchivalState::Archived) => Some(Some(Utc::now().naive_utc())),
+            (Some(true), TimelineArchivalState::Unarchived) => Some(None),
+            (None, _) => bail!("timeline not ready yet, please retry"),
         };
 
         if let Some(intended_archived_at) = upload_needed {
@@ -1270,13 +1267,6 @@ impl Tenant {
                 bail!("reached timeout for upload queue flush");
             };
             v?;
-            // Update the internal value after the remote operation succeeded.
-            // This way, on a retry we'll never be in the situation where we think that
-            // the state is already updated (instead we might think that the state is
-            // not updated yet while it already is).
-            timeline
-                .is_archived
-                .store(intended_archived_at.is_some(), Ordering::Relaxed);
         }
         Ok(())
     }
