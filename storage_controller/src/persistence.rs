@@ -95,6 +95,8 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealth,
     ListMetadataHealthUnhealthy,
     ListMetadataHealthOutdated,
+    GetLeader,
+    UpdateLeader,
 }
 
 #[must_use]
@@ -785,6 +787,71 @@ impl Persistence {
         )
         .await
     }
+
+    /// Get the current entry from the `leader` table if one exists.
+    /// It is an error for the table to contain more than one entry.
+    pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<LeaderPersistence>> {
+        let mut leader: Vec<LeaderPersistence> = self
+            .with_measured_conn(
+                DatabaseOperation::GetLeader,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(crate::schema::leader::table.load::<LeaderPersistence>(conn)?)
+                },
+            )
+            .await?;
+
+        if leader.len() > 1 {
+            return Err(DatabaseError::Logical(format!(
+                "More than one entry present in the leader table: {leader:?}"
+            )));
+        }
+
+        Ok(leader.pop())
+    }
+
+    /// Update the new leader with compare-exchange semantics. If `prev` does not
+    /// match the current leader entry, then the update is treated as a failure.
+    /// When `prev` is not specified, the update is forced.
+    pub(crate) async fn update_leader(
+        &self,
+        prev: Option<LeaderPersistence>,
+        new: LeaderPersistence,
+    ) -> DatabaseResult<()> {
+        use crate::schema::leader::dsl::*;
+
+        let updated = self
+            .with_measured_conn(
+                DatabaseOperation::UpdateLeader,
+                move |conn| -> DatabaseResult<usize> {
+                    let updated = match &prev {
+                        Some(prev) => diesel::update(leader)
+                            .filter(hostname.eq(prev.hostname.clone()))
+                            .filter(port.eq(prev.port))
+                            .filter(started_at.eq(prev.started_at))
+                            .set((
+                                hostname.eq(new.hostname.clone()),
+                                port.eq(new.port),
+                                started_at.eq(new.started_at),
+                            ))
+                            .execute(conn)?,
+                        None => diesel::insert_into(leader)
+                            .values(new.clone())
+                            .execute(conn)?,
+                    };
+
+                    Ok(updated)
+                },
+            )
+            .await?;
+
+        if updated == 0 {
+            return Err(DatabaseError::Logical(
+                "Leader table update failed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
@@ -909,4 +976,14 @@ impl From<MetadataHealthPersistence> for MetadataHealthRecord {
             last_scrubbed_at: value.last_scrubbed_at,
         }
     }
+}
+
+#[derive(
+    Serialize, Deserialize, Queryable, Selectable, Insertable, Eq, PartialEq, Debug, Clone,
+)]
+#[diesel(table_name = crate::schema::leader)]
+pub(crate) struct LeaderPersistence {
+    pub(crate) hostname: String,
+    pub(crate) port: i32,
+    pub(crate) started_at: chrono::DateTime<chrono::Utc>,
 }
