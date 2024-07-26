@@ -358,14 +358,20 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 assert_eq!(len_buf[0] & 0xf0, 0);
                 len_buf[0] |= high_bit_mask;
                 io_buf.extend_from_slice(&len_buf[..]);
-                (self.write_all(io_buf, ctx).await, srcbuf, compression_info)
+                (self.write_all(io_buf, ctx).await, srcbuf)
             }
         }
         .await;
         self.io_buf = Some(io_buf);
         match hdr_res {
             Ok(_) => (),
-            Err(e) => return (Slice::into_inner(srcbuf.slice(..)), Err(e)),
+            Err(e) => {
+                return (
+                    Slice::into_inner(srcbuf.slice(..)),
+                    Err(e),
+                    compression_info,
+                )
+            }
         }
         let (srcbuf, res) = if let Some(compressed_buf) = compressed_buf {
             let (_buf, res) = self.write_all(compressed_buf, ctx).await;
@@ -430,12 +436,14 @@ pub(crate) mod tests {
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
-                    wtr.write_blob_maybe_compressed(
-                        blob.clone(),
-                        ctx,
-                        ImageCompressionAlgorithm::Zstd { level: Some(1) },
-                    )
-                    .await
+                    let res = wtr
+                        .write_blob_maybe_compressed(
+                            blob.clone(),
+                            ctx,
+                            ImageCompressionAlgorithm::Zstd { level: Some(1) },
+                        )
+                        .await;
+                    (res.0, res.1)
                 } else {
                     wtr.write_blob(blob.clone(), ctx).await
                 };
