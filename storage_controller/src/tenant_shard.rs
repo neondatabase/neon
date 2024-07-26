@@ -9,6 +9,7 @@ use crate::{
     persistence::TenantShardPersistence,
     reconciler::ReconcileUnits,
     scheduler::{AffinityScore, MaySchedule, RefCountUpdate, ScheduleContext},
+    service::ReconcileResultRequest,
 };
 use pageserver_api::controller_api::{
     NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
@@ -17,7 +18,7 @@ use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, Instrument};
@@ -283,7 +284,7 @@ impl Drop for IntentState {
     }
 }
 
-#[derive(Default, Clone, Serialize)]
+#[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub(crate) struct ObservedState {
     pub(crate) locations: HashMap<NodeId, ObservedStateLocation>,
 }
@@ -297,7 +298,7 @@ pub(crate) struct ObservedState {
 ///       what it is (e.g. we failed partway through configuring it)
 ///     * Instance exists with conf==Some: this tells us what we last successfully configured on this node,
 ///       and that configuration will still be present unless something external interfered.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub(crate) struct ObservedStateLocation {
     /// If None, it means we do not know the status of this shard's location on this node, but
     /// we know that we might have some state on this node.
@@ -1059,7 +1060,7 @@ impl TenantShard {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn spawn_reconciler(
         &mut self,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
         compute_hook: &Arc<ComputeHook>,
         service_config: &service::Config,
@@ -1183,7 +1184,9 @@ impl TenantShard {
                     pending_compute_notification: reconciler.compute_notify_failure,
                 };
 
-                result_tx.send(result).ok();
+                result_tx
+                    .send(ReconcileResultRequest::ReconcileResult(result))
+                    .ok();
             }
             .instrument(reconciler_span),
         );

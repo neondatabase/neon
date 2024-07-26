@@ -657,7 +657,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
-    cargo install --locked --version 0.10.2 cargo-pgrx && \
+    cargo install --locked --version 0.11.3 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
@@ -688,10 +688,15 @@ RUN wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.
 FROM rust-extensions-build AS pg-jsonschema-pg-build
 ARG PG_VERSION
 
-RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.2.0.tar.gz -O pg_jsonschema.tar.gz && \
-    echo "9118fc508a6e231e7a39acaa6f066fcd79af17a5db757b47d2eefbe14f7794f0 pg_jsonschema.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.3.1.tar.gz -O pg_jsonschema.tar.gz && \
+    echo "61df3db1ed83cf24f6aa39c826f8818bfa4f0bd33b587fd6b2b1747985642297 pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    # see commit 252b3685a27a0f4c31a0f91e983c6314838e89e8
+    # `unsafe-postgres` feature allows to build pgx extensions
+    # against postgres forks that decided to change their ABI name (like us).
+    # With that we can build extensions without forking them and using stock
+    # pgx. As this feature is new few manual version bumps were required.
+    sed -i 's/pgrx = "0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
@@ -705,10 +710,10 @@ RUN wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.2.0.tar.
 FROM rust-extensions-build AS pg-graphql-pg-build
 ARG PG_VERSION
 
-RUN wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.4.0.tar.gz -O pg_graphql.tar.gz && \
-    echo "bd8dc7230282b3efa9ae5baf053a54151ed0e66881c7c53750e2d0c765776edc pg_graphql.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.5.7.tar.gz -O pg_graphql.tar.gz && \
+    echo "2b3e567a5b31019cb97ae0e33263c1bcc28580be5a444ac4c8ece5c4be2aea41 pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     # it's needed to enable extension because it uses untrusted C language
     sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_graphql.control && \
@@ -728,6 +733,9 @@ ARG PG_VERSION
 RUN wget https://github.com/kelvich/pg_tiktoken/archive/26806147b17b60763039c6a6878884c41a262318.tar.gz -O pg_tiktoken.tar.gz && \
     echo "e64e55aaa38c259512d3e27c572da22c4637418cf124caba904cd50944e5004e pg_tiktoken.tar.gz" | sha256sum --check && \
     mkdir pg_tiktoken-src && cd pg_tiktoken-src && tar xzf ../pg_tiktoken.tar.gz --strip-components=1 -C . && \
+    # TODO update pgrx version in the pg_tiktoken repo and remove this line
+    sed -i 's/pgrx = { version = "=0.10.2",/pgrx = { version = "0.11.3",/g' Cargo.toml && \
+    sed -i 's/pgrx-tests = "=0.10.2"/pgrx-tests = "0.11.3"/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_tiktoken.control
 
@@ -741,14 +749,10 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/26806147b17b60763039c6a6
 FROM rust-extensions-build AS pg-pgx-ulid-build
 ARG PG_VERSION
 
-RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.3.tar.gz -O pgx_ulid.tar.gz && \
-    echo "ee5db82945d2d9f2d15597a80cf32de9dca67b897f605beb830561705f12683c pgx_ulid.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.5.tar.gz -O pgx_ulid.tar.gz && \
+    echo "9d1659a2da65af0133d5451c454de31b37364e3502087dadf579f790bc8bef17 pgx_ulid.tar.gz" | sha256sum --check && \
     mkdir pgx_ulid-src && cd pgx_ulid-src && tar xzf ../pgx_ulid.tar.gz --strip-components=1 -C . && \
-    echo "******************* Apply a patch for Postgres 16 support; delete in the next release ******************" && \
-    wget https://github.com/pksunkara/pgx_ulid/commit/f84954cf63fc8c80d964ac970d9eceed3c791196.patch && \
-    patch -p1 < f84954cf63fc8c80d964ac970d9eceed3c791196.patch && \
-    echo "********************************************************************************************************" && \
-    sed -i 's/pgrx       = "=0.10.2"/pgrx = { version = "=0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx       = "^0.11.2"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/ulid.control
 

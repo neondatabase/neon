@@ -137,7 +137,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
+use super::{config::TenantConf, upload_queue::NotInitialized};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -642,7 +642,13 @@ impl FlushLayerError {
     // When crossing from generic anyhow errors to this error type, we explicitly check
     // for timeline cancellation to avoid logging inoffensive shutdown errors as warn/err.
     fn from_anyhow(timeline: &Timeline, err: anyhow::Error) -> Self {
-        if timeline.cancel.is_cancelled() {
+        let cancelled = timeline.cancel.is_cancelled()
+            // The upload queue might have been shut down before the official cancellation of the timeline.
+            || err
+                .downcast_ref::<NotInitialized>()
+                .map(NotInitialized::is_stopping)
+                .unwrap_or_default();
+        if cancelled {
             Self::Cancelled
         } else {
             Self::Other(Arc::new(err))
@@ -3415,7 +3421,6 @@ impl Timeline {
         }
     }
 
-    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
@@ -4786,7 +4791,7 @@ pub(crate) enum CompactionError {
     ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<CollectKeySpaceError> for CompactionError {
@@ -4797,6 +4802,38 @@ impl From<CollectKeySpaceError> for CompactionError {
                 CompactionError::ShuttingDown
             }
             e => CompactionError::Other(e.into()),
+        }
+    }
+}
+
+impl From<super::upload_queue::NotInitialized> for CompactionError {
+    fn from(value: super::upload_queue::NotInitialized) -> Self {
+        match value {
+            super::upload_queue::NotInitialized::Uninitialized
+            | super::upload_queue::NotInitialized::Stopped => {
+                CompactionError::Other(anyhow::anyhow!(value))
+            }
+            super::upload_queue::NotInitialized::ShuttingDown => CompactionError::ShuttingDown,
+        }
+    }
+}
+
+impl CompactionError {
+    /// We cannot do compaction because we could not download a layer that is input to the compaction.
+    pub(crate) fn input_layer_download_failed(
+        e: super::storage_layer::layer::DownloadError,
+    ) -> Self {
+        match e {
+            super::storage_layer::layer::DownloadError::TimelineShutdown |
+            /* TODO DownloadCancelled correct here? */
+            super::storage_layer::layer::DownloadError::DownloadCancelled  => CompactionError::ShuttingDown,
+            super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads |
+            super::storage_layer::layer::DownloadError::DownloadRequired |
+            super::storage_layer::layer::DownloadError::NotFile(_) |
+            super::storage_layer::layer::DownloadError::DownloadFailed |
+            super::storage_layer::layer::DownloadError::PreStatFailed(_)=>CompactionError::Other(anyhow::anyhow!(e)),
+            #[cfg(test)]
+            super::storage_layer::layer::DownloadError::Failpoint(_) =>  CompactionError::Other(anyhow::anyhow!(e)),
         }
     }
 }
@@ -4874,7 +4911,7 @@ impl Timeline {
         new_deltas: &[ResidentLayer],
         new_images: &[ResidentLayer],
         layers_to_remove: &[Layer],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CompactionError> {
         let mut guard = self.layers.write().await;
 
         let mut duplicated_layers = HashSet::new();
@@ -4892,7 +4929,7 @@ impl Timeline {
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
             } else if LayerMap::is_l0(&l.layer_desc().key_range) {
-                bail!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
+                return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
                 insert_layers.push(l.clone());
             }
@@ -4924,7 +4961,7 @@ impl Timeline {
         self: &Arc<Self>,
         mut replace_layers: Vec<(Layer, ResidentLayer)>,
         mut drop_layers: Vec<Layer>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), super::upload_queue::NotInitialized> {
         let mut guard = self.layers.write().await;
 
         // Trim our lists in case our caller (compaction) raced with someone else (GC) removing layers: we want
@@ -4946,7 +4983,7 @@ impl Timeline {
     fn upload_new_image_layers(
         self: &Arc<Self>,
         new_images: impl IntoIterator<Item = ResidentLayer>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), super::upload_queue::NotInitialized> {
         for layer in new_images {
             self.remote_client.schedule_layer_file_upload(layer)?;
         }

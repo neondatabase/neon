@@ -83,16 +83,16 @@ pub mod defaults {
     #[cfg(not(target_os = "linux"))]
     pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
 
-    pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
+    pub const DEFAULT_GET_VECTORED_IMPL: &str = "vectored";
 
-    pub const DEFAULT_GET_IMPL: &str = "legacy";
+    pub const DEFAULT_GET_IMPL: &str = "vectored";
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Disabled;
 
-    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
+    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 

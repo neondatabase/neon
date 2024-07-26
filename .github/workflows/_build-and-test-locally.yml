@@ -3,6 +3,10 @@ name: Build and Test Locally
 on:
   workflow_call:
     inputs:
+      arch:
+        description: 'x64 or arm64'
+        required: true
+        type: string
       build-tag:
         description: 'build tag'
         required: true
@@ -28,7 +32,7 @@ env:
 
 jobs:
   build-neon:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
@@ -236,8 +240,10 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
+    # Run test on x64 only
+    if: inputs.arch == 'x64'
     needs: [ build-neon ]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
@@ -272,9 +278,6 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          PAGESERVER_GET_VECTORED_IMPL: vectored
-          PAGESERVER_GET_IMPL: vectored
-          PAGESERVER_VALIDATE_VEC_GET: true
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540

@@ -287,6 +287,14 @@ pub enum PersistIndexPartWithDeletedFlagError {
     Other(#[from] anyhow::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum WaitCompletionError {
+    #[error(transparent)]
+    NotInitialized(NotInitialized),
+    #[error("wait_completion aborted because upload queue was stopped")]
+    UploadQueueShutDownOrStopped,
+}
+
 /// A client for accessing a timeline's data in remote storage.
 ///
 /// This takes care of managing the number of connections, and balancing them
@@ -630,7 +638,7 @@ impl RemoteTimelineClient {
     ///
     /// Like schedule_index_upload_for_metadata_update(), this merely adds
     /// the upload to the upload queue and returns quickly.
-    pub fn schedule_index_upload_for_file_changes(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub fn schedule_index_upload_for_file_changes(self: &Arc<Self>) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -645,7 +653,7 @@ impl RemoteTimelineClient {
     fn schedule_index_upload(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
         // fix up the duplicated field
         upload_queue.dirty.disk_consistent_lsn = disk_consistent_lsn;
@@ -653,7 +661,7 @@ impl RemoteTimelineClient {
         // make sure it serializes before doing it in perform_upload_task so that it doesn't
         // look like a retryable error
         let void = std::io::sink();
-        serde_json::to_writer(void, &upload_queue.dirty).context("serialize index_part.json")?;
+        serde_json::to_writer(void, &upload_queue.dirty).expect("serialize index_part.json");
 
         let index_part = &upload_queue.dirty;
 
@@ -699,7 +707,9 @@ impl RemoteTimelineClient {
             self.schedule_barrier0(upload_queue)
         };
 
-        Self::wait_completion0(receiver).await
+        Self::wait_completion0(receiver)
+            .await
+            .context("wait completion")
     }
 
     /// Schedules uploading a new version of `index_part.json` with the given layers added,
@@ -732,7 +742,9 @@ impl RemoteTimelineClient {
             barrier
         };
 
-        Self::wait_completion0(barrier).await
+        Self::wait_completion0(barrier)
+            .await
+            .context("wait completion")
     }
 
     /// Launch an upload operation in the background; the file is added to be included in next
@@ -740,7 +752,7 @@ impl RemoteTimelineClient {
     pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
         layer: ResidentLayer,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -826,7 +838,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         names: I,
-    ) -> anyhow::Result<Vec<(LayerName, LayerFileMetadata)>>
+    ) -> Result<Vec<(LayerName, LayerFileMetadata)>, NotInitialized>
     where
         I: IntoIterator<Item = LayerName>,
     {
@@ -952,7 +964,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         compacted_from: &[Layer],
         compacted_to: &[ResidentLayer],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -969,10 +981,12 @@ impl RemoteTimelineClient {
     }
 
     /// Wait for all previously scheduled uploads/deletions to complete
-    pub(crate) async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub(crate) async fn wait_completion(self: &Arc<Self>) -> Result<(), WaitCompletionError> {
         let receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
-            let upload_queue = guard.initialized_mut()?;
+            let upload_queue = guard
+                .initialized_mut()
+                .map_err(WaitCompletionError::NotInitialized)?;
             self.schedule_barrier0(upload_queue)
         };
 
@@ -981,9 +995,9 @@ impl RemoteTimelineClient {
 
     async fn wait_completion0(
         mut receiver: tokio::sync::watch::Receiver<()>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WaitCompletionError> {
         if receiver.changed().await.is_err() {
-            anyhow::bail!("wait_completion aborted because upload queue was stopped");
+            return Err(WaitCompletionError::UploadQueueShutDownOrStopped);
         }
 
         Ok(())
@@ -1366,12 +1380,13 @@ impl RemoteTimelineClient {
         // marker via its deleted_at attribute
         let latest_index = remaining
             .iter()
-            .filter(|p| {
-                p.object_name()
+            .filter(|o| {
+                o.key
+                    .object_name()
                     .map(|n| n.starts_with(IndexPart::FILE_NAME))
                     .unwrap_or(false)
             })
-            .filter_map(|path| parse_remote_index_path(path.clone()).map(|gen| (path, gen)))
+            .filter_map(|o| parse_remote_index_path(o.key.clone()).map(|gen| (o.key.clone(), gen)))
             .max_by_key(|i| i.1)
             .map(|i| i.0.clone())
             .unwrap_or(
@@ -1382,14 +1397,12 @@ impl RemoteTimelineClient {
 
         let remaining_layers: Vec<RemotePath> = remaining
             .into_iter()
-            .filter(|p| {
-                if p == &latest_index {
-                    return false;
+            .filter_map(|o| {
+                if o.key == latest_index || o.key.object_name() == Some(INITDB_PRESERVED_PATH) {
+                    None
+                } else {
+                    Some(o.key)
                 }
-                if p.object_name() == Some(INITDB_PRESERVED_PATH) {
-                    return false;
-                }
-                true
             })
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
