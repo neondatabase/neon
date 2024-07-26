@@ -111,8 +111,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
         if flags.contains(CompactFlags::EnhancedGcBottomMostCompaction) {
-            self
-                .compact_with_gc(cancel, ctx)
+            self.compact_with_gc(cancel, ctx)
                 .await
                 .map_err(CompactionError::Other)?;
             return Ok(false);
