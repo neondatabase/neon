@@ -6010,25 +6010,27 @@ impl Service {
         update_req: MetadataHealthUpdateRequest,
     ) -> Result<(), ApiError> {
         let now = chrono::offset::Utc::now();
-        let persistence_records = {
+        let (healthy_records, unhealthy_records) = {
             let locked = self.inner.read().unwrap();
-            let healthy_it = update_req
+            let healthy_records = update_req
                 .healthy_tenant_shards
                 .into_iter()
                 // Retain only health records associated with tenant shards managed by storage controller.
                 .filter(|tenant_shard_id| locked.tenants.contains_key(tenant_shard_id))
-                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, true, now));
-            let unhealthy_it = update_req
+                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, true, now))
+                .collect();
+            let unhealthy_records = update_req
                 .unhealthy_tenant_shards
                 .into_iter()
                 .filter(|tenant_shard_id| locked.tenants.contains_key(tenant_shard_id))
-                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, false, now));
+                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, false, now))
+                .collect();
 
-            healthy_it.chain(unhealthy_it).collect()
+            (healthy_records, unhealthy_records)
         };
 
         self.persistence
-            .update_metadata_health_records(persistence_records)
+            .update_metadata_health_records(healthy_records, unhealthy_records, now)
             .await?;
         Ok(())
     }

@@ -687,24 +687,28 @@ impl Persistence {
     #[allow(dead_code)]
     pub(crate) async fn update_metadata_health_records(
         &self,
-        metadata_health_records: Vec<MetadataHealthPersistence>,
+        healthy_records: Vec<MetadataHealthPersistence>,
+        unhealthy_records: Vec<MetadataHealthPersistence>,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> DatabaseResult<()> {
         use crate::schema::metadata_health::dsl::*;
 
         self.with_measured_conn(
             DatabaseOperation::UpdateMetadataHealth,
             move |conn| -> DatabaseResult<_> {
-                for update in &metadata_health_records {
-                    diesel::insert_into(metadata_health)
-                        .values(update)
-                        .on_conflict((tenant_id, shard_number, shard_count))
-                        .do_update()
-                        .set((
-                            healthy.eq(update.healthy),
-                            last_scrubbed_at.eq(update.last_scrubbed_at),
-                        ))
-                        .execute(conn)?;
-                }
+                diesel::insert_into(metadata_health)
+                    .values(&healthy_records)
+                    .on_conflict((tenant_id, shard_number, shard_count))
+                    .do_update()
+                    .set((healthy.eq(true), last_scrubbed_at.eq(now)))
+                    .execute(conn)?;
+
+                diesel::insert_into(metadata_health)
+                    .values(&unhealthy_records)
+                    .on_conflict((tenant_id, shard_number, shard_count))
+                    .do_update()
+                    .set((healthy.eq(false), last_scrubbed_at.eq(now)))
+                    .execute(conn)?;
                 Ok(())
             },
         )
