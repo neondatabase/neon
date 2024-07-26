@@ -2582,6 +2582,17 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
                 time.sleep(backoff)
 
+    def step_down(self):
+        log.info("Asking storage controller to step down")
+        response = self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/step_down",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+        response.raise_for_status()
+        return response.json()
+
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):
             pairs = [config_strings]
