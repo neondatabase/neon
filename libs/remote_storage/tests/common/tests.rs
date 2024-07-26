@@ -156,6 +156,7 @@ async fn list_no_delimiter_works(
         .context("client list root files failure")?
         .keys
         .into_iter()
+        .map(|o| o.key)
         .collect::<HashSet<_>>();
     assert_eq!(
         root_files,
@@ -182,6 +183,7 @@ async fn list_no_delimiter_works(
         .context("client list nested files failure")?
         .keys
         .into_iter()
+        .map(|o| o.key)
         .collect::<HashSet<_>>();
     let trim_remote_blobs: HashSet<_> = ctx
         .remote_blobs
