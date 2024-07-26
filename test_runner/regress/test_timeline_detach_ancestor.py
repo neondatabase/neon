@@ -1262,6 +1262,9 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
 
             # FIXME: this should be 404 but because there is another Anyhow conversion it is 500
             assert exc.value.status_code == 500
+            env.pageserver.allowed_errors.append(
+                ".*Error processing HTTP request: InternalServerError\\(detached timeline was not found after restart"
+            )
     finally:
         http.configure_failpoints((failpoint, "off"))
 
