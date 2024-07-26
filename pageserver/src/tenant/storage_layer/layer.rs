@@ -1625,7 +1625,7 @@ pub(crate) struct DownloadedLayer {
     owner: Weak<LayerInner>,
     // Use tokio OnceCell as we do not need to deinitialize this, it'll just get dropped with the
     // DownloadedLayer
-    kind: tokio::sync::OnceCell<LayerKind>,
+    kind: tokio::sync::OnceCell<anyhow::Result<LayerKind>>,
     version: usize,
 }
 
@@ -1651,8 +1651,9 @@ impl Drop for DownloadedLayer {
 }
 
 impl DownloadedLayer {
-    /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`], or fails to
-    /// initialize it permanently.
+    /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`].
+    /// Failure to load the layer is sticky, i.e., future `get()` calls will return
+    /// the initial load failure immediately.
     ///
     /// `owner` parameter is a strong reference at the same `LayerInner` as the
     /// `DownloadedLayer::owner` would be when upgraded. Given how this method ends up called,
@@ -1705,14 +1706,24 @@ impl DownloadedLayer {
 
             match res {
                 Ok(layer) => Ok(layer),
-                Err(permanent) => {
+                Err(err) => {
                     LAYER_IMPL_METRICS.inc_permanent_loading_failures();
-                    tracing::error!("layer loading failed permanently: {permanent:#}");
-                    Err(permanent)
+                    // We log this message once over the lifetime of `Self`
+                    // => Ok and good to log backtrace and path here.
+                    tracing::error!(
+                        "layer load failed, assuming permanent failure: {}: {err:?}",
+                        owner.path
+                    );
+                    Err(err)
                 }
             }
         };
-        self.kind.get_or_try_init(init).await
+        self.kind
+            .get_or_init(init)
+            .await
+            .as_ref()
+            // We already logged the full backtrace above, once. Don't repeat that here.
+            .map_err(|e| anyhow::anyhow!("layer load failed earlier: {e}"))
     }
 
     async fn get_value_reconstruct_data(
