@@ -84,6 +84,7 @@ impl std::fmt::Display for BackendType<'_, (), ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use BackendType::*;
         match self {
+            Local => todo!(),
             Console(api, _) => match &**api {
                 ConsoleBackend::Console(endpoint) => {
                     fmt.debug_tuple("Console").field(&endpoint.url()).finish()
@@ -106,6 +107,7 @@ impl<T, D> BackendType<'_, T, D> {
     pub fn as_ref(&self) -> BackendType<'_, &T, &D> {
         use BackendType::*;
         match self {
+            Local => todo!(),
             Console(c, x) => Console(MaybeOwned::Borrowed(c), x),
             Link(c, x) => Link(MaybeOwned::Borrowed(c), x),
         }
@@ -119,6 +121,7 @@ impl<'a, T, D> BackendType<'a, T, D> {
     pub fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<'a, R, D> {
         use BackendType::*;
         match self {
+            Local => todo!(),
             Console(c, x) => Console(c, f(x)),
             Link(c, x) => Link(c, x),
         }
@@ -130,6 +133,7 @@ impl<'a, T, D, E> BackendType<'a, Result<T, E>, D> {
     pub fn transpose(self) -> Result<BackendType<'a, T, D>, E> {
         use BackendType::*;
         match self {
+            Local => todo!(),
             Console(c, x) => x.map(|x| Console(c, x)),
             Link(c, x) => Ok(Link(c, x)),
         }
@@ -405,6 +409,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
         use BackendType::*;
 
         match self {
+            Local => todo!(),
             Console(_, user_info) => user_info.endpoint_id.clone(),
             Link(_, _) => Some("link".into()),
         }
@@ -415,6 +420,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
         use BackendType::*;
 
         match self {
+            Local => todo!(),
             Console(_, user_info) => &user_info.user,
             Link(_, _) => "link",
         }
@@ -433,6 +439,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
         use BackendType::*;
 
         let res = match self {
+            Local => todo!(),
             Console(api, user_info) => {
                 info!(
                     user = &*user_info.user,
@@ -474,6 +481,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         use BackendType::*;
         match self {
+            Local => todo!(),
             Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
             Link(_, _) => Ok(Cached::new_uncached(None)),
         }
@@ -485,6 +493,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         use BackendType::*;
         match self {
+            Local => todo!(),
             Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             Link(_, _) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
@@ -500,6 +509,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
         use BackendType::*;
 
         match self {
+            Local => todo!(),
             Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
             Link(_, info) => Ok(Cached::new_uncached(info.clone())),
         }
@@ -507,6 +517,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
 
     fn get_keys(&self) -> Option<&ComputeCredentialKeys> {
         match self {
+            BackendType::Local => todo!(),
             BackendType::Console(_, creds) => Some(&creds.keys),
             BackendType::Link(_, _) => None,
         }
@@ -522,6 +533,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
         use BackendType::*;
 
         match self {
+            Local => todo!(),
             Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
             Link(_, _) => unreachable!("link auth flow doesn't support waking the compute"),
         }
@@ -529,6 +541,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
 
     fn get_keys(&self) -> Option<&ComputeCredentialKeys> {
         match self {
+            BackendType::Local => todo!(),
             BackendType::Console(_, creds) => Some(&creds.keys),
             BackendType::Link(_, _) => None,
         }
