@@ -807,8 +807,6 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 
     What remains not tested by this:
     - shutdown winning over complete
-
-    Shutdown winning over complete needs gc blocking and reparenting any left-overs on retry.
     """
 
     if sharded and mode == "delete_tenant":
@@ -820,7 +818,13 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 
     neon_env_builder.num_pageservers = shard_count
 
-    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count if sharded else None)
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=shard_count if sharded else None,
+        initial_tenant_conf={
+            "gc_period": "1s",
+            "lsn_lease_length": "0s",
+        },
+    )
 
     for ps in env.pageservers:
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
@@ -829,7 +833,7 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 
     detached_timeline = env.neon_cli.create_branch("detached soon", "main")
 
-    failpoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
+    pausepoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
 
     env.storage_controller.reconcile_until_idle()
     shards = env.storage_controller.locate(env.initial_tenant)
@@ -841,13 +845,20 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 
     victim = pageservers[int(shards[-1]["node_id"])]
     victim_http = victim.http_client()
-    victim_http.configure_failpoints((failpoint, "pause"))
+    victim_http.configure_failpoints((pausepoint, "pause"))
 
     def detach_ancestor():
         target.detach_ancestor(env.initial_tenant, detached_timeline)
 
-    def at_failpoint() -> Tuple[str, LogCursor]:
-        return victim.assert_log_contains(f"at failpoint {failpoint}")
+    def at_failpoint() -> LogCursor:
+        msg, offset = victim.assert_log_contains(f"at failpoint {pausepoint}")
+        log.info(f"found {msg}")
+        msg, offset = victim.assert_log_contains(
+            ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+            offset,
+        )
+        log.info(f"found {msg}")
+        return offset
 
     def start_delete():
         if mode == "delete_timeline":
@@ -880,23 +891,44 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
     with ThreadPoolExecutor(max_workers=2) as pool:
         try:
             fut = pool.submit(detach_ancestor)
-            _, offset = wait_until(10, 1.0, at_failpoint)
+            offset = wait_until(10, 1.0, at_failpoint)
 
             delete = pool.submit(start_delete)
 
-            wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
+            offset = wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
 
-            victim_http.configure_failpoints((failpoint, "off"))
+            victim_http.configure_failpoints((pausepoint, "off"))
 
             delete.result()
 
             assert wait_until(10, 1.0, is_deleted), f"unimplemented mode {mode}"
 
+            # TODO: match the error
             with pytest.raises(PageserverApiException) as exc:
                 fut.result()
+            log.info(f"TODO: match this error: {exc.value}")
             assert exc.value.status_code == 503
         finally:
-            victim_http.configure_failpoints((failpoint, "off"))
+            victim_http.configure_failpoints((pausepoint, "off"))
+
+    if mode != "delete_timeline":
+        return
+
+    # make sure the gc is unblocked
+    time.sleep(2)
+    victim.assert_log_contains(".* gc_loop.*: 1 timelines need GC", offset)
+
+    if not sharded:
+        # we have the other node only while sharded
+        return
+
+    other = pageservers[int(shards[0]["node_id"])]
+    log.info(f"other is {other.id}")
+    _, offset = other.assert_log_contains(
+        ".*INFO request\\{method=PUT path=/v1/tenant/\\S+/timeline/\\S+/detach_ancestor .*\\}: Request handled, status: 200 OK",
+    )
+    # this might be a lot earlier than the victims line, but that is okay.
+    _, offset = other.assert_log_contains(".* gc_loop.*: 1 timelines need GC", offset)
 
 
 @pytest.mark.parametrize("mode", ["delete_reparentable_timeline"])
