@@ -1224,7 +1224,15 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
 def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
     neon_env_builder: NeonEnvBuilder,
 ):
-    env = neon_env_builder.init_start()
+    """
+    Make sure that a timeline deleted after restart will unpause gc blocking.
+    """
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "1s",
+            "lsn_lease_length": "0s",
+        }
+    )
 
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
@@ -1239,8 +1247,11 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
     def detach_and_get_stuck():
         return http.detach_ancestor(env.initial_tenant, detached)
 
-    def pausepoint_hit():
-        env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+    def request_processing_noted_in_log():
+        _, offset = env.pageserver.assert_log_contains(
+            ".*INFO request\\{method=PUT path=/v1/tenant/[0-9a-f]{32}/timeline/[0-9a-f]{32}/detach_ancestor .*\\}: Handling request",
+        )
+        return offset
 
     def delete_detached():
         return http.timeline_delete(env.initial_tenant, detached)
@@ -1249,7 +1260,18 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
         with ThreadPoolExecutor(max_workers=1) as pool:
             detach = pool.submit(detach_and_get_stuck)
 
-            wait_until(10, 1.0, pausepoint_hit)
+            offset = wait_until(10, 1.0, request_processing_noted_in_log)
+
+            # make this named fn tor more clear failure test output logging
+            def pausepoint_hit_with_gc_paused() -> LogCursor:
+                env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+                _, at = env.pageserver.assert_log_contains(
+                    ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+                    offset,
+                )
+                return at
+
+            offset = wait_until(10, 1.0, pausepoint_hit_with_gc_paused)
 
             delete_detached()
 
@@ -1267,6 +1289,11 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
             )
     finally:
         http.configure_failpoints((failpoint, "off"))
+
+    # make sure gc has been unblocked
+    time.sleep(2)
+
+    env.pageserver.assert_log_contains(".* gc_loop.*: 1 timelines need GC", offset)
 
 
 # TODO:
