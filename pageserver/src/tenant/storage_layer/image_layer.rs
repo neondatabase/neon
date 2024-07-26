@@ -859,7 +859,7 @@ impl ImageLayerWriterInner {
         // Calculate compression ratio
         let compressed_size = self.blob_writer.size() - PAGE_SZ as u64; // Subtract PAGE_SZ for header
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES.inc_by(self.uncompressed_bytes);
-        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_ELIGIBLE
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED
             .inc_by(self.uncompressed_bytes_eligible);
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
         crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);

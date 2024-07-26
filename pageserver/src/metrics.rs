@@ -618,9 +618,9 @@ pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES: Lazy<IntCounter> = Lazy::new(||
     .expect("failed to define a metric")
 });
 
-pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES_ELIGIBLE: Lazy<IntCounter> = Lazy::new(|| {
+pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_compression_image_in_bytes_large",
+        "pageserver_compression_image_in_bytes_considered",
         "Size of potentially compressible data written into image layers before compression"
     )
     .expect("failed to define a metric")
@@ -628,7 +628,7 @@ pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES_ELIGIBLE: Lazy<IntCounter> = Laz
 
 pub(crate) static COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
-        "pageserver_compression_image_in_bytes_large",
+        "pageserver_compression_image_in_bytes_chosen",
         "Size of data whose compressed form was written into image layers"
     )
     .expect("failed to define a metric")
