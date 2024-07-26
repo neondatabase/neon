@@ -494,48 +494,48 @@ RUN wget https://github.com/citusdata/pg_cron/archive/refs/tags/v1.6.0.tar.gz -O
 # compile rdkit extension
 #
 #########################################################################################
-FROM build-deps AS rdkit-pg-build
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# FROM build-deps AS rdkit-pg-build
+# COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN apt-get update && \
-    apt-get install -y \
-        cmake \
-        libboost-iostreams1.74-dev \
-        libboost-regex1.74-dev \
-        libboost-serialization1.74-dev \
-        libboost-system1.74-dev \
-        libeigen3-dev
+# RUN apt-get update && \
+#     apt-get install -y \
+#         cmake \
+#         libboost-iostreams1.74-dev \
+#         libboost-regex1.74-dev \
+#         libboost-serialization1.74-dev \
+#         libboost-system1.74-dev \
+#         libeigen3-dev
 
-ENV PATH "/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
-RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_3.tar.gz -O rdkit.tar.gz && \
-    echo "bdbf9a2e6988526bfeb8c56ce3cdfe2998d60ac289078e2215374288185e8c8d rdkit.tar.gz" | sha256sum --check && \
-    mkdir rdkit-src && cd rdkit-src && tar xzf ../rdkit.tar.gz --strip-components=1 -C . && \
-    cmake \
-        -D RDK_BUILD_CAIRO_SUPPORT=OFF \
-        -D RDK_BUILD_INCHI_SUPPORT=ON \
-        -D RDK_BUILD_AVALON_SUPPORT=ON \
-        -D RDK_BUILD_PYTHON_WRAPPERS=OFF \
-        -D RDK_BUILD_DESCRIPTORS3D=OFF \
-        -D RDK_BUILD_FREESASA_SUPPORT=OFF \
-        -D RDK_BUILD_COORDGEN_SUPPORT=ON \
-        -D RDK_BUILD_MOLINTERCHANGE_SUPPORT=OFF \
-        -D RDK_BUILD_YAEHMOP_SUPPORT=OFF \
-        -D RDK_BUILD_STRUCTCHECKER_SUPPORT=OFF \
-        -D RDK_USE_URF=OFF \
-        -D RDK_BUILD_PGSQL=ON \
-        -D RDK_PGSQL_STATIC=ON \
-        -D PostgreSQL_CONFIG=pg_config \
-        -D PostgreSQL_INCLUDE_DIR=`pg_config --includedir` \
-        -D PostgreSQL_TYPE_INCLUDE_DIR=`pg_config --includedir-server` \
-        -D PostgreSQL_LIBRARY_DIR=`pg_config --libdir` \
-        -D RDK_INSTALL_INTREE=OFF \
-        -D RDK_INSTALL_COMIC_FONTS=OFF \
-        -D RDK_BUILD_FREETYPE_SUPPORT=OFF \
-        -D CMAKE_BUILD_TYPE=Release \
-        . && \
-    make -j $(getconf _NPROCESSORS_ONLN) && \
-    make -j $(getconf _NPROCESSORS_ONLN) install && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/rdkit.control
+# ENV PATH "/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
+# RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_3.tar.gz -O rdkit.tar.gz && \
+#     echo "bdbf9a2e6988526bfeb8c56ce3cdfe2998d60ac289078e2215374288185e8c8d rdkit.tar.gz" | sha256sum --check && \
+#     mkdir rdkit-src && cd rdkit-src && tar xzf ../rdkit.tar.gz --strip-components=1 -C . && \
+#     cmake \
+#         -D RDK_BUILD_CAIRO_SUPPORT=OFF \
+#         -D RDK_BUILD_INCHI_SUPPORT=ON \
+#         -D RDK_BUILD_AVALON_SUPPORT=ON \
+#         -D RDK_BUILD_PYTHON_WRAPPERS=OFF \
+#         -D RDK_BUILD_DESCRIPTORS3D=OFF \
+#         -D RDK_BUILD_FREESASA_SUPPORT=OFF \
+#         -D RDK_BUILD_COORDGEN_SUPPORT=ON \
+#         -D RDK_BUILD_MOLINTERCHANGE_SUPPORT=OFF \
+#         -D RDK_BUILD_YAEHMOP_SUPPORT=OFF \
+#         -D RDK_BUILD_STRUCTCHECKER_SUPPORT=OFF \
+#         -D RDK_USE_URF=OFF \
+#         -D RDK_BUILD_PGSQL=ON \
+#         -D RDK_PGSQL_STATIC=ON \
+#         -D PostgreSQL_CONFIG=pg_config \
+#         -D PostgreSQL_INCLUDE_DIR=`pg_config --includedir` \
+#         -D PostgreSQL_TYPE_INCLUDE_DIR=`pg_config --includedir-server` \
+#         -D PostgreSQL_LIBRARY_DIR=`pg_config --libdir` \
+#         -D RDK_INSTALL_INTREE=OFF \
+#         -D RDK_INSTALL_COMIC_FONTS=OFF \
+#         -D RDK_BUILD_FREETYPE_SUPPORT=OFF \
+#         -D CMAKE_BUILD_TYPE=Release \
+#         . && \
+#     make -j $(getconf _NPROCESSORS_ONLN) && \
+#     make -j $(getconf _NPROCESSORS_ONLN) install && \
+#     echo 'trusted = true' >> /usr/local/pgsql/share/extension/rdkit.control
 
 #########################################################################################
 #
@@ -667,15 +667,16 @@ USER root
 FROM rust-extensions-build AS pg-neon-ai-pg-build
 ARG PG_VERSION
 
-RUN apt-get update && apt-get install -y python3 && \
+RUN apt-get update && apt-get install -y python3 python3-pip && \
+    python3 -m pip install cmake && \
     wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
-    ./build.sh --config Release --parallel --compile_no_warning_as_error --skip_submodule_sync && \
+    ./build.sh --config Release --parallel --skip_submodule_sync --allow_running_as_root && \
     cd .. && \
     wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz && \
     mkdir pg_neon_ai-src && cd pg_neon_ai-src && tar xzf ../pg_neon_ai.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
-    ORT_LIB_LOCATION=../onnxruntime-src/build/Linux cargo pgrx install --release && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/neon_ai.control
 
 
@@ -747,15 +748,15 @@ RUN wget https://github.com/kelvich/pg_tiktoken/archive/26806147b17b60763039c6a6
 #
 #########################################################################################
 
-FROM rust-extensions-build AS pg-pgx-ulid-build
-ARG PG_VERSION
+# FROM rust-extensions-build AS pg-pgx-ulid-build
+# ARG PG_VERSION
 
-RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.5.tar.gz -O pgx_ulid.tar.gz && \
-    echo "9d1659a2da65af0133d5451c454de31b37364e3502087dadf579f790bc8bef17 pgx_ulid.tar.gz" | sha256sum --check && \
-    mkdir pgx_ulid-src && cd pgx_ulid-src && tar xzf ../pgx_ulid.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx       = "^0.11.2"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
-    cargo pgrx install --release && \
-    echo "trusted = true" >> /usr/local/pgsql/share/extension/ulid.control
+# RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.5.tar.gz -O pgx_ulid.tar.gz && \
+#     echo "9d1659a2da65af0133d5451c454de31b37364e3502087dadf579f790bc8bef17 pgx_ulid.tar.gz" | sha256sum --check && \
+#     mkdir pgx_ulid-src && cd pgx_ulid-src && tar xzf ../pgx_ulid.tar.gz --strip-components=1 -C . && \
+#     sed -i 's/pgrx       = "^0.11.2"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+#     cargo pgrx install --release && \
+#     echo "trusted = true" >> /usr/local/pgsql/share/extension/ulid.control
 
 #########################################################################################
 #
@@ -841,8 +842,8 @@ COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+#COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
+#COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-semver-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -963,7 +964,7 @@ COPY patches/pg_hintplan.patch /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
 COPY patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
-COPY --from=rdkit-pg-build /rdkit.tar.gz /ext-src
+#COPY --from=rdkit-pg-build /rdkit.tar.gz /ext-src
 COPY --from=pg-uuidv7-pg-build /pg_uuidv7.tar.gz /ext-src
 COPY --from=pg-roaringbitmap-pg-build /pg_roaringbitmap.tar.gz /ext-src
 COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
