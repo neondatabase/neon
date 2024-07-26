@@ -1163,65 +1163,74 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     # tracked offset in the pageserver log which is at least at the most recent activation
     offset = None
 
-    def another_detach():
+    def try_detach():
         with pytest.raises(
-                PageserverApiException,
-                match=".*failed to reparent all candidate timelines, please retry",
-            ) as exc:
-                http.detach_ancestor(env.initial_tenant, detached)
+            PageserverApiException,
+            match=".*failed to reparent all candidate timelines, please retry",
+        ) as exc:
+            http.detach_ancestor(env.initial_tenant, detached)
         assert exc.value.status_code == 500
 
-    for nth_round in range(3):
-        another_detach()
+    # first round -- do more checking to make sure the gc gets paused
+    try_detach()
+
+    assert (
+        http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
+    ), "first round should had detached 'detached'"
+
+    reparented, not_reparented = reparenting_progress(timelines)
+    assert reparented == 1
+
+    time.sleep(2)
+    _, offset = env.pageserver.assert_log_contains(
+        ".*INFO request\\{method=PUT path=/v1/tenant/[0-9a-f]{32}/timeline/[0-9a-f]{32}/detach_ancestor .*\\}: Handling request",
+        offset,
+    )
+    _, offset = env.pageserver.assert_log_contains(".*: attach finished, activating", offset)
+    _, offset = env.pageserver.assert_log_contains(
+        ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+        offset,
+    )
+    metric = remote_storage_copy_requests()
+    assert metric != 0
+    # make sure the gc blocking is persistent over a restart
+    env.pageserver.restart()
+    env.pageserver.quiesce_tenants()
+    time.sleep(2)
+    _, offset = env.pageserver.assert_log_contains(".*: attach finished, activating", offset)
+    assert env.pageserver.log_contains(".* gc_loop.*: [0-9] timelines need GC", offset) is None
+    _, offset = env.pageserver.assert_log_contains(
+        ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+        offset,
+    )
+    # restore failpoint for the next reparented
+    http.configure_failpoints(("timeline-detach-ancestor::allow_one_reparented", "return"))
+
+    reparented_before = reparented
+
+    # do two more rounds
+    for _ in range(2):
+        try_detach()
 
         assert (
             http.timeline_detail(env.initial_tenant, detached)["ancestor_timeline_id"] is None
         ), "first round should had detached 'detached'"
 
         reparented, not_reparented = reparenting_progress(timelines)
-        assert reparented == nth_round + 1
+        assert reparented == reparented_before + 1
+        reparented_before = reparented
 
-        if nth_round == 0:
-            time.sleep(2)
-            _, offset = env.pageserver.assert_log_contains(
-                ".*INFO request\\{method=PUT path=/v1/tenant/[0-9a-f]{32}/timeline/[0-9a-f]{32}/detach_ancestor .*\\}: Handling request",
-                offset,
-            )
-            _, offset = env.pageserver.assert_log_contains(
-                ".*: attach finished, activating", offset
-            )
-            _, offset = env.pageserver.assert_log_contains(
-                ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
-                offset,
-            )
-            metric = remote_storage_copy_requests()
-            assert metric != 0
-            # make sure the gc blocking is persistent
-            env.pageserver.restart()
-            env.pageserver.quiesce_tenants()
-            time.sleep(2)
-            _, offset = env.pageserver.assert_log_contains(
-                ".*: attach finished, activating", offset
-            )
-            _, offset = env.pageserver.assert_log_contains(
-                ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
-                offset,
-            )
-            # restore failpoint for the next reparented
-            http.configure_failpoints(("timeline-detach-ancestor::allow_one_reparented", "return"))
-        else:
-            _, offset = env.pageserver.assert_log_contains(
-                ".*: attach finished, activating", offset
-            )
-            metric = remote_storage_copy_requests()
-            assert metric == 0, "copies happen in the first round"
+        _, offset = env.pageserver.assert_log_contains(".*: attach finished, activating", offset)
+        metric = remote_storage_copy_requests()
+        assert metric == 0, "copies happen in the first round"
 
     assert offset is not None
     assert len(not_reparented) == 1
 
     http.configure_failpoints(("timeline-detach-ancestor::complete_before_uploading", "return"))
 
-    # almost final round, the failpoint is hit no longer, and everything completes
+    # almost final round, the failpoint is hit no longer as there is only one reparented and one always gets to succeed.
+    # the tenant is restarted once more, but we fail during completing.
     with pytest.raises(
         PageserverApiException, match=".* timeline-detach-ancestor::complete_before_uploading"
     ) as exc:
