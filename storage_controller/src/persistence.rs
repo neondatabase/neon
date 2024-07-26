@@ -784,9 +784,6 @@ impl Persistence {
                             .or(metadata_health::last_scrubbed_at.lt(earlier)),
                     );
 
-                let sql = diesel::debug_query::<diesel::pg::Pg, _>(&query);
-                tracing::info!("Executed query: {}", sql);
-
                 let res = query.load::<MetadataHealthNullable>(conn)?;
 
                 Ok(res)
