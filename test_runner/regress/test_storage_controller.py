@@ -1830,7 +1830,7 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
 
     # Validate that the storcon is not replying to the usual requests
     # once it has stepped down.
-    with pytest.raises(StorageControllerApiException):
+    with pytest.raises(StorageControllerApiException, match="stepped_down"):
         env.storage_controller.tenant_list()
 
     # Validate that we can step down multiple times and the observed state
