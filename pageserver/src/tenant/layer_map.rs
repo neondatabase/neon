@@ -53,7 +53,7 @@ use crate::tenant::storage_layer::InMemoryLayer;
 use anyhow::Result;
 use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
 use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
 use std::sync::Arc;
@@ -943,36 +943,37 @@ impl LayerMap {
             Layer(&'a Arc<PersistentLayerDesc>),
         }
 
-        let mut items: Vec<Item<'a>> = Vec::with_capacity(self.historic.len() + read_points.len());
-        items.extend(self.iter_historic_layers().map(Item::Layer));
-        items.extend(
-            read_points
-                .into_iter()
-                .map(|rp| Item::ReadPoint { lsn: rp }),
-        );
+        let mut items: BTreeMap<_, Item<'a>> = BTreeMap::new();
+
+        //let mut items: Vec<Item<'a>> = Vec::with_capacity(self.historic.len() + read_points.len());
 
         // Ordering: we want to iterate like this:
         // 1. Highest LSNs first
         // 2. Consider ReadPoints before image layers if they're at the same LSN
-        items.sort_by_key(|item| {
-            std::cmp::Reverse(match item {
-                Item::ReadPoint { lsn } => (*lsn, 0),
-                Item::Layer(layer) => {
-                    if layer.is_delta() {
-                        (layer.get_lsn_range().end, 1)
+        items.extend(self.iter_historic_layers().map(|l| {
+            (
+                {
+                    if l.is_delta() {
+                        (l.get_lsn_range().end, 1)
                     } else {
-                        (layer.image_layer_lsn(), 2)
+                        (l.image_layer_lsn(), 2)
                     }
-                }
-            })
-        });
+                },
+                Item::Layer(l),
+            )
+        }));
+        items.extend(
+            read_points
+                .into_iter()
+                .map(|lsn| ((lsn, 0), Item::ReadPoint { lsn })),
+        );
 
         let mut results: Vec<(&'a Arc<PersistentLayerDesc>, LayerVisibilityHint)> =
             Vec::with_capacity(self.historic.len());
 
         let mut maybe_covered_deltas: Vec<&'a Arc<PersistentLayerDesc>> = Vec::new();
 
-        for item in items {
+        for item in items.values() {
             let (reached_lsn, is_readpoint) = match &item {
                 Item::ReadPoint { lsn } => (lsn, true),
                 Item::Layer(layer) => (&layer.lsn_range.start, false),
