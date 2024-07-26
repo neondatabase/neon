@@ -218,7 +218,7 @@ pub(super) async fn prepare(
 
     let attempt = start_new_attempt(detached, tenant).await?;
 
-    utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable");
+    utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking-pausable");
 
     fail::fail_point!(
         "timeline-detach-ancestor::before_starting_after_locking",

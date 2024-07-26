@@ -705,7 +705,7 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
     log.info(f"stuck pageserver is id={stuck.id}")
     stuck_http = stuck.http_client()
     stuck_http.configure_failpoints(
-        ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause")
+        ("timeline-detach-ancestor::before_starting_after_locking-pausable", "pause")
     )
 
     restarted = pageservers[int(shards[1]["node_id"])]
@@ -716,7 +716,7 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
     restarted_http = restarted.http_client()
     restarted_http.configure_failpoints(
         [
-            ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause"),
+            ("timeline-detach-ancestor::before_starting_after_locking-pausable", "pause"),
         ]
     )
 
@@ -734,7 +734,7 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         target.detach_ancestor(env.initial_tenant, branch_timeline_id, timeout=1)
 
     stuck_http.configure_failpoints(
-        ("timeline-detach-ancestor::before_starting_after_locking_pausable", "off")
+        ("timeline-detach-ancestor::before_starting_after_locking-pausable", "off")
     )
 
     barrier = threading.Barrier(2)
@@ -753,7 +753,7 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         # we have 10s, lets use 1/2 of that to help the shutdown start
         time.sleep(5)
         restarted_http.configure_failpoints(
-            ("timeline-detach-ancestor::before_starting_after_locking_pausable", "off")
+            ("timeline-detach-ancestor::before_starting_after_locking-pausable", "off")
         )
         fut.result()
 
@@ -833,7 +833,7 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
 
     detached_timeline = env.neon_cli.create_branch("detached soon", "main")
 
-    pausepoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
+    pausepoint = "timeline-detach-ancestor::before_starting_after_locking-pausable"
 
     env.storage_controller.reconcile_until_idle()
     shards = env.storage_controller.locate(env.initial_tenant)
@@ -987,7 +987,7 @@ def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnv
         "detached_branch", ancestor_branch_name="main", ancestor_start_lsn=detached_branch_lsn
     )
 
-    pausepoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
+    pausepoint = "timeline-detach-ancestor::before_starting_after_locking-pausable"
 
     stuck = pageservers[int(shards[0]["node_id"])]
     stuck_http = stuck.http_client().without_status_retrying()
