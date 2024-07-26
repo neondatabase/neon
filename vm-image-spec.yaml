@@ -404,7 +404,7 @@ files:
             x::text as duration_seconds,
             neon.approximate_working_set_size_seconds(x) as size
           from
-            (select generate_series * 60 as x from generate_series(1, 60));
+            (select generate_series * 60 as x from generate_series(1, 60)) as t (x);
 build: |
   # Build cgroup-tools
   #
