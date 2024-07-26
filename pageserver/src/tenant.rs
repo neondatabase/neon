@@ -1249,39 +1249,6 @@ impl Tenant {
             };
             v?;
         }
-        /*
-        let is_archived = timeline.is_archived();
-
-        let upload_needed = match (is_archived, state) {
-            (Some(true), TimelineArchivalState::Archived)
-            | (Some(false), TimelineArchivalState::Unarchived) => {
-                // Nothing to do
-                tracing::info!("intended state matches present state");
-                None
-            }
-            (Some(false), TimelineArchivalState::Archived) => Some(Some(Utc::now().naive_utc())),
-            (Some(true), TimelineArchivalState::Unarchived) => Some(None),
-            (None, _) => bail!("timeline not ready yet, please retry"),
-        };
-
-        if let Some(intended_archived_at) = upload_needed {
-            // We have to schedule this into the upload queue with the other operations,
-            // as if we side-step the upload queue and do it immediately, later operations
-            // without the `archived_at` field might override the file.
-            // Deletion addresses this by shutting down the upload queue. We cannot afford
-            // this here.
-            timeline
-                .remote_client
-                .schedule_index_upload_for_archived_at_update(intended_archived_at)?;
-            const MAX_WAIT: Duration = Duration::from_secs(10);
-            let Ok(v) =
-                tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
-            else {
-                tracing::warn!("reached timeout for waiting on upload queue");
-                bail!("reached timeout for upload queue flush");
-            };
-            v?;
-        } */
         Ok(())
     }
 
