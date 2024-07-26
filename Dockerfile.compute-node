@@ -667,10 +667,14 @@ USER root
 FROM rust-extensions-build AS pg-neon-ai-pg-build
 ARG PG_VERSION
 
-RUN wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz && \
+RUN wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
+    mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
+    ./build.sh --config Release --parallel --compile_no_warning_as_error --skip_submodule_sync && \
+    cd .. && \
+    wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz && \
     mkdir pg_neon_ai-src && cd pg_neon_ai-src && tar xzf ../pg_neon_ai.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "0.10.2"/pgrx = { version = "0.10.2", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
-    cargo pgrx install --release && \
+    ORT_LIB_LOCATION=../onnxruntime-src/build/Linux cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/neon_ai.control
 
 
