@@ -31,7 +31,7 @@ pub const SMGR_TRUNCATE_FSM: u32 = 0x0004;
 //
 
 // Assumes 8 byte alignment
-const SIZEOF_PAGE_HEADER_DATA: usize = std::mem::size_of::<PageHeaderData>();
+const SIZEOF_PAGE_HEADER_DATA: usize = size_of::<PageHeaderData>();
 pub const MAXALIGN_SIZE_OF_PAGE_HEADER_DATA: usize = (SIZEOF_PAGE_HEADER_DATA + 7) & !7;
 
 //
@@ -191,7 +191,7 @@ pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;
 pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
 pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
-pub const SIZEOF_XLOGRECORD: u32 = std::mem::size_of::<XLogRecord>() as u32;
+pub const SIZEOF_XLOGRECORD: u32 = size_of::<XLogRecord>() as u32;
 
 //
 // from xlogrecord.h
