@@ -2636,6 +2636,19 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         return response.json()
 
+    def metadata_health_is_healthy(self, outdated_duration: str = "1h") -> bool:
+        """Metadata is healthy if there is no unhealthy or outdated health records."""
+
+        unhealthy = self.metadata_health_list_unhealthy()
+        outdated = self.metadata_health_list_outdated(outdated_duration)
+
+        healthy = (
+            len(unhealthy["unhealthy_tenant_shards"]) == 0 and len(outdated["health_records"]) == 0
+        )
+        if not healthy:
+            log.info(f"{unhealthy=}, {outdated=}")
+        return healthy
+
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):
             pairs = [config_strings]

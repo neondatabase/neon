@@ -1804,6 +1804,9 @@ def test_storage_controller_metadata_health(
 
     Phase 3:
     - A: Post unhealthy status.
+
+    Phase 4:
+    - Delete tenant A, metadata health status should be deleted as well.
     """
 
     def update_and_query_metadata_health(
@@ -1881,3 +1884,9 @@ def test_storage_controller_metadata_health(
     for t in tenant_a_shard_ids:
         assert str(t) in unhealthy
     assert len(outdated) == 0
+
+    # Phase 4: Delete A
+    env.storage_controller.pageserver_api().tenant_delete(env.initial_tenant)
+
+    # A's unhealthy metadata health status should be deleted as well.
+    assert env.storage_controller.metadata_health_is_healthy()
