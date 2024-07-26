@@ -191,7 +191,9 @@ def test_scrubber_physical_gc_ancestors(
             "checkpoint_distance": f"{1024 * 1024}",
             "compaction_threshold": "1",
             "compaction_target_size": f"{1024 * 1024}",
-            "image_creation_threshold": "2",
+            # Disable automatic creation of image layers, as future image layers can result in layers in S3 that
+            # aren't referenced by children, earlier than the test expects such layers to exist
+            "image_creation_threshold": "9999",
             "image_layer_creation_check_threshold": "0",
             # Disable background compaction, we will do it explicitly
             "compaction_period": "0s",
@@ -241,7 +243,7 @@ def test_scrubber_physical_gc_ancestors(
     workload.churn_rows(100)
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
-        ps.http_client().timeline_compact(shard, timeline_id)
+        ps.http_client().timeline_compact(shard, timeline_id, force_image_layer_creation=True)
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
     # We will use a min_age_secs=1 threshold for deletion, let it pass

@@ -149,10 +149,16 @@ pub enum ListingMode {
     NoDelimiter,
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub struct ListingObject {
+    pub key: RemotePath,
+    pub last_modified: SystemTime,
+}
+
 #[derive(Default)]
 pub struct Listing {
     pub prefixes: Vec<RemotePath>,
-    pub keys: Vec<RemotePath>,
+    pub keys: Vec<ListingObject>,
 }
 
 /// Storage (potentially remote) API to manage its state.
@@ -201,7 +207,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         let mut combined = stream.next().await.expect("At least one item required")?;
         while let Some(list) = stream.next().await {
             let list = list?;
-            combined.keys.extend_from_slice(&list.keys);
+            combined.keys.extend(list.keys.into_iter());
             combined.prefixes.extend_from_slice(&list.prefixes);
         }
         Ok(combined)

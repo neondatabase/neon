@@ -198,8 +198,8 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         # disable background compaction and GC. We invoke it manually when we want it to happen.
         "gc_period": "0s",
         "compaction_period": "0s",
-        # create image layers eagerly, so that GC can remove some layers
-        "image_creation_threshold": 1,
+        # Disable automatic creation of image layers, as we will create them explicitly when we want them
+        "image_creation_threshold": 9999,
         "image_layer_creation_check_threshold": 0,
     }
 
@@ -225,7 +225,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
 
     # Do a full image layer generation before splitting, so that when we compact after splitting
     # we should only see sizes decrease (from post-split drops/rewrites), not increase (from image layer generation)
-    env.get_tenant_pageserver(tenant_id).http_client().timeline_compact(
+    env.get_tenant_pageserver(tenant_id).http_client().timeline_checkpoint(
         tenant_id, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
     )
 

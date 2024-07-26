@@ -227,12 +227,6 @@ def test_forward_compatibility(
     )
 
     try:
-        # Previous version neon_local and pageserver are not aware
-        # of the new config.
-        # TODO: remove these once the previous version of neon local supports them
-        neon_env_builder.pageserver_get_impl = None
-        neon_env_builder.pageserver_validate_vectored_get = None
-
         neon_env_builder.num_safekeepers = 3
 
         # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).

@@ -330,20 +330,14 @@ impl Persistence {
     /// Ordering: call this _after_ deleting the tenant on pageservers, but _before_ dropping state for
     /// the tenant from memory on this server.
     pub(crate) async fn delete_tenant(&self, del_tenant_id: TenantId) -> DatabaseResult<()> {
-        use crate::schema::metadata_health;
-        use crate::schema::tenant_shards;
+        use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(
             DatabaseOperation::DeleteTenant,
             move |conn| -> DatabaseResult<()> {
-                diesel::delete(tenant_shards::table)
-                    .filter(tenant_shards::tenant_id.eq(del_tenant_id.to_string()))
+                // `metadata_health` status (if exists) is also deleted based on the cascade behavior.
+                diesel::delete(tenant_shards)
+                    .filter(tenant_id.eq(del_tenant_id.to_string()))
                     .execute(conn)?;
-
-                // Delete metadata health status as well
-                diesel::delete(metadata_health::table)
-                    .filter(metadata_health::tenant_id.eq(del_tenant_id.to_string()))
-                    .execute(conn)?;
-
                 Ok(())
             },
         )
@@ -693,24 +687,28 @@ impl Persistence {
     #[allow(dead_code)]
     pub(crate) async fn update_metadata_health_records(
         &self,
-        metadata_health_records: Vec<MetadataHealthPersistence>,
+        healthy_records: Vec<MetadataHealthPersistence>,
+        unhealthy_records: Vec<MetadataHealthPersistence>,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> DatabaseResult<()> {
         use crate::schema::metadata_health::dsl::*;
 
         self.with_measured_conn(
             DatabaseOperation::UpdateMetadataHealth,
             move |conn| -> DatabaseResult<_> {
-                for update in &metadata_health_records {
-                    diesel::insert_into(metadata_health)
-                        .values(update)
-                        .on_conflict((tenant_id, shard_number, shard_count))
-                        .do_update()
-                        .set((
-                            healthy.eq(update.healthy),
-                            last_scrubbed_at.eq(update.last_scrubbed_at),
-                        ))
-                        .execute(conn)?;
-                }
+                diesel::insert_into(metadata_health)
+                    .values(&healthy_records)
+                    .on_conflict((tenant_id, shard_number, shard_count))
+                    .do_update()
+                    .set((healthy.eq(true), last_scrubbed_at.eq(now)))
+                    .execute(conn)?;
+
+                diesel::insert_into(metadata_health)
+                    .values(&unhealthy_records)
+                    .on_conflict((tenant_id, shard_number, shard_count))
+                    .do_update()
+                    .set((healthy.eq(false), last_scrubbed_at.eq(now)))
+                    .execute(conn)?;
                 Ok(())
             },
         )
@@ -756,15 +754,7 @@ impl Persistence {
     pub(crate) async fn list_outdated_metadata_health_records(
         &self,
         earlier: chrono::DateTime<chrono::Utc>,
-    ) -> DatabaseResult<
-        Vec<(
-            String,
-            i32,
-            i32,
-            Option<bool>,
-            Option<chrono::DateTime<chrono::Utc>>,
-        )>,
-    > {
+    ) -> DatabaseResult<Vec<MetadataHealthNullable>> {
         use crate::schema::metadata_health;
         use crate::schema::tenant_shards;
 
@@ -794,16 +784,7 @@ impl Persistence {
                             .or(metadata_health::last_scrubbed_at.lt(earlier)),
                     );
 
-                let sql = diesel::debug_query::<diesel::pg::Pg, _>(&query);
-                tracing::info!("Executed query: {}", sql);
-
-                let res = query.load::<(
-                    String,
-                    i32,
-                    i32,
-                    Option<bool>,
-                    Option<chrono::DateTime<chrono::Utc>>,
-                )>(conn)?;
+                let res = query.load::<MetadataHealthNullable>(conn)?;
 
                 Ok(res)
             },
@@ -893,6 +874,21 @@ pub(crate) struct MetadataHealthPersistence {
 
     pub(crate) healthy: bool,
     pub(crate) last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Tenant metadata health status with optional health marker and timestamp.
+#[derive(Queryable, Selectable, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[diesel(table_name = crate::schema::metadata_health)]
+pub(crate) struct MetadataHealthNullable {
+    #[serde(default)]
+    pub(crate) tenant_id: String,
+    #[serde(default)]
+    pub(crate) shard_number: i32,
+    #[serde(default)]
+    pub(crate) shard_count: i32,
+
+    pub(crate) healthy: Option<bool>,
+    pub(crate) last_scrubbed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl MetadataHealthPersistence {

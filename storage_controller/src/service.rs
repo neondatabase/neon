@@ -15,6 +15,7 @@ use crate::{
     },
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
+    metrics::LeadershipStatusGroup,
     persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
@@ -81,6 +82,7 @@ use crate::{
         ReconcilerWaiter, TenantShard,
     },
 };
+use serde::{Deserialize, Serialize};
 
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -131,6 +133,24 @@ enum NodeOperations {
     Delete,
 }
 
+/// The leadership status for the storage controller process.
+/// Allowed transitions are:
+/// 1. Leader -> SteppedDown
+/// 2. Candidate -> Leader
+#[derive(Copy, Clone, strum_macros::Display, measured::FixedCardinalityLabel)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum LeadershipStatus {
+    /// This is the steady state where the storage controller can produce
+    /// side effects in the cluster.
+    Leader,
+    /// We've been notified to step down by another candidate. No reconciliations
+    /// take place in this state.
+    SteppedDown,
+    /// Initial state for a new storage controller instance. Will attempt to assume leadership.
+    #[allow(unused)]
+    Candidate,
+}
+
 pub const RECONCILER_CONCURRENCY_DEFAULT: usize = 128;
 
 // Depth of the channel used to enqueue shards for reconciliation when they can't do it immediately.
@@ -140,6 +160,8 @@ const MAX_DELAYED_RECONCILES: usize = 10000;
 
 // Top level state available to all HTTP handlers
 struct ServiceState {
+    leadership_status: LeadershipStatus,
+
     tenants: BTreeMap<TenantShardId, TenantShard>,
 
     nodes: Arc<HashMap<NodeId, Node>>,
@@ -202,7 +224,21 @@ impl ServiceState {
         scheduler: Scheduler,
         delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
     ) -> Self {
+        let status = &crate::metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_leadership_status;
+
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::Leader,
+            },
+            1,
+        );
+
         Self {
+            // TODO: Starting up as Leader is a transient state. Once we enable rolling
+            // upgrades on the k8s side, we should start up as Candidate.
+            leadership_status: LeadershipStatus::Leader,
             tenants,
             nodes: Arc::new(nodes),
             scheduler,
@@ -219,6 +255,37 @@ impl ServiceState {
         &mut Scheduler,
     ) {
         (&mut self.nodes, &mut self.tenants, &mut self.scheduler)
+    }
+
+    fn get_leadership_status(&self) -> LeadershipStatus {
+        self.leadership_status
+    }
+
+    fn step_down(&mut self) {
+        self.leadership_status = LeadershipStatus::SteppedDown;
+
+        let status = &crate::metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_leadership_status;
+
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::SteppedDown,
+            },
+            1,
+        );
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::Leader,
+            },
+            0,
+        );
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::Candidate,
+            },
+            0,
+        );
     }
 }
 
@@ -403,10 +470,29 @@ struct ShardUpdate {
     generation: Option<Generation>,
 }
 
+enum StopReconciliationsReason {
+    ShuttingDown,
+    SteppingDown,
+}
+
+impl std::fmt::Display for StopReconciliationsReason {
+    fn fmt(&self, writer: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let s = match self {
+            Self::ShuttingDown => "Shutting down",
+            Self::SteppingDown => "Stepping down",
+        };
+        write!(writer, "{}", s)
+    }
+}
+
 pub(crate) enum ReconcileResultRequest {
     ReconcileResult(ReconcileResult),
     Stop,
 }
+
+// TODO: move this into the storcon peer client when that gets added
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub(crate) struct GlobalObservedState(HashMap<TenantShardId, ObservedState>);
 
 impl Service {
     pub fn get_config(&self) -> &Config {
@@ -5603,17 +5689,22 @@ impl Service {
         Ok(std::cmp::max(waiter_count, reconciles_spawned))
     }
 
-    pub async fn shutdown(&self) {
+    async fn stop_reconciliations(&self, reason: StopReconciliationsReason) {
         // Cancel all on-going reconciles and wait for them to exit the gate.
-        tracing::info!("Shutting down: cancelling and waiting for in-flight reconciles");
+        tracing::info!("{reason}: cancelling and waiting for in-flight reconciles");
         self.reconcilers_cancel.cancel();
         self.reconcilers_gate.close().await;
 
         // Signal the background loop in [`Service::process_results`] to exit once
         // it has proccessed the results from all the reconciles we cancelled earlier.
-        tracing::info!("Shutting down: processing results from previously in-flight reconciles");
+        tracing::info!("{reason}: processing results from previously in-flight reconciles");
         self.result_tx.send(ReconcileResultRequest::Stop).ok();
         self.result_tx.closed().await;
+    }
+
+    pub async fn shutdown(&self) {
+        self.stop_reconciliations(StopReconciliationsReason::ShuttingDown)
+            .await;
 
         // Background tasks hold gate guards: this notifies them of the cancellation and
         // waits for them all to complete.
@@ -6010,25 +6101,27 @@ impl Service {
         update_req: MetadataHealthUpdateRequest,
     ) -> Result<(), ApiError> {
         let now = chrono::offset::Utc::now();
-        let persistence_records = {
+        let (healthy_records, unhealthy_records) = {
             let locked = self.inner.read().unwrap();
-            let healthy_it = update_req
+            let healthy_records = update_req
                 .healthy_tenant_shards
                 .into_iter()
                 // Retain only health records associated with tenant shards managed by storage controller.
                 .filter(|tenant_shard_id| locked.tenants.contains_key(tenant_shard_id))
-                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, true, now));
-            let unhealthy_it = update_req
+                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, true, now))
+                .collect();
+            let unhealthy_records = update_req
                 .unhealthy_tenant_shards
                 .into_iter()
                 .filter(|tenant_shard_id| locked.tenants.contains_key(tenant_shard_id))
-                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, false, now));
+                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, false, now))
+                .collect();
 
-            healthy_it.chain(unhealthy_it).collect()
+            (healthy_records, unhealthy_records)
         };
 
         self.persistence
-            .update_metadata_health_records(persistence_records)
+            .update_metadata_health_records(healthy_records, unhealthy_records, now)
             .await?;
         Ok(())
     }
@@ -6059,28 +6152,49 @@ impl Service {
             .list_outdated_metadata_health_records(earlier)
             .await?
             .into_iter()
-            .map(
-                |(tenant_id, shard_number, shard_count, healthy, last_scrubbed_at)| {
-                    if let Ok(tenant_id) = TenantId::from_str(tenant_id.as_str()) {
-                        let tenant_shard_id = TenantShardId {
-                            tenant_id,
-                            shard_number: ShardNumber(shard_number as u8),
-                            shard_count: ShardCount::new(shard_count as u8),
-                        };
+            .map(|record| {
+                if let Ok(tenant_id) = TenantId::from_str(record.tenant_id.as_str()) {
+                    let tenant_shard_id = TenantShardId {
+                        tenant_id,
+                        shard_number: ShardNumber(record.shard_number as u8),
+                        shard_count: ShardCount::new(record.shard_count as u8),
+                    };
 
-                        Ok(MetadataHealthRecord {
-                            tenant_shard_id,
-                            healthy,
-                            last_scrubbed_at,
-                        })
-                    } else {
-                        anyhow::bail!("Error parsing tenant id from db")
-                    }
-                },
-            )
+                    Ok(MetadataHealthRecord {
+                        tenant_shard_id,
+                        healthy: record.healthy,
+                        last_scrubbed_at: record.last_scrubbed_at,
+                    })
+                } else {
+                    anyhow::bail!("Error parsing tenant id from db")
+                }
+            })
             .try_collect()
             .map_err(ApiError::InternalServerError)?;
 
         Ok(result)
+    }
+
+    pub(crate) fn get_leadership_status(&self) -> LeadershipStatus {
+        self.inner.read().unwrap().get_leadership_status()
+    }
+
+    pub(crate) async fn step_down(&self) -> GlobalObservedState {
+        tracing::info!("Received step down request from peer");
+
+        self.inner.write().unwrap().step_down();
+        // TODO: would it make sense to have a time-out for this?
+        self.stop_reconciliations(StopReconciliationsReason::SteppingDown)
+            .await;
+
+        let mut global_observed = GlobalObservedState::default();
+        let locked = self.inner.read().unwrap();
+        for (tid, tenant_shard) in locked.tenants.iter() {
+            global_observed
+                .0
+                .insert(*tid, tenant_shard.observed.clone());
+        }
+
+        global_observed
     }
 }
