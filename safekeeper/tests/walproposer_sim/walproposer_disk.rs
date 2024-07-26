@@ -172,7 +172,7 @@ fn write_walrecord_to_disk(
     let mut freespace = insert_freespace(curr_ptr);
     let mut written: usize = 0;
 
-    assert!(freespace >= std::mem::size_of::<u32>());
+    assert!(freespace >= size_of::<u32>());
 
     for mut rdata in rdatas {
         while rdata.len() >= freespace {

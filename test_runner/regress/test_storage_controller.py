@@ -1890,3 +1890,78 @@ def test_storage_controller_metadata_health(
 
     # A's unhealthy metadata health status should be deleted as well.
     assert env.storage_controller.metadata_health_is_healthy()
+
+
+def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
+    """
+    Test the `/control/v1/step_down` storage controller API. Upon receiving such
+    a request, the storage controller cancels any on-going reconciles and replies
+    with 503 to all requests apart from `/control/v1/step_down`, `/status` and `/metrics`.
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tid = TenantId.generate()
+    tsid = str(TenantShardId(tid, shard_number=0, shard_count=0))
+    env.storage_controller.tenant_create(tid)
+
+    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.configure_failpoints(("sleep-on-reconcile-epilogue", "return(10000)"))
+
+    # Make a change to the tenant config to trigger a slow reconcile
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
+    virtual_ps_http.patch_tenant_config_client_side(tid, {"compaction_threshold": 5}, None)
+    env.storage_controller.allowed_errors.append(
+        ".*Accepted configuration update but reconciliation failed.*"
+    )
+
+    observed_state = env.storage_controller.step_down()
+    log.info(f"Storage controller stepped down with {observed_state=}")
+
+    # Validate that we waited for the slow reconcile to complete
+    # and updated the observed state in the storcon before stepping down.
+    node_id = str(env.pageserver.id)
+    assert tsid in observed_state
+    assert node_id in observed_state[tsid]["locations"]
+    assert "conf" in observed_state[tsid]["locations"][node_id]
+    assert "tenant_conf" in observed_state[tsid]["locations"][node_id]["conf"]
+
+    tenant_conf = observed_state[tsid]["locations"][node_id]["conf"]["tenant_conf"]
+    assert "compaction_threshold" in tenant_conf
+    assert tenant_conf["compaction_threshold"] == 5
+
+    # Validate that we propagated the change to the pageserver
+    ps_tenant_conf = env.pageserver.http_client().tenant_config(tid)
+    assert "compaction_threshold" in ps_tenant_conf.effective_config
+    assert ps_tenant_conf.effective_config["compaction_threshold"] == 5
+
+    # Validate that the storcon is not replying to the usual requests
+    # once it has stepped down.
+    with pytest.raises(StorageControllerApiException, match="stepped_down"):
+        env.storage_controller.tenant_list()
+
+    # Validate that we can step down multiple times and the observed state
+    # doesn't change.
+    observed_state_again = env.storage_controller.step_down()
+    assert observed_state == observed_state_again
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "leader"}
+        )
+        == 0
+    )
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "stepped_down"}
+        )
+        == 1
+    )
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "candidate"}
+        )
+        == 0
+    )

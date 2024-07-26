@@ -545,7 +545,10 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
                         &cancel,
                     )
                     .await?
-                    .keys;
+                    .keys
+                    .into_iter()
+                    .map(|o| o.key)
+                    .collect::<Vec<_>>();
                 if files.is_empty() {
                     return Ok(()); // done
                 }
@@ -613,7 +616,7 @@ pub async fn copy_s3_segments(
 
     let uploaded_segments = &files
         .iter()
-        .filter_map(|file| file.object_name().map(ToOwned::to_owned))
+        .filter_map(|o| o.key.object_name().map(ToOwned::to_owned))
         .collect::<HashSet<_>>();
 
     debug!(

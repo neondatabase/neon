@@ -44,8 +44,9 @@ use crate::{
     error::Cancelled,
     metrics::{start_counting_cancelled_wait, start_measuring_requests},
     support::PermitCarrying,
-    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, ListingObject, RemotePath,
+    RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use crate::metrics::AttemptOutcome;
@@ -548,9 +549,26 @@ impl RemoteStorage for S3Bucket {
                 let mut result = Listing::default();
 
                 for object in keys {
-                    let object_path = object.key().expect("response does not contain a key");
-                    let remote_path = self.s3_object_to_relative_path(object_path);
-                    result.keys.push(remote_path);
+                    let key = object.key().expect("response does not contain a key");
+                    let key = self.s3_object_to_relative_path(key);
+
+                    let last_modified = match object.last_modified.map(SystemTime::try_from) {
+                        Some(Ok(t)) => t,
+                        Some(Err(_)) => {
+                            tracing::warn!("Remote storage last_modified {:?} for {} is out of bounds",
+                                object.last_modified, key
+                        );
+                            SystemTime::now()
+                        },
+                        None => {
+                            SystemTime::now()
+                        }
+                    };
+
+                    result.keys.push(ListingObject{
+                        key,
+                        last_modified
+                    });
                     if let Some(mut mk) = max_keys {
                         assert!(mk > 0);
                         mk -= 1;

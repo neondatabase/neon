@@ -204,9 +204,11 @@ impl<'a> IteratorWrapper<'a> {
 /// A merge iterator over delta/image layer iterators. When duplicated records are
 /// found, the iterator will not perform any deduplication, and the caller should handle
 /// these situation. By saying duplicated records, there are many possibilities:
+///
 /// * Two same delta at the same LSN.
 /// * Two same image at the same LSN.
 /// * Delta/image at the same LSN where the image has already applied the delta.
+///
 /// The iterator will always put the image before the delta.
 pub struct MergeIterator<'a> {
     heap: BinaryHeap<IteratorWrapper<'a>>,

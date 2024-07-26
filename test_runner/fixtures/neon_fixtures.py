@@ -543,21 +543,6 @@ class NeonEnvBuilder:
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
             )
 
-        self.pageserver_get_vectored_impl: Optional[str] = None
-        if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
-            self.pageserver_get_vectored_impl = "vectored"
-            log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
-
-        self.pageserver_get_impl: Optional[str] = None
-        if os.getenv("PAGESERVER_GET_IMPL", "") == "vectored":
-            self.pageserver_get_impl = "vectored"
-            log.debug('Overriding pageserver get_impl config to "vectored"')
-
-        self.pageserver_validate_vectored_get: Optional[bool] = None
-        if (validate := os.getenv("PAGESERVER_VALIDATE_VEC_GET")) is not None:
-            self.pageserver_validate_vectored_get = bool(validate)
-            log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
-
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
         self.safekeeper_extra_opts = safekeeper_extra_opts
@@ -1158,12 +1143,6 @@ class NeonEnv:
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
-            if config.pageserver_get_vectored_impl is not None:
-                ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
-            if config.pageserver_get_impl is not None:
-                ps_cfg["get_impl"] = config.pageserver_get_impl
-            if config.pageserver_validate_vectored_get is not None:
-                ps_cfg["validate_vectored_get"] = config.pageserver_validate_vectored_get
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
                 tenant_config[
@@ -2648,6 +2627,17 @@ class NeonStorageController(MetricsGetter, LogUtils):
         if not healthy:
             log.info(f"{unhealthy=}, {outdated=}")
         return healthy
+
+    def step_down(self):
+        log.info("Asking storage controller to step down")
+        response = self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/step_down",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+        response.raise_for_status()
+        return response.json()
 
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):
