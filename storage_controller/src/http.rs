@@ -741,7 +741,7 @@ struct RequestMeta {
     at: Instant,
 }
 
-pub fn prologue_ledearship_status_check_middleware<
+pub fn prologue_leadership_status_check_middleware<
     B: hyper::body::HttpBody + Send + Sync + 'static,
 >() -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
@@ -868,7 +868,7 @@ pub fn make_router(
     build_info: BuildInfo,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router()
-        .middleware(prologue_ledearship_status_check_middleware())
+        .middleware(prologue_leadership_status_check_middleware())
         .middleware(prologue_metrics_middleware())
         .middleware(epilogue_metrics_middleware());
     if auth.is_some() {
