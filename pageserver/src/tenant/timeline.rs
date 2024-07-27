@@ -2001,6 +2001,11 @@ impl Timeline {
         self.current_state() == TimelineState::Active
     }
 
+    #[allow(unused)]
+    pub(crate) fn is_archived(&self) -> Option<bool> {
+        self.remote_client.is_archived()
+    }
+
     pub(crate) fn is_stopping(&self) -> bool {
         self.current_state() == TimelineState::Stopping
     }
