@@ -1441,6 +1441,7 @@ def neon_env_builder(
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
+    record_property: Callable[[str, object], None],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1480,9 +1481,7 @@ def neon_env_builder(
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,
         # like `test_output_dir` fixture for attaching all database files to Allure report.
-        request.node.user_properties.append(
-            ("preserve_database_files", builder.preserve_database_files)
-        )
+        record_property("preserve_database_files", builder.preserve_database_files)
 
 
 @dataclass
