@@ -94,6 +94,13 @@ impl Claims {
             scope,
             endpoint_id: None,
         }
+
+    pub fn new_for_endpoint(endpoint_id: Uuid) -> Self {
+        Self {
+            tenant_id: None,
+            endpoint_id: Some(endpoint_id),
+            scope: Scope::TenantEndpoint,
+        }
     }
 }
 
@@ -217,6 +224,25 @@ pub fn encode_from_key_file<S: Serialize>(claims: &S, pem: &Pem) -> Result<Strin
     Ok(encode(&Header::new(STORAGE_TOKEN_ALGORITHM), claims, &key)?)
 }
 
+/// Encode (i.e., sign) a Hadron auth token with the given claims and RSA private key. This is used
+/// by HCC to sign tokens when deploying compute or returning the compute spec. The resulting token
+/// is used by the compute node to authenticate with HCC and PS/SK.
+pub fn encode_hadron_token(claims: &Claims, key_data: &[u8]) -> Result<String> {
+    let key = EncodingKey::from_rsa_pem(key_data)?;
+    encode_hadron_token_with_encoding_key(claims, &key)
+}
+
+pub fn encode_hadron_token_with_encoding_key(
+    claims: &Claims,
+    encoding_key: &EncodingKey,
+) -> Result<String> {
+    Ok(encode(
+        &Header::new(HADRON_STORAGE_TOKEN_ALGORITHM),
+        claims,
+        encoding_key,
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -243,6 +269,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     fn test_decode() {
         let expected_claims = Claims {
             tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
+            endpoint_id: None,
             scope: Scope::Tenant,
             endpoint_id: None,
         };
@@ -272,6 +299,7 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
     fn test_encode() {
         let claims = Claims {
             tenant_id: Some(TenantId::from_str("3d1f7595b468230304e0b73cecbcb081").unwrap()),
+            endpoint_id: None,
             scope: Scope::Tenant,
             endpoint_id: None,
         };
@@ -286,5 +314,70 @@ MC4CAQAwBQYDK2VwBCIEID/Drmc1AA6U/znNRWpF3zEGegOATQxfkdWxitcOMsIH
         let decoded: TokenData<Claims> = auth.decode(&encoded).unwrap();
 
         assert_eq!(decoded.claims, claims);
+    }
+
+    #[test]
+    fn test_decode_with_key_from_certificate() {
+        // Tests that we can sign (encode) a token with a RSA private key and verify (decode) it with the
+        // corresponding public key extracted from a certificate.
+
+        // Generate two RSA key pairs and create self-signed certificates with it.
+        let key_pair_1 = rcgen::KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256).unwrap();
+        let key_pair_2 = rcgen::KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256).unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "eng-brickstore@databricks.com");
+        let cert_1 = params.clone().self_signed(&key_pair_1).unwrap();
+        let cert_2 = params.self_signed(&key_pair_2).unwrap();
+
+        // Write the certificates and keys to a temporary dir.
+        let dir = camino_tempfile::tempdir().unwrap();
+        {
+            fs::File::create(dir.path().join("cert_1.pem"))
+                .unwrap()
+                .write_all(cert_1.pem().as_bytes())
+                .unwrap();
+            fs::File::create(dir.path().join("key_1.pem"))
+                .unwrap()
+                .write_all(key_pair_1.serialize_pem().as_bytes())
+                .unwrap();
+            fs::File::create(dir.path().join("cert_2.pem"))
+                .unwrap()
+                .write_all(cert_2.pem().as_bytes())
+                .unwrap();
+            fs::File::create(dir.path().join("key_2.pem"))
+                .unwrap()
+                .write_all(key_pair_2.serialize_pem().as_bytes())
+                .unwrap();
+        }
+        // Instantiate a `JwtAuth` with the certificate path. The resulting `JwtAuth` should extract the RSA public
+        // keys out of the X509 certificates and use them as the decoding keys. Since we specified a directory, both
+        // X509 certificates will be loaded, but the private key files are skipped.
+        let auth = JwtAuth::from_cert_path(dir.path()).unwrap();
+        assert_eq!(auth.decoding_keys.len(), 2);
+
+        // Also create a `JwtAuth`, specifying a single certificate file for it to get the decoding key from.
+        let auth_cert_1 = JwtAuth::from_cert_path(&dir.path().join("cert_1.pem")).unwrap();
+        assert_eq!(auth_cert_1.decoding_keys.len(), 1);
+
+        // Encode tokens with some claims.
+        let claims = Claims {
+            tenant_id: Some(TenantId::generate()),
+            endpoint_id: None,
+            scope: Scope::Tenant,
+        };
+        let encoded_1 =
+            encode_hadron_token(&claims, key_pair_1.serialize_pem().as_bytes()).unwrap();
+        let encoded_2 =
+            encode_hadron_token(&claims, key_pair_2.serialize_pem().as_bytes()).unwrap();
+
+        // Verify that we can decode the token with matching decoding keys (decoding also verifies the signature).
+        assert_eq!(auth.decode(&encoded_1).unwrap().claims, claims);
+        assert_eq!(auth.decode(&encoded_2).unwrap().claims, claims);
+        assert_eq!(auth_cert_1.decode(&encoded_1).unwrap().claims, claims);
+
+        // Verify that the token cannot be decoded with a mismatched decode key.
+        assert!(auth_cert_1.decode(&encoded_2).is_err());
     }
 }

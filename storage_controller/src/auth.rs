@@ -9,7 +9,6 @@ pub fn check_permission(claims: &Claims, required_scope: Scope) -> Result<(), Au
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn check_endpoint_permission(claims: &Claims, endpoint_id: Uuid) -> Result<(), AuthError> {
     if claims.scope != Scope::TenantEndpoint {
         return Err(AuthError("Scope mismatch. Permission denied".into()));

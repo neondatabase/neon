@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
+use crate::hadron_token::HadronTokenGenerator;
 
 use anyhow::Context;
 use control_plane::storage_controller::{
@@ -515,6 +516,10 @@ pub struct Service {
     inner: Arc<std::sync::RwLock<ServiceState>>,
     config: Config,
     persistence: Arc<Persistence>,
+
+    // HadronTokenGenerator to generate (sign) JWTs during compute deployment and compute-spec generation.
+    token_generator: Option<HadronTokenGenerator>,
+
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
@@ -1656,7 +1661,7 @@ impl Service {
         }
     }
 
-    pub async fn spawn(config: Config, persistence: Arc<Persistence>) -> anyhow::Result<Arc<Self>> {
+    pub async fn spawn(config: Config, persistence: Arc<Persistence>, token_generator: Option<HadronTokenGenerator>) -> anyhow::Result<Arc<Self>> {
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
         let (abort_tx, abort_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -1913,6 +1918,7 @@ impl Service {
             ))),
             config: config.clone(),
             persistence,
+            token_generator,
             compute_hook: Arc::new(ComputeHook::new(config.clone())?),
             result_tx,
             heartbeater_ps,

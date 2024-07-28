@@ -1403,6 +1403,12 @@ def test_storage_controller_s3_time_travel_recovery(
     env.storage_controller.consistency_check()
 
 
+@pytest.mark.skip(
+    reason="""
+    [BRC-1269, BRC-1270] Hadron currently uses network segmentation to prevent all storage controller (non-HCC) HTTP APIs from being
+    accessed from untrusted networks, so auth is currently permenantly disabled for all of these APIs in storage controller code.
+    """
+)
 def test_storage_controller_auth(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.auth_enabled = True
     env = neon_env_builder.init_start()

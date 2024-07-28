@@ -73,7 +73,7 @@ impl PageServerNode {
                 {
                     match conf.http_auth_type {
                         AuthType::Trust => None,
-                        AuthType::NeonJWT => Some(
+                        AuthType::NeonJWT | AuthType::HadronJWT => Some(
                             env.generate_auth_token(&Claims::new(None, Scope::PageServerApi))
                                 .unwrap(),
                         ),
@@ -117,6 +117,9 @@ impl PageServerNode {
 
         // Storage controller uses the same auth as pageserver: if JWT is enabled
         // for us, we will also need it to talk to them.
+        // Note: In Hadron the "control plane" is HCC. HCC does not require a token on the trusted port PS connects
+        // to, so we do not need to set any tokens when using HadronJWT. In the future we may consider using mTLS
+        // instead of JWT for HTTP auth.
         if matches!(conf.http_auth_type, AuthType::NeonJWT) {
             let jwt_token = self
                 .env

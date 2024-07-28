@@ -18,7 +18,7 @@ use postgres_backend::AuthType;
 use reqwest::{Certificate, Url};
 use safekeeper_api::PgMajorVersion;
 use serde::{Deserialize, Serialize};
-use utils::auth::encode_from_key_file;
+use utils::auth::{encode_from_key_file, Claims, encode_hadron_token};
 use utils::id::{NodeId, TenantId, TenantTimelineId, TimelineId};
 
 use crate::broker::StorageBroker;
@@ -60,6 +60,9 @@ pub struct LocalEnv {
     // --tenant_id is not explicitly specified.
     pub default_tenant_id: Option<TenantId>,
 
+    // The type of tokens to use for authentication in the test environment. Determines
+    // the type of key pairs and tokens generated in the test.
+    pub token_auth_type: AuthType,
     // used to issue tokens during e.g pg start
     pub private_key_path: PathBuf,
     /// Path to environment's public key
@@ -105,6 +108,7 @@ pub struct OnDiskConfig {
     pub pg_distrib_dir: PathBuf,
     pub neon_distrib_dir: PathBuf,
     pub default_tenant_id: Option<TenantId>,
+    pub token_auth_type: Option<AuthType>,
     pub private_key_path: PathBuf,
     pub public_key_path: PathBuf,
     pub broker: NeonBroker,
@@ -153,6 +157,7 @@ pub struct NeonLocalInitConf {
     pub control_plane_api: Option<Url>,
     pub control_plane_hooks_api: Option<Url>,
     pub generate_local_ssl_certs: bool,
+    pub auth_token_type: AuthType,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -374,7 +379,7 @@ pub struct SafekeeperConf {
     pub sync: bool,
     pub remote_storage: Option<String>,
     pub backup_threads: Option<u32>,
-    pub auth_enabled: bool,
+    pub auth_type: AuthType,
     pub listen_addr: Option<String>,
 }
 
@@ -389,7 +394,7 @@ impl Default for SafekeeperConf {
             sync: true,
             remote_storage: None,
             backup_threads: None,
-            auth_enabled: false,
+            auth_type: AuthType::Trust,
             listen_addr: None,
         }
     }
@@ -663,6 +668,7 @@ impl LocalEnv {
                 pg_distrib_dir,
                 neon_distrib_dir,
                 default_tenant_id,
+                token_auth_type,
                 private_key_path,
                 public_key_path,
                 broker,
@@ -681,6 +687,7 @@ impl LocalEnv {
                 pg_distrib_dir,
                 neon_distrib_dir,
                 default_tenant_id,
+                token_auth_type: token_auth_type.unwrap_or(AuthType::NeonJWT),
                 private_key_path,
                 public_key_path,
                 broker,
@@ -796,6 +803,7 @@ impl LocalEnv {
                 pg_distrib_dir: self.pg_distrib_dir.clone(),
                 neon_distrib_dir: self.neon_distrib_dir.clone(),
                 default_tenant_id: self.default_tenant_id,
+                token_auth_type: Some(self.token_auth_type),
                 private_key_path: self.private_key_path.clone(),
                 public_key_path: self.public_key_path.clone(),
                 broker: self.broker.clone(),
@@ -825,8 +833,13 @@ impl LocalEnv {
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token<S: Serialize>(&self, claims: &S) -> anyhow::Result<String> {
-        let key = self.read_private_key()?;
-        encode_from_key_file(claims, &key)
+        let private_key_path = self.get_private_key_path();
+        let key_data = fs::read(private_key_path)?;
+        match self.token_auth_type {
+            AuthType::NeonJWT => encode_from_key_file(claims, &key_data),
+            AuthType::HadronJWT => encode_hadron_token(claims, &key_data),
+            _ => panic!("unsupported token auth type {:?}", self.token_auth_type),
+        }
     }
 
     /// Get the path to the private key.
@@ -915,6 +928,7 @@ impl LocalEnv {
             generate_local_ssl_certs,
             control_plane_hooks_api,
             endpoint_storage,
+            auth_token_type,
         } = conf;
 
         // Find postgres binaries.
@@ -943,6 +957,7 @@ impl LocalEnv {
         generate_auth_keys(
             base_path.join("auth_private_key.pem").as_path(),
             base_path.join("auth_public_key.pem").as_path(),
+            auth_token_type,
         )
         .context("generate auth keys")?;
         let private_key_path = PathBuf::from("auth_private_key.pem");
@@ -956,6 +971,7 @@ impl LocalEnv {
             pg_distrib_dir,
             neon_distrib_dir,
             default_tenant_id: Some(default_tenant_id),
+            token_auth_type: auth_token_type,
             private_key_path,
             public_key_path,
             broker,
@@ -1035,39 +1051,63 @@ pub fn base_path() -> PathBuf {
 }
 
 /// Generate a public/private key pair for JWT authentication
-fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow::Result<()> {
-    // Generate the key pair
-    //
-    // openssl genpkey -algorithm ed25519 -out auth_private_key.pem
-    let keygen_output = Command::new("openssl")
-        .arg("genpkey")
-        .args(["-algorithm", "ed25519"])
-        .args(["-out", private_key_path.to_str().unwrap()])
-        .stdout(Stdio::null())
-        .output()
-        .context("failed to generate auth private key")?;
-    if !keygen_output.status.success() {
-        bail!(
-            "openssl failed: '{}'",
-            String::from_utf8_lossy(&keygen_output.stderr)
-        );
-    }
-
-    // Extract the public key from the private key file
-    //
-    // openssl pkey -in auth_private_key.pem -pubout -out auth_public_key.pem
-    let keygen_output = Command::new("openssl")
-        .arg("pkey")
-        .args(["-in", private_key_path.to_str().unwrap()])
-        .arg("-pubout")
-        .args(["-out", public_key_path.to_str().unwrap()])
-        .output()
-        .context("failed to extract public key from private key")?;
-    if !keygen_output.status.success() {
-        bail!(
-            "openssl failed: '{}'",
-            String::from_utf8_lossy(&keygen_output.stderr)
-        );
+fn generate_auth_keys(
+    private_key_path: &Path,
+    public_key_path: &Path,
+    auth_type: AuthType,
+) -> anyhow::Result<()> {
+    if auth_type == AuthType::NeonJWT {
+        // Generate the key pair
+        //
+        // openssl genpkey -algorithm ed25519 -out auth_private_key.pem
+        let keygen_output = Command::new("openssl")
+            .arg("genpkey")
+            .args(["-algorithm", "ed25519"])
+            .args(["-out", private_key_path.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .output()
+            .context("failed to generate auth private key")?;
+        if !keygen_output.status.success() {
+            bail!(
+                "openssl failed: '{}'",
+                String::from_utf8_lossy(&keygen_output.stderr)
+            );
+        }
+        // Extract the public key from the private key file
+        //
+        // openssl pkey -in auth_private_key.pem -pubout -out auth_public_key.pem
+        let keygen_output = Command::new("openssl")
+            .arg("pkey")
+            .args(["-in", private_key_path.to_str().unwrap()])
+            .arg("-pubout")
+            .args(["-out", public_key_path.to_str().unwrap()])
+            .output()
+            .context("failed to extract public key from private key")?;
+        if !keygen_output.status.success() {
+            bail!(
+                "openssl failed: '{}'",
+                String::from_utf8_lossy(&keygen_output.stderr)
+            );
+        }
+    } else if auth_type == AuthType::HadronJWT {
+        // Generate the RSA key pair. Note that the public key is embedded in an X509 certificate.
+        //
+        // openssl req -x509 -newkey rsa:4096 -keyout auth_private_key.pem -out auth_public_key.pem -nodes -subj "/CN=eng-brickstore@databricks.com"
+        let keygen_output = Command::new("openssl")
+            .arg("req")
+            .args(["-x509", "-newkey", "rsa:4096", "-sha256"])
+            .args(["-keyout", private_key_path.to_str().unwrap()])
+            .args(["-out", public_key_path.to_str().unwrap()])
+            .args(["-nodes"])
+            .args(["-subj", "/CN=eng-brickstore@databricks.com"])
+            .output()
+            .context("Failed to generate RSA key pair for Hadron token auth")?;
+        if !keygen_output.status.success() {
+            bail!(
+                "openssl failed: '{}'",
+                String::from_utf8_lossy(&keygen_output.stderr)
+            );
+        }
     }
 
     Ok(())

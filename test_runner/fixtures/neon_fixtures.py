@@ -34,6 +34,9 @@ import pytest
 import requests
 import toml
 from jwcrypto import jwk
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -403,6 +406,15 @@ class PageserverImportConfig:
         return ("timeline_import_config", value)
 
 
+@dataclass
+class HadronTokenDecoder:
+    public_key: str
+    algorithm: str
+
+    def decode_token(self, token: str) -> Dict[str, Any]:
+        return jwt.decode(token, self.public_key, algorithms=[self.algorithm])
+
+
 class NeonEnvBuilder:
     """
     Builder object to create a Neon runtime environment
@@ -473,6 +485,7 @@ class NeonEnvBuilder:
         self.safekeepers_id_start = safekeepers_id_start
         self.safekeepers_enable_fsync = safekeepers_enable_fsync
         self.auth_enabled = auth_enabled
+        self.use_hadron_auth_tokens = False
         self.default_branch_name = default_branch_name
         self.env: NeonEnv | None = None
         self.keep_remote_storage_contents: bool = True
@@ -1119,8 +1132,12 @@ class NeonEnv:
             or config.use_https_storage_broker_api
         )
         self.ssl_ca_file = (
-            self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None
-        )
+            self.repo_dir.joinpath("rootCA.crt") if self.generate_local_ssl_certs else None)
+
+        # The auth token type used in the test environment. neon_local is instruted to generate key pairs
+        # according to the auth token type. The keys are always generated but are only used if
+        # config.auth_enabled == True.
+        self.auth_token_type: str = "HadronJWT" if config.use_hadron_auth_tokens else "NeonJWT"
 
         neon_local_env_vars = {}
         if self.rust_log_override is not None:
@@ -1199,6 +1216,7 @@ class NeonEnv:
                 "listen_addr": f"127.0.0.1:{self.port_distributor.get_port()}",
             },
             "generate_local_ssl_certs": self.generate_local_ssl_certs,
+            "auth_token_type": self.auth_token_type,
         }
 
         if config.use_https_storage_broker_api:
@@ -1246,9 +1264,9 @@ class NeonEnv:
             )
 
         # Create config for pageserver
-        http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
-        pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
-        grpc_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        http_auth_type = self.auth_token_type if config.auth_enabled else "Trust"
+        pg_auth_type = self.auth_token_type if config.auth_enabled else "Trust"
+        grpc_auth_type = self.auth_token_type if config.auth_enabled else "Trust"
         for ps_id in range(
             self.BASE_PAGESERVER_ID, self.BASE_PAGESERVER_ID + config.num_pageservers
         ):
@@ -1386,9 +1404,8 @@ class NeonEnv:
                 "https_port": port.https,
                 "sync": config.safekeepers_enable_fsync,
                 "use_https_safekeeper_api": config.use_https_safekeeper_api,
+                "auth_type": self.auth_token_type if config.auth_enabled else "Trust",
             }
-            if config.auth_enabled:
-                sk_cfg["auth_enabled"] = True
             if self.safekeepers_remote_storage is not None:
                 sk_cfg["remote_storage"] = (
                     self.safekeepers_remote_storage.to_toml_inline_table().strip()
@@ -1568,29 +1585,66 @@ class NeonEnv:
     @cached_property
     def auth_keys(self) -> AuthKeys:
         priv = (Path(self.repo_dir) / "auth_private_key.pem").read_text()
-        return AuthKeys(priv=priv)
+        algorithm = "EdDSA" if self.auth_token_type == "NeonJWT" else "RS256"
+        return AuthKeys(priv=priv, algorithm=algorithm)
+
+    @cached_property
+    def hadron_token_decoder(self) -> HadronTokenDecoder:
+        cert = (Path(self.repo_dir) / "auth_public_key.pem").read_text()
+        x509_cert = x509.load_pem_x509_certificate(cert.encode(), default_backend())
+        pem_public_key = (
+            x509_cert.public_key()
+            .public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            .decode()
+        )
+        return HadronTokenDecoder(public_key=pem_public_key, algorithm="RS256")
 
     def regenerate_keys_at(self, privkey_path: Path, pubkey_path: Path):
-        # compare generate_auth_keys() in local_env.rs
-        subprocess.run(
-            ["openssl", "genpkey", "-algorithm", "ed25519", "-out", privkey_path],
-            cwd=self.repo_dir,
-            check=True,
-        )
+        if self.auth_token_type == "NeonJWT":
+            # compare generate_auth_keys() in local_env.rs
+            subprocess.run(
+                ["openssl", "genpkey", "-algorithm", "ed25519", "-out", privkey_path],
+                cwd=self.repo_dir,
+                check=True,
+            )
 
-        subprocess.run(
-            [
-                "openssl",
-                "pkey",
-                "-in",
-                privkey_path,
-                "-pubout",
-                "-out",
-                pubkey_path,
-            ],
-            cwd=self.repo_dir,
-            check=True,
-        )
+            subprocess.run(
+                [
+                    "openssl",
+                    "pkey",
+                    "-in",
+                    privkey_path,
+                    "-pubout",
+                    "-out",
+                    pubkey_path,
+                ],
+                cwd=self.repo_dir,
+                check=True,
+            )
+        elif self.auth_token_type == "HadronJWT":
+            # compare generate_auth_keys() in local_env.rs
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:4096",
+                    "-sha256",
+                    "-keyout",
+                    privkey_path,
+                    "-out",
+                    pubkey_path,
+                    "-nodes",
+                    "-subj",
+                    "/CN=eng-brickstore@databricks.com",
+                ],
+                cwd=self.repo_dir,
+                check=True,
+            )
         del self.auth_keys
 
     def generate_endpoint_id(self) -> str:
@@ -2008,10 +2062,10 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         return resp
 
-    def headers(self, scope: TokenScope | None) -> dict[str, str]:
+    def headers(self, scope: TokenScope | None, **token_data: Any) -> dict[str, str]:
         headers = {}
         if self.auth_enabled and scope is not None:
-            jwt_token = self.env.auth_keys.generate_token(scope=scope)
+            jwt_token = self.env.auth_keys.generate_token(scope=scope, **token_data)
             headers["Authorization"] = f"Bearer {jwt_token}"
 
         return headers

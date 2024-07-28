@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use bytes::{Bytes, BytesMut};
 use camino::Utf8PathBuf;
+use postgres_backend::AuthType;
 use desim::executor::{self, PollSome};
 use desim::network::TCP;
 use desim::node_os::NodeOs;
@@ -166,9 +167,11 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         wal_backup_enabled: false,
         listen_pg_addr_tenant_only: None,
         advertise_pg_addr: None,
+        advertise_pg_addr_tenant_only: None,
         availability_zone: None,
         peer_recovery_enabled: false,
         backup_parallel_jobs: 0,
+        auth_type: AuthType::NeonJWT,
         pg_auth: None,
         pg_tenant_only_auth: None,
         http_auth: None,

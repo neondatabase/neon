@@ -13,12 +13,15 @@ use std::{io, result};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use postgres_backend::AuthType;
 use postgres_connection::PgConnectionConfig;
 use safekeeper_api::models::TimelineCreateRequest;
 use safekeeper_client::mgmt_api;
 use thiserror::Error;
 use utils::auth::{Claims, Scope};
 use utils::id::NodeId;
+use utils::ip_address::HADRON_NODE_IP_ADDRESS;
+use utils::{http::error::HttpErrorBody, id::NodeId};
 
 use crate::background_process;
 use crate::local_env::{LocalEnv, SafekeeperConf};
@@ -156,7 +159,7 @@ impl SafekeeperNode {
             "--id".to_owned(),
             id_string,
             "--listen-pg".to_owned(),
-            listen_pg,
+            listen_pg.clone(),
             "--listen-http".to_owned(),
             listen_http,
             "--availability-zone".to_owned(),
@@ -186,7 +189,11 @@ impl SafekeeperNode {
         }
 
         let key_path = self.env.base_data_dir.join("auth_public_key.pem");
-        if self.conf.auth_enabled {
+        if self.conf.auth_type != AuthType::Trust {
+            args.extend([
+                "--token-auth-type".to_owned(),
+                self.conf.auth_type.to_string(),
+            ]);
             let key_path_string = key_path
                 .to_str()
                 .with_context(|| {

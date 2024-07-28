@@ -1801,6 +1801,22 @@ fn check_permissions(request: &Request<Body>, required_scope: Scope) -> Result<(
         }
     })
 }
+/// Similar to `check_permissions()` above, but checks for TenantEndpoint scope specifically. Used by the compute spec-fetch API.
+/// Access by Admin-scope tokens is also permitted.
+/// TODO(william.huang): Merge with the previous function by refactoring `Scope` to make it carry the dependent arguments.
+/// E.g., `Scope::TenantEndpoint(EndpointId)`, `Scope::Tenant(TenantId)`, etc.
+fn check_endpoint_permission(request: &Request<Body>, endpoint_id: Uuid) -> Result<(), ApiError> {
+    check_permission_with(
+        request,
+        |claims| match crate::auth::check_endpoint_permission(claims, endpoint_id) {
+            Err(e) => match crate::auth::check_permission(claims, Scope::Admin) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(e),
+            },
+            Ok(()) => Ok(()),
+        },
+    )
+}
 
 #[derive(Clone, Debug)]
 struct RequestMeta {
