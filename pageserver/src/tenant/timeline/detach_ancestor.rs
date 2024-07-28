@@ -26,7 +26,7 @@ pub(crate) enum Error {
     #[error("flushing failed")]
     FlushAncestor(#[source] FlushLayerError),
     #[error("layer download failed")]
-    RewrittenDeltaDownloadFailed(#[source] anyhow::Error),
+    RewrittenDeltaDownloadFailed(#[source] crate::tenant::storage_layer::layer::DownloadError),
     #[error("copying LSN prefix locally failed")]
     CopyDeltaPrefix(#[source] anyhow::Error),
     #[error("upload rewritten layer")]

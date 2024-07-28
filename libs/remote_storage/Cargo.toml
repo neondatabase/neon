@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+async-stream.workspace = true
 once_cell.workspace = true
 aws-smithy-async.workspace = true
 aws-smithy-types.workspace = true

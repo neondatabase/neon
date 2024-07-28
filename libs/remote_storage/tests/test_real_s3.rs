@@ -81,6 +81,7 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
                 .context("list root files failure")?
                 .keys
                 .into_iter()
+                .map(|o| o.key)
                 .collect::<HashSet<_>>(),
         )
     }

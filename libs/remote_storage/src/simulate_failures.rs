@@ -3,6 +3,7 @@
 //! testing purposes.
 use bytes::Bytes;
 use futures::stream::Stream;
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Mutex;
@@ -107,6 +108,23 @@ impl UnreliableWrapper {
 type VoidStorage = crate::LocalFs;
 
 impl RemoteStorage for UnreliableWrapper {
+    fn list_streaming(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
+        async_stream::stream! {
+            self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
+                .map_err(DownloadError::Other)?;
+            let mut stream = self.inner
+                .list_streaming(prefix, mode, max_keys, cancel);
+            while let Some(item) = stream.next().await {
+                yield item;
+            }
+        }
+    }
     async fn list(
         &self,
         prefix: Option<&RemotePath>,

@@ -10,7 +10,7 @@ use std::{
 use anyhow::Context;
 use futures_util::TryStreamExt;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::{GenericRemoteStorage, ListingMode, RemotePath};
+use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePath};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -324,7 +324,7 @@ impl std::fmt::Display for PurgeMode {
 pub async fn get_tenant_objects(
     s3_client: &GenericRemoteStorage,
     tenant_shard_id: TenantShardId,
-) -> anyhow::Result<Vec<RemotePath>> {
+) -> anyhow::Result<Vec<ListingObject>> {
     tracing::debug!("Listing objects in tenant {tenant_shard_id}");
     let tenant_root = super::remote_tenant_path(&tenant_shard_id);
 
@@ -345,7 +345,7 @@ pub async fn get_tenant_objects(
 pub async fn get_timeline_objects(
     s3_client: &GenericRemoteStorage,
     ttid: TenantShardTimelineId,
-) -> anyhow::Result<Vec<RemotePath>> {
+) -> anyhow::Result<Vec<ListingObject>> {
     tracing::debug!("Listing objects in timeline {ttid}");
     let timeline_root = super::remote_timeline_path_id(&ttid);
 
@@ -372,7 +372,7 @@ const MAX_KEYS_PER_DELETE: usize = 1000;
 /// `num_deleted` returns number of deleted keys.
 async fn do_delete(
     remote_client: &GenericRemoteStorage,
-    keys: &mut Vec<RemotePath>,
+    keys: &mut Vec<ListingObject>,
     dry_run: bool,
     drain: bool,
     progress_tracker: &mut DeletionProgressTracker,
@@ -381,6 +381,8 @@ async fn do_delete(
     while (!keys.is_empty() && drain) || (keys.len() >= MAX_KEYS_PER_DELETE) {
         let request_keys =
             keys.split_off(keys.len() - (std::cmp::min(MAX_KEYS_PER_DELETE, keys.len())));
+
+        let request_keys: Vec<RemotePath> = request_keys.into_iter().map(|o| o.key).collect();
 
         let num_deleted = request_keys.len();
         if dry_run {

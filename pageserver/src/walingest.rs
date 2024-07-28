@@ -618,7 +618,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -685,7 +685,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -752,7 +752,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -920,7 +920,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 

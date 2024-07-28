@@ -1405,6 +1405,7 @@ impl TenantManager {
             tracing::info!("Remote storage already deleted");
         } else {
             tracing::info!("Deleting {} keys from remote storage", keys.len());
+            let keys = keys.into_iter().map(|o| o.key).collect::<Vec<_>>();
             self.resources
                 .remote_storage
                 .delete_objects(&keys, &self.cancel)

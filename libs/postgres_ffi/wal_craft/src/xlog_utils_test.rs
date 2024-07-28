@@ -178,7 +178,7 @@ pub fn test_find_end_of_wal_last_crossing_segment() {
 /// currently 1024.
 #[test]
 pub fn test_update_next_xid() {
-    let checkpoint_buf = [0u8; std::mem::size_of::<CheckPoint>()];
+    let checkpoint_buf = [0u8; size_of::<CheckPoint>()];
     let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
 
     checkpoint.nextXid = FullTransactionId { value: 10 };
@@ -204,7 +204,7 @@ pub fn test_update_next_xid() {
 
 #[test]
 pub fn test_update_next_multixid() {
-    let checkpoint_buf = [0u8; std::mem::size_of::<CheckPoint>()];
+    let checkpoint_buf = [0u8; size_of::<CheckPoint>()];
     let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
 
     // simple case

@@ -151,7 +151,10 @@ pub struct NeonBroker {
 pub struct NeonStorageControllerConf {
     /// Heartbeat timeout before marking a node offline
     #[serde(with = "humantime_serde")]
-    pub max_unavailable: Duration,
+    pub max_offline: Duration,
+
+    #[serde(with = "humantime_serde")]
+    pub max_warming_up: Duration,
 
     /// Threshold for auto-splitting a tenant into shards
     pub split_threshold: Option<u64>,
@@ -159,14 +162,16 @@ pub struct NeonStorageControllerConf {
 
 impl NeonStorageControllerConf {
     // Use a shorter pageserver unavailability interval than the default to speed up tests.
-    const DEFAULT_MAX_UNAVAILABLE_INTERVAL: std::time::Duration =
-        std::time::Duration::from_secs(10);
+    const DEFAULT_MAX_OFFLINE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+    const DEFAULT_MAX_WARMING_UP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 }
 
 impl Default for NeonStorageControllerConf {
     fn default() -> Self {
         Self {
-            max_unavailable: Self::DEFAULT_MAX_UNAVAILABLE_INTERVAL,
+            max_offline: Self::DEFAULT_MAX_OFFLINE_INTERVAL,
+            max_warming_up: Self::DEFAULT_MAX_WARMING_UP_INTERVAL,
             split_threshold: None,
         }
     }
