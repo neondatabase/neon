@@ -1,7 +1,7 @@
 //! Man-in-the-middle tests
 //!
 //! Channel binding should prevent a proxy server
-//! - that has access to create valid certificates -
+//! *that has access to create valid certificates*
 //! from controlling the TLS connection.
 
 use std::fmt::Debug;

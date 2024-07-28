@@ -27,8 +27,9 @@ use utils::id::TimelineId;
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
 use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
+use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
-use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
+use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc, ValueReconstructState};
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{Layer, ResidentLayer};
@@ -36,7 +37,7 @@ use crate::tenant::DeltaLayer;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 
 use crate::keyspace::KeySpace;
-use crate::repository::Key;
+use crate::repository::{Key, Value};
 
 use utils::lsn::Lsn;
 
@@ -45,16 +46,75 @@ use pageserver_compaction::interface::*;
 
 use super::CompactionError;
 
+/// Maximum number of deltas before generating an image layer in bottom-most compaction.
+const COMPACTION_DELTA_THRESHOLD: usize = 5;
+
+/// The result of bottom-most compaction for a single key at each LSN.
+#[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub struct KeyLogAtLsn(pub Vec<(Lsn, Value)>);
+
+/// The result of bottom-most compaction.
+#[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
+pub(crate) struct KeyHistoryRetention {
+    /// Stores logs to reconstruct the value at the given LSN, that is to say, logs <= LSN or image == LSN.
+    pub(crate) below_horizon: Vec<(Lsn, KeyLogAtLsn)>,
+    /// Stores logs to reconstruct the value at any LSN above the horizon, that is to say, log > LSN.
+    pub(crate) above_horizon: KeyLogAtLsn,
+}
+
+impl KeyHistoryRetention {
+    async fn pipe_to(
+        self,
+        key: Key,
+        delta_writer: &mut Vec<(Key, Lsn, Value)>,
+        image_writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let mut first_batch = true;
+        for (_, KeyLogAtLsn(logs)) in self.below_horizon {
+            if first_batch {
+                if logs.len() == 1 && logs[0].1.is_image() {
+                    let Value::Image(img) = &logs[0].1 else {
+                        unreachable!()
+                    };
+                    image_writer.put_image(key, img.clone(), ctx).await?;
+                } else {
+                    for (lsn, val) in logs {
+                        delta_writer.push((key, lsn, val));
+                    }
+                }
+                first_batch = false;
+            } else {
+                for (lsn, val) in logs {
+                    delta_writer.push((key, lsn, val));
+                }
+            }
+        }
+        let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
+        for (lsn, val) in above_horizon_logs {
+            delta_writer.push((key, lsn, val));
+        }
+        Ok(())
+    }
+}
+
 impl Timeline {
     /// TODO: cancellation
+    ///
+    /// Returns whether the compaction has pending tasks.
     pub(crate) async fn compact_legacy(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         if flags.contains(CompactFlags::EnhancedGcBottomMostCompaction) {
-            return self.compact_with_gc(cancel, ctx).await;
+            self.compact_with_gc(cancel, ctx)
+                .await
+                .map_err(CompactionError::Other)?;
+            return Ok(false);
         }
 
         // High level strategy for compaction / image creation:
@@ -102,7 +162,7 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // FIXME: the match should only cover repartitioning, not the next steps
-        let partition_count = match self
+        let (partition_count, has_pending_tasks) = match self
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
@@ -119,30 +179,35 @@ impl Timeline {
 
                 // 2. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size, ctx).await?;
+                let fully_compacted = self.compact_level0(target_file_size, ctx).await?;
                 timer.stop_and_record();
 
-                // 3. Create new image layers for partitions that have been modified
-                // "enough".
                 let mut partitioning = dense_partitioning;
                 partitioning
                     .parts
                     .extend(sparse_partitioning.into_dense().parts);
-                let image_layers = self
-                    .create_image_layers(
-                        &partitioning,
-                        lsn,
-                        if flags.contains(CompactFlags::ForceImageLayerCreation) {
-                            ImageLayerCreationMode::Force
-                        } else {
-                            ImageLayerCreationMode::Try
-                        },
-                        &image_ctx,
-                    )
-                    .await?;
 
-                self.upload_new_image_layers(image_layers)?;
-                partitioning.parts.len()
+                // 3. Create new image layers for partitions that have been modified
+                // "enough". Skip image layer creation if L0 compaction cannot keep up.
+                if fully_compacted {
+                    let image_layers = self
+                        .create_image_layers(
+                            &partitioning,
+                            lsn,
+                            if flags.contains(CompactFlags::ForceImageLayerCreation) {
+                                ImageLayerCreationMode::Force
+                            } else {
+                                ImageLayerCreationMode::Try
+                            },
+                            &image_ctx,
+                        )
+                        .await?;
+
+                    self.upload_new_image_layers(image_layers)?;
+                } else {
+                    info!("skipping image layer generation due to L0 compaction did not include all layers.");
+                }
+                (partitioning.parts.len(), !fully_compacted)
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -154,7 +219,7 @@ impl Timeline {
                 if !self.cancel.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
-                1
+                (1, false)
             }
         };
 
@@ -167,7 +232,7 @@ impl Timeline {
             self.compact_shard_ancestors(rewrite_max, ctx).await?;
         }
 
-        Ok(())
+        Ok(has_pending_tasks)
     }
 
     /// Check for layers that are elegible to be rewritten:
@@ -182,7 +247,7 @@ impl Timeline {
         self: &Arc<Self>,
         rewrite_max: usize,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CompactionError> {
         let mut drop_layers = Vec::new();
         let mut layers_to_rewrite: Vec<Layer> = Vec::new();
 
@@ -303,7 +368,8 @@ impl Timeline {
                 layer.layer_desc().image_layer_lsn(),
                 ctx,
             )
-            .await?;
+            .await
+            .map_err(CompactionError::Other)?;
 
             // Safety of layer rewrites:
             // - We are writing to a different local file path than we are reading from, so the old Layer
@@ -318,14 +384,20 @@ impl Timeline {
             // - We do not run concurrently with other kinds of compaction, so the only layer map writes we race with are:
             //    - GC, which at worst witnesses us "undelete" a layer that they just deleted.
             //    - ingestion, which only inserts layers, therefore cannot collide with us.
-            let resident = layer.download_and_keep_resident().await?;
+            let resident = layer
+                .download_and_keep_resident()
+                .await
+                .map_err(CompactionError::input_layer_download_failed)?;
 
             let keys_written = resident
                 .filter(&self.shard_identity, &mut image_layer_writer, ctx)
                 .await?;
 
             if keys_written > 0 {
-                let new_layer = image_layer_writer.finish(self, ctx).await?;
+                let new_layer = image_layer_writer
+                    .finish(self, ctx)
+                    .await
+                    .map_err(CompactionError::Other)?;
                 tracing::info!(layer=%new_layer, "Rewrote layer, {} -> {} bytes",
                     layer.metadata().file_size,
                     new_layer.metadata().file_size);
@@ -353,7 +425,13 @@ impl Timeline {
         // necessary for correctness, but it simplifies testing, and avoids proceeding with another
         // Timeline's compaction while this timeline's uploads may be generating lots of disk I/O
         // load.
-        self.remote_client.wait_completion().await?;
+        match self.remote_client.wait_completion().await {
+            Ok(()) => (),
+            Err(WaitCompletionError::NotInitialized(ni)) => return Err(CompactionError::from(ni)),
+            Err(WaitCompletionError::UploadQueueShutDownOrStopped) => {
+                return Err(CompactionError::ShuttingDown)
+            }
+        }
 
         fail::fail_point!("compact-shard-ancestors-persistent");
 
@@ -361,15 +439,16 @@ impl Timeline {
     }
 
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
-    /// as Level 1 files.
+    /// as Level 1 files. Returns whether the L0 layers are fully compacted.
     async fn compact_level0(
         self: &Arc<Self>,
         target_file_size: u64,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
+            fully_compacted,
         } = {
             let phase1_span = info_span!("compact_level0_phase1");
             let ctx = ctx.attached_child();
@@ -392,12 +471,12 @@ impl Timeline {
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
-            return Ok(());
+            return Ok(true);
         }
 
         self.finish_compact_batch(&new_layers, &Vec::new(), &deltas_to_compact)
             .await?;
-        Ok(())
+        Ok(fully_compacted)
     }
 
     /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
@@ -411,7 +490,7 @@ impl Timeline {
         stats.read_lock_held_spawn_blocking_startup_micros =
             stats.read_lock_acquisition_micros.till_now(); // set by caller
         let layers = guard.layer_map();
-        let level0_deltas = layers.get_level0_deltas()?;
+        let level0_deltas = layers.get_level0_deltas();
         let mut level0_deltas = level0_deltas
             .into_iter()
             .map(|x| guard.get_from_desc(&x))
@@ -464,14 +543,25 @@ impl Timeline {
         ) as u64
             * std::cmp::max(self.get_checkpoint_distance(), DEFAULT_CHECKPOINT_DISTANCE);
 
-        deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
+        let mut fully_compacted = true;
+
+        deltas_to_compact.push(
+            first_level0_delta
+                .download_and_keep_resident()
+                .await
+                .map_err(CompactionError::input_layer_download_failed)?,
+        );
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
 
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            deltas_to_compact.push(l.download_and_keep_resident().await?);
+            deltas_to_compact.push(
+                l.download_and_keep_resident()
+                    .await
+                    .map_err(CompactionError::input_layer_download_failed)?,
+            );
             deltas_to_compact_bytes += l.metadata().file_size;
             prev_lsn_end = lsn_range.end;
 
@@ -482,6 +572,7 @@ impl Timeline {
                     "L0 compaction picker hit max delta layer size limit: {}",
                     delta_size_limit
                 );
+                fully_compacted = false;
 
                 // Proceed with compaction, but only a subset of L0s
                 break;
@@ -530,7 +621,7 @@ impl Timeline {
         let mut all_keys = Vec::new();
 
         for l in deltas_to_compact.iter() {
-            all_keys.extend(l.load_keys(ctx).await?);
+            all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
         }
 
         // FIXME: should spawn_blocking the rest of this function
@@ -652,7 +743,7 @@ impl Timeline {
             key, lsn, ref val, ..
         } in all_values_iter
         {
-            let value = val.load(ctx).await?;
+            let value = val.load(ctx).await.map_err(CompactionError::Other)?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -709,7 +800,8 @@ impl Timeline {
                                 .take()
                                 .unwrap()
                                 .finish(prev_key.unwrap().next(), self, ctx)
-                                .await?,
+                                .await
+                                .map_err(CompactionError::Other)?,
                         );
                         writer = None;
 
@@ -747,7 +839,8 @@ impl Timeline {
                             },
                             ctx,
                         )
-                        .await?,
+                        .await
+                        .map_err(CompactionError::Other)?,
                     );
                 }
 
@@ -755,7 +848,8 @@ impl Timeline {
                     .as_mut()
                     .unwrap()
                     .put_value(key, lsn, value, ctx)
-                    .await?;
+                    .await
+                    .map_err(CompactionError::Other)?;
             } else {
                 debug!(
                     "Dropping key {} during compaction (it belongs on shard {:?})",
@@ -771,7 +865,12 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(writer.finish(prev_key.unwrap().next(), self, ctx).await?);
+            new_layers.push(
+                writer
+                    .finish(prev_key.unwrap().next(), self, ctx)
+                    .await
+                    .map_err(CompactionError::Other)?,
+            );
         }
 
         // Sync layers
@@ -835,6 +934,7 @@ impl Timeline {
                 .into_iter()
                 .map(|x| x.drop_eviction_guard())
                 .collect::<Vec<_>>(),
+            fully_compacted,
         })
     }
 }
@@ -843,6 +943,9 @@ impl Timeline {
 struct CompactLevel0Phase1Result {
     new_layers: Vec<ResidentLayer>,
     deltas_to_compact: Vec<Layer>,
+    // Whether we have included all L0 layers, or selected only part of them due to the
+    // L0 compaction size limit.
+    fully_compacted: bool,
 }
 
 #[derive(Default)]
@@ -953,7 +1056,7 @@ impl Timeline {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
 
-            let l0_deltas = layers.get_level0_deltas()?;
+            let l0_deltas = layers.get_level0_deltas();
             drop(guard);
 
             // As an optimization, if we find that there are too few L0 layers,
@@ -983,10 +1086,195 @@ impl Timeline {
             fanout,
             ctx,
         )
-        .await?;
+        .await
+        // TODO: compact_tiered needs to return CompactionError
+        .map_err(CompactionError::Other)?;
 
         adaptor.flush_updates().await?;
         Ok(())
+    }
+
+    /// Take a list of images and deltas, produce images and deltas according to GC horizon and retain_lsns.
+    ///
+    /// It takes a key, the values of the key within the compaction process, a GC horizon, and all retain_lsns below the horizon.
+    /// For now, it requires the `accumulated_values` contains the full history of the key (i.e., the key with the lowest LSN is
+    /// an image or a WAL not requiring a base image). This restriction will be removed once we implement gc-compaction on branch.
+    ///
+    /// The function returns the deltas and the base image that need to be placed at each of the retain LSN. For example, we have:
+    ///
+    /// A@0x10, +B@0x20, +C@0x30, +D@0x40, +E@0x50, +F@0x60
+    /// horizon = 0x50, retain_lsn = 0x20, 0x40, delta_threshold=3
+    ///
+    /// The function will produce:
+    ///
+    /// ```plain
+    /// 0x20(retain_lsn) -> img=AB@0x20                  always produce a single image below the lowest retain LSN
+    /// 0x40(retain_lsn) -> deltas=[+C@0x30, +D@0x40]    two deltas since the last base image, keeping the deltas
+    /// 0x50(horizon)    -> deltas=[ABCDE@0x50]          three deltas since the last base image, generate an image but put it in the delta
+    /// above_horizon    -> deltas=[+F@0x60]             full history above the horizon
+    /// ```
+    ///
+    /// Note that `accumulated_values` must be sorted by LSN and should belong to a single key.
+    pub(crate) async fn generate_key_retention(
+        self: &Arc<Timeline>,
+        key: Key,
+        history: &[(Key, Lsn, Value)],
+        horizon: Lsn,
+        retain_lsn_below_horizon: &[Lsn],
+        delta_threshold_cnt: usize,
+    ) -> anyhow::Result<KeyHistoryRetention> {
+        // Pre-checks for the invariants
+        if cfg!(debug_assertions) {
+            for (log_key, _, _) in history {
+                assert_eq!(log_key, &key, "mismatched key");
+            }
+            for i in 1..history.len() {
+                assert!(history[i - 1].1 <= history[i].1, "unordered LSN");
+                if history[i - 1].1 == history[i].1 {
+                    assert!(
+                        matches!(history[i - 1].2, Value::Image(_)),
+                        "unordered delta/image, or duplicated delta"
+                    );
+                }
+            }
+            // There was an assertion for no base image that checks if the first
+            // record in the history is `will_init` before, but it was removed.
+            // This is explained in the test cases for generate_key_retention.
+            // Search "incomplete history" for more information.
+            for lsn in retain_lsn_below_horizon {
+                assert!(lsn < &horizon, "retain lsn must be below horizon")
+            }
+            for i in 1..retain_lsn_below_horizon.len() {
+                assert!(
+                    retain_lsn_below_horizon[i - 1] <= retain_lsn_below_horizon[i],
+                    "unordered LSN"
+                );
+            }
+        }
+        // Step 1: split history into len(retain_lsn_below_horizon) + 2 buckets, where the last bucket is for all deltas above the horizon,
+        // and the second-to-last bucket is for the horizon. Each bucket contains lsn_last_bucket < deltas <= lsn_this_bucket.
+        let (mut split_history, lsn_split_points) = {
+            let mut split_history = Vec::new();
+            split_history.resize_with(retain_lsn_below_horizon.len() + 2, Vec::new);
+            let mut lsn_split_points = Vec::with_capacity(retain_lsn_below_horizon.len() + 1);
+            for lsn in retain_lsn_below_horizon {
+                lsn_split_points.push(*lsn);
+            }
+            lsn_split_points.push(horizon);
+            let mut current_idx = 0;
+            for item @ (_, lsn, _) in history {
+                while current_idx < lsn_split_points.len() && *lsn > lsn_split_points[current_idx] {
+                    current_idx += 1;
+                }
+                split_history[current_idx].push(item);
+            }
+            (split_history, lsn_split_points)
+        };
+        // Step 2: filter out duplicated records due to the k-merge of image/delta layers
+        for split_for_lsn in &mut split_history {
+            let mut prev_lsn = None;
+            let mut new_split_for_lsn = Vec::with_capacity(split_for_lsn.len());
+            for record @ (_, lsn, _) in std::mem::take(split_for_lsn) {
+                if let Some(prev_lsn) = &prev_lsn {
+                    if *prev_lsn == lsn {
+                        // The case that we have an LSN with both data from the delta layer and the image layer. As
+                        // `ValueWrapper` ensures that an image is ordered before a delta at the same LSN, we simply
+                        // drop this delta and keep the image.
+                        //
+                        // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
+                        // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
+                        // dropped.
+                        continue;
+                    }
+                }
+                prev_lsn = Some(lsn);
+                new_split_for_lsn.push(record);
+            }
+            *split_for_lsn = new_split_for_lsn;
+        }
+        // Step 3: generate images when necessary
+        let mut retention = Vec::with_capacity(split_history.len());
+        let mut records_since_last_image = 0;
+        let batch_cnt = split_history.len();
+        assert!(
+            batch_cnt >= 2,
+            "should have at least below + above horizon batches"
+        );
+        let mut replay_history: Vec<(Key, Lsn, Value)> = Vec::new();
+        for (i, split_for_lsn) in split_history.into_iter().enumerate() {
+            records_since_last_image += split_for_lsn.len();
+            let generate_image = if i == 0 {
+                // We always generate images for the first batch (below horizon / lowest retain_lsn)
+                true
+            } else if i == batch_cnt - 1 {
+                // Do not generate images for the last batch (above horizon)
+                false
+            } else if records_since_last_image >= delta_threshold_cnt {
+                // Generate images when there are too many records
+                true
+            } else {
+                false
+            };
+            replay_history.extend(split_for_lsn.iter().map(|x| (*x).clone()));
+            // Only retain the items after the last image record
+            for idx in (0..replay_history.len()).rev() {
+                if replay_history[idx].2.will_init() {
+                    replay_history = replay_history[idx..].to_vec();
+                    break;
+                }
+            }
+            if let Some((_, _, val)) = replay_history.first() {
+                assert!(val.will_init(), "invalid history, no base image");
+            }
+            if generate_image && records_since_last_image > 0 {
+                records_since_last_image = 0;
+                let history = std::mem::take(&mut replay_history);
+                let mut img = None;
+                let mut records = Vec::with_capacity(history.len());
+                if let (_, lsn, Value::Image(val)) = history.first().as_ref().unwrap() {
+                    img = Some((*lsn, val.clone()));
+                    for (_, lsn, val) in history.into_iter().skip(1) {
+                        let Value::WalRecord(rec) = val else {
+                            panic!("invalid record")
+                        };
+                        records.push((lsn, rec));
+                    }
+                } else {
+                    for (_, lsn, val) in history.into_iter() {
+                        let Value::WalRecord(rec) = val else {
+                            panic!("invalid record")
+                        };
+                        records.push((lsn, rec));
+                    }
+                }
+                records.reverse();
+                let state = ValueReconstructState { img, records };
+                let request_lsn = lsn_split_points[i]; // last batch does not generate image so i is always in range
+                let img = self.reconstruct_value(key, request_lsn, state).await?;
+                replay_history.push((key, request_lsn, Value::Image(img.clone())));
+                retention.push(vec![(request_lsn, Value::Image(img))]);
+            } else {
+                retention.push(
+                    split_for_lsn
+                        .iter()
+                        .map(|(_, lsn, value)| (*lsn, value.clone()))
+                        .collect(),
+                );
+            }
+        }
+        let mut result = Vec::with_capacity(retention.len());
+        assert_eq!(retention.len(), lsn_split_points.len() + 1);
+        for (idx, logs) in retention.into_iter().enumerate() {
+            if idx == lsn_split_points.len() {
+                return Ok(KeyHistoryRetention {
+                    below_horizon: result,
+                    above_horizon: KeyLogAtLsn(logs),
+                });
+            } else {
+                result.push((lsn_split_points[idx], KeyLogAtLsn(logs)));
+            }
+        }
+        unreachable!()
     }
 
     /// An experimental compaction building block that combines compaction with garbage collection.
@@ -999,8 +1287,7 @@ impl Timeline {
         self: &Arc<Self>,
         _cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
-        use crate::tenant::storage_layer::ValueReconstructState;
+    ) -> anyhow::Result<()> {
         use std::collections::BTreeSet;
 
         info!("running enhanced gc bottom-most compaction");
@@ -1013,30 +1300,51 @@ impl Timeline {
         // The layer selection has the following properties:
         // 1. If a layer is in the selection, all layers below it are in the selection.
         // 2. Inferred from (1), for each key in the layer selection, the value can be reconstructed only with the layers in the layer selection.
-        let (layer_selection, gc_cutoff) = {
+        let (layer_selection, gc_cutoff, retain_lsns_below_horizon) = {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
             let gc_info = self.gc_info.read().unwrap();
-            if !gc_info.retain_lsns.is_empty() || !gc_info.leases.is_empty() {
-                return Err(CompactionError::Other(anyhow!(
-                    "enhanced legacy compaction currently does not support retain_lsns (branches)"
-                )));
-            }
+            let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = gc_info.cutoffs.select_min();
+            for (lsn, _timeline_id) in &gc_info.retain_lsns {
+                if lsn < &gc_cutoff {
+                    retain_lsns_below_horizon.push(*lsn);
+                }
+            }
+            for lsn in gc_info.leases.keys() {
+                if lsn < &gc_cutoff {
+                    retain_lsns_below_horizon.push(*lsn);
+                }
+            }
             let mut selected_layers = Vec::new();
-            // TODO: consider retain_lsns
             drop(gc_info);
             for desc in layers.iter_historic_layers() {
                 if desc.get_lsn_range().start <= gc_cutoff {
                     selected_layers.push(guard.get_from_desc(&desc));
                 }
             }
-            (selected_layers, gc_cutoff)
+            retain_lsns_below_horizon.sort();
+            (selected_layers, gc_cutoff, retain_lsns_below_horizon)
         };
+        let lowest_retain_lsn = retain_lsns_below_horizon
+            .first()
+            .copied()
+            .unwrap_or(gc_cutoff);
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                lowest_retain_lsn,
+                retain_lsns_below_horizon
+                    .iter()
+                    .min()
+                    .copied()
+                    .unwrap_or(gc_cutoff)
+            );
+        }
         info!(
-            "picked {} layers for compaction with gc_cutoff={}",
+            "picked {} layers for compaction with gc_cutoff={} lowest_retain_lsn={}",
             layer_selection.len(),
-            gc_cutoff
+            gc_cutoff,
+            lowest_retain_lsn
         );
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         // Also, collect the layer information to decide when to split the new delta layers.
@@ -1072,61 +1380,13 @@ impl Timeline {
         let mut accumulated_values = Vec::new();
         let mut last_key: Option<Key> = None;
 
-        /// Take a list of images and deltas, produce an image at the GC horizon, and a list of deltas above the GC horizon.
-        async fn flush_accumulated_states(
-            tline: &Arc<Timeline>,
-            key: Key,
-            accumulated_values: &[(Key, Lsn, crate::repository::Value)],
-            horizon: Lsn,
-        ) -> anyhow::Result<(Vec<(Key, Lsn, crate::repository::Value)>, bytes::Bytes)> {
-            let mut base_image = None;
-            let mut keys_above_horizon = Vec::new();
-            let mut delta_above_base_image = Vec::new();
-            // We have a list of deltas/images. We want to create image layers while collect garbages.
-            for (key, lsn, val) in accumulated_values.iter().rev() {
-                if *lsn > horizon {
-                    if let Some((_, prev_lsn, _)) = keys_above_horizon.last_mut() {
-                        if *prev_lsn == *lsn {
-                            // The case that we have an LSN with both data from the delta layer and the image layer. As
-                            // `ValueWrapper` ensures that an image is ordered before a delta at the same LSN, we simply
-                            // drop this delta and keep the image.
-                            //
-                            // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
-                            // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
-                            // dropped.
-                            continue;
-                        }
-                    }
-                    keys_above_horizon.push((*key, *lsn, val.clone()));
-                } else if *lsn <= horizon {
-                    match val {
-                        crate::repository::Value::Image(image) => {
-                            base_image = Some((*lsn, image.clone()));
-                            break;
-                        }
-                        crate::repository::Value::WalRecord(wal) => {
-                            delta_above_base_image.push((*lsn, wal.clone()));
-                        }
-                    }
-                }
-            }
-            // do not reverse delta_above_base_image, reconstruct state expects reversely-ordered records
-            keys_above_horizon.reverse();
-            let state = ValueReconstructState {
-                img: base_image,
-                records: delta_above_base_image,
-            };
-            let img = tline.reconstruct_value(key, horizon, state).await?;
-            Ok((keys_above_horizon, img))
-        }
-
         async fn flush_deltas(
             deltas: &mut Vec<(Key, Lsn, crate::repository::Value)>,
             last_key: Key,
             delta_split_points: &[Key],
             current_delta_split_point: &mut usize,
             tline: &Arc<Timeline>,
-            gc_cutoff: Lsn,
+            lowest_retain_lsn: Lsn,
             ctx: &RequestContext,
         ) -> anyhow::Result<Option<ResidentLayer>> {
             // Check if we need to split the delta layer. We split at the original delta layer boundary to avoid
@@ -1161,7 +1421,7 @@ impl Timeline {
                 tline.timeline_id,
                 tline.tenant_shard_id,
                 deltas.first().unwrap().0,
-                gc_cutoff..end_lsn,
+                lowest_retain_lsn..end_lsn,
                 ctx,
             )
             .await?;
@@ -1178,7 +1438,7 @@ impl Timeline {
             self.timeline_id,
             self.tenant_shard_id,
             &(Key::MIN..Key::MAX), // covers the full key range
-            gc_cutoff,
+            lowest_retain_lsn,
             ctx,
         )
         .await?;
@@ -1195,12 +1455,19 @@ impl Timeline {
                 accumulated_values.push((key, lsn, val));
             } else {
                 let last_key = last_key.as_mut().unwrap();
-                let (deltas, image) =
-                    flush_accumulated_states(self, *last_key, &accumulated_values, gc_cutoff)
-                        .await?;
+                let retention = self
+                    .generate_key_retention(
+                        *last_key,
+                        &accumulated_values,
+                        gc_cutoff,
+                        &retain_lsns_below_horizon,
+                        COMPACTION_DELTA_THRESHOLD,
+                    )
+                    .await?;
                 // Put the image into the image layer. Currently we have a single big layer for the compaction.
-                image_layer_writer.put_image(*last_key, image, ctx).await?;
-                delta_values.extend(deltas);
+                retention
+                    .pipe_to(*last_key, &mut delta_values, &mut image_layer_writer, ctx)
+                    .await?;
                 delta_layers.extend(
                     flush_deltas(
                         &mut delta_values,
@@ -1208,7 +1475,7 @@ impl Timeline {
                         &delta_split_points,
                         &mut current_delta_split_point,
                         self,
-                        gc_cutoff,
+                        lowest_retain_lsn,
                         ctx,
                     )
                     .await?,
@@ -1221,11 +1488,19 @@ impl Timeline {
 
         let last_key = last_key.expect("no keys produced during compaction");
         // TODO: move this part to the loop body
-        let (deltas, image) =
-            flush_accumulated_states(self, last_key, &accumulated_values, gc_cutoff).await?;
+        let retention = self
+            .generate_key_retention(
+                last_key,
+                &accumulated_values,
+                gc_cutoff,
+                &retain_lsns_below_horizon,
+                COMPACTION_DELTA_THRESHOLD,
+            )
+            .await?;
         // Put the image into the image layer. Currently we have a single big layer for the compaction.
-        image_layer_writer.put_image(last_key, image, ctx).await?;
-        delta_values.extend(deltas);
+        retention
+            .pipe_to(last_key, &mut delta_values, &mut image_layer_writer, ctx)
+            .await?;
         delta_layers.extend(
             flush_deltas(
                 &mut delta_values,
@@ -1233,7 +1508,7 @@ impl Timeline {
                 &delta_split_points,
                 &mut current_delta_split_point,
                 self,
-                gc_cutoff,
+                lowest_retain_lsn,
                 ctx,
             )
             .await?,
@@ -1281,7 +1556,7 @@ impl TimelineAdaptor {
         }
     }
 
-    pub async fn flush_updates(&mut self) -> anyhow::Result<()> {
+    pub async fn flush_updates(&mut self) -> Result<(), CompactionError> {
         let layers_to_delete = {
             let guard = self.timeline.layers.read().await;
             self.layers_to_delete

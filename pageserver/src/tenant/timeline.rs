@@ -1,5 +1,5 @@
 pub(crate) mod analysis;
-mod compaction;
+pub(crate) mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
@@ -137,7 +137,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
+use super::{config::TenantConf, upload_queue::NotInitialized};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -460,7 +460,7 @@ pub(crate) struct GcInfo {
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<Lsn>,
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -476,12 +476,21 @@ impl GcInfo {
     pub(crate) fn min_cutoff(&self) -> Lsn {
         self.cutoffs.select_min()
     }
+
+    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn) {
+        self.retain_lsns.push((child_lsn, child_id));
+        self.retain_lsns.sort_by_key(|i| i.0);
+    }
+
+    pub(super) fn remove_child(&mut self, child_id: TimelineId) {
+        self.retain_lsns.retain(|i| i.1 != child_id);
+    }
 }
 
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
 /// is a single number (the oldest LSN which we must retain), but it internally distinguishes
 /// between time-based and space-based retention for observability and consumption metrics purposes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct GcCutoffs {
     /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
     /// history we must keep to retain a specified number of bytes of WAL.
@@ -633,7 +642,13 @@ impl FlushLayerError {
     // When crossing from generic anyhow errors to this error type, we explicitly check
     // for timeline cancellation to avoid logging inoffensive shutdown errors as warn/err.
     fn from_anyhow(timeline: &Timeline, err: anyhow::Error) -> Self {
-        if timeline.cancel.is_cancelled() {
+        let cancelled = timeline.cancel.is_cancelled()
+            // The upload queue might have been shut down before the official cancellation of the timeline.
+            || err
+                .downcast_ref::<NotInitialized>()
+                .map(NotInitialized::is_stopping)
+                .unwrap_or_default();
+        if cancelled {
             Self::Cancelled
         } else {
             Self::Other(Arc::new(err))
@@ -1754,13 +1769,14 @@ impl Timeline {
         }
     }
 
-    /// Outermost timeline compaction operation; downloads needed layers.
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
     pub(crate) async fn compact(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1780,8 +1796,8 @@ impl Timeline {
         // compaction task goes over it's period (20s) which is quite often in production.
         let (_guard, _permit) = tokio::select! {
             tuple = prepare => { tuple },
-            _ = self.cancel.cancelled() => return Ok(()),
-            _ = cancel.cancelled() => return Ok(()),
+            _ = self.cancel.cancelled() => return Ok(false),
+            _ = cancel.cancelled() => return Ok(false),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1789,11 +1805,14 @@ impl Timeline {
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(());
+            return Ok(false);
         }
 
         match self.get_compaction_algorithm_settings().kind {
-            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
+            CompactionAlgorithm::Tiered => {
+                self.compact_tiered(cancel, ctx).await?;
+                Ok(false)
+            }
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
         }
     }
@@ -1980,6 +1999,11 @@ impl Timeline {
 
     pub(crate) fn is_active(&self) -> bool {
         self.current_state() == TimelineState::Active
+    }
+
+    #[allow(unused)]
+    pub(crate) fn is_archived(&self) -> Option<bool> {
+        self.remote_client.is_archived()
     }
 
     pub(crate) fn is_stopping(&self) -> bool {
@@ -2306,6 +2330,11 @@ impl Timeline {
                 &conf.default_tenant_conf,
             )
         };
+
+        if let Some(ancestor) = &ancestor {
+            let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
+            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn());
+        }
 
         Arc::new_cyclic(|myself| {
             let metrics = TimelineMetrics::new(
@@ -3155,7 +3184,7 @@ impl Timeline {
         let guard = self.layers.read().await;
 
         let resident = guard.likely_resident_layers().map(|layer| {
-            let last_activity_ts = layer.access_stats().latest_activity_or_now();
+            let last_activity_ts = layer.access_stats().latest_activity();
 
             HeatMapLayer::new(
                 layer.layer_desc().layer_name(),
@@ -3401,7 +3430,6 @@ impl Timeline {
         }
     }
 
-    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
@@ -4753,6 +4781,18 @@ impl Timeline {
     }
 }
 
+impl Drop for Timeline {
+    fn drop(&mut self) {
+        if let Some(ancestor) = &self.ancestor_timeline {
+            // This lock should never be poisoned, but in case it is we do a .map() instead of
+            // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
+            if let Ok(mut gc_info) = ancestor.gc_info.write() {
+                gc_info.remove_child(self.timeline_id)
+            }
+        }
+    }
+}
+
 /// Top-level failure to compact.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CompactionError {
@@ -4760,7 +4800,7 @@ pub(crate) enum CompactionError {
     ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<CollectKeySpaceError> for CompactionError {
@@ -4771,6 +4811,38 @@ impl From<CollectKeySpaceError> for CompactionError {
                 CompactionError::ShuttingDown
             }
             e => CompactionError::Other(e.into()),
+        }
+    }
+}
+
+impl From<super::upload_queue::NotInitialized> for CompactionError {
+    fn from(value: super::upload_queue::NotInitialized) -> Self {
+        match value {
+            super::upload_queue::NotInitialized::Uninitialized
+            | super::upload_queue::NotInitialized::Stopped => {
+                CompactionError::Other(anyhow::anyhow!(value))
+            }
+            super::upload_queue::NotInitialized::ShuttingDown => CompactionError::ShuttingDown,
+        }
+    }
+}
+
+impl CompactionError {
+    /// We cannot do compaction because we could not download a layer that is input to the compaction.
+    pub(crate) fn input_layer_download_failed(
+        e: super::storage_layer::layer::DownloadError,
+    ) -> Self {
+        match e {
+            super::storage_layer::layer::DownloadError::TimelineShutdown |
+            /* TODO DownloadCancelled correct here? */
+            super::storage_layer::layer::DownloadError::DownloadCancelled  => CompactionError::ShuttingDown,
+            super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads |
+            super::storage_layer::layer::DownloadError::DownloadRequired |
+            super::storage_layer::layer::DownloadError::NotFile(_) |
+            super::storage_layer::layer::DownloadError::DownloadFailed |
+            super::storage_layer::layer::DownloadError::PreStatFailed(_)=>CompactionError::Other(anyhow::anyhow!(e)),
+            #[cfg(test)]
+            super::storage_layer::layer::DownloadError::Failpoint(_) =>  CompactionError::Other(anyhow::anyhow!(e)),
         }
     }
 }
@@ -4848,7 +4920,7 @@ impl Timeline {
         new_deltas: &[ResidentLayer],
         new_images: &[ResidentLayer],
         layers_to_remove: &[Layer],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CompactionError> {
         let mut guard = self.layers.write().await;
 
         let mut duplicated_layers = HashSet::new();
@@ -4866,7 +4938,7 @@ impl Timeline {
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
             } else if LayerMap::is_l0(&l.layer_desc().key_range) {
-                bail!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
+                return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
                 insert_layers.push(l.clone());
             }
@@ -4898,7 +4970,7 @@ impl Timeline {
         self: &Arc<Self>,
         mut replace_layers: Vec<(Layer, ResidentLayer)>,
         mut drop_layers: Vec<Layer>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), super::upload_queue::NotInitialized> {
         let mut guard = self.layers.write().await;
 
         // Trim our lists in case our caller (compaction) raced with someone else (GC) removing layers: we want
@@ -4920,7 +4992,7 @@ impl Timeline {
     fn upload_new_image_layers(
         self: &Arc<Self>,
         new_images: impl IntoIterator<Item = ResidentLayer>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), super::upload_queue::NotInitialized> {
         for layer in new_images {
             self.remote_client.schedule_layer_file_upload(layer)?;
         }
@@ -5070,7 +5142,11 @@ impl Timeline {
 
             let space_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
             let time_cutoff = gc_info.cutoffs.time;
-            let retain_lsns = gc_info.retain_lsns.clone();
+            let retain_lsns = gc_info
+                .retain_lsns
+                .iter()
+                .map(|(lsn, _child_id)| *lsn)
+                .collect();
 
             // Gets the maximum LSN that holds the valid lease.
             //
@@ -5582,7 +5658,7 @@ impl Timeline {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-                let last_activity_ts = layer.access_stats().latest_activity_or_now();
+                let last_activity_ts = layer.access_stats().latest_activity();
 
                 EvictionCandidate {
                     layer: layer.into(),

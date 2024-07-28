@@ -284,6 +284,16 @@ impl Timeline {
         if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
             return Ok(true);
         }
+        // then check if the database was already initialized.
+        // get_rel_exists can be called before dbdir is created.
+        let buf = version.get(self, DBDIR_KEY, ctx).await?;
+        let dbdirs = match DbDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => Ok(dir.dbdirs),
+            Err(e) => Err(PageReconstructError::from(e)),
+        }?;
+        if !dbdirs.contains_key(&(tag.spcnode, tag.dbnode)) {
+            return Ok(false);
+        }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = version.get(self, key, ctx).await?;

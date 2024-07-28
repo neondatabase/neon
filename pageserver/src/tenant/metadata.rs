@@ -111,7 +111,7 @@ impl TryFrom<&TimelineMetadataBodyV2> for TimelineMetadataHeader {
 #[error("re-serializing for crc32 failed")]
 struct Crc32CalculationFailed(#[source] utils::bin_ser::SerializeError);
 
-const METADATA_HDR_SIZE: usize = std::mem::size_of::<TimelineMetadataHeader>();
+const METADATA_HDR_SIZE: usize = size_of::<TimelineMetadataHeader>();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TimelineMetadataBodyV2 {

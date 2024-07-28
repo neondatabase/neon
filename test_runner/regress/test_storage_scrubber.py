@@ -191,7 +191,9 @@ def test_scrubber_physical_gc_ancestors(
             "checkpoint_distance": f"{1024 * 1024}",
             "compaction_threshold": "1",
             "compaction_target_size": f"{1024 * 1024}",
-            "image_creation_threshold": "2",
+            # Disable automatic creation of image layers, as future image layers can result in layers in S3 that
+            # aren't referenced by children, earlier than the test expects such layers to exist
+            "image_creation_threshold": "9999",
             "image_layer_creation_check_threshold": "0",
             # Disable background compaction, we will do it explicitly
             "compaction_period": "0s",
@@ -209,9 +211,17 @@ def test_scrubber_physical_gc_ancestors(
     new_shard_count = 4
     assert shard_count is None or new_shard_count > shard_count
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
+    env.storage_controller.reconcile_until_idle()  # Move shards to their final locations immediately
 
-    # Make sure child shards have some layers
-    workload.write_rows(100)
+    # Make sure child shards have some layers.  Do not force upload, because the test helper calls checkpoint, which
+    # compacts, and we only want to do tha explicitly later in the test.
+    workload.write_rows(100, upload=False)
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
+        ps.http_client().timeline_checkpoint(
+            shard, timeline_id, compact=False, wait_until_uploaded=True
+        )
 
     # Flush deletion queue so that we don't leave any orphan layers in the parent that will confuse subsequent checks: once
     # a shard is split, any layers in its prefix that aren't referenced by a child will be considered GC'able, even
@@ -233,7 +243,7 @@ def test_scrubber_physical_gc_ancestors(
     workload.churn_rows(100)
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
-        ps.http_client().timeline_compact(shard, timeline_id)
+        ps.http_client().timeline_compact(shard, timeline_id, force_image_layer_creation=True)
         ps.http_client().timeline_gc(shard, timeline_id, 0)
 
     # We will use a min_age_secs=1 threshold for deletion, let it pass

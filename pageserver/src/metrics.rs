@@ -3104,6 +3104,8 @@ pub fn preinitialize_metrics() {
         &tokio_epoll_uring::THREAD_LOCAL_LAUNCH_SUCCESSES,
         &REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
         &REMOTE_ONDEMAND_DOWNLOADED_BYTES,
+        &CIRCUIT_BREAKERS_BROKEN,
+        &CIRCUIT_BREAKERS_UNBROKEN,
     ]
     .into_iter()
     .for_each(|c| {
