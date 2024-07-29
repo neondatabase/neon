@@ -112,7 +112,11 @@ where
                 bucket_width,
             },
             state: Mutex::new(LeakyBucketState::new(end)),
-            queue: fair.then(Notify::new),
+            queue: fair.then(|| {
+                let queue = Notify::new();
+                queue.notify_one();
+                queue
+            }),
         };
 
         Inner {
