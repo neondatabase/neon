@@ -1532,7 +1532,6 @@ impl DeltaLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
         DeltaLayerKeyIterator {
-            layer: self,
             buffer: None,
             index_iter: tree_reader.iter(&[0; DELTA_KEY_SIZE], ctx),
         }
@@ -1670,12 +1669,9 @@ impl<'a> DeltaLayerIterator<'a> {
 }
 
 pub struct DeltaLayerKeyIterator<'a> {
-    layer: &'a DeltaLayerInner,
-    buffer: Option<DeltaLayerKeyIteratorBuffer>,
     index_iter: DiskBtreeIterator<'a>,
 }
 
-#[derive(Clone)]
 pub(crate) struct DeltaLayerKeyIteratorItem {
     pub(crate) key: Key,
     pub(crate) lsn: Lsn,
@@ -1688,52 +1684,12 @@ struct DeltaLayerKeyIteratorBuffer {
 }
 
 impl<'a> DeltaLayerKeyIterator<'a> {
-    async fn read_one(&mut self) -> anyhow::Result<Option<DeltaLayerKeyIteratorBuffer>> {
-        let Some((raw_key, value)) = self.index_iter.next().await.transpose()? else {
+    pub(crate) async fn next(&mut self) -> anyhow::Result<Option<DeltaKey>> {
+        let Some(res) = self.index_iter.next().await else {
             return Ok(None);
         };
-        let key = DeltaKey::from_slice(&raw_key);
-        let blob_ref = BlobRef(value);
-        Ok(Some(DeltaLayerKeyIteratorBuffer { key, blob_ref }))
-    }
-
-    /// Errors are not retryable.
-    pub(crate) async fn next(&mut self) -> anyhow::Result<Option<DeltaLayerKeyIteratorItem>> {
-        if self.buffer.is_none() {
-            self.buffer = self.read_one().await?;
-        }
-        let buffer = self.buffer.take();
-        let next = self.read_one().await?;
-        let yielded = match (buffer, &next) {
-            (None, None) => return Ok(None),
-            (None, Some(_)) => unreachable!(
-                "we fill the buffer first, index_iter must have returned Some() after None"
-            ),
-            (Some(buffered), Some(next)) => {
-                DeltaLayerKeyIteratorItem {
-                    key: buffered.key.key(),
-                    lsn: buffered.key.lsn(),
-                    physical_size: next
-                        .blob_ref
-                        .pos()
-                        .checked_sub(buffered.blob_ref.pos())
-                        // likely corruption
-                        .context("offsets returned from delta layer index iterator are not monotonically increasing")?,
-                }
-            }
-            (Some(buffered), None) => {
-                // Last key occupies all space till end of value storage,
-                // which corresponds to beginning of the index
-                let size = self.layer.index_start_offset() - buffered.blob_ref.pos();
-                DeltaLayerKeyIteratorItem {
-                    key: buffered.key.key(),
-                    lsn: buffered.key.lsn(),
-                    physical_size: size,
-                }
-            }
-        };
-        self.buffer = next;
-        Ok(Some(yielded))
+        let (raw_key, _value) = res?;
+        Ok(Some(DeltaKey::from_slice(&raw_key)))
     }
 }
 

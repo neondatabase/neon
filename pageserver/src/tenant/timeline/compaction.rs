@@ -28,7 +28,6 @@ use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder}
 use crate::page_cache;
 use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
 use crate::tenant::remote_timeline_client::WaitCompletionError;
-use crate::tenant::storage_layer::delta_layer::DeltaLayerKeyIteratorItem;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc, ValueReconstructState};
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
@@ -619,27 +618,21 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
 
-        // TODO: replace with k-merge
-        let all_keys = {
-            let mut all_keys = Vec::new();
-            for l in deltas_to_compact.iter() {
-                let mut iter = l
-                    .iter_delta_keys(ctx)
-                    .await
-                    .map_err(CompactionError::Other)?;
-                while let Some(entry) = iter.next().await.map_err(CompactionError::Other)? {
-                    all_keys.push(entry);
-                }
-            }
-            // The current stdlib sorting implementation is designed in a way where it is
-            // particularly fast where the slice is made up of sorted sub-ranges.
-            all_keys.sort_by_key(|DeltaLayerKeyIteratorItem { key, lsn, .. }| (*key, *lsn));
-            all_keys
-        };
+        let mut all_keys = Vec::new();
+
+        for l in deltas_to_compact.iter() {
+            all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
+        }
+
+        // FIXME: should spawn_blocking the rest of this function
+
+        // The current stdlib sorting implementation is designed in a way where it is
+        // particularly fast where the slice is made up of sorted sub-ranges.
+        all_keys.sort_by_key(|DeltaEntry { key, lsn, .. }| (*key, *lsn));
 
         stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
 
-        for &DeltaLayerKeyIteratorItem { key: next_key, .. } in all_keys.iter() {
+        for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
             if let Some(prev_key) = prev {
                 // just first fast filter, do not create hole entries for metadata keys. The last hole in the
                 // compaction is the gap between data key and metadata keys.
@@ -684,20 +677,23 @@ impl Timeline {
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = all_keys.iter().cloned().coalesce(|mut prev, cur| {
-            // Coalesce keys that belong to the same key pair.
-            // This ensures that compaction doesn't put them
-            // into different layer files.
-            // Still limit this by the target file size,
-            // so that we keep the size of the files in
-            // check.
-            if prev.key == cur.key && prev.physical_size < target_file_size {
-                prev.physical_size += cur.physical_size;
-                Ok(prev)
-            } else {
-                Err((prev, cur))
-            }
-        });
+        let mut all_keys_iter = all_keys
+            .iter()
+            .map(|DeltaEntry { key, lsn, size, .. }| (*key, *lsn, *size))
+            .coalesce(|mut prev, cur| {
+                // Coalesce keys that belong to the same key pair.
+                // This ensures that compaction doesn't put them
+                // into different layer files.
+                // Still limit this by the target file size,
+                // so that we keep the size of the files in
+                // check.
+                if prev.0 == cur.0 && prev.2 < target_file_size {
+                    prev.2 += cur.2;
+                    Ok(prev)
+                } else {
+                    Err((prev, cur))
+                }
+            });
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -765,12 +761,7 @@ impl Timeline {
                     dup_end_lsn = Lsn::INVALID;
                 }
                 // Determine size occupied by this key. We stop at next key or when size becomes larger than target_file_size
-                for DeltaLayerKeyIteratorItem {
-                    key: next_key,
-                    lsn: next_lsn,
-                    physical_size: next_size,
-                } in all_keys_iter.by_ref()
-                {
+                for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
                     next_key_size = next_size;
                     if key != next_key {
                         if dup_end_lsn.is_valid() {
