@@ -17,6 +17,7 @@ use crate::{
     drain_utils::{self, TenantShardDrain, TenantShardIterator},
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     metrics::LeadershipStatusGroup,
+    peer_client::GlobalObservedState,
     persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
@@ -83,7 +84,6 @@ use crate::{
         ReconcilerWaiter, TenantShard,
     },
 };
-use serde::{Deserialize, Serialize};
 
 pub mod chaos_injector;
 
@@ -499,10 +499,6 @@ pub(crate) enum ReconcileResultRequest {
     ReconcileResult(ReconcileResult),
     Stop,
 }
-
-// TODO: move this into the storcon peer client when that gets added
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub(crate) struct GlobalObservedState(HashMap<TenantShardId, ObservedState>);
 
 impl Service {
     pub fn get_config(&self) -> &Config {
