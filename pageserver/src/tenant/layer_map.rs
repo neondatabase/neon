@@ -980,12 +980,10 @@ impl LayerMap {
                 if *reached_lsn >= d.lsn_range.start && is_readpoint {
                     // We encountered a readpoint within the delta layer: it is visible
 
-                    eprintln!("confirm visible delta @ {}", d.lsn_range.end);
                     results.push((d.clone(), LayerVisibilityHint::Visible));
                     false
                 } else if *reached_lsn < d.lsn_range.start {
                     // We passed the layer's range without encountering a read point: it is not visible
-                    eprintln!("confirm covered delta @ {}", d.lsn_range.end);
                     results.push((d.clone(), LayerVisibilityHint::Covered));
                     false
                 } else {
@@ -1006,27 +1004,18 @@ impl LayerMap {
                             // If a layer isn't visible based on current state, we must defer deciding whether
                             // it is truly not visible until we have advanced past the delta's range: we might
                             // encounter another branch point within this delta layer's LSN range.
-                            eprintln!("maybe covered delta @ {}", layer.lsn_range.end);
                             maybe_covered_deltas.push(layer);
                             continue;
                         } else {
-                            eprintln!("visible delta @ {}", layer.lsn_range.end);
                             LayerVisibilityHint::Visible
                         }
                     } else {
                         let modified = shadow.cover(layer.get_key_range());
-                        eprintln!(
-                            "Extended shadow with {}..{} - modified={modified}",
-                            layer.get_key_range().start,
-                            layer.get_key_range().end,
-                        );
                         if modified {
                             // An image layer in a region which wasn't fully covered yet: this layer is visible, but layers below it will be covered
-                            eprintln!("visible image @ {}", layer.image_layer_lsn());
                             LayerVisibilityHint::Visible
                         } else {
                             // An image layer in a region that was already covered
-                            eprintln!("covered image @ {}", layer.image_layer_lsn());
                             LayerVisibilityHint::Covered
                         }
                     };
