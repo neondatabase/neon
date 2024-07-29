@@ -27,7 +27,8 @@ use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_time
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{
-    GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config, DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
+    GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+    S3Config, DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -428,7 +429,8 @@ fn stream_objects_with_retries<'a>(
         let mut trial = 0;
         let cancel = CancellationToken::new();
         let prefix = RemotePath::from_string(&s3_target.prefix_in_bucket)?;
-        let mut list_stream = storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
+        let mut list_stream =
+            storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
         while let Some(res) = list_stream.next().await {
             if let Err(err) = res {
                 if !err.is_permanent() {
@@ -440,6 +442,9 @@ fn stream_objects_with_retries<'a>(
                             .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
                     }
                     continue;
+                } else {
+                    yield Err(err)
+                        .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
                 }
             } else {
                 trial = 0;
