@@ -11,6 +11,7 @@ use arc_swap::ArcSwap;
 use enumset::EnumSet;
 use tokio::sync::Notify;
 use tracing::{error, warn};
+use utils::leaky_bucket::{LeakyBucketConfig, LeakyBucketState};
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
@@ -93,18 +94,33 @@ where
                 }
             })
             .collect();
+
+        //
+        let time_cost = refill_interval / refill_amount.get() as u32;
+        let bucket_width = time_cost * (max as u32);
+
+        // initial tracks how many tokens are available to put in the bucket
+        // we want how many tokens are currently in the bucket
+        let initial_tokens = (max - initial) as u32;
+        let end = time_cost * initial_tokens;
+
+        // start a bit early to avoid certain underflow issues
+        let epoch_offset = 2 * bucket_width + refill_interval;
+
+        let rate_limiter = RateLimiter {
+            config: LeakyBucketConfig {
+                epoch: tokio::time::Instant::now() - epoch_offset,
+                refill_rate: refill_interval,
+                time_cost,
+                bucket_width,
+            },
+            state: Mutex::new(LeakyBucketState::new(end + epoch_offset)),
+            queue: fair.then(Notify::new),
+        };
+
         Inner {
             task_kinds,
-            rate_limiter: Arc::new(
-                RateLimiterBuilder {
-                    initial,
-                    refill_interval,
-                    refill: refill_amount.get(),
-                    max,
-                    fair,
-                }
-                .build(),
-            ),
+            rate_limiter: Arc::new(rate_limiter),
         }
     }
     pub fn reconfigure(&self, config: Config) {
@@ -137,7 +153,7 @@ where
         };
         let start = std::time::Instant::now();
 
-        let did_throttle = !inner.rate_limiter.acquire(key_count).await;
+        let did_throttle = inner.rate_limiter.acquire(key_count).await;
 
         self.count_accounted.fetch_add(1, Ordering::Relaxed);
         if did_throttle {
@@ -169,89 +185,33 @@ where
 }
 
 struct RateLimiter {
-    epoch: tokio::time::Instant,
+    config: LeakyBucketConfig,
+    state: Mutex<LeakyBucketState>,
 
-    /// "time cost" of a single request unit.
-    /// loosely represents how long it takes to handle a request unit in active CPU time.
-    time_cost: Duration,
-
-    bucket_width: Duration,
-
-    interval: Duration,
-
-    /// Bucket is represented by `start..end` where `end = epoch + end` and `start = end - config.bucket_width`.
-    ///
-    /// At any given time, `end - now` represents the number of tokens in the bucket, multiplied by the "time_cost".
-    /// Adding `n` tokens to the bucket is done by moving `end` forward by `n * config.time_cost`.
-    /// If `now < start`, the bucket is considered filled and cannot accept any more tokens.
-    /// Draining the bucket will happen naturally as `now` moves forward.
-    ///
-    /// Let `n` be some "time cost" for the request,
-    /// If now is after end, the bucket is empty and the end is reset to now,
-    /// If now is within the `bucket window + n`, we are within time budget.
-    /// If now is before the `bucket window + n`, we have run out of budget.
-    ///
-    /// This is inspired by the generic cell rate algorithm (GCRA) and works
-    /// exactly the same as a leaky-bucket.
-    end: Mutex<Duration>,
-
+    /// if this rate limiter is fair,
+    /// provide a queue to provide this fair ordering.
     queue: Option<Notify>,
-}
-
-struct RateLimiterBuilder {
-    /// The max number of tokens.
-    max: usize,
-    /// The initial count of tokens.
-    initial: usize,
-    /// Tokens to add every `per` duration.
-    refill: usize,
-    /// Interval to add tokens in milliseconds.
-    refill_interval: Duration,
-    /// If the rate limiter is fair or not.
-    fair: bool,
-}
-
-impl RateLimiterBuilder {
-    fn build(self) -> RateLimiter {
-        let queue = self.fair.then(Notify::new);
-
-        let time_cost = self.refill_interval / self.refill as u32;
-        let bucket_width = time_cost * (self.max as u32);
-        let initial_allow = time_cost * (self.initial as u32);
-        let end = bucket_width - initial_allow;
-
-        RateLimiter {
-            epoch: tokio::time::Instant::now(),
-            time_cost,
-            bucket_width,
-            interval: self.refill_interval,
-            end: Mutex::new(end),
-            queue,
-        }
-    }
 }
 
 impl RateLimiter {
     fn steady_rps(&self) -> f64 {
-        self.time_cost.as_secs_f64().recip()
+        self.config.time_cost.as_secs_f64().recip()
     }
 
-    /// returns true if not throttled
+    /// returns true if we did throttle
     async fn acquire(&self, count: usize) -> bool {
-        let mut not_throttled = true;
-
-        let n = self.time_cost.mul_f64(count as f64);
+        let mut throttled = false;
 
         // wait until we are the first in the queue
         if let Some(queue) = &self.queue {
             let mut notified = std::pin::pin!(queue.notified());
             if !notified.as_mut().enable() {
-                not_throttled = false;
+                throttled = true;
                 notified.await;
             }
         }
 
-        // notify the next waiter in the queue
+        // notify the next waiter in the queue when we are done.
         scopeguard::defer! {
             if let Some(queue) = &self.queue {
                 queue.notify_one();
@@ -260,42 +220,19 @@ impl RateLimiter {
 
         loop {
             let now = tokio::time::Instant::now();
-            let now = now - self.epoch;
 
-            // we only "add" new tokens on a fixed interval.
-            // truncate to the most recent multiple of self.interval.
-            let now = self
-                .interval
-                .mul_f64(now.div_duration_f64(self.interval).trunc());
-
-            let ready_at = {
-                //       start          end
-                //       |     start+n  |     end+n
-                //       |   /          |   /
-                // ------{o-[---------o-}--]----o----
-                //   now1 ^      now2 ^         ^ now3
-                //
-                // at now1, the bucket would be completely filled if we add n tokens.
-                // at now2, the bucket would be partially filled if we add n tokens.
-                // at now3, the bucket would start completely empty before we add n tokens.
-
-                let mut end = self.end.lock().unwrap();
-                let start = *end - self.bucket_width;
-                let ready_at = start + n;
-
-                if *end + n <= now {
-                    *end = now + n;
-                    return not_throttled;
-                } else if ready_at <= now {
-                    *end += n;
-                    return not_throttled;
+            let res = self
+                .state
+                .lock()
+                .unwrap()
+                .add_tokens(&self.config, now, count as f64);
+            match res {
+                Ok(()) => return throttled,
+                Err(ready_at) => {
+                    throttled = true;
+                    tokio::time::sleep_until(ready_at).await;
                 }
-
-                ready_at
-            };
-
-            not_throttled = false;
-            tokio::time::sleep_until(self.epoch + ready_at).await;
+            }
         }
     }
 }
