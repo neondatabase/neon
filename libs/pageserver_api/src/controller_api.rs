@@ -298,14 +298,8 @@ pub struct TenantShardMigrateResponse {}
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHealthRecord {
     pub tenant_shard_id: TenantShardId,
-    pub healthy: Option<bool>,
-    pub last_scrubbed_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl MetadataHealthRecord {
-    pub fn has_been_scanned(&self) -> bool {
-        self.last_scrubbed_at.is_some()
-    }
+    pub healthy: bool,
+    pub last_scrubbed_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

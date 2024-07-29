@@ -1810,16 +1810,20 @@ def test_storage_controller_metadata_health(
     """
 
     def update_and_query_metadata_health(
-        env: NeonEnv, healthy: List[TenantShardId], unhealthy: List[TenantShardId]
+        env: NeonEnv,
+        healthy: List[TenantShardId],
+        unhealthy: List[TenantShardId],
+        outdated_duration: str = "1h",
     ) -> Tuple[Set[str], Set[str]]:
         """
         Update metadata health. Then list tenant shards with unhealthy and
         outdated metadata health status.
         """
-        env.storage_controller.metadata_health_update(healthy, unhealthy)
+        if healthy or unhealthy:
+            env.storage_controller.metadata_health_update(healthy, unhealthy)
         result = env.storage_controller.metadata_health_list_unhealthy()
         unhealthy_res = set(result["unhealthy_tenant_shards"])
-        result = env.storage_controller.metadata_health_list_outdated("1h")
+        result = env.storage_controller.metadata_health_list_outdated(outdated_duration)
         outdated_res = set(record["tenant_shard_id"] for record in result["health_records"])
 
         return unhealthy_res, outdated_res
@@ -1853,6 +1857,9 @@ def test_storage_controller_metadata_health(
         else [TenantShardId(tenant_c, 0, 0)]
     )
 
+    # Metadata health table also updated as tenant shards are created.
+    assert env.storage_controller.metadata_health_is_healthy()
+
     # post "fake" updates to storage controller db
 
     unhealthy, outdated = update_and_query_metadata_health(
@@ -1863,9 +1870,7 @@ def test_storage_controller_metadata_health(
     assert len(unhealthy) == len(tenant_b_shard_ids)
     for t in tenant_b_shard_ids:
         assert str(t) in unhealthy
-    assert len(outdated) == len(tenant_c_shard_ids)
-    for t in tenant_c_shard_ids:
-        assert str(t) in outdated
+    assert len(outdated) == 0
 
     unhealthy, outdated = update_and_query_metadata_health(
         env, healthy=tenant_b_shard_ids + tenant_c_shard_ids, unhealthy=[]
@@ -1890,6 +1895,14 @@ def test_storage_controller_metadata_health(
 
     # A's unhealthy metadata health status should be deleted as well.
     assert env.storage_controller.metadata_health_is_healthy()
+
+    # All shards from B and C are not fresh if set outdated duration to 0 seconds.
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=[], unhealthy=tenant_a_shard_ids, outdated_duration="0s"
+    )
+    assert len(unhealthy) == 0
+    for t in tenant_b_shard_ids + tenant_c_shard_ids:
+        assert str(t) in outdated
 
 
 def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):

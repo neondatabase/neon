@@ -312,15 +312,32 @@ impl Persistence {
         &self,
         shards: Vec<TenantShardPersistence>,
     ) -> DatabaseResult<()> {
-        use crate::schema::tenant_shards::dsl::*;
+        use crate::schema::metadata_health;
+        use crate::schema::tenant_shards;
+
+        let now = chrono::Utc::now();
+
+        let metadata_health_records = shards
+            .iter()
+            .map(|t| MetadataHealthPersistence {
+                tenant_id: t.tenant_id.clone(),
+                shard_number: t.shard_number,
+                shard_count: t.shard_count,
+                healthy: true,
+                last_scrubbed_at: now,
+            })
+            .collect::<Vec<_>>();
+
         self.with_measured_conn(
             DatabaseOperation::InsertTenantShards,
             move |conn| -> DatabaseResult<()> {
-                for tenant in &shards {
-                    diesel::insert_into(tenant_shards)
-                        .values(tenant)
-                        .execute(conn)?;
-                }
+                diesel::insert_into(tenant_shards::table)
+                    .values(&shards)
+                    .execute(conn)?;
+
+                diesel::insert_into(metadata_health::table)
+                    .values(&metadata_health_records)
+                    .execute(conn)?;
                 Ok(())
             },
         )
@@ -754,37 +771,14 @@ impl Persistence {
     pub(crate) async fn list_outdated_metadata_health_records(
         &self,
         earlier: chrono::DateTime<chrono::Utc>,
-    ) -> DatabaseResult<Vec<MetadataHealthNullable>> {
-        use crate::schema::metadata_health;
-        use crate::schema::tenant_shards;
+    ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
+        use crate::schema::metadata_health::dsl::*;
 
         self.with_measured_conn(
             DatabaseOperation::ListMetadataHealthOutdated,
             move |conn| -> DatabaseResult<_> {
-                let query = tenant_shards::table
-                    .left_join(
-                        metadata_health::table.on(tenant_shards::tenant_id
-                            .eq(metadata_health::tenant_id)
-                            .and(tenant_shards::shard_number.eq(metadata_health::shard_number))
-                            .and(tenant_shards::shard_count.eq(metadata_health::shard_count))),
-                    )
-                    .select((
-                        tenant_shards::tenant_id,
-                        tenant_shards::shard_number,
-                        tenant_shards::shard_count,
-                        metadata_health::healthy.nullable(),
-                        metadata_health::last_scrubbed_at.nullable(),
-                    ))
-                    .filter(
-                        metadata_health::last_scrubbed_at
-                            .nullable()
-                            // tenant shards that do not have an update
-                            .is_null()
-                            // tenant shards that has outdated metadata health records
-                            .or(metadata_health::last_scrubbed_at.lt(earlier)),
-                    );
-
-                let res = query.load::<MetadataHealthNullable>(conn)?;
+                let query = metadata_health.filter(last_scrubbed_at.lt(earlier));
+                let res = query.load::<MetadataHealthPersistence>(conn)?;
 
                 Ok(res)
             },
@@ -876,21 +870,6 @@ pub(crate) struct MetadataHealthPersistence {
     pub(crate) last_scrubbed_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Tenant metadata health status with optional health marker and timestamp.
-#[derive(Queryable, Selectable, Serialize, Deserialize, Clone, Eq, PartialEq)]
-#[diesel(table_name = crate::schema::metadata_health)]
-pub(crate) struct MetadataHealthNullable {
-    #[serde(default)]
-    pub(crate) tenant_id: String,
-    #[serde(default)]
-    pub(crate) shard_number: i32,
-    #[serde(default)]
-    pub(crate) shard_count: i32,
-
-    pub(crate) healthy: Option<bool>,
-    pub(crate) last_scrubbed_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 impl MetadataHealthPersistence {
     pub fn new(
         tenant_shard_id: TenantShardId,
@@ -926,8 +905,8 @@ impl From<MetadataHealthPersistence> for MetadataHealthRecord {
             tenant_shard_id: value
                 .get_tenant_shard_id()
                 .expect("stored tenant id should be valid"),
-            healthy: Some(value.healthy),
-            last_scrubbed_at: Some(value.last_scrubbed_at),
+            healthy: value.healthy,
+            last_scrubbed_at: value.last_scrubbed_at,
         }
     }
 }
