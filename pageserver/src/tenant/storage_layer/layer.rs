@@ -20,7 +20,7 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::{CompactionError, GetVectoredError};
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
-use super::delta_layer::{self, DeltaEntry};
+use super::delta_layer::{self, DeltaEntry, DeltaLayerKeyIterator};
 use super::image_layer::{self};
 use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
@@ -1853,6 +1853,21 @@ impl ResidentLayer {
                     .with_context(|| format!("Layer index is corrupted for {self}"))
             }
             Image(_) => anyhow::bail!(format!("cannot load_keys on a image layer {self}")),
+        }
+    }
+
+    /// Iterate over all delta keys stored in the layer.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
+    pub(crate) async fn iter_delta_keys<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+    ) -> anyhow::Result<DeltaLayerKeyIterator<'a>> {
+        use LayerKind::*;
+
+        let owner = &self.owner.0;
+        match self.downloaded.get(owner, ctx).await? {
+            Delta(ref d) => Ok(delta_layer::DeltaLayerInner::iter_keys(d, ctx)),
+            Image(_) => anyhow::bail!(format!("cannot iter_delta_keys on a image layer {self}")),
         }
     }
 
