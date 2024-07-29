@@ -43,7 +43,7 @@ pub async fn task_main(
                     error!("connection handler exited: {}", err);
                 }
             }
-            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty)),
+            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty, application_name = field::Empty)),
         );
     }
 }
