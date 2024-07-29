@@ -48,13 +48,12 @@ def test_threshold_based_eviction(
     tenant_id, timeline_id = env.initial_tenant, env.initial_timeline
 
     ps_http = env.pageserver.http_client()
-    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
-        "kind": "NoEviction"
-    }
+    vps_http = env.storage_controller.pageserver_api()
+    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] is None
 
     eviction_threshold = 10
     eviction_period = 2
-    ps_http.set_tenant_config(
+    vps_http.set_tenant_config(
         tenant_id,
         {
             "eviction_policy": {
@@ -64,7 +63,7 @@ def test_threshold_based_eviction(
             },
         },
     )
-    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
+    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",
         "threshold": f"{eviction_threshold}s",
         "period": f"{eviction_period}s",
@@ -73,7 +72,7 @@ def test_threshold_based_eviction(
     # restart because changing tenant config is not instant
     env.pageserver.restart()
 
-    assert ps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
+    assert vps_http.tenant_config(tenant_id).effective_config["eviction_policy"] == {
         "kind": "LayerAccessThreshold",
         "threshold": f"{eviction_threshold}s",
         "period": f"{eviction_period}s",
@@ -81,7 +80,7 @@ def test_threshold_based_eviction(
 
     # create a bunch of L1s, only the least of which will need to be resident
     compaction_threshold = 3  # create L1 layers quickly
-    ps_http.patch_tenant_config_client_side(
+    vps_http.patch_tenant_config_client_side(
         tenant_id,
         inserts={
             # Disable gc and compaction to avoid on-demand downloads from their side.
@@ -154,7 +153,7 @@ def test_threshold_based_eviction(
     while time.time() - started_waiting_at < observation_window:
         current = (
             time.time(),
-            MapInfoProjection(ps_http.layer_map_info(tenant_id, timeline_id)),
+            MapInfoProjection(vps_http.layer_map_info(tenant_id, timeline_id)),
         )
         last = map_info_changes[-1] if map_info_changes else (0, None)
         if last[1] is None or current[1] != last[1]:
