@@ -451,20 +451,14 @@ pub enum ValueReconstructResult {
 /// than an authoritative value, so that we do not have to update it synchronously when changing the visibility
 /// of layers (for example when creating a branch that makes some previously covered layers visible).  It should
 /// be used for cache management but not for correctness-critical checks.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayerVisibilityHint {
     /// A Visible layer might be read while serving a read, because there is not an image layer between it
     /// and a readable LSN (the tip of the branch or a child's branch point)
     Visible,
     /// A Covered layer probably won't be read right now, but _can_ be read in future if someone creates
     /// a branch or ephemeral endpoint at an LSN below the layer that covers this.
-    #[allow(unused)]
     Covered,
-    /// Calculating layer visibilty requires I/O, so until this has happened layers are loaded
-    /// in this state.  Note that newly written layers may be called Visible immediately, this uninitialized
-    /// state is for when existing layers are constructed while loading a timeline.
-    #[default]
-    Uninitialized,
 }
 
 pub(crate) struct LayerAccessStats(std::sync::atomic::AtomicU64);
@@ -629,7 +623,7 @@ impl LayerAccessStats {
     pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) {
         let value = match visibility {
             LayerVisibilityHint::Visible => 0x1 << Self::VISIBILITY_SHIFT,
-            LayerVisibilityHint::Covered | LayerVisibilityHint::Uninitialized => 0x0,
+            LayerVisibilityHint::Covered => 0x0,
         };
 
         self.write_bits(0x1 << Self::VISIBILITY_SHIFT, value);
