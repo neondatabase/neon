@@ -279,10 +279,10 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
-        let (buf, res, _compression_info) = self
+        let (buf, res) = self
             .write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
             .await;
-        (buf, res)
+        (buf, res.map(|(off, _compression_info)| off))
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
@@ -292,7 +292,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
         algorithm: ImageCompressionAlgorithm,
-    ) -> (B::Buf, Result<u64, Error>, CompressionInfo) {
+    ) -> (B::Buf, Result<(u64, CompressionInfo), Error>) {
         let offset = self.offset;
         let mut compression_info = CompressionInfo {
             written_compressed: false,
@@ -365,13 +365,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         self.io_buf = Some(io_buf);
         match hdr_res {
             Ok(_) => (),
-            Err(e) => {
-                return (
-                    Slice::into_inner(srcbuf.slice(..)),
-                    Err(e),
-                    compression_info,
-                )
-            }
+            Err(e) => return (Slice::into_inner(srcbuf.slice(..)), Err(e)),
         }
         let (srcbuf, res) = if let Some(compressed_buf) = compressed_buf {
             let (_buf, res) = self.write_all(compressed_buf, ctx).await;
@@ -379,7 +373,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         } else {
             self.write_all(srcbuf, ctx).await
         };
-        (srcbuf, res.map(|_| offset), compression_info)
+        (srcbuf, res.map(|_| (offset, compression_info)))
     }
 }
 
@@ -443,7 +437,7 @@ pub(crate) mod tests {
                             ImageCompressionAlgorithm::Zstd { level: Some(1) },
                         )
                         .await;
-                    (res.0, res.1)
+                    (res.0, res.1.map(|(off, _)| off))
                 } else {
                     wtr.write_blob(blob.clone(), ctx).await
                 };

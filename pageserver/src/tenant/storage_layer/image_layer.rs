@@ -822,10 +822,12 @@ impl ImageLayerWriterInner {
         let compression = self.conf.image_compression;
         let uncompressed_len = img.len() as u64;
         self.uncompressed_bytes += uncompressed_len;
-        let (_img, res, compression_info) = self
+        let (_img, res) = self
             .blob_writer
             .write_blob_maybe_compressed(img, ctx, compression)
             .await;
+        // TODO: re-use the buffer for `img` further upstack
+        let (off, compression_info) = res?;
         if compression_info.compressed_size.is_some() {
             // The image has been considered for compression at least
             self.uncompressed_bytes_eligible += uncompressed_len;
@@ -834,8 +836,6 @@ impl ImageLayerWriterInner {
             // The image has been compressed
             self.uncompressed_bytes_chosen += uncompressed_len;
         }
-        // TODO: re-use the buffer for `img` further upstack
-        let off = res?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
