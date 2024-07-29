@@ -125,7 +125,7 @@ impl S3Target {
     pub fn with_sub_segment(&self, new_segment: &str) -> Self {
         let mut new_self = self.clone();
         if new_self.prefix_in_bucket.is_empty() {
-            new_self.prefix_in_bucket = format!("/{}/", new_segment);
+            new_self.prefix_in_bucket = format!("{}/", new_segment);
         } else {
             if new_self.prefix_in_bucket.ends_with('/') {
                 new_self.prefix_in_bucket.pop();
