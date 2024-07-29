@@ -16,6 +16,7 @@ use crate::{
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     metrics::LeadershipStatusGroup,
+    peer_client::GlobalObservedState,
     persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
@@ -82,7 +83,6 @@ use crate::{
         ReconcilerWaiter, TenantShard,
     },
 };
-use serde::{Deserialize, Serialize};
 
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -490,10 +490,6 @@ pub(crate) enum ReconcileResultRequest {
     ReconcileResult(ReconcileResult),
     Stop,
 }
-
-// TODO: move this into the storcon peer client when that gets added
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub(crate) struct GlobalObservedState(HashMap<TenantShardId, ObservedState>);
 
 impl Service {
     pub fn get_config(&self) -> &Config {
