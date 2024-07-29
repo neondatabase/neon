@@ -15,7 +15,7 @@ jobs:
       contents: read
 #    environment: dev
     name: Build image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       # two checkout steps follow, one when commit is specified, second when not.
       # if it makes sense be optimized to one step - feel free to do it.
