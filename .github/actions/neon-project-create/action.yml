@@ -16,7 +16,7 @@ inputs:
     default: console-stage.neon.build
   provisioner:
     description: 'k8s-pod or k8s-neonvm'
-    default: 'k8s-pod'
+    default: 'k8s-neonvm'
   compute_units:
     description: '[Min, Max] compute units; Min and Max are used for k8s-neonvm with autoscaling, for k8s-pod values Min and Max should be equal'
     default: '[1, 1]'
