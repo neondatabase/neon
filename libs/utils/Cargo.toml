@@ -26,7 +26,6 @@ hyper = { workspace = true, features = ["full"] }
 fail.workspace = true
 futures = { workspace = true}
 jsonwebtoken.workspace = true
-leaky-bucket.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
