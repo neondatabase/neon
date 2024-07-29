@@ -1567,7 +1567,6 @@ broker_endpoint = '{broker_endpoint}'
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [disk_usage_based_eviction]
 max_usage_pct = 80
@@ -1637,7 +1636,6 @@ threshold = "20m"
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [tenant_config]
 evictions_low_residence_duration_metric_threshold = "20m"
