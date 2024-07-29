@@ -7771,7 +7771,7 @@ mod tests {
                 &ctx,
                 vec![],                       // delta layers
                 vec![(Lsn(0x18), img_layer)], // image layers
-                Lsn(0x20),
+                Lsn(0x18),
             )
             .await?;
 
@@ -7781,7 +7781,7 @@ mod tests {
             .branch_timeline_test_with_layers(
                 &parent_tline,
                 NEW_TIMELINE_ID,
-                None,
+                Some(Lsn(0x18)),
                 &ctx,
                 vec![
                     DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta1),
@@ -7799,7 +7799,7 @@ mod tests {
             // Update GC info
             let mut guard = parent_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x20), tline.timeline_id)],
+                retain_lsns: vec![(Lsn(0x18), tline.timeline_id)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x10),
                     space: Lsn(0x10),
