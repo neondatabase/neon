@@ -430,7 +430,7 @@ impl<T: Types> PerTimelineState<T> {
             trace!("already shut down");
             return;
         };
-        for (_, handle) in &handles {
+        for handle in handles.values() {
             // Make hits fail.
             handle.shut_down.store(true, Ordering::Relaxed);
         }
