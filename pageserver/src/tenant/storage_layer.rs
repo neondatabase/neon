@@ -620,22 +620,29 @@ impl LayerAccessStats {
         }
     }
 
-    pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) {
+    /// Helper for extracting the visibility hint from the literal value of our inner u64
+    fn decode_visibility(&self, bits: u64) -> LayerVisibilityHint {
+        match (bits >> Self::VISIBILITY_SHIFT) & 0x1 {
+            1 => LayerVisibilityHint::Visible,
+            0 => LayerVisibilityHint::Covered,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the old value which has been replaced
+    pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) -> LayerVisibilityHint {
         let value = match visibility {
             LayerVisibilityHint::Visible => 0x1 << Self::VISIBILITY_SHIFT,
             LayerVisibilityHint::Covered => 0x0,
         };
 
-        self.write_bits(0x1 << Self::VISIBILITY_SHIFT, value);
+        let old_bits = self.write_bits(0x1 << Self::VISIBILITY_SHIFT, value);
+        self.decode_visibility(old_bits)
     }
 
     pub(crate) fn visibility(&self) -> LayerVisibilityHint {
         let read = self.0.load(std::sync::atomic::Ordering::Relaxed);
-        match (read >> Self::VISIBILITY_SHIFT) & 0x1 {
-            1 => LayerVisibilityHint::Visible,
-            0 => LayerVisibilityHint::Covered,
-            _ => unreachable!(),
-        }
+        self.decode_visibility(read)
     }
 }
 

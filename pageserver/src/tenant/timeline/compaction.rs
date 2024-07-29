@@ -29,9 +29,7 @@ use crate::page_cache;
 use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
-use crate::tenant::storage_layer::{
-    AsLayerDesc, LayerVisibilityHint, PersistentLayerDesc, ValueReconstructState,
-};
+use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc, ValueReconstructState};
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{Layer, ResidentLayer};
@@ -467,28 +465,16 @@ impl Timeline {
             readable_points
         };
 
-        let mut visible_size = 0;
         let (layer_visibility, covered) = layer_map.get_visibility(readable_points);
         for (layer_desc, visibility) in layer_visibility {
             // FIXME: a more efficiency bulk zip() through the layers rather than NlogN getting each one
             let layer = layer_manager.get_from_desc(&layer_desc);
-            if matches!(visibility, LayerVisibilityHint::Visible) {
-                visible_size += layer.metadata().file_size;
-            }
-
-            layer.access_stats().set_visibility(visibility);
+            layer.set_visibility(visibility);
         }
 
         // TODO: publish our covered KeySpace to our parent, so that when they update their visibility, they can
         // avoid assuming that everything at a branch point is visible.
         drop(covered);
-
-        // Also include in the visible size all the layers which we would never update visibility on
-        // TODO: getter that doesn't spuriously construct a Vec<>
-        for layer in layer_map.get_level0_deltas() {
-            visible_size += layer.file_size;
-        }
-        self.metrics.visible_physical_size_gauge.set(visible_size);
     }
 
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
