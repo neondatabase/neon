@@ -63,11 +63,9 @@ jobs:
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
-            provisioner: 'k8s-neonvm'
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
-            provisioner: 'k8s-neonvm'
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
@@ -100,7 +98,6 @@ jobs:
         region_id: ${{ matrix.region_id }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-        provisioner: ${{ matrix.provisioner }}
 
     - name: Run benchmark
       uses: ./.github/actions/run-python-test-set
@@ -344,7 +341,6 @@ jobs:
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
         compute_units: ${{ (contains(matrix.platform, 'captest-freetier') && '[0.25, 0.25]') || '[1, 1]' }}
-        provisioner: k8s-neonvm
 
     - name: Set up Connection String
       id: set-up-connstr
