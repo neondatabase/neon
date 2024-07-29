@@ -13,6 +13,7 @@ on:
     paths:
       - '.github/workflows/pg-clients.yml'
       - 'test_runner/pg_clients/**'
+      - 'test_runner/logical_repl/**'
       - 'poetry.lock'
   workflow_dispatch:
 
