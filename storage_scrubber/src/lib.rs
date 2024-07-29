@@ -433,18 +433,18 @@ fn stream_objects_with_retries<'a>(
             storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
         while let Some(res) = list_stream.next().await {
             if let Err(err) = res {
-                if !err.is_permanent() {
+                let yield_err = if err.is_permanent() {
+                    true
+                } else {
                     let backoff_time = 1 << trial.max(5);
                     tokio::time::sleep(Duration::from_secs(backoff_time)).await;
                     trial += 1;
-                    if trial == MAX_RETRIES - 1 {
-                        yield Err(err)
-                            .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
-                    }
-                    continue;
-                } else {
+                    trial == MAX_RETRIES - 1
+                };
+                if yield_err {
                     yield Err(err)
                         .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                    break;
                 }
             } else {
                 trial = 0;
