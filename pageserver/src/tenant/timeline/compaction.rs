@@ -622,12 +622,8 @@ impl Timeline {
         // TODO: replace with k-merge
         let all_keys = {
             let mut all_keys = Vec::new();
-            let mut all_keys = Vec::new();
-
-            let mut all_keys = Vec::new();
-
             for l in deltas_to_compact.iter() {
-                let iter = l
+                let mut iter = l
                     .iter_delta_keys(ctx)
                     .await
                     .map_err(CompactionError::Other)?;
@@ -637,7 +633,7 @@ impl Timeline {
             }
             // The current stdlib sorting implementation is designed in a way where it is
             // particularly fast where the slice is made up of sorted sub-ranges.
-            all_keys.sort_by_key(|DeltaLayerKeyIteratorItem { key, lsn, .. }| (key, lsn));
+            all_keys.sort_by_key(|DeltaLayerKeyIteratorItem { key, lsn, .. }| (*key, *lsn));
             all_keys
         };
 
@@ -678,10 +674,17 @@ impl Timeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter = all_keys.iter();
+        let mut all_values_iter = {
+            let mut deltas = Vec::with_capacity(deltas_to_compact.len());
+            for l in deltas_to_compact.iter() {
+                let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                deltas.push(l);
+            }
+            MergeIterator::create(&deltas, &[], ctx)
+        };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = all_keys.iter().coalesce(|mut prev, cur| {
+        let mut all_keys_iter = all_keys.iter().cloned().coalesce(|mut prev, cur| {
             // Coalesce keys that belong to the same key pair.
             // This ensures that compaction doesn't put them
             // into different layer files.
@@ -747,11 +750,11 @@ impl Timeline {
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
 
-        for &DeltaLayerKeyIteratorItem {
-            key, lsn, ref val, ..
-        } in all_values_iter
+        while let Some((key, lsn, value)) = all_values_iter
+            .next()
+            .await
+            .map_err(CompactionError::Other)?
         {
-            let value = val.load(ctx).await.map_err(CompactionError::Other)?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -762,9 +765,9 @@ impl Timeline {
                     dup_end_lsn = Lsn::INVALID;
                 }
                 // Determine size occupied by this key. We stop at next key or when size becomes larger than target_file_size
-                for &DeltaLayerKeyIteratorItem {
+                for DeltaLayerKeyIteratorItem {
                     key: next_key,
-                    key: next_lsn,
+                    lsn: next_lsn,
                     physical_size: next_size,
                 } in all_keys_iter.by_ref()
                 {
@@ -940,6 +943,8 @@ impl Timeline {
                 warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
             }
         }
+
+        drop(all_values_iter);
 
         Ok(CompactLevel0Phase1Result {
             new_layers,

@@ -1532,6 +1532,7 @@ impl DeltaLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
         DeltaLayerKeyIterator {
+            layer: self,
             buffer: None,
             index_iter: tree_reader.iter(&[0; DELTA_KEY_SIZE], ctx),
         }
@@ -1674,6 +1675,7 @@ pub struct DeltaLayerKeyIterator<'a> {
     index_iter: DiskBtreeIterator<'a>,
 }
 
+#[derive(Clone)]
 pub(crate) struct DeltaLayerKeyIteratorItem {
     pub(crate) key: Key,
     pub(crate) lsn: Lsn,
