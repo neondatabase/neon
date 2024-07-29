@@ -3,11 +3,9 @@
 
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
-use crate::tenant::block_io::BlockLease;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 use crate::virtual_file::VirtualFile;
 
-use once_cell::sync::Lazy;
 use std::io::{self, ErrorKind};
 use std::ops::{Deref, Range};
 use tokio_epoll_uring::BoundedBuf;
@@ -23,28 +21,77 @@ pub struct RW {
     _gate_guard: utils::sync::gate::GateGuard,
 }
 
-/// When we flush a block to the underlying [`crate::virtual_file::VirtualFile`],
-/// should we pre-warm the [`crate::page_cache`] with the contents?
-#[derive(Clone, Copy)]
-pub enum PrewarmOnWrite {
-    Yes,
-    No,
+/// Result of [`RW::read_page`].
+pub(crate) enum ReadResult<'a> {
+    EphemeralFileMutableTail(PageBuf, &'a [u8; PAGE_SZ]),
+    Owned(PageBuf),
+}
+
+impl ReadResult<'_> {
+    pub(crate) fn contents(&self) -> &[u8; PAGE_SZ] {
+        match self {
+            ReadResult::EphemeralFileMutableTail(_, buf) => buf,
+            ReadResult::Owned(buf) => buf.deref(),
+        }
+    }
+    pub(crate) fn into_page_buf(self) -> PageBuf {
+        match self {
+            ReadResult::EphemeralFileMutableTail(buf, _) => buf,
+            ReadResult::Owned(buf) => buf,
+        }
+    }
+}
+
+pub(crate) struct PageBuf(Box<[u8; PAGE_SZ]>);
+
+impl From<Box<[u8; PAGE_SZ]>> for PageBuf {
+    fn from(buf: Box<[u8; PAGE_SZ]>) -> Self {
+        Self(buf)
+    }
+}
+
+impl Deref for PageBuf {
+    type Target = [u8; PAGE_SZ];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+// Safety: `PageBuf` is a fixed-size buffer that is zero-initialized.
+unsafe impl tokio_epoll_uring::IoBuf for PageBuf {
+    fn stable_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.0.len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.0.len()
+    }
+}
+
+// Safety: the `&mut self` guarantees no aliasing. `set_init` is safe
+// because the buffer is always fully initialized.
+unsafe impl tokio_epoll_uring::IoBufMut for PageBuf {
+    fn stable_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+
+    unsafe fn set_init(&mut self, pos: usize) {
+        // this is a no-op because the buffer is always fully initialized
+        assert!(pos <= self.0.len());
+    }
 }
 
 impl RW {
-    pub fn new(
-        file: VirtualFile,
-        prewarm_on_write: PrewarmOnWrite,
-        _gate_guard: utils::sync::gate::GateGuard,
-    ) -> Self {
+    pub fn new(file: VirtualFile, _gate_guard: utils::sync::gate::GateGuard) -> Self {
         let page_cache_file_id = page_cache::next_file_id();
         Self {
             page_cache_file_id,
-            rw: super::zero_padded_read_write::RW::new(PreWarmingWriter::new(
-                page_cache_file_id,
-                file,
-                prewarm_on_write,
-            )),
+            rw: super::zero_padded_read_write::RW::new(PreWarmingWriter::new(file)),
             _gate_guard,
         }
     }
@@ -57,17 +104,17 @@ impl RW {
         &mut self,
         srcbuf: &[u8],
         ctx: &RequestContext,
-    ) -> Result<usize, io::Error> {
+    ) -> Result<(), io::Error> {
         // It doesn't make sense to proactively fill the page cache on the Pageserver write path
         // because Compute is unlikely to access recently written data.
-        self.rw.write_all_borrowed(srcbuf, ctx).await
+        self.rw.write_all_borrowed(srcbuf, ctx).await.map(|_| ())
     }
 
-    pub(crate) fn bytes_written(&self) -> u64 {
+    pub(crate) fn bytes_written(&self) -> u32 {
         self.rw.bytes_written()
     }
 
-    /// Load all blocks that can be read via [`Self::read_blk`] into a contiguous memory buffer.
+    /// Load all blocks that can be read via [`Self::read_page`] into a contiguous memory buffer.
     ///
     /// This includes the blocks that aren't yet flushed to disk by the internal buffered writer.
     /// The last block is zero-padded to [`PAGE_SZ`], so, the returned buffer is always a multiple of [`PAGE_SZ`].
@@ -104,45 +151,24 @@ impl RW {
         Ok(vec)
     }
 
-    pub(crate) async fn read_blk(
+    pub(crate) async fn read_page(
         &self,
         blknum: u32,
+        buf: PageBuf,
         ctx: &RequestContext,
-    ) -> Result<BlockLease, io::Error> {
+    ) -> Result<ReadResult, io::Error> {
         match self.rw.read_blk(blknum).await? {
             zero_padded_read_write::ReadResult::NeedsReadFromWriter { writer } => {
-                let cache = page_cache::get();
-                match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum, ctx)
+                let buf = writer
+                    .file
+                    .read_exact_at(buf.slice_full(), blknum as u64 * PAGE_SZ as u64, ctx)
                     .await
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            // order path before error because error is anyhow::Error => might have many contexts
-                            format!(
-                                "ephemeral file: read immutable page #{}: {}: {:#}",
-                                blknum,
-                                self.rw.as_writer().file.path,
-                                e,
-                            ),
-                        )
-                    })? {
-                    page_cache::ReadBufResult::Found(guard) => {
-                        return Ok(BlockLease::PageReadGuard(guard))
-                    }
-                    page_cache::ReadBufResult::NotFound(write_guard) => {
-                        let write_guard = writer
-                            .file
-                            .read_exact_at_page(write_guard, blknum as u64 * PAGE_SZ as u64, ctx)
-                            .await?;
-                        let read_guard = write_guard.mark_valid();
-                        return Ok(BlockLease::PageReadGuard(read_guard));
-                    }
-                }
+                    .map(|slice| slice.into_inner())?;
+                Ok(ReadResult::Owned(buf))
             }
-            zero_padded_read_write::ReadResult::ServedFromZeroPaddedMutableTail { buffer } => {
-                Ok(BlockLease::EphemeralFileMutableTail(buffer))
-            }
+            zero_padded_read_write::ReadResult::ServedFromZeroPaddedMutableTail {
+                buffer: tail_ref,
+            } => Ok(ReadResult::EphemeralFileMutableTail(buf, tail_ref)),
         }
     }
 }
@@ -172,22 +198,14 @@ impl Drop for RW {
 }
 
 struct PreWarmingWriter {
-    prewarm_on_write: PrewarmOnWrite,
     nwritten_blocks: u32,
-    page_cache_file_id: page_cache::FileId,
     file: VirtualFile,
 }
 
 impl PreWarmingWriter {
-    fn new(
-        page_cache_file_id: page_cache::FileId,
-        file: VirtualFile,
-        prewarm_on_write: PrewarmOnWrite,
-    ) -> Self {
+    fn new(file: VirtualFile) -> Self {
         Self {
-            prewarm_on_write,
             nwritten_blocks: 0,
-            page_cache_file_id,
             file,
         }
     }
@@ -241,49 +259,6 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
 
         let nblocks = buflen / PAGE_SZ;
         let nblocks32 = u32::try_from(nblocks).unwrap();
-
-        if matches!(self.prewarm_on_write, PrewarmOnWrite::Yes) {
-            // Pre-warm page cache with the contents.
-            // At least in isolated bulk ingest benchmarks (test_bulk_insert.py), the pre-warming
-            // benefits the code that writes InMemoryLayer=>L0 layers.
-
-            let cache = page_cache::get();
-            static CTX: Lazy<RequestContext> = Lazy::new(|| {
-                RequestContext::new(
-                    crate::task_mgr::TaskKind::EphemeralFilePreWarmPageCache,
-                    crate::context::DownloadBehavior::Error,
-                )
-            });
-            for blknum_in_buffer in 0..nblocks {
-                let blk_in_buffer =
-                    &buf[blknum_in_buffer * PAGE_SZ..(blknum_in_buffer + 1) * PAGE_SZ];
-                let blknum = self
-                    .nwritten_blocks
-                    .checked_add(blknum_in_buffer as u32)
-                    .unwrap();
-                match cache
-                    .read_immutable_buf(self.page_cache_file_id, blknum, &CTX)
-                    .await
-                {
-                    Err(e) => {
-                        error!("ephemeral_file write_blob failed to get immutable buf to pre-warm page cache: {e:?}");
-                        // fail gracefully, it's not the end of the world if we can't pre-warm the cache here
-                    }
-                    Ok(v) => match v {
-                        page_cache::ReadBufResult::Found(_guard) => {
-                            // This function takes &mut self, so, it shouldn't be possible to reach this point.
-                            unreachable!("we just wrote block {blknum} to the VirtualFile, which is owned by Self, \
-                                      and this function takes &mut self, so, no concurrent read_blk is possible");
-                        }
-                        page_cache::ReadBufResult::NotFound(mut write_guard) => {
-                            write_guard.copy_from_slice(blk_in_buffer);
-                            let _ = write_guard.mark_valid();
-                        }
-                    },
-                }
-            }
-        }
-
         self.nwritten_blocks = self.nwritten_blocks.checked_add(nblocks32).unwrap();
         Ok((buflen, buf))
     }

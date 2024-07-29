@@ -4,7 +4,6 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
-use crate::tenant::block_io::{BlockCursor, BlockLease, BlockReader};
 use crate::virtual_file::{self, VirtualFile};
 use camino::Utf8PathBuf;
 use pageserver_api::shard::TenantShardId;
@@ -20,8 +19,9 @@ pub struct EphemeralFile {
     rw: page_caching::RW,
 }
 
-mod page_caching;
-pub(crate) use page_caching::PrewarmOnWrite as PrewarmPageCacheOnWrite;
+pub(super) mod page_caching;
+
+use super::storage_layer::inmemory_layer::InMemoryLayerIndexValue;
 mod zero_padded_read_write;
 
 impl EphemeralFile {
@@ -52,16 +52,14 @@ impl EphemeralFile {
         )
         .await?;
 
-        let prewarm = conf.l0_flush.prewarm_on_write();
-
         Ok(EphemeralFile {
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
-            rw: page_caching::RW::new(file, prewarm, gate_guard),
+            rw: page_caching::RW::new(file, gate_guard),
         })
     }
 
-    pub(crate) fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u32 {
         self.rw.bytes_written()
     }
 
@@ -74,37 +72,40 @@ impl EphemeralFile {
         self.rw.load_to_vec(ctx).await
     }
 
-    pub(crate) async fn read_blk(
+    pub(crate) async fn read_page(
         &self,
         blknum: u32,
+        dst: page_caching::PageBuf,
         ctx: &RequestContext,
-    ) -> Result<BlockLease, io::Error> {
-        self.rw.read_blk(blknum, ctx).await
+    ) -> Result<page_caching::ReadResult, io::Error> {
+        self.rw.read_page(blknum, dst, ctx).await
     }
 
     pub(crate) async fn write_blob(
         &mut self,
-        srcbuf: &[u8],
+        buf: &[u8],
         ctx: &RequestContext,
-    ) -> Result<u64, io::Error> {
+    ) -> Result<InMemoryLayerIndexValue, io::Error> {
         let pos = self.rw.bytes_written();
+        let len = u32::try_from(buf.len()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                anyhow::anyhow!(
+                    "EphemeralFile::write_blob value too large: {}: {e}",
+                    buf.len()
+                ),
+            )
+        })?;
+        pos.checked_add(len).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "EphemeralFile::write_blob: overflow",
+            )
+        })?;
 
-        // Write the length field
-        if srcbuf.len() < 0x80 {
-            // short one-byte length header
-            let len_buf = [srcbuf.len() as u8];
+        self.rw.write_all_borrowed(buf, ctx).await?;
 
-            self.rw.write_all_borrowed(&len_buf, ctx).await?;
-        } else {
-            let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
-            len_buf[0] |= 0x80;
-            self.rw.write_all_borrowed(&len_buf, ctx).await?;
-        }
-
-        // Write the payload
-        self.rw.write_all_borrowed(srcbuf, ctx).await?;
-
-        Ok(pos)
+        Ok(InMemoryLayerIndexValue { pos, len })
     }
 }
 
@@ -117,19 +118,11 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
     }
 }
 
-impl BlockReader for EphemeralFile {
-    fn block_cursor(&self) -> super::block_io::BlockCursor<'_> {
-        BlockCursor::new(super::block_io::BlockReaderRef::EphemeralFile(self))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
-    use crate::tenant::block_io::BlockReaderRef;
-    use rand::{thread_rng, RngCore};
     use std::fs;
     use std::str::FromStr;
 
@@ -158,69 +151,6 @@ mod tests {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         Ok((conf, tenant_shard_id, timeline_id, ctx))
-    }
-
-    #[tokio::test]
-    async fn test_ephemeral_blobs() -> Result<(), io::Error> {
-        let (conf, tenant_id, timeline_id, ctx) = harness("ephemeral_blobs")?;
-
-        let gate = utils::sync::gate::Gate::default();
-
-        let entered = gate.enter().unwrap();
-
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, entered, &ctx).await?;
-
-        let pos_foo = file.write_blob(b"foo", &ctx).await?;
-        assert_eq!(
-            b"foo",
-            file.block_cursor()
-                .read_blob(pos_foo, &ctx)
-                .await?
-                .as_slice()
-        );
-        let pos_bar = file.write_blob(b"bar", &ctx).await?;
-        assert_eq!(
-            b"foo",
-            file.block_cursor()
-                .read_blob(pos_foo, &ctx)
-                .await?
-                .as_slice()
-        );
-        assert_eq!(
-            b"bar",
-            file.block_cursor()
-                .read_blob(pos_bar, &ctx)
-                .await?
-                .as_slice()
-        );
-
-        let mut blobs = Vec::new();
-        for i in 0..10000 {
-            let data = Vec::from(format!("blob{}", i).as_bytes());
-            let pos = file.write_blob(&data, &ctx).await?;
-            blobs.push((pos, data));
-        }
-        // also test with a large blobs
-        for i in 0..100 {
-            let data = format!("blob{}", i).as_bytes().repeat(100);
-            let pos = file.write_blob(&data, &ctx).await?;
-            blobs.push((pos, data));
-        }
-
-        let cursor = BlockCursor::new(BlockReaderRef::EphemeralFile(&file));
-        for (pos, expected) in blobs {
-            let actual = cursor.read_blob(pos, &ctx).await?;
-            assert_eq!(actual, expected);
-        }
-
-        // Test a large blob that spans multiple pages
-        let mut large_data = vec![0; 20000];
-        thread_rng().fill_bytes(&mut large_data);
-        let pos_large = file.write_blob(&large_data, &ctx).await?;
-        let result = file.block_cursor().read_blob(pos_large, &ctx).await?;
-        assert_eq!(result, large_data);
-
-        Ok(())
     }
 
     #[tokio::test]

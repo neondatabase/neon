@@ -19,6 +19,8 @@
 
 mod zero_padded;
 
+use anyhow::Context;
+
 use crate::{
     context::RequestContext,
     page_cache::PAGE_SZ,
@@ -69,10 +71,12 @@ where
         self.buffered_writer.write_buffered_borrowed(buf, ctx).await
     }
 
-    pub fn bytes_written(&self) -> u64 {
+    pub fn bytes_written(&self) -> u32 {
         let flushed_offset = self.buffered_writer.as_inner().bytes_written();
+        let flushed_offset = u32::try_from(flushed_offset).with_context(|| format!("buffered_writer.write_buffered_borrowed() disallows sizes larger than u32::MAX: {flushed_offset}")).unwrap();
         let buffer: &zero_padded::Buffer<TAIL_SZ> = self.buffered_writer.inspect_buffer();
-        flushed_offset + u64::try_from(buffer.pending()).unwrap()
+        let buffer_pending = u32::try_from(buffer.pending()).expect("TAIL_SZ is < u32::MAX");
+        flushed_offset.checked_add(buffer_pending).with_context(|| format!("buffered_writer.write_buffered_borrowed() disallows sizes larger than u32::MAX: {flushed_offset} + {buffer_pending}")).unwrap()
     }
 
     /// Get a slice of all blocks that [`Self::read_blk`] would return as [`ReadResult::ServedFromZeroPaddedMutableTail`].
@@ -91,10 +95,12 @@ where
     }
 
     pub(crate) async fn read_blk(&self, blknum: u32) -> Result<ReadResult<'_, W>, std::io::Error> {
-        let flushed_offset = self.buffered_writer.as_inner().bytes_written();
+        let flushed_offset =
+            u32::try_from(self.buffered_writer.as_inner().bytes_written()).expect("");
         let buffer: &zero_padded::Buffer<TAIL_SZ> = self.buffered_writer.inspect_buffer();
-        let buffered_offset = flushed_offset + u64::try_from(buffer.pending()).unwrap();
-        let read_offset = (blknum as u64) * (PAGE_SZ as u64);
+        let buffered_offset = flushed_offset + u32::try_from(buffer.pending()).unwrap();
+        let page_sz = u32::try_from(PAGE_SZ).unwrap();
+        let read_offset = blknum.checked_mul(page_sz).unwrap();
 
         // The trailing page ("block") might only be partially filled,
         // yet the blob_io code relies on us to return a full PAGE_SZed slice anyway.
@@ -103,28 +109,28 @@ where
         // DeltaLayer probably has the same issue, not sure why it needs no special treatment.
         // => check here that the read doesn't go beyond this potentially trailing
         // => the zero-padding is done in the `else` branch below
-        let blocks_written = if buffered_offset % (PAGE_SZ as u64) == 0 {
-            buffered_offset / (PAGE_SZ as u64)
+        let blocks_written = if buffered_offset % page_sz == 0 {
+            buffered_offset / page_sz
         } else {
-            (buffered_offset / (PAGE_SZ as u64)) + 1
+            (buffered_offset / page_sz) + 1
         };
-        if (blknum as u64) >= blocks_written {
+        if blknum >= blocks_written {
             return Err(std::io::Error::new(std::io::ErrorKind::Other, anyhow::anyhow!("read past end of ephemeral_file: read=0x{read_offset:x} buffered=0x{buffered_offset:x} flushed=0x{flushed_offset}")));
         }
 
         // assertions for the `if-else` below
         assert_eq!(
-            flushed_offset % (TAIL_SZ as u64), 0,
+            flushed_offset % (u32::try_from(TAIL_SZ).unwrap()), 0,
             "we only use write_buffered_borrowed to write to the buffered writer, so it's guaranteed that flushes happen buffer.cap()-sized chunks"
         );
         assert_eq!(
-            flushed_offset % (PAGE_SZ as u64),
+            flushed_offset % page_sz,
             0,
             "the logic below can't handle if the page is spread across the flushed part and the buffer"
         );
 
         if read_offset < flushed_offset {
-            assert!(read_offset + (PAGE_SZ as u64) <= flushed_offset);
+            assert!(read_offset + page_sz <= flushed_offset);
             Ok(ReadResult::NeedsReadFromWriter {
                 writer: self.as_writer(),
             })

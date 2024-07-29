@@ -1463,6 +1463,7 @@ impl Timeline {
             tracing::warn!("Lock conflict while reading size of open layer");
             return;
         };
+        let current_size = current_size as u64;
 
         let current_lsn = self.get_last_record_lsn();
 

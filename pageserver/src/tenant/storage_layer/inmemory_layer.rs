@@ -8,13 +8,14 @@ use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
-use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
+use crate::tenant::ephemeral_file::page_caching::PageBuf;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::{l0_flush, page_cache, walrecord};
+use crate::{l0_flush, page_cache};
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
 use pageserver_api::keyspace::KeySpace;
@@ -80,7 +81,7 @@ pub struct InMemoryLayerInner {
     /// All versions of all pages in the layer are kept here. Indexed
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
-    index: BTreeMap<CompactKey, VecMap<Lsn, u64>>,
+    index: BTreeMap<CompactKey, VecMap<Lsn, InMemoryLayerIndexValue>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
@@ -88,6 +89,10 @@ pub struct InMemoryLayerInner {
     file: EphemeralFile,
 
     resource_units: GlobalResourceUnits,
+}
+pub(crate) struct InMemoryLayerIndexValue {
+    pub(crate) pos: u32,
+    pub(crate) len: u32,
 }
 
 impl std::fmt::Debug for InMemoryLayerInner {
@@ -230,7 +235,7 @@ impl InMemoryLayer {
         }
     }
 
-    pub(crate) fn try_len(&self) -> Option<u64> {
+    pub(crate) fn try_len(&self) -> Option<u32> {
         self.inner.try_read().map(|i| i.file.len()).ok()
     }
 
@@ -249,48 +254,13 @@ impl InMemoryLayer {
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
-    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        let inner = self.inner.read().await;
-
+    pub async fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let end_str = self.end_lsn_or_max();
 
         println!(
             "----- in-memory layer for tli {} LSNs {}-{} ----",
             self.timeline_id, self.start_lsn, end_str,
         );
-
-        if !verbose {
-            return Ok(());
-        }
-
-        let cursor = inner.file.block_cursor();
-        let mut buf = Vec::new();
-        for (key, vec_map) in inner.index.iter() {
-            for (lsn, pos) in vec_map.as_slice() {
-                let mut desc = String::new();
-                cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
-                let val = Value::des(&buf);
-                match val {
-                    Ok(Value::Image(img)) => {
-                        write!(&mut desc, " img {} bytes", img.len())?;
-                    }
-                    Ok(Value::WalRecord(rec)) => {
-                        let wal_desc = walrecord::describe_wal_record(&rec).unwrap();
-                        write!(
-                            &mut desc,
-                            " rec {} bytes will_init: {} {}",
-                            buf.len(),
-                            rec.will_init(),
-                            wal_desc
-                        )?;
-                    }
-                    Err(err) => {
-                        write!(&mut desc, " DESERIALIZATION ERROR: {}", err)?;
-                    }
-                }
-                println!("  key {} at {}: {}", key, lsn, desc);
-            }
-        }
 
         Ok(())
     }
@@ -311,7 +281,6 @@ impl InMemoryLayer {
             .build();
 
         let inner = self.inner.read().await;
-        let reader = inner.file.block_cursor();
 
         for range in keyspace.ranges.iter() {
             for (key, vec_map) in inner
@@ -326,15 +295,53 @@ impl InMemoryLayer {
 
                 let slice = vec_map.slice_range(lsn_range);
 
-                for (entry_lsn, pos) in slice.iter().rev() {
-                    // TODO: this uses the page cache => https://github.com/neondatabase/neon/issues/8183
-                    let buf = reader.read_blob(*pos, &ctx).await;
-                    if let Err(e) = buf {
-                        reconstruct_state.on_key_error(key, PageReconstructError::from(anyhow!(e)));
-                        break;
-                    }
+                'foreach_value: for (entry_lsn, value) in slice.iter().rev() {
+                    let InMemoryLayerIndexValue { pos, len } = value;
 
-                    let value = Value::des(&buf.unwrap());
+                    // TODO: coalesce multiple reads that hit the same page into one page read
+                    // Yuchen is working on a VectoredReadPlanner change to support this.
+                    // In the meantime, we prepare the way for direct IO by doing full page reads.
+                    let len = usize::try_from(*len).unwrap();
+                    let mut value_buf = Vec::with_capacity(len);
+                    let mut page_buf_storage = Some(PageBuf::from(Box::new([0u8; PAGE_SZ])));
+                    let mut page_no = *pos / (PAGE_SZ as u32);
+                    let mut offset_in_page = usize::try_from(*pos % (PAGE_SZ as u32)).unwrap();
+                    while value_buf.len() < len {
+                        let read_result = match inner
+                            .file
+                            .read_page(
+                                page_no,
+                                page_buf_storage
+                                    .take()
+                                    .expect("we put it back each iteration"),
+                                &ctx,
+                            )
+                            .await
+                        {
+                            Ok(page) => page,
+                            Err(e) => {
+                                reconstruct_state
+                                    .on_key_error(key, PageReconstructError::from(anyhow!(e)));
+                                break 'foreach_value;
+                            }
+                        };
+                        {
+                            let page_contents = read_result.contents();
+                            let remaining_in_page = std::cmp::min(
+                                len - value_buf.len(),
+                                page_contents.len() - offset_in_page,
+                            );
+                            value_buf.extend_from_slice(
+                                &page_contents[offset_in_page..offset_in_page + remaining_in_page],
+                            );
+                        }
+                        offset_in_page = 0;
+                        page_no += 1;
+                        page_buf_storage = Some(read_result.into_page_buf());
+                    }
+                    assert!(value_buf.len() == len);
+
+                    let value = Value::des(&value_buf);
                     if let Err(e) = value {
                         reconstruct_state.on_key_error(key, PageReconstructError::from(anyhow!(e)));
                         break;
@@ -380,7 +387,7 @@ impl InMemoryLayer {
     /// Get layer size.
     pub async fn size(&self) -> Result<u64> {
         let inner = self.inner.read().await;
-        Ok(inner.file.len())
+        Ok(inner.file.len() as u64)
     }
 
     /// Create a new, empty, in-memory layer
@@ -441,27 +448,25 @@ impl InMemoryLayer {
     ) -> Result<()> {
         trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
 
-        let off = {
-            locked_inner
-                .file
-                .write_blob(
-                    buf,
-                    &RequestContextBuilder::extend(ctx)
-                        .page_content_kind(PageContentKind::InMemoryLayer)
-                        .build(),
-                )
-                .await?
-        };
+        let entry = locked_inner
+            .file
+            .write_blob(
+                buf,
+                &RequestContextBuilder::extend(ctx)
+                    .page_content_kind(PageContentKind::InMemoryLayer)
+                    .build(),
+            )
+            .await?;
 
         let vec_map = locked_inner.index.entry(key).or_default();
-        let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
+        let old = vec_map.append_or_update_last(lsn, entry).unwrap().0;
         if old.is_some() {
             // We already had an entry for this LSN. That's odd..
             warn!("Key {} at {} already exists", key, lsn);
         }
 
         let size = locked_inner.file.len();
-        locked_inner.resource_units.maybe_publish_size(size);
+        locked_inner.resource_units.maybe_publish_size(size as u64);
 
         Ok(())
     }
@@ -473,7 +478,7 @@ impl InMemoryLayer {
     pub(crate) async fn tick(&self) -> Option<u64> {
         let mut inner = self.inner.write().await;
         let size = inner.file.len();
-        inner.resource_units.publish_size(size)
+        inner.resource_units.publish_size(size as u64)
     }
 
     pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
@@ -536,7 +541,6 @@ impl InMemoryLayer {
 
         use l0_flush::Inner;
         let _concurrency_permit = match l0_flush_global_state {
-            Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
         };
 
@@ -568,34 +572,6 @@ impl InMemoryLayer {
         .await?;
 
         match l0_flush_global_state {
-            l0_flush::Inner::PageCached => {
-                let ctx = RequestContextBuilder::extend(ctx)
-                    .page_content_kind(PageContentKind::InMemoryLayer)
-                    .build();
-
-                let mut buf = Vec::new();
-
-                let cursor = inner.file.block_cursor();
-
-                for (key, vec_map) in inner.index.iter() {
-                    // Write all page versions
-                    for (lsn, pos) in vec_map.as_slice() {
-                        cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
-                        let will_init = Value::des(&buf)?.will_init();
-                        let (tmp, res) = delta_layer_writer
-                            .put_value_bytes(
-                                Key::from_compact(*key),
-                                *lsn,
-                                buf.slice_len(),
-                                will_init,
-                                &ctx,
-                            )
-                            .await;
-                        res?;
-                        buf = tmp.into_raw_slice().into_inner();
-                    }
-                }
-            }
             l0_flush::Inner::Direct { .. } => {
                 let file_contents: Vec<u8> = inner.file.load_to_vec(ctx).await?;
                 assert_eq!(
@@ -612,22 +588,15 @@ impl InMemoryLayer {
                     }
                 });
 
-                let cursor = BlockCursor::new(BlockReaderRef::Slice(&file_contents));
-
-                let mut buf = Vec::new();
+                let file_contents = Bytes::from(file_contents);
 
                 for (key, vec_map) in inner.index.iter() {
                     // Write all page versions
-                    for (lsn, pos) in vec_map.as_slice() {
-                        // TODO: once we have blob lengths in the in-memory index, we can
-                        // 1. get rid of the blob_io / BlockReaderRef::Slice business and
-                        // 2. load the file contents into a Bytes and
-                        // 3. the use `Bytes::slice` to get the `buf` that is our blob
-                        // 4. pass that `buf` into `put_value_bytes`
-                        // => https://github.com/neondatabase/neon/issues/8183
-                        cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
+                    for (lsn, entry) in vec_map.as_slice() {
+                        let InMemoryLayerIndexValue { pos, len } = entry;
+                        let buf = file_contents.slice(*pos as usize..(*pos + *len) as usize);
                         let will_init = Value::des(&buf)?.will_init();
-                        let (tmp, res) = delta_layer_writer
+                        let (_buf, res) = delta_layer_writer
                             .put_value_bytes(
                                 Key::from_compact(*key),
                                 *lsn,
@@ -637,7 +606,6 @@ impl InMemoryLayer {
                             )
                             .await;
                         res?;
-                        buf = tmp.into_raw_slice().into_inner();
                     }
                 }
             }
