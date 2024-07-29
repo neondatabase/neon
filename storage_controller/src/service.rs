@@ -527,8 +527,6 @@ impl Service {
         let mut cleanup = Vec::new();
 
         let node_listings = self.scan_node_locations(node_scan_deadline).await;
-        // Send initial heartbeat requests to nodes that replied to the location listing above.
-        let nodes_online = self.initial_heartbeat_round(node_listings.keys()).await;
 
         for (node_id, list_response) in node_listings {
             let tenant_shards = list_response.tenant_shards;
@@ -543,6 +541,13 @@ impl Service {
                 shard_observations.push((node_id, conf_opt));
             }
         }
+
+        // Send initial heartbeat requests to all nodes loaded from the database
+        let all_nodes = {
+            let locked = self.inner.read().unwrap();
+            locked.nodes.clone()
+        };
+        let nodes_online = self.initial_heartbeat_round(all_nodes.keys()).await;
 
         // List of tenants for which we will attempt to notify compute of their location at startup
         let mut compute_notifications = Vec::new();
