@@ -95,7 +95,7 @@ where
             })
             .collect();
 
-        //
+        // how frequently we drain a single token on average
         let time_cost = refill_interval / refill_amount.get() as u32;
         let bucket_width = time_cost * (max as u32);
 
@@ -104,17 +104,14 @@ where
         let initial_tokens = (max - initial) as u32;
         let end = time_cost * initial_tokens;
 
-        // start a bit early to avoid certain underflow issues
-        let epoch_offset = 2 * bucket_width + refill_interval;
-
         let rate_limiter = RateLimiter {
             config: LeakyBucketConfig {
-                epoch: tokio::time::Instant::now() - epoch_offset,
+                epoch: tokio::time::Instant::now(),
                 refill_rate: refill_interval,
                 time_cost,
                 bucket_width,
             },
-            state: Mutex::new(LeakyBucketState::new(end + epoch_offset)),
+            state: Mutex::new(LeakyBucketState::new(end)),
             queue: fair.then(Notify::new),
         };
 

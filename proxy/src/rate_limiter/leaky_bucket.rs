@@ -84,10 +84,9 @@ impl From<LeakyBucketConfig> for utils::leaky_bucket::LeakyBucketConfig {
         let spr = config.rps.recip();
         let bucket_width = Duration::from_secs_f64(config.max * spr);
         utils::leaky_bucket::LeakyBucketConfig {
+            epoch: Instant::now(),
             time_cost: Duration::from_secs_f64(spr),
             bucket_width,
-            // start a bit early to avoid certain underflow issues
-            epoch: Instant::now() - 2 * bucket_width,
             refill_rate: Duration::ZERO,
         }
     }
