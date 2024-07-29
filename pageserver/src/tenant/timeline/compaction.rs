@@ -667,6 +667,8 @@ impl Timeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
+        // If there's both a Value::Image and Value::WalRecord for the same (key,lsn),
+        // then the Value::Image is ordered before Value::WalRecord.
         let mut all_values_iter = {
             let mut deltas = Vec::with_capacity(deltas_to_compact.len());
             for l in deltas_to_compact.iter() {
