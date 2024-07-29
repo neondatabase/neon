@@ -5,6 +5,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -18,7 +19,7 @@ use utils::id::TenantId;
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
-    init_remote, init_remote_generic,
+    init_remote, init_remote_generic, list_objects_with_retries,
     metadata_stream::{stream_tenant_timelines, stream_tenants},
     BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth,
 };
@@ -27,6 +28,11 @@ use crate::{
 enum GarbageReason {
     DeletedInConsole,
     MissingInConsole,
+
+    // The remaining data relates to a known deletion issue, and we're sure that purging this
+    // will not delete any real data, for example https://github.com/neondatabase/neon/pull/7928 where
+    // there is nothing in a tenant path apart from a heatmap file.
+    KnownBug,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -70,6 +76,15 @@ impl GarbageList {
             node_kind,
             bucket_config,
         }
+    }
+
+    /// If an entity has been identified as requiring purge due to a known bug, e.g.
+    /// a particular type of object left behind after an incomplete deletion.
+    fn append_buggy(&mut self, entity: GarbageEntity) {
+        self.items.push(GarbageItem {
+            entity,
+            reason: GarbageReason::KnownBug,
+        });
     }
 
     /// Return true if appended, false if not.  False means the result was not garbage.
@@ -219,6 +234,71 @@ async fn find_garbage_inner(
             assert!(project.tenant == tenant_shard_id.tenant_id);
         }
 
+        // Special case: If it's missing in console, check for known bugs that would enable us to conclusively
+        // identify it as purge-able anyway
+        if console_result.is_none() {
+            let timelines = stream_tenant_timelines(&s3_client, &target, tenant_shard_id)
+                .await?
+                .collect::<Vec<_>>()
+                .await;
+            if timelines.is_empty() {
+                // No timelines, but a heatmap: the deletion bug where we deleted everything but heatmaps
+                let tenant_objects = list_objects_with_retries(
+                    &s3_client,
+                    &target.tenant_root(&tenant_shard_id),
+                    None,
+                )
+                .await?;
+                let object = tenant_objects.contents.as_ref().unwrap().first().unwrap();
+                if object.key.as_ref().unwrap().ends_with("heatmap-v1.json") {
+                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
+                    garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
+                    continue;
+                } else {
+                    tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key.as_ref().unwrap());
+                }
+            } else {
+                // A console-unknown tenant with timelines: check if these timelines only contain initdb.tar.zst, from the initial
+                // rollout of WAL DR in which we never deleted these.
+                let mut any_non_initdb = false;
+
+                for timeline_r in timelines {
+                    let timeline = timeline_r?;
+                    let timeline_objects = list_objects_with_retries(
+                        &s3_client,
+                        &target.timeline_root(&timeline),
+                        None,
+                    )
+                    .await?;
+                    if timeline_objects
+                        .common_prefixes
+                        .as_ref()
+                        .map(|v| v.len())
+                        .unwrap_or(0)
+                        > 0
+                    {
+                        // Sub-paths?  Unexpected
+                        any_non_initdb = true;
+                    } else {
+                        let object = timeline_objects.contents.as_ref().unwrap().first().unwrap();
+                        if object.key.as_ref().unwrap().ends_with("initdb.tar.zst") {
+                            tracing::info!("Timeline {timeline} contains only initdb.tar.zst");
+                        } else {
+                            any_non_initdb = true;
+                        }
+                    }
+                }
+
+                if any_non_initdb {
+                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and contains timelines, one or more of which are more than just initdb");
+                } else {
+                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and contains only timelines that only contain initdb");
+                    garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
+                    continue;
+                }
+            }
+        }
+
         if garbage.maybe_append(GarbageEntity::Tenant(tenant_shard_id), console_result) {
             tracing::debug!("Tenant {tenant_shard_id} is garbage");
         } else {
@@ -349,9 +429,6 @@ pub async fn get_timeline_objects(
     tracing::debug!("Listing objects in timeline {ttid}");
     let timeline_root = super::remote_timeline_path_id(&ttid);
 
-    // TODO: apply extra validation based on object modification time.  Don't purge
-    // timelines whose index_part.json has been touched recently.
-
     let list = s3_client
         .list(
             Some(&timeline_root),
@@ -422,6 +499,7 @@ impl DeletionProgressTracker {
 pub async fn purge_garbage(
     input_path: String,
     mode: PurgeMode,
+    min_age: Duration,
     dry_run: bool,
 ) -> anyhow::Result<()> {
     let list_bytes = tokio::fs::read(&input_path).await?;
@@ -459,6 +537,7 @@ pub async fn purge_garbage(
         .filter(|i| match (&mode, &i.reason) {
             (PurgeMode::DeletedAndMissing, _) => true,
             (PurgeMode::DeletedOnly, GarbageReason::DeletedInConsole) => true,
+            (PurgeMode::DeletedOnly, GarbageReason::KnownBug) => true,
             (PurgeMode::DeletedOnly, GarbageReason::MissingInConsole) => false,
         });
 
@@ -487,6 +566,37 @@ pub async fn purge_garbage(
     let mut progress_tracker = DeletionProgressTracker::default();
     while let Some(result) = get_objects_results.next().await {
         let mut object_list = result?;
+
+        // Extra safety check: even if a collection of objects is garbage, check max() of modification
+        // times before purging, so that if we incorrectly marked a live tenant as garbage then we would
+        // notice that its index has been written recently and would omit deleting it.
+        if object_list.is_empty() {
+            // Simplify subsequent code by ensuring list always has at least one item
+            // Usually, this only occurs if there is parallel deletions racing us, as there is no empty prefixes
+            continue;
+        }
+        let max_mtime = object_list.iter().map(|o| o.last_modified).max().unwrap();
+        let age = max_mtime.elapsed();
+        match age {
+            Err(_) => {
+                tracing::warn!("Bad last_modified time");
+                continue;
+            }
+            Ok(a) if a < min_age => {
+                // Failed age check.  This doesn't mean we did something wrong: a tenant might really be garbage and recently
+                // written, but out of an abundance of caution we still don't purge it.
+                tracing::info!(
+                    "Skipping tenant with young objects {}..{}",
+                    object_list.first().as_ref().unwrap().key,
+                    object_list.last().as_ref().unwrap().key
+                );
+                continue;
+            }
+            Ok(_) => {
+                // Passed age check
+            }
+        }
+
         objects_to_delete.append(&mut object_list);
         if objects_to_delete.len() >= MAX_KEYS_PER_DELETE {
             do_delete(
