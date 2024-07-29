@@ -517,11 +517,6 @@ impl Service {
             Result<(), (TenantShardId, NotifyError)>,
         >,
     ) {
-        // For all tenant shards, a vector of observed states on nodes (where None means
-        // indeterminate, same as in [`ObservedStateLocation`])
-        let mut observed: HashMap<TenantShardId, Vec<(NodeId, Option<LocationConfig>)>> =
-            HashMap::new();
-
         // Startup reconciliation does I/O to other services: whether they
         // are responsive or not, we should aim to finish within our deadline, because:
         // - If we don't, a k8s readiness hook watching /ready will kill us.
@@ -535,24 +530,10 @@ impl Service {
             .checked_add(STARTUP_RECONCILE_TIMEOUT / 2)
             .expect("Reconcile timeout is a modest constant");
 
+        let observed = self.build_global_observed_state(node_scan_deadline).await;
+
         // Accumulate a list of any tenant locations that ought to be detached
         let mut cleanup = Vec::new();
-
-        let node_listings = self.scan_node_locations(node_scan_deadline).await;
-
-        for (node_id, list_response) in node_listings {
-            let tenant_shards = list_response.tenant_shards;
-            tracing::info!(
-                "Received {} shard statuses from pageserver {}, setting it to Active",
-                tenant_shards.len(),
-                node_id
-            );
-
-            for (tenant_shard_id, conf_opt) in tenant_shards {
-                let shard_observations = observed.entry(tenant_shard_id).or_default();
-                shard_observations.push((node_id, conf_opt));
-            }
-        }
 
         // Send initial heartbeat requests to all nodes loaded from the database
         let all_nodes = {
@@ -582,17 +563,16 @@ impl Service {
             }
             *nodes = Arc::new(new_nodes);
 
-            for (tenant_shard_id, shard_observations) in observed {
-                for (node_id, observed_loc) in shard_observations {
-                    let Some(tenant_shard) = tenants.get_mut(&tenant_shard_id) else {
-                        cleanup.push((tenant_shard_id, node_id));
-                        continue;
-                    };
-                    tenant_shard
-                        .observed
-                        .locations
-                        .insert(node_id, ObservedStateLocation { conf: observed_loc });
-                }
+            for (tenant_shard_id, observed_state) in observed.0 {
+                let Some(tenant_shard) = tenants.get_mut(&tenant_shard_id) else {
+                    for node_id in observed_state.locations.keys() {
+                        cleanup.push((tenant_shard_id, *node_id));
+                    }
+
+                    continue;
+                };
+
+                tenant_shard.observed = observed_state;
             }
 
             // Populate each tenant's intent state
@@ -789,6 +769,31 @@ impl Service {
         }
 
         node_results
+    }
+
+    async fn build_global_observed_state(&self, deadline: Instant) -> GlobalObservedState {
+        let node_listings = self.scan_node_locations(deadline).await;
+        let mut observed = GlobalObservedState::default();
+
+        for (node_id, location_confs) in node_listings {
+            tracing::info!(
+                "Received {} shard statuses from pageserver {}",
+                location_confs.tenant_shards.len(),
+                node_id
+            );
+
+            for (tid, location_conf) in location_confs.tenant_shards {
+                let entry = observed.0.entry(tid).or_default();
+                entry.locations.insert(
+                    node_id,
+                    ObservedStateLocation {
+                        conf: location_conf,
+                    },
+                );
+            }
+        }
+
+        observed
     }
 
     /// Used during [`Self::startup_reconcile`]: detach a list of unknown-to-us tenants from pageservers.
