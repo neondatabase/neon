@@ -1243,7 +1243,6 @@ max_file_descriptors = 333
 
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zzzz'
-id = 10
 
 metric_collection_interval = '222 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
@@ -1260,9 +1259,8 @@ background_task_maximum_delay = '334 s'
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
         // we have to create dummy values to overcome the validation errors
-        let config_string = format!(
-            "pg_distrib_dir='{pg_distrib_dir}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
-        );
+        let config_string =
+            format!("pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",);
         let toml = config_string.parse()?;
 
         let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
@@ -1567,7 +1565,6 @@ broker_endpoint = '{broker_endpoint}'
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [disk_usage_based_eviction]
 max_usage_pct = 80
@@ -1637,7 +1634,6 @@ threshold = "20m"
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [tenant_config]
 evictions_low_residence_duration_metric_threshold = "20m"
