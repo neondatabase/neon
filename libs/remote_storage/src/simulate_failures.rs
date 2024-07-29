@@ -114,7 +114,7 @@ impl RemoteStorage for UnreliableWrapper {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + Send {
         async_stream::stream! {
             self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
                 .map_err(DownloadError::Other)?;
