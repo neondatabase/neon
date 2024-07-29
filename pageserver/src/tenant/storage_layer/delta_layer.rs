@@ -1526,16 +1526,6 @@ impl DeltaLayerInner {
             ),
         }
     }
-
-    pub(crate) fn iter_keys<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerKeyIterator<'a> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader =
-            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
-        DeltaLayerKeyIterator {
-            buffer: None,
-            index_iter: tree_reader.iter(&[0; DELTA_KEY_SIZE], ctx),
-        }
-    }
 }
 
 /// A set of data associated with a delta layer key and its value
@@ -1665,31 +1655,6 @@ impl<'a> DeltaLayerIterator<'a> {
                 .pop_front()
                 .expect("should not be empty"),
         ))
-    }
-}
-
-pub struct DeltaLayerKeyIterator<'a> {
-    index_iter: DiskBtreeIterator<'a>,
-}
-
-pub(crate) struct DeltaLayerKeyIteratorItem {
-    pub(crate) key: Key,
-    pub(crate) lsn: Lsn,
-    pub(crate) physical_size: u64, // TODO: can we use a smaller size here given that we know we write small values?
-}
-
-struct DeltaLayerKeyIteratorBuffer {
-    key: DeltaKey,
-    blob_ref: BlobRef,
-}
-
-impl<'a> DeltaLayerKeyIterator<'a> {
-    pub(crate) async fn next(&mut self) -> anyhow::Result<Option<DeltaKey>> {
-        let Some(res) = self.index_iter.next().await else {
-            return Ok(None);
-        };
-        let (raw_key, _value) = res?;
-        Ok(Some(DeltaKey::from_slice(&raw_key)))
     }
 }
 
