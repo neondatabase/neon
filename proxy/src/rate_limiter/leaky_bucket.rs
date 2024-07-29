@@ -86,7 +86,7 @@ struct LeakyBucketConfigInner {
 
 impl From<LeakyBucketConfig> for LeakyBucketConfigInner {
     fn from(config: LeakyBucketConfig) -> Self {
-        // seconds-per-request = 1/(request-per-second)
+        // seconds_per_request = 1/(request_per_second)
         let spr = config.rps.recip();
         Self {
             time_cost: Duration::from_secs_f64(spr),
@@ -98,7 +98,7 @@ impl From<LeakyBucketConfig> for LeakyBucketConfigInner {
 struct LeakyBucketState {
     /// Bucket is represented by `start..end` where `start = end - config.bucket_width`.
     ///
-    /// At any given time, `end-now` represents the number of tokens in the bucket, multiplied by the "time_cost".
+    /// At any given time, `end - now` represents the number of tokens in the bucket, multiplied by the "time_cost".
     /// Adding `n` tokens to the bucket is done by moving `end` forward by `n * config.time_cost`.
     /// If `now < start`, the bucket is considered filled and cannot accept any more tokens.
     /// Draining the bucket will happen naturally as `now` moves forward.
