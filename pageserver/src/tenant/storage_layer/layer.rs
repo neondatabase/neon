@@ -1,9 +1,7 @@
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::{
-    HistoricLayerInfo, LayerAccessKind, LayerResidenceEventReason, LayerResidenceStatus,
-};
+use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -19,7 +17,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::repository::Key;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::task_mgr::TaskKind;
-use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::timeline::{CompactionError, GetVectoredError};
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
 use super::delta_layer::{self, DeltaEntry};
@@ -160,13 +158,10 @@ impl Layer {
             metadata.file_size,
         );
 
-        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
-
         let owner = Layer(Arc::new(LayerInner::new(
             conf,
             timeline,
             local_path,
-            access_stats,
             desc,
             None,
             metadata.generation,
@@ -193,8 +188,6 @@ impl Layer {
             metadata.file_size,
         );
 
-        let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
-
         let mut resident = None;
 
         let owner = Layer(Arc::new_cyclic(|owner| {
@@ -209,7 +202,6 @@ impl Layer {
                 conf,
                 timeline,
                 local_path,
-                access_stats,
                 desc,
                 Some(inner),
                 metadata.generation,
@@ -245,11 +237,6 @@ impl Layer {
                 version: 0,
             });
             resident = Some(inner.clone());
-            let access_stats = LayerAccessStats::empty_will_record_residence_event_later();
-            access_stats.record_residence_event(
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::LayerCreate,
-            );
 
             let local_path = local_layer_path(
                 conf,
@@ -259,16 +246,22 @@ impl Layer {
                 &timeline.generation,
             );
 
-            LayerInner::new(
+            let layer = LayerInner::new(
                 conf,
                 timeline,
                 local_path,
-                access_stats,
                 desc,
                 Some(inner),
                 timeline.generation,
                 timeline.get_shard_index(),
-            )
+            );
+
+            // Newly created layers are marked visible by default: the usual case is that they were created to be read.
+            layer
+                .access_stats
+                .set_visibility(super::LayerVisibilityHint::Visible);
+
+            layer
         }));
 
         let downloaded = resident.expect("just initialized");
@@ -332,9 +325,7 @@ impl Layer {
         use anyhow::ensure;
 
         let layer = self.0.get_or_maybe_download(true, Some(ctx)).await?;
-        self.0
-            .access_stats
-            .record_access(LayerAccessKind::GetValueReconstructData, ctx);
+        self.0.access_stats.record_access(ctx);
 
         if self.layer_desc().is_delta {
             ensure!(lsn_range.start >= self.layer_desc().lsn_range.start);
@@ -368,9 +359,7 @@ impl Layer {
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
 
-        self.0
-            .access_stats
-            .record_access(LayerAccessKind::GetValueReconstructData, ctx);
+        self.0.access_stats.record_access(ctx);
 
         layer
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
@@ -437,7 +426,7 @@ impl Layer {
     }
 
     /// Downloads if necessary and creates a guard, which will keep this layer from being evicted.
-    pub(crate) async fn download_and_keep_resident(&self) -> anyhow::Result<ResidentLayer> {
+    pub(crate) async fn download_and_keep_resident(&self) -> Result<ResidentLayer, DownloadError> {
         let downloaded = self.0.get_or_maybe_download(true, None).await?;
 
         Ok(ResidentLayer {
@@ -786,7 +775,6 @@ impl LayerInner {
         conf: &'static PageServerConf,
         timeline: &Arc<Timeline>,
         local_path: Utf8PathBuf,
-        access_stats: LayerAccessStats,
         desc: PersistentLayerDesc,
         downloaded: Option<Arc<DownloadedLayer>>,
         generation: Generation,
@@ -821,7 +809,7 @@ impl LayerInner {
             path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
-            access_stats,
+            access_stats: Default::default(),
             wanted_deleted: AtomicBool::new(false),
             inner,
             version: AtomicUsize::new(version),
@@ -1176,10 +1164,7 @@ impl LayerInner {
                     LAYER_IMPL_METRICS.record_redownloaded_after(since_last_eviction);
                 }
 
-                self.access_stats.record_residence_event(
-                    LayerResidenceStatus::Resident,
-                    LayerResidenceEventReason::ResidenceChange,
-                );
+                self.access_stats.record_residence_event();
 
                 Ok(self.initialize_after_layer_is_on_disk(permit))
             }
@@ -1533,10 +1518,7 @@ impl LayerInner {
             }
         }
 
-        self.access_stats.record_residence_event(
-            LayerResidenceStatus::Evicted,
-            LayerResidenceEventReason::ResidenceChange,
-        );
+        self.access_stats.record_residence_event();
 
         self.status.as_ref().unwrap().send_replace(Status::Evicted);
 
@@ -1669,8 +1651,9 @@ impl Drop for DownloadedLayer {
 }
 
 impl DownloadedLayer {
-    /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`], or fails to
-    /// initialize it permanently.
+    /// Initializes the `DeltaLayerInner` or `ImageLayerInner` within [`LayerKind`].
+    /// Failure to load the layer is sticky, i.e., future `get()` calls will return
+    /// the initial load failure immediately.
     ///
     /// `owner` parameter is a strong reference at the same `LayerInner` as the
     /// `DownloadedLayer::owner` would be when upgraded. Given how this method ends up called,
@@ -1701,7 +1684,7 @@ impl DownloadedLayer {
                     ctx,
                 )
                 .await
-                .map(|res| res.map(LayerKind::Delta))
+                .map(LayerKind::Delta)
             } else {
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
@@ -1718,32 +1701,29 @@ impl DownloadedLayer {
                     ctx,
                 )
                 .await
-                .map(|res| res.map(LayerKind::Image))
+                .map(LayerKind::Image)
             };
 
             match res {
-                Ok(Ok(layer)) => Ok(Ok(layer)),
-                Ok(Err(transient)) => Err(transient),
-                Err(permanent) => {
+                Ok(layer) => Ok(layer),
+                Err(err) => {
                     LAYER_IMPL_METRICS.inc_permanent_loading_failures();
-                    // TODO(#5815): we are not logging all errors, so temporarily log them **once**
-                    // here as well
-                    let permanent = permanent.context("load layer");
-                    tracing::error!("layer loading failed permanently: {permanent:#}");
-                    Ok(Err(permanent))
+                    // We log this message once over the lifetime of `Self`
+                    // => Ok and good to log backtrace and path here.
+                    tracing::error!(
+                        "layer load failed, assuming permanent failure: {}: {err:?}",
+                        owner.path
+                    );
+                    Err(err)
                 }
             }
         };
         self.kind
-            .get_or_try_init(init)
-            // return transient errors using `?`
-            .await?
+            .get_or_init(init)
+            .await
             .as_ref()
-            .map_err(|e| {
-                // errors are not clonabled, cannot but stringify
-                // test_broken_timeline matches this string
-                anyhow::anyhow!("layer loading failed: {e:#}")
-            })
+            // We already logged the full backtrace above, once. Don't repeat that here.
+            .map_err(|e| anyhow::anyhow!("layer load failed earlier: {e}"))
     }
 
     async fn get_value_reconstruct_data(
@@ -1778,7 +1758,11 @@ impl DownloadedLayer {
     ) -> Result<(), GetVectoredError> {
         use LayerKind::*;
 
-        match self.get(owner, ctx).await.map_err(GetVectoredError::from)? {
+        match self
+            .get(owner, ctx)
+            .await
+            .map_err(GetVectoredError::Other)?
+        {
             Delta(d) => {
                 d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
                     .await
@@ -1862,9 +1846,7 @@ impl ResidentLayer {
                 // this is valid because the DownloadedLayer::kind is a OnceCell, not a
                 // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
                 // while it's being held.
-                owner
-                    .access_stats
-                    .record_access(LayerAccessKind::KeyIter, ctx);
+                owner.access_stats.record_access(ctx);
 
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await
@@ -1882,12 +1864,24 @@ impl ResidentLayer {
         shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<usize> {
+    ) -> Result<usize, CompactionError> {
         use LayerKind::*;
 
-        match self.downloaded.get(&self.owner.0, ctx).await? {
-            Delta(_) => anyhow::bail!(format!("cannot filter() on a delta layer {self}")),
-            Image(i) => i.filter(shard_identity, writer, ctx).await,
+        match self
+            .downloaded
+            .get(&self.owner.0, ctx)
+            .await
+            .map_err(CompactionError::Other)?
+        {
+            Delta(_) => {
+                return Err(CompactionError::Other(anyhow::anyhow!(format!(
+                    "cannot filter() on a delta layer {self}"
+                ))));
+            }
+            Image(i) => i
+                .filter(shard_identity, writer, ctx)
+                .await
+                .map_err(CompactionError::Other),
         }
     }
 

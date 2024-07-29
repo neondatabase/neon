@@ -717,8 +717,10 @@ mod tests {
                 _ => panic!("wrong message"),
             }
         });
-        let endpoint_rate_limiter =
-            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
+        let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+            EndpointRateLimiter::DEFAULT,
+            64,
+        ));
 
         let _creds = auth_quirks(
             &mut ctx,
@@ -767,8 +769,10 @@ mod tests {
             frontend::password_message(b"my-secret-password", &mut write).unwrap();
             client.write_all(&write).await.unwrap();
         });
-        let endpoint_rate_limiter =
-            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
+        let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+            EndpointRateLimiter::DEFAULT,
+            64,
+        ));
 
         let _creds = auth_quirks(
             &mut ctx,
@@ -818,8 +822,10 @@ mod tests {
             client.write_all(&write).await.unwrap();
         });
 
-        let endpoint_rate_limiter =
-            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
+        let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+            EndpointRateLimiter::DEFAULT,
+            64,
+        ));
 
         let creds = auth_quirks(
             &mut ctx,

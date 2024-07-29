@@ -59,8 +59,6 @@ pub mod signals;
 
 pub mod fs_ext;
 
-pub mod history_buffer;
-
 pub mod measured_stream;
 
 pub mod serde_percent;

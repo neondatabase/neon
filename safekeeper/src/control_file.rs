@@ -27,7 +27,7 @@ pub const SK_FORMAT_VERSION: u32 = 9;
 pub const CONTROL_FILE_NAME: &str = "safekeeper.control";
 // needed to atomically update the state using `rename`
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
-pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
+pub const CHECKSUM_SIZE: usize = size_of::<u32>();
 
 /// Storage should keep actual state inside of it. It should implement Deref
 /// trait to access state fields and have persist method for updating that state.

@@ -52,7 +52,7 @@ pub mod defaults {
     use pageserver_api::models::ImageCompressionAlgorithm;
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
-    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
+    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
@@ -83,16 +83,16 @@ pub mod defaults {
     #[cfg(not(target_os = "linux"))]
     pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
 
-    pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
+    pub const DEFAULT_GET_VECTORED_IMPL: &str = "vectored";
 
-    pub const DEFAULT_GET_IMPL: &str = "legacy";
+    pub const DEFAULT_GET_IMPL: &str = "vectored";
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Disabled;
 
-    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
+    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
