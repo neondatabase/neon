@@ -58,7 +58,7 @@ impl EphemeralFile {
         })
     }
 
-    pub(crate) fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u32 {
         self.rw.bytes_written()
     }
 
@@ -83,7 +83,7 @@ impl EphemeralFile {
         &mut self,
         srcbuf: &[u8],
         ctx: &RequestContext,
-    ) -> Result<u64, io::Error> {
+    ) -> Result<u32, io::Error> {
         let pos = self.rw.bytes_written();
 
         // Write the length field
