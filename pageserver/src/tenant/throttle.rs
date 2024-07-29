@@ -107,8 +107,8 @@ where
         let rate_limiter = RateLimiter {
             config: LeakyBucketConfig {
                 epoch: tokio::time::Instant::now(),
-                refill_rate: refill_interval,
-                time_cost,
+                drain_interval: refill_interval,
+                cost: time_cost,
                 bucket_width,
             },
             state: Mutex::new(LeakyBucketState::new(end)),
@@ -192,7 +192,7 @@ struct RateLimiter {
 
 impl RateLimiter {
     fn steady_rps(&self) -> f64 {
-        self.config.time_cost.as_secs_f64().recip()
+        self.config.cost.as_secs_f64().recip()
     }
 
     /// returns true if we did throttle

@@ -85,9 +85,9 @@ impl From<LeakyBucketConfig> for utils::leaky_bucket::LeakyBucketConfig {
         let bucket_width = Duration::from_secs_f64(config.max * spr);
         utils::leaky_bucket::LeakyBucketConfig {
             epoch: Instant::now(),
-            time_cost: Duration::from_secs_f64(spr),
+            cost: Duration::from_secs_f64(spr),
             bucket_width,
-            refill_rate: Duration::ZERO,
+            drain_interval: Duration::ZERO,
         }
     }
 }
@@ -105,7 +105,7 @@ mod tests {
     async fn check() {
         let config: utils::leaky_bucket::LeakyBucketConfig =
             LeakyBucketConfig::new(500.0, 2000.0).into();
-        assert_eq!(config.time_cost, Duration::from_millis(2));
+        assert_eq!(config.cost, Duration::from_millis(2));
         assert_eq!(config.bucket_width, Duration::from_secs(4));
 
         let mut bucket = LeakyBucketState::new(Instant::now() - config.epoch);
