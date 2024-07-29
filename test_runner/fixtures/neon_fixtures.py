@@ -1395,7 +1395,7 @@ def _shared_simple_env(
         pg_distrib_dir=pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
-        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
@@ -1442,6 +1442,7 @@ def neon_env_builder(
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
+    record_property: Callable[[str, object], None],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1470,7 +1471,7 @@ def neon_env_builder(
         pg_version=pg_version,
         broker=default_broker,
         run_id=run_id,
-        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,
@@ -1479,6 +1480,9 @@ def neon_env_builder(
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
     ) as builder:
         yield builder
+        # Propogate `preserve_database_files` to make it possible to use in other fixtures,
+        # like `test_output_dir` fixture for attaching all database files to Allure report.
+        record_property("preserve_database_files", builder.preserve_database_files)
 
 
 @dataclass
@@ -4525,7 +4529,16 @@ def test_output_dir(
 
     yield test_dir
 
-    allure_attach_from_dir(test_dir)
+    preserve_database_files = False
+    for k, v in request.node.user_properties:
+        # NB: the neon_env_builder fixture uses this fixture (test_output_dir).
+        # So, neon_env_builder's cleanup runs before here.
+        # The cleanup propagates NeonEnvBuilder.preserve_database_files into this user property.
+        if k == "preserve_database_files":
+            assert isinstance(v, bool)
+            preserve_database_files = v
+
+    allure_attach_from_dir(test_dir, preserve_database_files)
 
 
 class FileAndThreadLock:

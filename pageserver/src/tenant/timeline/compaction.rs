@@ -102,17 +102,19 @@ impl KeyHistoryRetention {
 
 impl Timeline {
     /// TODO: cancellation
+    ///
+    /// Returns whether the compaction has pending tasks.
     pub(crate) async fn compact_legacy(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         if flags.contains(CompactFlags::EnhancedGcBottomMostCompaction) {
-            return self
-                .compact_with_gc(cancel, ctx)
+            self.compact_with_gc(cancel, ctx)
                 .await
-                .map_err(CompactionError::Other);
+                .map_err(CompactionError::Other)?;
+            return Ok(false);
         }
 
         // High level strategy for compaction / image creation:
@@ -160,7 +162,7 @@ impl Timeline {
         // Define partitioning schema if needed
 
         // FIXME: the match should only cover repartitioning, not the next steps
-        let partition_count = match self
+        let (partition_count, has_pending_tasks) = match self
             .repartition(
                 self.get_last_record_lsn(),
                 self.get_compaction_target_size(),
@@ -177,30 +179,35 @@ impl Timeline {
 
                 // 2. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size, ctx).await?;
+                let fully_compacted = self.compact_level0(target_file_size, ctx).await?;
                 timer.stop_and_record();
 
-                // 3. Create new image layers for partitions that have been modified
-                // "enough".
                 let mut partitioning = dense_partitioning;
                 partitioning
                     .parts
                     .extend(sparse_partitioning.into_dense().parts);
-                let image_layers = self
-                    .create_image_layers(
-                        &partitioning,
-                        lsn,
-                        if flags.contains(CompactFlags::ForceImageLayerCreation) {
-                            ImageLayerCreationMode::Force
-                        } else {
-                            ImageLayerCreationMode::Try
-                        },
-                        &image_ctx,
-                    )
-                    .await?;
 
-                self.upload_new_image_layers(image_layers)?;
-                partitioning.parts.len()
+                // 3. Create new image layers for partitions that have been modified
+                // "enough". Skip image layer creation if L0 compaction cannot keep up.
+                if fully_compacted {
+                    let image_layers = self
+                        .create_image_layers(
+                            &partitioning,
+                            lsn,
+                            if flags.contains(CompactFlags::ForceImageLayerCreation) {
+                                ImageLayerCreationMode::Force
+                            } else {
+                                ImageLayerCreationMode::Try
+                            },
+                            &image_ctx,
+                        )
+                        .await?;
+
+                    self.upload_new_image_layers(image_layers)?;
+                } else {
+                    info!("skipping image layer generation due to L0 compaction did not include all layers.");
+                }
+                (partitioning.parts.len(), !fully_compacted)
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -212,7 +219,7 @@ impl Timeline {
                 if !self.cancel.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
-                1
+                (1, false)
             }
         };
 
@@ -225,7 +232,7 @@ impl Timeline {
             self.compact_shard_ancestors(rewrite_max, ctx).await?;
         }
 
-        Ok(())
+        Ok(has_pending_tasks)
     }
 
     /// Check for layers that are elegible to be rewritten:
@@ -432,15 +439,16 @@ impl Timeline {
     }
 
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
-    /// as Level 1 files.
+    /// as Level 1 files. Returns whether the L0 layers are fully compacted.
     async fn compact_level0(
         self: &Arc<Self>,
         target_file_size: u64,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
+            fully_compacted,
         } = {
             let phase1_span = info_span!("compact_level0_phase1");
             let ctx = ctx.attached_child();
@@ -463,12 +471,12 @@ impl Timeline {
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
-            return Ok(());
+            return Ok(true);
         }
 
         self.finish_compact_batch(&new_layers, &Vec::new(), &deltas_to_compact)
             .await?;
-        Ok(())
+        Ok(fully_compacted)
     }
 
     /// Level0 files first phase of compaction, explained in the [`Self::compact_legacy`] comment.
@@ -535,6 +543,8 @@ impl Timeline {
         ) as u64
             * std::cmp::max(self.get_checkpoint_distance(), DEFAULT_CHECKPOINT_DISTANCE);
 
+        let mut fully_compacted = true;
+
         deltas_to_compact.push(
             first_level0_delta
                 .download_and_keep_resident()
@@ -562,6 +572,7 @@ impl Timeline {
                     "L0 compaction picker hit max delta layer size limit: {}",
                     delta_size_limit
                 );
+                fully_compacted = false;
 
                 // Proceed with compaction, but only a subset of L0s
                 break;
@@ -923,6 +934,7 @@ impl Timeline {
                 .into_iter()
                 .map(|x| x.drop_eviction_guard())
                 .collect::<Vec<_>>(),
+            fully_compacted,
         })
     }
 }
@@ -931,6 +943,9 @@ impl Timeline {
 struct CompactLevel0Phase1Result {
     new_layers: Vec<ResidentLayer>,
     deltas_to_compact: Vec<Layer>,
+    // Whether we have included all L0 layers, or selected only part of them due to the
+    // L0 compaction size limit.
+    fully_compacted: bool,
 }
 
 #[derive(Default)]

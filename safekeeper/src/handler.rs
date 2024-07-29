@@ -143,7 +143,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                 self.tenant_id.unwrap_or(TenantId::from([0u8; 16])),
                 self.timeline_id.unwrap_or(TimelineId::from([0u8; 16])),
             );
-            tracing::Span::current().record("ttid", tracing::field::display(ttid));
+            tracing::Span::current()
+                .record("ttid", tracing::field::display(ttid))
+                .record(
+                    "application_name",
+                    tracing::field::debug(self.appname.clone()),
+                );
 
             Ok(())
         } else {

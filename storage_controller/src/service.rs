@@ -6152,26 +6152,8 @@ impl Service {
             .list_outdated_metadata_health_records(earlier)
             .await?
             .into_iter()
-            .map(|record| {
-                if let Ok(tenant_id) = TenantId::from_str(record.tenant_id.as_str()) {
-                    let tenant_shard_id = TenantShardId {
-                        tenant_id,
-                        shard_number: ShardNumber(record.shard_number as u8),
-                        shard_count: ShardCount::new(record.shard_count as u8),
-                    };
-
-                    Ok(MetadataHealthRecord {
-                        tenant_shard_id,
-                        healthy: record.healthy,
-                        last_scrubbed_at: record.last_scrubbed_at,
-                    })
-                } else {
-                    anyhow::bail!("Error parsing tenant id from db")
-                }
-            })
-            .try_collect()
-            .map_err(ApiError::InternalServerError)?;
-
+            .map(|record| record.into())
+            .collect();
         Ok(result)
     }
 

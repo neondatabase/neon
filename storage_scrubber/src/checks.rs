@@ -92,7 +92,8 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             .push(format!("index_part.json version: {}", index_part.version()))
                     }
 
-                    if &index_part.version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
+                    let mut newest_versions = IndexPart::KNOWN_VERSIONS.iter().rev().take(2);
+                    if !newest_versions.any(|ip| ip == &index_part.version()) {
                         info!(
                             "index_part.json version is not latest: {}",
                             index_part.version()
