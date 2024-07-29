@@ -1552,13 +1552,21 @@ impl Timeline {
                     lsn_range: lowest_retain_lsn..end_lsn,
                     is_delta: true,
                 };
+
                 if guard.contains_key(&key) {
+                    let layer_generation = guard.get_from_key(&key).metadata().generation;
                     drop(guard);
-                    info!(
-                        "skipping delta layer due to duplicated layer key: {}..{} {}..{}",
-                        key_start, key_end, lowest_retain_lsn, end_lsn
-                    );
-                    return Ok(Some(FlushDeltaResult::KeepLayer(key)));
+                    if layer_generation == tline.generation {
+                        // TODO: depending on whether we design this compaction process to run along with
+                        // other compactions, there could be layer map modifications after we drop the
+                        // layer guard, and in case it creates duplicated layer key, we will still error
+                        // in the end.
+                        info!(
+                            "discard delta layer due to duplicated layer key in the same generation: {}..{} {}..{} gen={:?}",
+                            key_start, key_end, lowest_retain_lsn, end_lsn, layer_generation
+                        );
+                        return Ok(Some(FlushDeltaResult::KeepLayer(key)));
+                    }
                 }
             }
 
@@ -1579,29 +1587,11 @@ impl Timeline {
         }
 
         // Hack the key range to be min..(max-1). Otherwise, the image layer will be
-        // interpreted as an L0 delta layer. Also, to avoid creating duplicated image layers,
-        // we varies the end key a little bit each time we do the compaction. This should
-        // be fixed in the future (i.e., we allow replace an existing layer with another
-        // layer of the same key range).
+        // interpreted as an L0 delta layer.
         let hack_image_layer_range = {
-            let guard = self.layers.read().await;
-
             let mut end_key = Key::MAX;
             end_key.field6 -= 1;
-            let mut img_range = Key::MIN..end_key;
-
-            while guard.contains_key(&PersistentLayerKey {
-                key_range: img_range.clone(),
-                lsn_range: PersistentLayerDesc::image_layer_lsn_range(lowest_retain_lsn),
-                is_delta: false,
-            }) {
-                img_range.end.field6 -= 1;
-                continue;
-            }
-            // We will get `MIN..(MAX-1)` for an iteration, and `MIN..(MAX-2)` for the next iteration.
-            // Then for the third iteration, because `MIN..(MAX-1)` gets removed in the first iteration,
-            // we will again get `MIN..(MAX-1)`.
-            img_range
+            Key::MIN..end_key
         };
 
         let mut image_layer_writer = ImageLayerWriter::new(
@@ -1613,6 +1603,38 @@ impl Timeline {
             ctx,
         )
         .await?;
+        let image_layer_key = PersistentLayerKey {
+            key_range: hack_image_layer_range,
+            lsn_range: PersistentLayerDesc::image_layer_lsn_range(lowest_retain_lsn),
+            is_delta: false,
+        };
+
+        let discard_image_layer = {
+            let guard = self.layers.read().await;
+            if guard.contains_key(&image_layer_key) {
+                let layer_generation = guard.get_from_key(&image_layer_key).metadata().generation;
+                drop(guard);
+                if layer_generation == self.generation {
+                    // TODO: depending on whether we design this compaction process to run along with
+                    // other compactions, there could be layer map modifications after we drop the
+                    // layer guard, and in case it creates duplicated layer key, we will still error
+                    // in the end.
+                    info!(
+                            "discard image layer due to duplicated layer key in the same generation: {}..{} {} gen={:?}",
+                            image_layer_key.key_range.start, image_layer_key.key_range.end, image_layer_key.lsn_range.start, layer_generation
+                        );
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        // Actually, we can decide not to write to the image layer at all at this point because
+        // the key and LSN range are determined. However, to keep things simple here, we still
+        // create this writer, and discard the writer in the end.
 
         let mut delta_values = Vec::new();
         let delta_split_points = delta_split_points.into_iter().collect_vec();
@@ -1685,27 +1707,34 @@ impl Timeline {
             .await?,
         );
 
-        let image_layer = image_layer_writer.finish(self, ctx).await?;
+        let image_layer = if discard_image_layer {
+            None
+        } else {
+            Some(image_layer_writer.finish(self, ctx).await?)
+        };
         info!(
             "produced {} delta layers and {} image layers",
             delta_layers.len(),
-            1
+            if image_layer.is_some() { 1 } else { 0 }
         );
         let mut compact_to = Vec::new();
-        let mut keep_delta_layers = HashSet::new();
+        let mut keep_layers = HashSet::new();
         for action in delta_layers {
             match action {
                 FlushDeltaResult::CreateResidentLayer(layer) => {
                     compact_to.push(layer);
                 }
                 FlushDeltaResult::KeepLayer(l) => {
-                    keep_delta_layers.insert(l);
+                    keep_layers.insert(l);
                 }
             }
         }
+        if discard_image_layer {
+            keep_layers.insert(image_layer_key);
+        }
         let mut layer_selection = layer_selection;
-        layer_selection.retain(|x| !keep_delta_layers.contains(&x.layer_desc().key()));
-        compact_to.push(image_layer);
+        layer_selection.retain(|x| !keep_layers.contains(&x.layer_desc().key()));
+        compact_to.extend(image_layer);
         // Step 3: Place back to the layer map.
         {
             let mut guard = self.layers.write().await;
