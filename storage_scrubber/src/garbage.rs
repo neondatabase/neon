@@ -249,7 +249,6 @@ async fn find_garbage_inner(
                     None,
                 )
                 .await?;
-                // let contents_len = tenant_objects.contents.as_ref().map(|v| v.len()).unwrap_or(0);
                 let object = tenant_objects.contents.as_ref().unwrap().first().unwrap();
                 if object.key.as_ref().unwrap().ends_with("heatmap-v1.json") {
                     tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
@@ -573,6 +572,7 @@ pub async fn purge_garbage(
         // notice that its index has been written recently and would omit deleting it.
         if object_list.is_empty() {
             // Simplify subsequent code by ensuring list always has at least one item
+            // Usually, this only occurs if there is parallel deletions racing us, as there is no empty prefixes
             continue;
         }
         let max_mtime = object_list.iter().map(|o| o.last_modified).max().unwrap();
@@ -586,7 +586,7 @@ pub async fn purge_garbage(
                 // Failed age check.  This doesn't mean we did something wrong: a tenant might really be garbage and recently
                 // written, but out of an abundance of caution we still don't purge it.
                 tracing::info!(
-                    "Skipping young objects {}..{}",
+                    "Skipping tenant with young objects {}..{}",
                     object_list.first().as_ref().unwrap().key,
                     object_list.last().as_ref().unwrap().key
                 );
