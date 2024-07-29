@@ -137,7 +137,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
+use super::{config::TenantConf, upload_queue::NotInitialized};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -642,7 +642,13 @@ impl FlushLayerError {
     // When crossing from generic anyhow errors to this error type, we explicitly check
     // for timeline cancellation to avoid logging inoffensive shutdown errors as warn/err.
     fn from_anyhow(timeline: &Timeline, err: anyhow::Error) -> Self {
-        if timeline.cancel.is_cancelled() {
+        let cancelled = timeline.cancel.is_cancelled()
+            // The upload queue might have been shut down before the official cancellation of the timeline.
+            || err
+                .downcast_ref::<NotInitialized>()
+                .map(NotInitialized::is_stopping)
+                .unwrap_or_default();
+        if cancelled {
             Self::Cancelled
         } else {
             Self::Other(Arc::new(err))
@@ -1763,13 +1769,14 @@ impl Timeline {
         }
     }
 
-    /// Outermost timeline compaction operation; downloads needed layers.
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
     pub(crate) async fn compact(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1789,8 +1796,8 @@ impl Timeline {
         // compaction task goes over it's period (20s) which is quite often in production.
         let (_guard, _permit) = tokio::select! {
             tuple = prepare => { tuple },
-            _ = self.cancel.cancelled() => return Ok(()),
-            _ = cancel.cancelled() => return Ok(()),
+            _ = self.cancel.cancelled() => return Ok(false),
+            _ = cancel.cancelled() => return Ok(false),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1798,11 +1805,14 @@ impl Timeline {
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(());
+            return Ok(false);
         }
 
         match self.get_compaction_algorithm_settings().kind {
-            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
+            CompactionAlgorithm::Tiered => {
+                self.compact_tiered(cancel, ctx).await?;
+                Ok(false)
+            }
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
         }
     }
@@ -1989,6 +1999,11 @@ impl Timeline {
 
     pub(crate) fn is_active(&self) -> bool {
         self.current_state() == TimelineState::Active
+    }
+
+    #[allow(unused)]
+    pub(crate) fn is_archived(&self) -> Option<bool> {
+        self.remote_client.is_archived()
     }
 
     pub(crate) fn is_stopping(&self) -> bool {
@@ -3415,7 +3430,6 @@ impl Timeline {
         }
     }
 
-    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///

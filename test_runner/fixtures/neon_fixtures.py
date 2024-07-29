@@ -542,21 +542,6 @@ class NeonEnvBuilder:
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
             )
 
-        self.pageserver_get_vectored_impl: Optional[str] = None
-        if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
-            self.pageserver_get_vectored_impl = "vectored"
-            log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
-
-        self.pageserver_get_impl: Optional[str] = None
-        if os.getenv("PAGESERVER_GET_IMPL", "") == "vectored":
-            self.pageserver_get_impl = "vectored"
-            log.debug('Overriding pageserver get_impl config to "vectored"')
-
-        self.pageserver_validate_vectored_get: Optional[bool] = None
-        if (validate := os.getenv("PAGESERVER_VALIDATE_VEC_GET")) is not None:
-            self.pageserver_validate_vectored_get = bool(validate)
-            log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
-
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
         self.safekeeper_extra_opts = safekeeper_extra_opts
@@ -1157,12 +1142,6 @@ class NeonEnv:
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
-            if config.pageserver_get_vectored_impl is not None:
-                ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
-            if config.pageserver_get_impl is not None:
-                ps_cfg["get_impl"] = config.pageserver_get_impl
-            if config.pageserver_validate_vectored_get is not None:
-                ps_cfg["validate_vectored_get"] = config.pageserver_validate_vectored_get
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
                 tenant_config[
@@ -1415,7 +1394,7 @@ def _shared_simple_env(
         pg_distrib_dir=pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
-        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
@@ -1462,6 +1441,7 @@ def neon_env_builder(
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
+    record_property: Callable[[str, object], None],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1490,7 +1470,7 @@ def neon_env_builder(
         pg_version=pg_version,
         broker=default_broker,
         run_id=run_id,
-        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,
@@ -1499,6 +1479,9 @@ def neon_env_builder(
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
     ) as builder:
         yield builder
+        # Propogate `preserve_database_files` to make it possible to use in other fixtures,
+        # like `test_output_dir` fixture for attaching all database files to Allure report.
+        record_property("preserve_database_files", builder.preserve_database_files)
 
 
 @dataclass
@@ -2602,6 +2585,17 @@ class NeonStorageController(MetricsGetter, LogUtils):
                     raise e
 
                 time.sleep(backoff)
+
+    def step_down(self):
+        log.info("Asking storage controller to step down")
+        response = self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/step_down",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+        response.raise_for_status()
+        return response.json()
 
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):
@@ -4488,7 +4482,16 @@ def test_output_dir(
 
     yield test_dir
 
-    allure_attach_from_dir(test_dir)
+    preserve_database_files = False
+    for k, v in request.node.user_properties:
+        # NB: the neon_env_builder fixture uses this fixture (test_output_dir).
+        # So, neon_env_builder's cleanup runs before here.
+        # The cleanup propagates NeonEnvBuilder.preserve_database_files into this user property.
+        if k == "preserve_database_files":
+            assert isinstance(v, bool)
+            preserve_database_files = v
+
+    allure_attach_from_dir(test_dir, preserve_database_files)
 
 
 class FileAndThreadLock:

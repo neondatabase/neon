@@ -102,8 +102,7 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -1227,11 +1226,29 @@ impl Tenant {
         Ok(timeline_preloads)
     }
 
-    pub async fn apply_timeline_archival_config(
+    pub(crate) async fn apply_timeline_archival_config(
         &self,
-        _timeline_id: TimelineId,
-        _config: TimelineArchivalState,
+        timeline_id: TimelineId,
+        state: TimelineArchivalState,
     ) -> anyhow::Result<()> {
+        let timeline = self
+            .get_timeline(timeline_id, false)
+            .context("Cannot apply timeline archival config to inexistent timeline")?;
+
+        let upload_needed = timeline
+            .remote_client
+            .schedule_index_upload_for_timeline_archival_state(state)?;
+
+        if upload_needed {
+            const MAX_WAIT: Duration = Duration::from_secs(10);
+            let Ok(v) =
+                tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
+            else {
+                tracing::warn!("reached timeout for waiting on upload queue");
+                bail!("reached timeout for upload queue flush");
+            };
+            v?;
+        }
         Ok(())
     }
 
@@ -1616,21 +1633,23 @@ impl Tenant {
     /// This function is periodically called by compactor task.
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
+    ///
+    /// Returns whether we have pending compaction task.
     async fn compaction_iteration(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> Result<(), timeline::CompactionError> {
+    ) -> Result<bool, timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
-            return Ok(());
+            return Ok(false);
         }
 
         {
             let conf = self.tenant_conf.load();
             if !conf.location.may_delete_layers_hint() || !conf.location.may_upload_layers_hint() {
                 info!("Skipping compaction in location state {:?}", conf.location);
-                return Ok(());
+                return Ok(false);
             }
         }
 
@@ -1657,11 +1676,13 @@ impl Tenant {
         // Before doing any I/O work, check our circuit breaker
         if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
             info!("Skipping compaction due to previous failures");
-            return Ok(());
+            return Ok(false);
         }
 
+        let mut has_pending_task = false;
+
         for (timeline_id, timeline) in &timelines_to_compact {
-            timeline
+            has_pending_task |= timeline
                 .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await
@@ -1681,7 +1702,7 @@ impl Tenant {
             .unwrap()
             .success(&CIRCUIT_BREAKERS_UNBROKEN);
 
-        Ok(())
+        Ok(has_pending_task)
     }
 
     // Call through to all timelines to freeze ephemeral layers if needed.  Usually
@@ -7309,7 +7330,9 @@ mod tests {
             (
                 key,
                 Lsn(0x80),
-                Value::WalRecord(NeonWalRecord::wal_append(";0x80")),
+                Value::Image(Bytes::copy_from_slice(
+                    b"0x10;0x20;0x30;0x40;0x50;0x60;0x70;0x80",
+                )),
             ),
             (
                 key,
@@ -7371,7 +7394,9 @@ mod tests {
                 ),
                 (
                     Lsn(0x80),
-                    Value::WalRecord(NeonWalRecord::wal_append(";0x80")),
+                    Value::Image(Bytes::copy_from_slice(
+                        b"0x10;0x20;0x30;0x40;0x50;0x60;0x70;0x80",
+                    )),
                 ),
                 (
                     Lsn(0x90),
@@ -7380,7 +7405,118 @@ mod tests {
             ]),
         };
         assert_eq!(res, expected_res);
-        // TODO: more tests with mixed image + delta, adding with k-merge test cases; e2e compaction test
+
+        // We expect GC-compaction to run with the original GC. This would create a situation that
+        // the original GC algorithm removes some delta layers b/c there are full image coverage,
+        // therefore causing some keys to have an incomplete history below the lowest retain LSN.
+        // For example, we have
+        // ```plain
+        // init delta @ 0x10, image @ 0x20, delta @ 0x30 (gc_horizon), image @ 0x40.
+        // ```
+        // Now the GC horizon moves up, and we have
+        // ```plain
+        // init delta @ 0x10, image @ 0x20, delta @ 0x30, image @ 0x40 (gc_horizon)
+        // ```
+        // The original GC algorithm kicks in, and removes delta @ 0x10, image @ 0x20.
+        // We will end up with
+        // ```plain
+        // delta @ 0x30, image @ 0x40 (gc_horizon)
+        // ```
+        // Now we run the GC-compaction, and this key does not have a full history.
+        // We should be able to handle this partial history and drop everything before the
+        // gc_horizon image.
+
+        let history = vec![
+            (
+                key,
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x20")),
+            ),
+            (
+                key,
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x30")),
+            ),
+            (
+                key,
+                Lsn(0x40),
+                Value::Image(Bytes::copy_from_slice(b"0x10;0x20;0x30;0x40")),
+            ),
+            (
+                key,
+                Lsn(0x50),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x50")),
+            ),
+            (
+                key,
+                Lsn(0x60),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x60")),
+            ),
+            (
+                key,
+                Lsn(0x70),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+            ),
+            (
+                key,
+                Lsn(0x80),
+                Value::Image(Bytes::copy_from_slice(
+                    b"0x10;0x20;0x30;0x40;0x50;0x60;0x70;0x80",
+                )),
+            ),
+            (
+                key,
+                Lsn(0x90),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x90")),
+            ),
+        ];
+        let res = tline
+            .generate_key_retention(key, &history, Lsn(0x60), &[Lsn(0x40), Lsn(0x50)], 3)
+            .await
+            .unwrap();
+        let expected_res = KeyHistoryRetention {
+            below_horizon: vec![
+                (
+                    Lsn(0x40),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x40),
+                        Value::Image(Bytes::copy_from_slice(b"0x10;0x20;0x30;0x40")),
+                    )]),
+                ),
+                (
+                    Lsn(0x50),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x50),
+                        Value::WalRecord(NeonWalRecord::wal_append(";0x50")),
+                    )]),
+                ),
+                (
+                    Lsn(0x60),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x60),
+                        Value::WalRecord(NeonWalRecord::wal_append(";0x60")),
+                    )]),
+                ),
+            ],
+            above_horizon: KeyLogAtLsn(vec![
+                (
+                    Lsn(0x70),
+                    Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+                ),
+                (
+                    Lsn(0x80),
+                    Value::Image(Bytes::copy_from_slice(
+                        b"0x10;0x20;0x30;0x40;0x50;0x60;0x70;0x80",
+                    )),
+                ),
+                (
+                    Lsn(0x90),
+                    Value::WalRecord(NeonWalRecord::wal_append(";0x90")),
+                ),
+            ]),
+        };
+        assert_eq!(res, expected_res);
+
         Ok(())
     }
 

@@ -1384,33 +1384,32 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
     ) -> Result<(), DeleteTenantError> {
         let remote_path = remote_tenant_path(&tenant_shard_id);
-        let keys = match self
-            .resources
-            .remote_storage
-            .list(
-                Some(&remote_path),
-                remote_storage::ListingMode::NoDelimiter,
-                None,
-                &self.cancel,
-            )
-            .await
-        {
-            Ok(listing) => listing.keys,
-            Err(remote_storage::DownloadError::Cancelled) => {
-                return Err(DeleteTenantError::Cancelled)
-            }
-            Err(remote_storage::DownloadError::NotFound) => return Ok(()),
-            Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
-        };
+        let mut keys_stream = self.resources.remote_storage.list_streaming(
+            Some(&remote_path),
+            remote_storage::ListingMode::NoDelimiter,
+            None,
+            &self.cancel,
+        );
+        while let Some(chunk) = keys_stream.next().await {
+            let keys = match chunk {
+                Ok(listing) => listing.keys,
+                Err(remote_storage::DownloadError::Cancelled) => {
+                    return Err(DeleteTenantError::Cancelled)
+                }
+                Err(remote_storage::DownloadError::NotFound) => return Ok(()),
+                Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
+            };
 
-        if keys.is_empty() {
-            tracing::info!("Remote storage already deleted");
-        } else {
-            tracing::info!("Deleting {} keys from remote storage", keys.len());
-            self.resources
-                .remote_storage
-                .delete_objects(&keys, &self.cancel)
-                .await?;
+            if keys.is_empty() {
+                tracing::info!("Remote storage already deleted");
+            } else {
+                tracing::info!("Deleting {} keys from remote storage", keys.len());
+                let keys = keys.into_iter().map(|o| o.key).collect::<Vec<_>>();
+                self.resources
+                    .remote_storage
+                    .delete_objects(&keys, &self.cancel)
+                    .await?;
+            }
         }
 
         Ok(())

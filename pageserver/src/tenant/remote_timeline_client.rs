@@ -187,7 +187,7 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
-use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::{AuxFilePolicy, TimelineArchivalState};
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -457,6 +457,17 @@ impl RemoteTimelineClient {
             .unwrap_or(false)
     }
 
+    /// Returns whether the timeline is archived.
+    /// Return None if the remote index_part hasn't been downloaded yet.
+    pub(crate) fn is_archived(&self) -> Option<bool> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|q| q.clean.0.archived_at.is_some())
+            .ok()
+    }
+
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
         let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
             current_remote_index_part
@@ -617,7 +628,7 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    /// Launch an index-file upload operation in the background, with only aux_file_policy flag updated.
+    /// Launch an index-file upload operation in the background, with only the `aux_file_policy` flag updated.
     pub(crate) fn schedule_index_upload_for_aux_file_policy_update(
         self: &Arc<Self>,
         last_aux_file_policy: Option<AuxFilePolicy>,
@@ -628,6 +639,48 @@ impl RemoteTimelineClient {
         self.schedule_index_upload(upload_queue)?;
         Ok(())
     }
+
+    /// Launch an index-file upload operation in the background, with only the `archived_at` field updated.
+    ///
+    /// Returns whether it is required to wait for the queue to be empty to ensure that the change is uploaded,
+    /// so either if the change is already sitting in the queue, but not commited yet, or the change has not
+    /// been in the queue yet.
+    pub(crate) fn schedule_index_upload_for_timeline_archival_state(
+        self: &Arc<Self>,
+        state: TimelineArchivalState,
+    ) -> anyhow::Result<bool> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        /// Returns Some(_) if a change is needed, and Some(true) if it's a
+        /// change needed to set archived_at.
+        fn need_change(
+            archived_at: &Option<NaiveDateTime>,
+            state: TimelineArchivalState,
+        ) -> Option<bool> {
+            match (archived_at, state) {
+                (Some(_), TimelineArchivalState::Archived)
+                | (None, TimelineArchivalState::Unarchived) => {
+                    // Nothing to do
+                    tracing::info!("intended state matches present state");
+                    None
+                }
+                (None, TimelineArchivalState::Archived) => Some(true),
+                (Some(_), TimelineArchivalState::Unarchived) => Some(false),
+            }
+        }
+        let need_upload_scheduled = need_change(&upload_queue.dirty.archived_at, state);
+
+        if let Some(archived_at_set) = need_upload_scheduled {
+            let intended_archived_at = archived_at_set.then(|| Utc::now().naive_utc());
+            upload_queue.dirty.archived_at = intended_archived_at;
+            self.schedule_index_upload(upload_queue)?;
+        }
+
+        let need_wait = need_change(&upload_queue.clean.0.archived_at, state).is_some();
+        Ok(need_wait)
+    }
+
     ///
     /// Launch an index-file upload operation in the background, if necessary.
     ///
@@ -1380,12 +1433,13 @@ impl RemoteTimelineClient {
         // marker via its deleted_at attribute
         let latest_index = remaining
             .iter()
-            .filter(|p| {
-                p.object_name()
+            .filter(|o| {
+                o.key
+                    .object_name()
                     .map(|n| n.starts_with(IndexPart::FILE_NAME))
                     .unwrap_or(false)
             })
-            .filter_map(|path| parse_remote_index_path(path.clone()).map(|gen| (path, gen)))
+            .filter_map(|o| parse_remote_index_path(o.key.clone()).map(|gen| (o.key.clone(), gen)))
             .max_by_key(|i| i.1)
             .map(|i| i.0.clone())
             .unwrap_or(
@@ -1396,14 +1450,12 @@ impl RemoteTimelineClient {
 
         let remaining_layers: Vec<RemotePath> = remaining
             .into_iter()
-            .filter(|p| {
-                if p == &latest_index {
-                    return false;
+            .filter_map(|o| {
+                if o.key == latest_index || o.key.object_name() == Some(INITDB_PRESERVED_PATH) {
+                    None
+                } else {
+                    Some(o.key)
                 }
-                if p.object_name() == Some(INITDB_PRESERVED_PATH) {
-                    return false;
-                }
-                true
             })
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
