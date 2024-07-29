@@ -419,16 +419,16 @@ async fn list_objects_with_retries(
     Err(anyhow!("unreachable unless MAX_RETRIES==0"))
 }
 
-async fn stream_objects_with_retries<'a>(
+fn stream_objects_with_retries<'a>(
     storage_client: &'a GenericRemoteStorage,
+    listing_mode: ListingMode,
     s3_target: &'a S3Target,
 ) -> impl Stream<Item = Result<Listing, anyhow::Error>> + 'a {
     async_stream::stream! {
         let mut trial = 0;
-        let mode = ListingMode::NoDelimiter;
         let cancel = CancellationToken::new();
         let prefix = RemotePath::from_string(&s3_target.prefix_in_bucket)?;
-        let mut list_stream = storage_client.list_streaming(Some(&prefix), mode, None, &cancel);
+        let mut list_stream = storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
         while let Some(res) = list_stream.next().await {
             if let Err(err) = res {
                 if !err.is_permanent() {
