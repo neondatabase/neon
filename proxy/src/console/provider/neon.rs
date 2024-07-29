@@ -12,7 +12,7 @@ use crate::{
     console::messages::{ColdStartInfo, Reason},
     http,
     metrics::{CacheOutcome, Metrics},
-    rate_limiter::EndpointRateLimiter,
+    rate_limiter::WakeComputeRateLimiter,
     scram, EndpointCacheKey,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
@@ -26,7 +26,7 @@ pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
     pub locks: &'static ApiLocks<EndpointCacheKey>,
-    pub wake_compute_endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    pub wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     jwt: String,
 }
 
@@ -36,7 +36,7 @@ impl Api {
         endpoint: http::Endpoint,
         caches: &'static ApiCaches,
         locks: &'static ApiLocks<EndpointCacheKey>,
-        wake_compute_endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+        wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     ) -> Self {
         let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
             Ok(v) => v,

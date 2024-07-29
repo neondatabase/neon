@@ -44,8 +44,9 @@ use crate::{
     error::Cancelled,
     metrics::{start_counting_cancelled_wait, start_measuring_requests},
     support::PermitCarrying,
-    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, RemotePath, RemoteStorage,
-    TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, ListingObject, RemotePath,
+    RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
+    REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use crate::metrics::AttemptOutcome;
@@ -386,6 +387,10 @@ impl S3Bucket {
         }
         Ok(())
     }
+
+    pub fn bucket_name(&self) -> &str {
+        &self.bucket_name
+    }
 }
 
 pin_project_lite::pin_project! {
@@ -463,17 +468,16 @@ impl<S: Stream<Item = std::io::Result<Bytes>>> Stream for TimedDownload<S> {
 }
 
 impl RemoteStorage for S3Bucket {
-    async fn list(
+    fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> Result<Listing, DownloadError> {
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
         let kind = RequestKind::List;
         // s3 sdk wants i32
         let mut max_keys = max_keys.map(|mk| mk.get() as i32);
-        let mut result = Listing::default();
 
         // get the passed prefix or if it is not set use prefix_in_bucket value
         let list_prefix = prefix
@@ -485,89 +489,116 @@ impl RemoteStorage for S3Bucket {
                 })
             });
 
-        let _permit = self.permit(kind, cancel).await?;
+        async_stream::stream! {
+            let _permit = self.permit(kind, cancel).await?;
 
-        let mut continuation_token = None;
+            let mut continuation_token = None;
+            'outer: loop {
+                let started_at = start_measuring_requests(kind);
 
-        loop {
-            let started_at = start_measuring_requests(kind);
+                // min of two Options, returning Some if one is value and another is
+                // None (None is smaller than anything, so plain min doesn't work).
+                let request_max_keys = self
+                    .max_keys_per_list_response
+                    .into_iter()
+                    .chain(max_keys.into_iter())
+                    .min();
+                let mut request = self
+                    .client
+                    .list_objects_v2()
+                    .bucket(self.bucket_name.clone())
+                    .set_prefix(list_prefix.clone())
+                    .set_continuation_token(continuation_token.clone())
+                    .set_max_keys(request_max_keys);
 
-            // min of two Options, returning Some if one is value and another is
-            // None (None is smaller than anything, so plain min doesn't work).
-            let request_max_keys = self
-                .max_keys_per_list_response
-                .into_iter()
-                .chain(max_keys.into_iter())
-                .min();
-            let mut request = self
-                .client
-                .list_objects_v2()
-                .bucket(self.bucket_name.clone())
-                .set_prefix(list_prefix.clone())
-                .set_continuation_token(continuation_token)
-                .set_max_keys(request_max_keys);
-
-            if let ListingMode::WithDelimiter = mode {
-                request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
-            }
-
-            let request = request.send();
-
-            let response = tokio::select! {
-                res = request => res,
-                _ = tokio::time::sleep(self.timeout) => return Err(DownloadError::Timeout),
-                _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
-            };
-
-            let response = response
-                .context("Failed to list S3 prefixes")
-                .map_err(DownloadError::Other);
-
-            let started_at = ScopeGuard::into_inner(started_at);
-
-            crate::metrics::BUCKET_METRICS
-                .req_seconds
-                .observe_elapsed(kind, &response, started_at);
-
-            let response = response?;
-
-            let keys = response.contents();
-            let empty = Vec::new();
-            let prefixes = response.common_prefixes.as_ref().unwrap_or(&empty);
-
-            tracing::debug!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
-
-            for object in keys {
-                let object_path = object.key().expect("response does not contain a key");
-                let remote_path = self.s3_object_to_relative_path(object_path);
-                result.keys.push(remote_path);
-                if let Some(mut mk) = max_keys {
-                    assert!(mk > 0);
-                    mk -= 1;
-                    if mk == 0 {
-                        return Ok(result); // limit reached
-                    }
-                    max_keys = Some(mk);
+                if let ListingMode::WithDelimiter = mode {
+                    request = request.delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string());
                 }
+
+                let request = request.send();
+
+                let response = tokio::select! {
+                    res = request => Ok(res),
+                    _ = tokio::time::sleep(self.timeout) => Err(DownloadError::Timeout),
+                    _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                }?;
+
+                let response = response
+                    .context("Failed to list S3 prefixes")
+                    .map_err(DownloadError::Other);
+
+                let started_at = ScopeGuard::into_inner(started_at);
+
+                crate::metrics::BUCKET_METRICS
+                    .req_seconds
+                    .observe_elapsed(kind, &response, started_at);
+
+                let response = match response {
+                    Ok(response) => response,
+                    Err(e) => {
+                        // The error is potentially retryable, so we must rewind the loop after yielding.
+                        yield Err(e);
+                        continue 'outer;
+                    },
+                };
+
+                let keys = response.contents();
+                let prefixes = response.common_prefixes.as_deref().unwrap_or_default();
+
+                tracing::debug!("list: {} prefixes, {} keys", prefixes.len(), keys.len());
+                let mut result = Listing::default();
+
+                for object in keys {
+                    let key = object.key().expect("response does not contain a key");
+                    let key = self.s3_object_to_relative_path(key);
+
+                    let last_modified = match object.last_modified.map(SystemTime::try_from) {
+                        Some(Ok(t)) => t,
+                        Some(Err(_)) => {
+                            tracing::warn!("Remote storage last_modified {:?} for {} is out of bounds",
+                                object.last_modified, key
+                        );
+                            SystemTime::now()
+                        },
+                        None => {
+                            SystemTime::now()
+                        }
+                    };
+
+                    result.keys.push(ListingObject{
+                        key,
+                        last_modified
+                    });
+                    if let Some(mut mk) = max_keys {
+                        assert!(mk > 0);
+                        mk -= 1;
+                        if mk == 0 {
+                            // limit reached
+                            yield Ok(result);
+                            break 'outer;
+                        }
+                        max_keys = Some(mk);
+                    }
+                }
+
+                // S3 gives us prefixes like "foo/", we return them like "foo"
+                result.prefixes.extend(prefixes.iter().filter_map(|o| {
+                    Some(
+                        self.s3_object_to_relative_path(
+                            o.prefix()?
+                                .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR),
+                        ),
+                    )
+                }));
+
+                yield Ok(result);
+
+                continuation_token = match response.next_continuation_token {
+                    Some(new_token) => Some(new_token),
+                    None => break,
+                };
             }
-
-            // S3 gives us prefixes like "foo/", we return them like "foo"
-            result.prefixes.extend(prefixes.iter().filter_map(|o| {
-                Some(
-                    self.s3_object_to_relative_path(
-                        o.prefix()?
-                            .trim_end_matches(REMOTE_STORAGE_PREFIX_SEPARATOR),
-                    ),
-                )
-            }));
-
-            continuation_token = match response.next_continuation_token {
-                Some(new_token) => Some(new_token),
-                None => break,
-            };
         }
-
-        Ok(result)
     }
 
     async fn upload(

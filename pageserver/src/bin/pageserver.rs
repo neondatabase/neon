@@ -19,9 +19,13 @@ use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_evicti
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use pageserver::tenant::{secondary, TenantSharedResources};
+use pageserver::{
+    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, LibpqEndpointListener,
+};
 use remote_storage::GenericRemoteStorage;
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use metrics::set_build_info_metric;
@@ -286,6 +290,7 @@ fn start_pageserver(
     // Create and lock PID file. This ensures that there cannot be more than one
     // pageserver process running at the same time.
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
+    info!("Claiming pid file at {lock_file_path:?}...");
     let lock_file =
         utils::pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
     info!("Claimed pid file at {lock_file_path:?}");
@@ -411,8 +416,10 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
+    let background_purges = mgr::BackgroundPurges::default();
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
+        background_purges.clone(),
         TenantSharedResources {
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
@@ -504,7 +511,7 @@ fn start_pageserver(
         }
     });
 
-    let secondary_controller = secondary::spawn_tasks(
+    let (secondary_controller, secondary_controller_tasks) = secondary::spawn_tasks(
         tenant_manager.clone(),
         remote_storage.clone(),
         background_jobs_barrier.clone(),
@@ -517,18 +524,19 @@ fn start_pageserver(
     // been configured.
     let disk_usage_eviction_state: Arc<disk_usage_eviction_task::State> = Arc::default();
 
-    launch_disk_usage_global_eviction_task(
+    let disk_usage_eviction_task = launch_disk_usage_global_eviction_task(
         conf,
         remote_storage.clone(),
         disk_usage_eviction_state.clone(),
         tenant_manager.clone(),
         background_jobs_barrier.clone(),
-    )?;
+    );
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
-    {
-        let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
+    let http_endpoint_listener = {
+        let _rt_guard = MGMT_REQUEST_RUNTIME.enter(); // for hyper
+        let cancel = CancellationToken::new();
 
         let router_state = Arc::new(
             http::routes::State::new(
@@ -549,77 +557,44 @@ fn start_pageserver(
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
-            .with_graceful_shutdown(task_mgr::shutdown_watcher());
+            .with_graceful_shutdown({
+                let cancel = cancel.clone();
+                async move { cancel.clone().cancelled().await }
+            });
 
-        task_mgr::spawn(
-            MGMT_REQUEST_RUNTIME.handle(),
-            TaskKind::HttpEndpointListener,
-            None,
-            None,
+        let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
             "http endpoint listener",
-            true,
-            async {
-                server.await?;
-                Ok(())
-            },
-        );
-    }
+            server,
+        ));
+        HttpEndpointListener(CancellableTask { task, cancel })
+    };
 
-    if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-        let metrics_ctx = RequestContext::todo_child(
-            TaskKind::MetricsCollection,
-            // This task itself shouldn't download anything.
-            // The actual size calculation does need downloads, and
-            // creates a child context with the right DownloadBehavior.
-            DownloadBehavior::Error,
-        );
+    let consumption_metrics_tasks = {
+        let cancel = shutdown_pageserver.child_token();
+        let task = crate::BACKGROUND_RUNTIME.spawn({
+            let tenant_manager = tenant_manager.clone();
+            let cancel = cancel.clone();
+            async move {
+                // first wait until background jobs are cleared to launch.
+                //
+                // this is because we only process active tenants and timelines, and the
+                // Timeline::get_current_logical_size will spawn the logical size calculation,
+                // which will not be rate-limited.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return; },
+                    _ = background_jobs_barrier.wait() => {}
+                };
 
-        let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
-
-        task_mgr::spawn(
-            crate::BACKGROUND_RUNTIME.handle(),
-            TaskKind::MetricsCollection,
-            None,
-            None,
-            "consumption metrics collection",
-            true,
-            {
-                let tenant_manager = tenant_manager.clone();
-                async move {
-                    // first wait until background jobs are cleared to launch.
-                    //
-                    // this is because we only process active tenants and timelines, and the
-                    // Timeline::get_current_logical_size will spawn the logical size calculation,
-                    // which will not be rate-limited.
-                    let cancel = task_mgr::shutdown_token();
-
-                    tokio::select! {
-                        _ = cancel.cancelled() => { return Ok(()); },
-                        _ = background_jobs_barrier.wait() => {}
-                    };
-
-                    pageserver::consumption_metrics::collect_metrics(
-                        tenant_manager,
-                        metric_collection_endpoint,
-                        &conf.metric_collection_bucket,
-                        conf.metric_collection_interval,
-                        conf.synthetic_size_calculation_interval,
-                        conf.id,
-                        local_disk_storage,
-                        cancel,
-                        metrics_ctx,
-                    )
-                    .instrument(info_span!("metrics_collection"))
-                    .await?;
-                    Ok(())
-                }
-            },
-        );
-    }
+                pageserver::consumption_metrics::run(conf, tenant_manager, cancel).await;
+            }
+        });
+        ConsumptionMetricsTasks(CancellableTask { task, cancel })
+    };
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
-    {
+    let libpq_listener = {
+        let cancel = CancellationToken::new();
         let libpq_ctx = RequestContext::todo_child(
             TaskKind::LibpqEndpointListener,
             // listener task shouldn't need to download anything. (We will
@@ -628,29 +603,20 @@ fn start_pageserver(
             // accept connections.)
             DownloadBehavior::Error,
         );
-        task_mgr::spawn(
-            COMPUTE_REQUEST_RUNTIME.handle(),
-            TaskKind::LibpqEndpointListener,
-            None,
-            None,
-            "libpq endpoint listener",
-            true,
-            {
-                let tenant_manager = tenant_manager.clone();
-                async move {
-                    page_service::libpq_listener_main(
-                        tenant_manager,
-                        pg_auth,
-                        pageserver_listener,
-                        conf.pg_auth_type,
-                        libpq_ctx,
-                        task_mgr::shutdown_token(),
-                    )
-                    .await
-                }
-            },
-        );
-    }
+
+        let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+            "libpq listener",
+            page_service::libpq_listener_main(
+                tenant_manager.clone(),
+                pg_auth,
+                pageserver_listener,
+                conf.pg_auth_type,
+                libpq_ctx,
+                cancel.clone(),
+            ),
+        ));
+        LibpqEndpointListener(CancellableTask { task, cancel })
+    };
 
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
@@ -676,7 +642,18 @@ fn start_pageserver(
             // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
             // The plan is to change that over time.
             shutdown_pageserver.take();
-            pageserver::shutdown_pageserver(&tenant_manager, deletion_queue.clone(), 0).await;
+            pageserver::shutdown_pageserver(
+                http_endpoint_listener,
+                libpq_listener,
+                consumption_metrics_tasks,
+                disk_usage_eviction_task,
+                &tenant_manager,
+                background_purges,
+                deletion_queue.clone(),
+                secondary_controller_tasks,
+                0,
+            )
+            .await;
             unreachable!()
         })
     }

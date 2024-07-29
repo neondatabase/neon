@@ -187,7 +187,7 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
-use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::{AuxFilePolicy, TimelineArchivalState};
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -285,6 +285,14 @@ pub enum PersistIndexPartWithDeletedFlagError {
     AlreadyDeleted(NaiveDateTime),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WaitCompletionError {
+    #[error(transparent)]
+    NotInitialized(NotInitialized),
+    #[error("wait_completion aborted because upload queue was stopped")]
+    UploadQueueShutDownOrStopped,
 }
 
 /// A client for accessing a timeline's data in remote storage.
@@ -449,6 +457,17 @@ impl RemoteTimelineClient {
             .unwrap_or(false)
     }
 
+    /// Returns whether the timeline is archived.
+    /// Return None if the remote index_part hasn't been downloaded yet.
+    pub(crate) fn is_archived(&self) -> Option<bool> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|q| q.clean.0.archived_at.is_some())
+            .ok()
+    }
+
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
         let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
             current_remote_index_part
@@ -609,7 +628,7 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    /// Launch an index-file upload operation in the background, with only aux_file_policy flag updated.
+    /// Launch an index-file upload operation in the background, with only the `aux_file_policy` flag updated.
     pub(crate) fn schedule_index_upload_for_aux_file_policy_update(
         self: &Arc<Self>,
         last_aux_file_policy: Option<AuxFilePolicy>,
@@ -620,6 +639,48 @@ impl RemoteTimelineClient {
         self.schedule_index_upload(upload_queue)?;
         Ok(())
     }
+
+    /// Launch an index-file upload operation in the background, with only the `archived_at` field updated.
+    ///
+    /// Returns whether it is required to wait for the queue to be empty to ensure that the change is uploaded,
+    /// so either if the change is already sitting in the queue, but not commited yet, or the change has not
+    /// been in the queue yet.
+    pub(crate) fn schedule_index_upload_for_timeline_archival_state(
+        self: &Arc<Self>,
+        state: TimelineArchivalState,
+    ) -> anyhow::Result<bool> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+
+        /// Returns Some(_) if a change is needed, and Some(true) if it's a
+        /// change needed to set archived_at.
+        fn need_change(
+            archived_at: &Option<NaiveDateTime>,
+            state: TimelineArchivalState,
+        ) -> Option<bool> {
+            match (archived_at, state) {
+                (Some(_), TimelineArchivalState::Archived)
+                | (None, TimelineArchivalState::Unarchived) => {
+                    // Nothing to do
+                    tracing::info!("intended state matches present state");
+                    None
+                }
+                (None, TimelineArchivalState::Archived) => Some(true),
+                (Some(_), TimelineArchivalState::Unarchived) => Some(false),
+            }
+        }
+        let need_upload_scheduled = need_change(&upload_queue.dirty.archived_at, state);
+
+        if let Some(archived_at_set) = need_upload_scheduled {
+            let intended_archived_at = archived_at_set.then(|| Utc::now().naive_utc());
+            upload_queue.dirty.archived_at = intended_archived_at;
+            self.schedule_index_upload(upload_queue)?;
+        }
+
+        let need_wait = need_change(&upload_queue.clean.0.archived_at, state).is_some();
+        Ok(need_wait)
+    }
+
     ///
     /// Launch an index-file upload operation in the background, if necessary.
     ///
@@ -630,7 +691,7 @@ impl RemoteTimelineClient {
     ///
     /// Like schedule_index_upload_for_metadata_update(), this merely adds
     /// the upload to the upload queue and returns quickly.
-    pub fn schedule_index_upload_for_file_changes(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub fn schedule_index_upload_for_file_changes(self: &Arc<Self>) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -645,7 +706,7 @@ impl RemoteTimelineClient {
     fn schedule_index_upload(
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let disk_consistent_lsn = upload_queue.dirty.metadata.disk_consistent_lsn();
         // fix up the duplicated field
         upload_queue.dirty.disk_consistent_lsn = disk_consistent_lsn;
@@ -653,7 +714,7 @@ impl RemoteTimelineClient {
         // make sure it serializes before doing it in perform_upload_task so that it doesn't
         // look like a retryable error
         let void = std::io::sink();
-        serde_json::to_writer(void, &upload_queue.dirty).context("serialize index_part.json")?;
+        serde_json::to_writer(void, &upload_queue.dirty).expect("serialize index_part.json");
 
         let index_part = &upload_queue.dirty;
 
@@ -699,7 +760,9 @@ impl RemoteTimelineClient {
             self.schedule_barrier0(upload_queue)
         };
 
-        Self::wait_completion0(receiver).await
+        Self::wait_completion0(receiver)
+            .await
+            .context("wait completion")
     }
 
     /// Schedules uploading a new version of `index_part.json` with the given layers added,
@@ -732,7 +795,9 @@ impl RemoteTimelineClient {
             barrier
         };
 
-        Self::wait_completion0(barrier).await
+        Self::wait_completion0(barrier)
+            .await
+            .context("wait completion")
     }
 
     /// Launch an upload operation in the background; the file is added to be included in next
@@ -740,7 +805,7 @@ impl RemoteTimelineClient {
     pub(crate) fn schedule_layer_file_upload(
         self: &Arc<Self>,
         layer: ResidentLayer,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -826,7 +891,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         upload_queue: &mut UploadQueueInitialized,
         names: I,
-    ) -> anyhow::Result<Vec<(LayerName, LayerFileMetadata)>>
+    ) -> Result<Vec<(LayerName, LayerFileMetadata)>, NotInitialized>
     where
         I: IntoIterator<Item = LayerName>,
     {
@@ -952,7 +1017,7 @@ impl RemoteTimelineClient {
         self: &Arc<Self>,
         compacted_from: &[Layer],
         compacted_to: &[ResidentLayer],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -969,10 +1034,12 @@ impl RemoteTimelineClient {
     }
 
     /// Wait for all previously scheduled uploads/deletions to complete
-    pub(crate) async fn wait_completion(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub(crate) async fn wait_completion(self: &Arc<Self>) -> Result<(), WaitCompletionError> {
         let receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
-            let upload_queue = guard.initialized_mut()?;
+            let upload_queue = guard
+                .initialized_mut()
+                .map_err(WaitCompletionError::NotInitialized)?;
             self.schedule_barrier0(upload_queue)
         };
 
@@ -981,9 +1048,9 @@ impl RemoteTimelineClient {
 
     async fn wait_completion0(
         mut receiver: tokio::sync::watch::Receiver<()>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), WaitCompletionError> {
         if receiver.changed().await.is_err() {
-            anyhow::bail!("wait_completion aborted because upload queue was stopped");
+            return Err(WaitCompletionError::UploadQueueShutDownOrStopped);
         }
 
         Ok(())
@@ -1366,12 +1433,13 @@ impl RemoteTimelineClient {
         // marker via its deleted_at attribute
         let latest_index = remaining
             .iter()
-            .filter(|p| {
-                p.object_name()
+            .filter(|o| {
+                o.key
+                    .object_name()
                     .map(|n| n.starts_with(IndexPart::FILE_NAME))
                     .unwrap_or(false)
             })
-            .filter_map(|path| parse_remote_index_path(path.clone()).map(|gen| (path, gen)))
+            .filter_map(|o| parse_remote_index_path(o.key.clone()).map(|gen| (o.key.clone(), gen)))
             .max_by_key(|i| i.1)
             .map(|i| i.0.clone())
             .unwrap_or(
@@ -1382,14 +1450,12 @@ impl RemoteTimelineClient {
 
         let remaining_layers: Vec<RemotePath> = remaining
             .into_iter()
-            .filter(|p| {
-                if p == &latest_index {
-                    return false;
+            .filter_map(|o| {
+                if o.key == latest_index || o.key.object_name() == Some(INITDB_PRESERVED_PATH) {
+                    None
+                } else {
+                    Some(o.key)
                 }
-                if p.object_name() == Some(INITDB_PRESERVED_PATH) {
-                    return false;
-                }
-                true
             })
             .inspect(|path| {
                 if let Some(name) = path.object_name() {
@@ -1525,7 +1591,6 @@ impl RemoteTimelineClient {
                 Some(self.tenant_shard_id),
                 Some(self.timeline_id),
                 "remote upload",
-                false,
                 async move {
                     self_rc.perform_upload_task(task).await;
                     Ok(())

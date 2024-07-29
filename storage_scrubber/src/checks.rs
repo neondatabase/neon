@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use aws_sdk_s3::Client;
+use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use tracing::{error, info, warn};
@@ -12,7 +13,7 @@ use crate::cloud_admin_api::BranchData;
 use crate::metadata_stream::stream_listing;
 use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::StreamExt;
-use pageserver::tenant::remote_timeline_client::parse_remote_index_path;
+use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use remote_storage::RemotePath;
@@ -41,7 +42,9 @@ impl TimelineAnalysis {
     }
 }
 
-pub(crate) fn branch_cleanup_and_check_errors(
+pub(crate) async fn branch_cleanup_and_check_errors(
+    s3_client: &Client,
+    target: &RootTarget,
     id: &TenantShardTimelineId,
     tenant_objects: &mut TenantObjectListing,
     s3_active_branch: Option<&BranchData>,
@@ -84,16 +87,19 @@ pub(crate) fn branch_cleanup_and_check_errors(
                             .push(format!("index_part.json version: {}", index_part.version()))
                     }
 
-                    if &index_part.version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
-                        result.warnings.push(format!(
+                    let mut newest_versions = IndexPart::KNOWN_VERSIONS.iter().rev().take(2);
+                    if !newest_versions.any(|ip| ip == &index_part.version()) {
+                        info!(
                             "index_part.json version is not latest: {}",
                             index_part.version()
-                        ))
+                        );
                     }
 
                     if index_part.metadata.disk_consistent_lsn()
                         != index_part.duplicated_disk_consistent_lsn()
                     {
+                        // Tech debt: let's get rid of one of these, they are redundant
+                        // https://github.com/neondatabase/neon/issues/8343
                         result.errors.push(format!(
                             "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
                             index_part.metadata.disk_consistent_lsn(),
@@ -102,8 +108,16 @@ pub(crate) fn branch_cleanup_and_check_errors(
                     }
 
                     if index_part.layer_metadata.is_empty() {
-                        // not an error, can happen for branches with zero writes, but notice that
-                        info!("index_part.json has no layers");
+                        if index_part.metadata.ancestor_timeline().is_none() {
+                            // The initial timeline with no ancestor should ALWAYS have layers.
+                            result.errors.push(
+                                "index_part.json has no layers (ancestor_timeline=None)"
+                                    .to_string(),
+                            );
+                        } else {
+                            // Not an error, can happen for branches with zero writes, but notice that
+                            info!("index_part.json has no layers (ancestor_timeline exists)");
+                        }
                     }
 
                     for (layer, metadata) in index_part.layer_metadata {
@@ -114,16 +128,41 @@ pub(crate) fn branch_cleanup_and_check_errors(
                         }
 
                         if !tenant_objects.check_ref(id.timeline_id, &layer, &metadata) {
-                            // FIXME: this will emit false positives if an index was
-                            // uploaded concurrently with our scan.  To make this check
-                            // correct, we need to try sending a HEAD request for the
-                            // layer we think is missing.
-                            result.errors.push(format!(
-                                "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage",
-                                layer,
-                                metadata.generation.get_suffix(),
-                                metadata.shard
-                            ))
+                            let path = remote_layer_path(
+                                &id.tenant_shard_id.tenant_id,
+                                &id.timeline_id,
+                                metadata.shard,
+                                &layer,
+                                metadata.generation,
+                            );
+
+                            // HEAD request used here to address a race condition  when an index was uploaded concurrently
+                            // with our scan. We check if the object is uploaded to S3 after taking the listing snapshot.
+                            let response = s3_client
+                                .head_object()
+                                .bucket(target.bucket_name())
+                                .key(path.get_path().as_str())
+                                .send()
+                                .await;
+
+                            if response.is_err() {
+                                // Object is not present.
+                                let is_l0 = LayerMap::is_l0(layer.key_range());
+
+                                let msg = format!(
+                                    "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {})",
+                                    layer,
+                                    metadata.generation.get_suffix(),
+                                    metadata.shard,
+                                    is_l0,
+                                );
+
+                                if is_l0 {
+                                    result.warnings.push(msg);
+                                } else {
+                                    result.errors.push(msg);
+                                }
+                            }
                         }
                     }
                 }
@@ -302,6 +341,9 @@ pub(crate) async fn list_timeline_blobs(
             Some("initdb.tar.zst") => {
                 tracing::debug!("initdb archive {key}");
                 initdb_archive = true;
+            }
+            Some("initdb-preserved.tar.zst") => {
+                tracing::info!("initdb archive preserved {key}");
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
                 Ok((new_layer, gen)) => {

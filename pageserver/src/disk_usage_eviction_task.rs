@@ -59,13 +59,14 @@ use utils::{completion, id::TimelineId};
 use crate::{
     config::PageServerConf,
     metrics::disk_usage_based_eviction::METRICS,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
+    task_mgr::{self, BACKGROUND_RUNTIME},
     tenant::{
         mgr::TenantManager,
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
         storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName},
     },
+    CancellableTask, DiskUsageEvictionTask,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,17 +84,9 @@ pub struct DiskUsageEvictionTaskConfig {
 
 /// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
 /// partitioning.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "args")]
 pub enum EvictionOrder {
-    /// Order the layers to be evicted by how recently they have been accessed in absolute
-    /// time.
-    ///
-    /// This strategy is unfair when some tenants grow faster than others towards the slower
-    /// growing.
-    #[default]
-    AbsoluteAccessed,
-
     /// Order the layers to be evicted by how recently they have been accessed relatively within
     /// the set of resident layers of a tenant.
     RelativeAccessed {
@@ -108,6 +101,14 @@ pub enum EvictionOrder {
     },
 }
 
+impl Default for EvictionOrder {
+    fn default() -> Self {
+        Self::RelativeAccessed {
+            highest_layer_count_loses_first: true,
+        }
+    }
+}
+
 fn default_highest_layer_count_loses_first() -> bool {
     true
 }
@@ -117,11 +118,6 @@ impl EvictionOrder {
         use EvictionOrder::*;
 
         match self {
-            AbsoluteAccessed => {
-                candidates.sort_unstable_by_key(|(partition, candidate)| {
-                    (*partition, candidate.last_activity_ts)
-                });
-            }
             RelativeAccessed { .. } => candidates.sort_unstable_by_key(|(partition, candidate)| {
                 (*partition, candidate.relative_last_activity)
             }),
@@ -134,7 +130,6 @@ impl EvictionOrder {
         use EvictionOrder::*;
 
         match self {
-            AbsoluteAccessed => finite_f32::FiniteF32::ZERO,
             RelativeAccessed {
                 highest_layer_count_loses_first,
             } => {
@@ -192,36 +187,34 @@ pub fn launch_disk_usage_global_eviction_task(
     state: Arc<State>,
     tenant_manager: Arc<TenantManager>,
     background_jobs_barrier: completion::Barrier,
-) -> anyhow::Result<()> {
+) -> Option<DiskUsageEvictionTask> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
-        return Ok(());
+        return None;
     };
 
     info!("launching disk usage based eviction task");
 
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        TaskKind::DiskUsageEviction,
-        None,
-        None,
+    let cancel = CancellationToken::new();
+    let task = BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "disk usage based eviction",
-        false,
-        async move {
-            let cancel = task_mgr::shutdown_token();
+        {
+            let cancel = cancel.clone();
+            async move {
+                // wait until initial load is complete, because we cannot evict from loading tenants.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return anyhow::Ok(()); },
+                    _ = background_jobs_barrier.wait() => { }
+                };
 
-            // wait until initial load is complete, because we cannot evict from loading tenants.
-            tokio::select! {
-                _ = cancel.cancelled() => { return Ok(()); },
-                _ = background_jobs_barrier.wait() => { }
-            };
-
-            disk_usage_eviction_task(&state, task_config, &storage, tenant_manager, cancel).await;
-            Ok(())
+                disk_usage_eviction_task(&state, task_config, &storage, tenant_manager, cancel)
+                    .await;
+                anyhow::Ok(())
+            }
         },
-    );
+    ));
 
-    Ok(())
+    Some(DiskUsageEvictionTask(CancellableTask { cancel, task }))
 }
 
 #[instrument(skip_all)]

@@ -315,6 +315,9 @@ def test_tenant_delete_races_timeline_creation(
     # Zero tenants remain (we deleted the default tenant)
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 0
 
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
+
 
 def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
     """

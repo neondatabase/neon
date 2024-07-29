@@ -13,7 +13,10 @@ use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
-use crate::persistence::{DatabaseError, DatabaseOperation};
+use crate::{
+    persistence::{DatabaseError, DatabaseOperation},
+    service::LeadershipStatus,
+};
 
 pub(crate) static METRICS_REGISTRY: Lazy<StorageControllerMetrics> =
     Lazy::new(StorageControllerMetrics::default);
@@ -81,6 +84,8 @@ pub(crate) struct StorageControllerMetricGroup {
     #[metric(metadata = histogram::Thresholds::exponential_buckets(0.1, 2.0))]
     pub(crate) storage_controller_database_query_latency:
         measured::HistogramVec<DatabaseQueryLatencyLabelGroupSet, 5>,
+
+    pub(crate) storage_controller_leadership_status: measured::GaugeVec<LeadershipStatusGroupSet>,
 }
 
 impl StorageControllerMetrics {
@@ -154,6 +159,12 @@ pub(crate) struct DatabaseQueryErrorLabelGroup {
 #[label(set = DatabaseQueryLatencyLabelGroupSet)]
 pub(crate) struct DatabaseQueryLatencyLabelGroup {
     pub(crate) operation: DatabaseOperation,
+}
+
+#[derive(measured::LabelGroup)]
+#[label(set = LeadershipStatusGroupSet)]
+pub(crate) struct LeadershipStatusGroup {
+    pub(crate) status: LeadershipStatus,
 }
 
 #[derive(FixedCardinalityLabel, Clone, Copy)]

@@ -23,8 +23,8 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use utils::crashsafe::path_with_suffix_extension;
 
 use crate::{
-    Download, DownloadError, Listing, ListingMode, RemotePath, TimeTravelError, TimeoutOrCancel,
-    REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Download, DownloadError, Listing, ListingMode, ListingObject, RemotePath, TimeTravelError,
+    TimeoutOrCancel, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use super::{RemoteStorage, StorageMetadata};
@@ -331,6 +331,17 @@ impl LocalFs {
 }
 
 impl RemoteStorage for LocalFs {
+    fn list_streaming(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
+        let listing = self.list(prefix, mode, max_keys, cancel);
+        futures::stream::once(listing)
+    }
+
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
@@ -346,19 +357,28 @@ impl RemoteStorage for LocalFs {
                 .list_recursive(prefix)
                 .await
                 .map_err(DownloadError::Other)?;
-            let keys = keys
+            let objects = keys
                 .into_iter()
-                .filter(|k| {
+                .filter_map(|k| {
                     let path = k.with_base(&self.storage_root);
-                    !path.is_dir()
+                    if path.is_dir() {
+                        None
+                    } else {
+                        Some(ListingObject {
+                            key: k.clone(),
+                            // LocalFs is just for testing, so just specify a dummy time
+                            last_modified: SystemTime::now(),
+                        })
+                    }
                 })
                 .collect();
 
             if let ListingMode::NoDelimiter = mode {
-                result.keys = keys;
+                result.keys = objects;
             } else {
                 let mut prefixes = HashSet::new();
-                for key in keys {
+                for object in objects {
+                    let key = object.key;
                     // If the part after the prefix includes a "/", take only the first part and put it in `prefixes`.
                     let relative_key = if let Some(prefix) = prefix {
                         let mut prefix = prefix.clone();
@@ -387,9 +407,11 @@ impl RemoteStorage for LocalFs {
                             .to_owned();
                         prefixes.insert(first_part);
                     } else {
-                        result
-                            .keys
-                            .push(RemotePath::from_string(&relative_key).unwrap());
+                        result.keys.push(ListingObject {
+                            key: RemotePath::from_string(&relative_key).unwrap(),
+                            // LocalFs is just for testing
+                            last_modified: SystemTime::now(),
+                        });
                     }
                 }
                 result.prefixes = prefixes
@@ -939,7 +961,11 @@ mod fs_tests {
             .await?;
         assert!(listing.prefixes.is_empty());
         assert_eq!(
-            listing.keys.into_iter().collect::<HashSet<_>>(),
+            listing
+                .keys
+                .into_iter()
+                .map(|o| o.key)
+                .collect::<HashSet<_>>(),
             HashSet::from([uncle.clone(), child.clone(), child_sibling.clone()])
         );
 
@@ -964,7 +990,7 @@ mod fs_tests {
             )
             .await?;
         assert_eq!(
-            listing.keys,
+            listing.keys.into_iter().map(|o| o.key).collect::<Vec<_>>(),
             [RemotePath::from_string("uncle").unwrap()].to_vec()
         );
         assert_eq!(
@@ -981,7 +1007,7 @@ mod fs_tests {
                 &cancel,
             )
             .await?;
-        assert_eq!(listing.keys, [].to_vec());
+        assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
             [RemotePath::from_string("grandparent").unwrap()].to_vec()
@@ -996,7 +1022,7 @@ mod fs_tests {
                 &cancel,
             )
             .await?;
-        assert_eq!(listing.keys, [].to_vec());
+        assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
             [RemotePath::from_string("grandparent").unwrap()].to_vec()
@@ -1029,7 +1055,7 @@ mod fs_tests {
                 &cancel,
             )
             .await?;
-        assert_eq!(listing.keys, [].to_vec());
+        assert_eq!(listing.keys, vec![]);
 
         let mut found_prefixes = listing.prefixes.clone();
         found_prefixes.sort();

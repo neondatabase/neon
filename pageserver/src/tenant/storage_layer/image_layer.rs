@@ -49,7 +49,6 @@ use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -228,7 +227,7 @@ impl ImageLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
+        let inner = self.load(ctx).await?;
 
         inner.dump(ctx).await?;
 
@@ -255,12 +254,8 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    async fn load(
-        &self,
-        access_kind: LayerAccessKind,
-        ctx: &RequestContext,
-    ) -> Result<&ImageLayerInner> {
-        self.access_stats.record_access(access_kind, ctx);
+    async fn load(&self, ctx: &RequestContext) -> Result<&ImageLayerInner> {
+        self.access_stats.record_access(ctx);
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
             .await
@@ -270,9 +265,8 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
-            .await
-            .and_then(|res| res)?;
+        let loaded =
+            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx).await?;
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
@@ -312,7 +306,7 @@ impl ImageLayer {
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
+            access_stats: Default::default(),
             inner: OnceCell::new(),
         })
     }
@@ -390,17 +384,16 @@ impl ImageLayerInner {
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
-    ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path, ctx).await {
-            Ok(file) => file,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
-        };
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path, ctx)
+            .await
+            .context("open layer file")?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
-        let summary_blk = match block_reader.read_blk(0, ctx).await {
-            Ok(blk) => blk,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
-        };
+        let summary_blk = block_reader
+            .read_blk(0, ctx)
+            .await
+            .context("read first block")?;
 
         // length is the only way how this could fail, so it's not actually likely at all unless
         // read_blk returns wrong sized block.
@@ -425,7 +418,7 @@ impl ImageLayerInner {
             }
         }
 
-        Ok(Ok(ImageLayerInner {
+        Ok(ImageLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
             lsn,
@@ -433,7 +426,7 @@ impl ImageLayerInner {
             file_id,
             max_vectored_read_bytes,
             key_range: actual_summary.key_range,
-        }))
+        })
     }
 
     pub(super) async fn get_value_reconstruct_data(

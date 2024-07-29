@@ -122,7 +122,12 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             "scheduling": "Stop",
         },
     )
-    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy Stop.*")
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Scheduling is disabled by policy Stop.*",
+            ".*Skipping reconcile for policy Stop.*",
+        ]
+    )
 
     # We use a fixed seed to make the test reproducible: we want a randomly
     # chosen order, but not to change the order every time we run the test.
@@ -385,6 +390,9 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     # (reproduce https://github.com/neondatabase/neon/issues/6802)
     pageserver_b.http_client().tenant_delete(tenant_id)
 
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
+
 
 def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
     """
@@ -583,6 +591,9 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         ),
     )
     workload.stop()
+
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
 
 
 def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
