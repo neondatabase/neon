@@ -859,6 +859,26 @@ jobs:
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
           done
 
+      - name: Azure login
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: 4bb00e03-987d-4b86-a013-079729a85cb8
+          tenant-id: c8350122-1697-4543-929a-d4a75d1bb552
+          subscription-id: a57dcb0f-4249-4982-a872-1b73a7126c12
+
+      - name: Login to ACR
+        run: |
+          az acr login --name=neoneastus2
+
+      - name: Copy docker images to ACR-dev
+        if: github.ref_name == 'main'
+        run: |
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+            docker buildx imagetools create -t \
+              neoneastus2.azurecr.io/neondatabase/${image}-${version}:${{ needs.tag.outputs.build-tag }} \
+                                     neondatabase/${image}-${version}:${{ needs.tag.outputs.build-tag }}
+          done
+
       - name: Add latest tag to images
         if: github.ref_name == 'main'
         run: |
