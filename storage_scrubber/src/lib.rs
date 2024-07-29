@@ -22,16 +22,17 @@ use aws_sdk_s3::Client;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
+use futures::{Stream, StreamExt};
 use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{
-    GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
-    DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+    GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config, DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -416,6 +417,36 @@ async fn list_objects_with_retries(
         }
     }
     Err(anyhow!("unreachable unless MAX_RETRIES==0"))
+}
+
+async fn stream_objects_with_retries<'a>(
+    storage_client: &'a GenericRemoteStorage,
+    s3_target: &'a S3Target,
+) -> impl Stream<Item = Result<Listing, anyhow::Error>> + 'a {
+    async_stream::stream! {
+        let mut trial = 0;
+        let mode = ListingMode::NoDelimiter;
+        let cancel = CancellationToken::new();
+        let prefix = RemotePath::from_string(&s3_target.prefix_in_bucket)?;
+        let mut list_stream = storage_client.list_streaming(Some(&prefix), mode, None, &cancel);
+        while let Some(res) = list_stream.next().await {
+            if let Err(err) = res {
+                if !err.is_permanent() {
+                    let backoff_time = 1 << trial.max(5);
+                    tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+                    trial += 1;
+                    if trial == MAX_RETRIES - 1 {
+                        yield Err(err)
+                            .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                    }
+                    continue;
+                }
+            } else {
+                trial = 0;
+                yield res.map_err(anyhow::Error::from);
+            }
+        }
+    }
 }
 
 async fn download_object_with_retries(
