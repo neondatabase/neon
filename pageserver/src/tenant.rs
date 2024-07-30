@@ -7497,6 +7497,114 @@ mod tests {
         };
         assert_eq!(res, expected_res);
 
+        // In case of branch compaction, the branch itself does not have the full history, and we need to provide
+        // the ancestor image in the test case.
+
+        let history = vec![
+            (
+                key,
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x20")),
+            ),
+            (
+                key,
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x30")),
+            ),
+            (
+                key,
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x40")),
+            ),
+            (
+                key,
+                Lsn(0x70),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+            ),
+        ];
+        let res = tline
+            .generate_key_retention(
+                key,
+                &history,
+                Lsn(0x60),
+                &[],
+                3,
+                Some((key, Lsn(0x10), Bytes::copy_from_slice(b"0x10"))),
+            )
+            .await
+            .unwrap();
+        let expected_res = KeyHistoryRetention {
+            below_horizon: vec![(
+                Lsn(0x60),
+                KeyLogAtLsn(vec![(
+                    Lsn(0x60),
+                    Value::Image(Bytes::copy_from_slice(b"0x10;0x20;0x30;0x40")), // use the ancestor image to reconstruct the page
+                )]),
+            )],
+            above_horizon: KeyLogAtLsn(vec![(
+                Lsn(0x70),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+            )]),
+        };
+        assert_eq!(res, expected_res);
+
+        let history = vec![
+            (
+                key,
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x20")),
+            ),
+            (
+                key,
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x40")),
+            ),
+            (
+                key,
+                Lsn(0x60),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x60")),
+            ),
+            (
+                key,
+                Lsn(0x70),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+            ),
+        ];
+        let res = tline
+            .generate_key_retention(
+                key,
+                &history,
+                Lsn(0x60),
+                &[Lsn(0x30)],
+                3,
+                Some((key, Lsn(0x10), Bytes::copy_from_slice(b"0x10"))),
+            )
+            .await
+            .unwrap();
+        let expected_res = KeyHistoryRetention {
+            below_horizon: vec![
+                (
+                    Lsn(0x30),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x20),
+                        Value::WalRecord(NeonWalRecord::wal_append(";0x20")),
+                    )]),
+                ),
+                (
+                    Lsn(0x60),
+                    KeyLogAtLsn(vec![(
+                        Lsn(0x60),
+                        Value::Image(Bytes::copy_from_slice(b"0x10;0x20;0x40;0x60")),
+                    )]),
+                ),
+            ],
+            above_horizon: KeyLogAtLsn(vec![(
+                Lsn(0x70),
+                Value::WalRecord(NeonWalRecord::wal_append(";0x70")),
+            )]),
+        };
+        assert_eq!(res, expected_res);
+
         Ok(())
     }
 
@@ -7777,7 +7885,7 @@ mod tests {
 
         parent_tline.add_extra_test_dense_keyspace(KeySpace::single(get_key(0)..get_key(10)));
 
-        let tline = tenant
+        let branch_tline = tenant
             .branch_timeline_test_with_layers(
                 &parent_tline,
                 NEW_TIMELINE_ID,
@@ -7793,13 +7901,13 @@ mod tests {
             )
             .await?;
 
-        tline.add_extra_test_dense_keyspace(KeySpace::single(get_key(0)..get_key(10)));
+        branch_tline.add_extra_test_dense_keyspace(KeySpace::single(get_key(0)..get_key(10)));
 
         {
             // Update GC info
             let mut guard = parent_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x18), tline.timeline_id)],
+                retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x10),
                     space: Lsn(0x10),
@@ -7811,9 +7919,9 @@ mod tests {
 
         {
             // Update GC info
-            let mut guard = tline.gc_info.write().unwrap();
+            let mut guard = branch_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x40), tline.timeline_id)],
+                retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x50),
                     space: Lsn(0x50),
@@ -7852,14 +7960,14 @@ mod tests {
         let verify_result = || async {
             for idx in 0..10 {
                 assert_eq!(
-                    tline
+                    branch_tline
                         .get(get_key(idx as u32), Lsn(0x50), &ctx)
                         .await
                         .unwrap(),
                     &expected_result_at_gc_horizon[idx]
                 );
                 assert_eq!(
-                    tline
+                    branch_tline
                         .get(get_key(idx as u32), Lsn(0x40), &ctx)
                         .await
                         .unwrap(),
@@ -7871,7 +7979,7 @@ mod tests {
         verify_result().await;
 
         let cancel = CancellationToken::new();
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        branch_tline.compact_with_gc(&cancel, &ctx).await.unwrap();
 
         verify_result().await;
 

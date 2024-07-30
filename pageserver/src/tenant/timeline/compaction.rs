@@ -1142,6 +1142,7 @@ impl Timeline {
                 );
             }
         }
+        let has_ancestor = base_img_from_ancestor.is_some();
         // Step 1: split history into len(retain_lsn_below_horizon) + 2 buckets, where the last bucket is for all deltas above the horizon,
         // and the second-to-last bucket is for the horizon. Each bucket contains lsn_last_bucket < deltas <= lsn_this_bucket.
         let (mut split_history, lsn_split_points) = {
@@ -1201,7 +1202,7 @@ impl Timeline {
         for (i, split_for_lsn) in split_history.into_iter().enumerate() {
             // TODO: there could be image keys inside the splits, and we can compute records_since_last_image accordingly.
             records_since_last_image += split_for_lsn.len();
-            let generate_image = if i == 0 {
+            let generate_image = if i == 0 && !has_ancestor {
                 // We always generate images for the first batch (below horizon / lowest retain_lsn)
                 true
             } else if i == batch_cnt - 1 {
@@ -1324,20 +1325,25 @@ impl Timeline {
             retain_lsns_below_horizon.sort();
             (selected_layers, gc_cutoff, retain_lsns_below_horizon)
         };
-        let lowest_retain_lsn = retain_lsns_below_horizon
-            .first()
-            .copied()
-            .unwrap_or(gc_cutoff);
-        if cfg!(debug_assertions) {
-            assert_eq!(
-                lowest_retain_lsn,
-                retain_lsns_below_horizon
-                    .iter()
-                    .min()
-                    .copied()
-                    .unwrap_or(gc_cutoff)
-            );
-        }
+        let lowest_retain_lsn = if self.ancestor_timeline.is_some() {
+            Lsn(self.ancestor_lsn.0 + 1)
+        } else {
+            let res = retain_lsns_below_horizon
+                .first()
+                .copied()
+                .unwrap_or(gc_cutoff);
+            if cfg!(debug_assertions) {
+                assert_eq!(
+                    res,
+                    retain_lsns_below_horizon
+                        .iter()
+                        .min()
+                        .copied()
+                        .unwrap_or(gc_cutoff)
+                );
+            }
+            res
+        };
         info!(
             "picked {} layers for compaction with gc_cutoff={} lowest_retain_lsn={}",
             layer_selection.len(),
