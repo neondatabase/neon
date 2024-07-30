@@ -1159,15 +1159,14 @@ impl Timeline {
     ) -> anyhow::Result<KeyHistoryRetention> {
         // Pre-checks for the invariants
         if cfg!(debug_assertions) {
-            let history = full_history;
-            for (log_key, _, _) in history {
+            for (log_key, _, _) in full_history {
                 assert_eq!(log_key, &key, "mismatched key");
             }
-            for i in 1..history.len() {
-                assert!(history[i - 1].1 <= history[i].1, "unordered LSN");
-                if history[i - 1].1 == history[i].1 {
+            for i in 1..full_history.len() {
+                assert!(full_history[i - 1].1 <= full_history[i].1, "unordered LSN");
+                if full_history[i - 1].1 == full_history[i].1 {
                     assert!(
-                        matches!(history[i - 1].2, Value::Image(_)),
+                        matches!(full_history[i - 1].2, Value::Image(_)),
                         "unordered delta/image, or duplicated delta"
                     );
                 }
@@ -1265,19 +1264,23 @@ impl Timeline {
         }
 
         fn generate_debug_trace(
-            replay_history: &[(Key, Lsn, Value)],
+            replay_history: Option<&[(Key, Lsn, Value)]>,
             full_history: &[(Key, Lsn, Value)],
             lsns: &[Lsn],
             horizon: Lsn,
         ) -> String {
             use std::fmt::Write;
             let mut output = String::new();
-            writeln!(
-                output,
-                "replay_history: {}",
-                generate_history_trace(replay_history)
-            )
-            .unwrap();
+            if let Some(replay_history) = replay_history {
+                writeln!(
+                    output,
+                    "replay_history: {}",
+                    generate_history_trace(replay_history)
+                )
+                .unwrap();
+            } else {
+                writeln!(output, "replay_history: <disabled>",).unwrap();
+            }
             writeln!(
                 output,
                 "full_history: {}",
@@ -1321,7 +1324,7 @@ impl Timeline {
                     return Err(anyhow::anyhow!("invalid history, no base image")).with_context(
                         || {
                             generate_debug_trace(
-                                &replay_history,
+                                Some(&replay_history),
                                 full_history,
                                 retain_lsn_below_horizon,
                                 horizon,
@@ -1332,6 +1335,12 @@ impl Timeline {
             }
             if generate_image && records_since_last_image > 0 {
                 records_since_last_image = 0;
+                let replay_history_for_debug = if cfg!(debug_assertions) {
+                    Some(replay_history.clone())
+                } else {
+                    None
+                };
+                let replay_history_for_debug_ref = replay_history_for_debug.as_deref();
                 let history = std::mem::take(&mut replay_history);
                 let mut img = None;
                 let mut records = Vec::with_capacity(history.len());
@@ -1344,7 +1353,7 @@ impl Timeline {
                             ))
                             .with_context(|| {
                                 generate_debug_trace(
-                                    &replay_history,
+                                    replay_history_for_debug_ref,
                                     full_history,
                                     retain_lsn_below_horizon,
                                     horizon,
@@ -1358,7 +1367,7 @@ impl Timeline {
                         let Value::WalRecord(rec) = val else {
                             return Err(anyhow::anyhow!("invalid record, first record is walrecord, expect rest are walrecord"))
                                 .with_context(|| generate_debug_trace(
-                                    &replay_history,
+                                    replay_history_for_debug_ref,
                                     full_history,
                                     retain_lsn_below_horizon,
                                     horizon,
@@ -1404,10 +1413,25 @@ impl Timeline {
     /// and create delta layers with all deltas >= gc horizon.
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
-        _cancel: &CancellationToken,
+        cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         use std::collections::BTreeSet;
+
+        // Block other compaction/GC tasks from running for now. GC-compaction could run along
+        // with legacy compaction tasks in the future.
+
+        let _compaction_lock = tokio::select! {
+            guard = self.compaction_lock.lock() => guard,
+            // TODO: refactor to CompactionError to correctly pass cancelled error
+            _ = cancel.cancelled() => return Err(anyhow!("cancelled")),
+        };
+
+        let _gc = tokio::select! {
+            guard = self.gc_lock.lock() => guard,
+            // TODO: refactor to CompactionError to correctly pass cancelled error
+            _ = cancel.cancelled() => return Err(anyhow!("cancelled")),
+        };
 
         info!("running enhanced gc bottom-most compaction");
 
@@ -1542,22 +1566,21 @@ impl Timeline {
                 return Ok(None);
             }
             let end_lsn = deltas.iter().map(|(_, lsn, _)| lsn).max().copied().unwrap() + 1;
-            let key = PersistentLayerKey {
-                    key_range: {
-                        let key_start = deltas.first().unwrap().0;
-                        let key_end = deltas.last().unwrap().0.next();
-                        key_start..key_end
-                    },
-                    lsn_range: lowest_retain_lsn..end_lsn,
-                    is_delta: true,
-                };
+            let delta_key = PersistentLayerKey {
+                key_range: {
+                    let key_start = deltas.first().unwrap().0;
+                    let key_end = deltas.last().unwrap().0.next();
+                    key_start..key_end
+                },
+                lsn_range: lowest_retain_lsn..end_lsn,
+                is_delta: true,
+            };
             {
                 // Hack: skip delta layer if we need to produce a layer of a same key-lsn.
                 let guard = tline.layers.read().await;
-               
 
-                if guard.contains_key(&key) {
-                    let layer_generation = guard.get_from_key(&key).metadata().generation;
+                if guard.contains_key(&delta_key) {
+                    let layer_generation = guard.get_from_key(&delta_key).metadata().generation;
                     drop(guard);
                     if layer_generation == tline.generation {
                         // TODO: depending on whether we design this compaction process to run along with
@@ -1565,9 +1588,11 @@ impl Timeline {
                         // layer guard, and in case it creates duplicated layer key, we will still error
                         // in the end.
                         info!(
-                            %key, %layer_generation, "discard delta layer due to duplicated layer in the same generation"
+                            key=%delta_key,
+                            ?layer_generation,
+                            "discard delta layer due to duplicated layer in the same generation"
                         );
-                        return Ok(Some(FlushDeltaResult::KeepLayer(key)));
+                        return Ok(Some(FlushDeltaResult::KeepLayer(delta_key)));
                     }
                 }
             }
@@ -1576,7 +1601,7 @@ impl Timeline {
                 tline.conf,
                 tline.timeline_id,
                 tline.tenant_shard_id,
-                key_start,
+                delta_key.key_range.start,
                 lowest_retain_lsn..end_lsn,
                 ctx,
             )
@@ -1584,7 +1609,9 @@ impl Timeline {
             for (key, lsn, val) in deltas {
                 delta_layer_writer.put_value(key, lsn, val, ctx).await?;
             }
-            let delta_layer = delta_layer_writer.finish(key_end, tline, ctx).await?;
+            let delta_layer = delta_layer_writer
+                .finish(delta_key.key_range.end, tline, ctx)
+                .await?;
             Ok(Some(FlushDeltaResult::CreateResidentLayer(delta_layer)))
         }
 
@@ -1622,9 +1649,10 @@ impl Timeline {
                     // layer guard, and in case it creates duplicated layer key, we will still error
                     // in the end.
                     info!(
-                            "discard image layer due to duplicated layer key in the same generation: {}..{} {} gen={:?}",
-                            image_layer_key.key_range.start, image_layer_key.key_range.end, image_layer_key.lsn_range.start, layer_generation
-                        );
+                        key=%image_layer_key,
+                        ?layer_generation,
+                        "discard image layer due to duplicated layer key in the same generation",
+                    );
                     true
                 } else {
                     false
