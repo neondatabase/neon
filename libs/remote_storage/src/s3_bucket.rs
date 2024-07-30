@@ -565,9 +565,12 @@ impl RemoteStorage for S3Bucket {
                         }
                     };
 
+                    let size = object.size.unwrap_or(0) as u64;
+
                     result.keys.push(ListingObject{
                         key,
-                        last_modified
+                        last_modified,
+                        size,
                     });
                     if let Some(mut mk) = max_keys {
                         assert!(mk > 0);
