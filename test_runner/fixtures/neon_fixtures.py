@@ -4401,10 +4401,11 @@ class StorageScrubber:
         assert stdout is not None
         return stdout
 
-    def scan_metadata(self) -> Any:
-        stdout = self.scrubber_cli(
-            ["scan-metadata", "--node-kind", "pageserver", "--json"], timeout=30
-        )
+    def scan_metadata(self, post_to_storage_controller: bool = False) -> Any:
+        args = ["scan-metadata", "--node-kind", "pageserver", "--json"]
+        if post_to_storage_controller:
+            args.append("--post")
+        stdout = self.scrubber_cli(args, timeout=30)
 
         try:
             return json.loads(stdout)
