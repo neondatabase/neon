@@ -16,7 +16,7 @@ use crate::{
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     metrics::LeadershipStatusGroup,
-    persistence::{AbortShardSplitStatus, TenantFilter},
+    persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
@@ -33,11 +33,11 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
-        NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
-        ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
-        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
-        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-        TenantShardMigrateResponse, UtilizationScore,
+        MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
+        NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest,
+        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
+        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
+        TenantShardMigrateRequest, TenantShardMigrateResponse, UtilizationScore,
     },
     models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
@@ -6093,6 +6093,68 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    /// Updates scrubber metadata health check results.
+    pub(crate) async fn metadata_health_update(
+        &self,
+        update_req: MetadataHealthUpdateRequest,
+    ) -> Result<(), ApiError> {
+        let now = chrono::offset::Utc::now();
+        let (healthy_records, unhealthy_records) = {
+            let locked = self.inner.read().unwrap();
+            let healthy_records = update_req
+                .healthy_tenant_shards
+                .into_iter()
+                // Retain only health records associated with tenant shards managed by storage controller.
+                .filter(|tenant_shard_id| locked.tenants.contains_key(tenant_shard_id))
+                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, true, now))
+                .collect();
+            let unhealthy_records = update_req
+                .unhealthy_tenant_shards
+                .into_iter()
+                .filter(|tenant_shard_id| locked.tenants.contains_key(tenant_shard_id))
+                .map(|tenant_shard_id| MetadataHealthPersistence::new(tenant_shard_id, false, now))
+                .collect();
+
+            (healthy_records, unhealthy_records)
+        };
+
+        self.persistence
+            .update_metadata_health_records(healthy_records, unhealthy_records, now)
+            .await?;
+        Ok(())
+    }
+
+    /// Lists the tenant shards that has unhealthy metadata status.
+    pub(crate) async fn metadata_health_list_unhealthy(
+        &self,
+    ) -> Result<Vec<TenantShardId>, ApiError> {
+        let result = self
+            .persistence
+            .list_unhealthy_metadata_health_records()
+            .await?
+            .iter()
+            .map(|p| p.get_tenant_shard_id().unwrap())
+            .collect();
+
+        Ok(result)
+    }
+
+    /// Lists the tenant shards that have not been scrubbed for some duration.
+    pub(crate) async fn metadata_health_list_outdated(
+        &self,
+        not_scrubbed_for: Duration,
+    ) -> Result<Vec<MetadataHealthRecord>, ApiError> {
+        let earlier = chrono::offset::Utc::now() - not_scrubbed_for;
+        let result = self
+            .persistence
+            .list_outdated_metadata_health_records(earlier)
+            .await?
+            .into_iter()
+            .map(|record| record.into())
+            .collect();
+        Ok(result)
     }
 
     pub(crate) fn get_leadership_status(&self) -> LeadershipStatus {
