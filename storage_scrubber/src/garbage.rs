@@ -19,8 +19,8 @@ use utils::id::TenantId;
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
-    init_remote, init_remote_generic, list_objects_with_retries,
-    metadata_stream::{stream_tenant_timelines, stream_tenants},
+    init_remote_generic, list_objects_with_retries_generic,
+    metadata_stream::{stream_tenant_timelines_generic, stream_tenants_generic},
     BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth,
 };
 
@@ -153,7 +153,7 @@ async fn find_garbage_inner(
     node_kind: NodeKind,
 ) -> anyhow::Result<GarbageList> {
     // Construct clients for S3 and for Console API
-    let (s3_client, target) = init_remote(bucket_config.clone(), node_kind).await?;
+    let (remote_client, target) = init_remote_generic(bucket_config.clone(), node_kind).await?;
     let cloud_admin_api_client = Arc::new(CloudAdminApiClient::new(console_config));
 
     // Build a set of console-known tenants, for quickly eliminating known-active tenants without having
@@ -179,7 +179,7 @@ async fn find_garbage_inner(
 
     // Enumerate Tenants in S3, and check if each one exists in Console
     tracing::info!("Finding all tenants in bucket {}...", bucket_config.bucket);
-    let tenants = stream_tenants(&s3_client, &target);
+    let tenants = stream_tenants_generic(&remote_client, &target);
     let tenants_checked = tenants.map_ok(|t| {
         let api_client = cloud_admin_api_client.clone();
         let console_cache = console_cache.clone();
@@ -237,25 +237,26 @@ async fn find_garbage_inner(
         // Special case: If it's missing in console, check for known bugs that would enable us to conclusively
         // identify it as purge-able anyway
         if console_result.is_none() {
-            let timelines = stream_tenant_timelines(&s3_client, &target, tenant_shard_id)
-                .await?
-                .collect::<Vec<_>>()
-                .await;
+            let timelines =
+                stream_tenant_timelines_generic(&remote_client, &target, tenant_shard_id)
+                    .await?
+                    .collect::<Vec<_>>()
+                    .await;
             if timelines.is_empty() {
                 // No timelines, but a heatmap: the deletion bug where we deleted everything but heatmaps
-                let tenant_objects = list_objects_with_retries(
-                    &s3_client,
+                let tenant_objects = list_objects_with_retries_generic(
+                    &remote_client,
+                    ListingMode::WithDelimiter,
                     &target.tenant_root(&tenant_shard_id),
-                    None,
                 )
                 .await?;
-                let object = tenant_objects.contents.as_ref().unwrap().first().unwrap();
-                if object.key.as_ref().unwrap().ends_with("heatmap-v1.json") {
+                let object = tenant_objects.keys.first().unwrap();
+                if object.key.get_path().as_str().ends_with("heatmap-v1.json") {
                     tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
                     garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
                     continue;
                 } else {
-                    tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key.as_ref().unwrap());
+                    tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key);
                 }
             } else {
                 // A console-unknown tenant with timelines: check if these timelines only contain initdb.tar.zst, from the initial
@@ -264,24 +265,18 @@ async fn find_garbage_inner(
 
                 for timeline_r in timelines {
                     let timeline = timeline_r?;
-                    let timeline_objects = list_objects_with_retries(
-                        &s3_client,
+                    let timeline_objects = list_objects_with_retries_generic(
+                        &remote_client,
+                        ListingMode::WithDelimiter,
                         &target.timeline_root(&timeline),
-                        None,
                     )
                     .await?;
-                    if timeline_objects
-                        .common_prefixes
-                        .as_ref()
-                        .map(|v| v.len())
-                        .unwrap_or(0)
-                        > 0
-                    {
+                    if !timeline_objects.prefixes.is_empty() {
                         // Sub-paths?  Unexpected
                         any_non_initdb = true;
                     } else {
-                        let object = timeline_objects.contents.as_ref().unwrap().first().unwrap();
-                        if object.key.as_ref().unwrap().ends_with("initdb.tar.zst") {
+                        let object = timeline_objects.keys.first().unwrap();
+                        if object.key.get_path().as_str().ends_with("initdb.tar.zst") {
                             tracing::info!("Timeline {timeline} contains only initdb.tar.zst");
                         } else {
                             any_non_initdb = true;
@@ -336,7 +331,8 @@ async fn find_garbage_inner(
 
     // Construct a stream of all timelines within active tenants
     let active_tenants = tokio_stream::iter(active_tenants.iter().map(Ok));
-    let timelines = active_tenants.map_ok(|t| stream_tenant_timelines(&s3_client, &target, *t));
+    let timelines =
+        active_tenants.map_ok(|t| stream_tenant_timelines_generic(&remote_client, &target, *t));
     let timelines = timelines.try_buffer_unordered(S3_CONCURRENCY);
     let timelines = timelines.try_flatten();
 
