@@ -13,7 +13,7 @@ pub struct LeakyBucketConfig {
     pub drain_interval: Duration,
 
     /// "time cost" of a single request unit.
-    /// should loosely represents how long it takes to handle a request unit in active resource time.
+    /// should loosely represent how long it takes to handle a request unit in active resource time.
     pub cost: Duration,
 
     /// total size of the bucket
