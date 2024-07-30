@@ -717,6 +717,10 @@ impl Timeline {
                         // compare results & log warnings as needed
                         macro_rules! rate_limited_warn {
                             ($($arg:tt)*) => {{
+                                if cfg!(debug_assertions) || cfg!(feature = "testing") {
+                                    warn!($($arg)*);
+                                    panic!("CompactL0BypassPageCacheValidation failure, check logs");
+                                }
                                 use once_cell::sync::Lazy;
                                 use utils::rate_limit::RateLimit;
                                 use std::sync::Mutex;
