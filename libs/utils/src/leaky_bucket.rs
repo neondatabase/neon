@@ -63,7 +63,7 @@ impl LeakyBucketState {
 
     pub fn bucket_is_empty(&self, config: &LeakyBucketConfig, now: Instant) -> bool {
         // if self.end is after now, the bucket is not empty
-        config.prev_multiple_of_drain(now - config.epoch) <= self.end
+        self.end <= config.prev_multiple_of_drain(now - config.epoch)
     }
 
     /// Immediately adds tokens to the bucket, if there is space.
