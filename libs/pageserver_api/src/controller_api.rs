@@ -1,5 +1,6 @@
+use std::collections::HashSet;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
-use std::{collections::HashSet, str::FromStr};
 
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
