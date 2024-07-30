@@ -953,17 +953,18 @@ impl LayerMap {
 
         // Ordering: we want to iterate like this:
         // 1. Highest LSNs first
-        // 2. Consider ReadPoints before image layers if they're at the same LSN
+        // 2. Consider images before deltas if they end at the same LSNs (images cover deltas)
+        // 2. Consider ReadPoints before image layers if they're at the same LSN (readpoints make that image visible)
         items.sort_by_key(|item| {
             std::cmp::Reverse(match item {
-                Item::ReadPoint { lsn } => (*lsn, 0),
                 Item::Layer(layer) => {
                     if layer.is_delta() {
-                        (Lsn(layer.get_lsn_range().end.0 - 1), 1)
+                        (Lsn(layer.get_lsn_range().end.0 - 1), 0)
                     } else {
-                        (layer.image_layer_lsn(), 2)
+                        (layer.image_layer_lsn(), 1)
                     }
                 }
+                Item::ReadPoint { lsn } => (*lsn, 2),
             })
         });
 
@@ -1039,7 +1040,10 @@ impl LayerMap {
 #[cfg(test)]
 mod tests {
     use crate::tenant::{storage_layer::LayerName, IndexPart};
-    use pageserver_api::{key::DBDIR_KEY, keyspace::KeySpace};
+    use pageserver_api::{
+        key::DBDIR_KEY,
+        keyspace::{KeySpace, KeySpaceRandomAccum},
+    };
     use std::{collections::HashMap, path::PathBuf};
     use utils::{
         id::{TenantId, TimelineId},
@@ -1220,11 +1224,19 @@ mod tests {
                 desc
             };
 
+        //
+        // Construct our scenario: the following lines go in backward-LSN order, constructing the various scenarios
+        // we expect to handle.  You can follow these examples through in the same order as they would be processed
+        // by the function under test.
+        //
+
+        let mut read_points = vec![Lsn(1000)];
+
         // A delta ahead of any image layer
         let ahead_layer = inject_delta(&mut updates, 10, 20, 101, 110);
 
         // An image layer is visible and covers some layers beneath itself
-        let visible_covering_img = inject_image(&mut updates, 5, 25, 100);
+        let visible_covering_img = inject_image(&mut updates, 5, 25, 99);
 
         // A delta layer covered by the image layer: should be covered
         let covered_delta = inject_delta(&mut updates, 10, 20, 90, 100);
@@ -1244,9 +1256,23 @@ mod tests {
         // An image layer not covered by an image layer: should be visible
         let not_covered_image = inject_image(&mut updates, 1, 4, 89);
 
-        updates.flush();
+        // A read point: this will make subsequent layers below here visible, even if there are
+        // more recent layers covering them.
+        read_points.push(Lsn(80));
 
-        let read_points = vec![Lsn(1000)];
+        // A delta layer covered by an earlier image layer, but visible to a readpoint below that covering layer
+        let covered_delta_below_read_point = inject_delta(&mut updates, 10, 20, 70, 79);
+
+        // A delta layer whose end LSN is covered, but where a read point is present partway through its LSN range:
+        // the read point should make it visible, even though its end LSN is covered
+        let covering_img_between_read_points = inject_image(&mut updates, 10, 20, 69);
+        let covered_delta_between_read_points = inject_delta(&mut updates, 10, 15, 67, 69);
+        read_points.push(Lsn(65));
+        let covered_delta_intersects_read_point = inject_delta(&mut updates, 15, 20, 60, 69);
+
+        let visible_img_after_last_read_point = inject_image(&mut updates, 10, 20, 65);
+
+        updates.flush();
 
         let (layer_visibilities, shadow) = layer_map.get_visibility(read_points);
         let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
@@ -1283,10 +1309,30 @@ mod tests {
             layer_visibilities.get(&not_covered_image),
             Some(&LayerVisibilityHint::Visible)
         );
+        assert_eq!(
+            layer_visibilities.get(&covered_delta_below_read_point),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covering_img_between_read_points),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_delta_between_read_points),
+            Some(&LayerVisibilityHint::Covered)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_delta_intersects_read_point),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&visible_img_after_last_read_point),
+            Some(&LayerVisibilityHint::Visible)
+        );
 
-        // Shadow should include all the images
+        // Shadow should include all the images below the last read point
         let expected_shadow = KeySpace {
-            ranges: vec![Key::from_i128(1)..Key::from_i128(25)],
+            ranges: vec![Key::from_i128(10)..Key::from_i128(20)],
         };
         assert_eq!(shadow, expected_shadow);
     }
@@ -1349,6 +1395,70 @@ mod tests {
             .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
 
         let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
+
+        // Brute force validation: a layer should be marked covered if and only if there are image layers above it in LSN order which cover it
+        for (layer_desc, visible) in &layer_visibilities {
+            let mut coverage = KeySpaceRandomAccum::new();
+            let mut covered_by = Vec::new();
+
+            for other_layer in layer_map.iter_historic_layers() {
+                if &other_layer == layer_desc {
+                    continue;
+                }
+                if !other_layer.is_delta()
+                    && other_layer.image_layer_lsn() >= Lsn(layer_desc.get_lsn_range().end.0 - 1)
+                    && other_layer.key_range.start <= layer_desc.key_range.end
+                    && layer_desc.key_range.start <= other_layer.key_range.end
+                {
+                    coverage.add_range(other_layer.get_key_range());
+                    covered_by.push((*other_layer).clone());
+                }
+            }
+            let coverage = coverage.to_keyspace();
+
+            let expect_visible = if coverage.ranges.len() == 1
+                && coverage.contains(&layer_desc.key_range.start)
+                && coverage.contains(&Key::from_i128(layer_desc.key_range.end.to_i128() - 1))
+            {
+                LayerVisibilityHint::Covered
+            } else {
+                LayerVisibilityHint::Visible
+            };
+
+            if expect_visible != *visible {
+                eprintln!(
+                    "Layer {}..{} @ {}..{} (delta={}) is {visible:?}, should be {expect_visible:?}",
+                    layer_desc.key_range.start,
+                    layer_desc.key_range.end,
+                    layer_desc.lsn_range.start,
+                    layer_desc.lsn_range.end,
+                    layer_desc.is_delta()
+                );
+                if expect_visible == LayerVisibilityHint::Covered {
+                    eprintln!("Covered by:");
+                    for other in covered_by {
+                        eprintln!(
+                            "  {}..{} @ {}",
+                            other.get_key_range().start,
+                            other.get_key_range().end,
+                            other.image_layer_lsn()
+                        );
+                    }
+                    if let Some(range) = coverage.ranges.first() {
+                        eprintln!(
+                            "Total coverage from contributing layers: {}..{}",
+                            range.start, range.end
+                        );
+                    } else {
+                        eprintln!(
+                            "Total coverage from contributing layers: {:?}",
+                            coverage.ranges
+                        );
+                    }
+                }
+            }
+            assert_eq!(expect_visible, *visible);
+        }
 
         // Sanity: the layer that holds latest data for the DBDIR key should always be visible
         // (just using this key as a key that will always exist for any layermap fixture)
