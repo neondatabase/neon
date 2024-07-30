@@ -833,6 +833,9 @@ jobs:
           rm -rf .docker-custom
 
   promote-images:
+    permissions:
+      contents: read  # This is required for actions/checkout
+      id-token: write # This is required for Azure Login to work.
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
