@@ -129,7 +129,7 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.get_impl, "starting with get page implementation");
     info!(?conf.get_vectored_impl, "starting with vectored get page implementation");
-    info!(?conf.compact_level0_bypass_page_cache, "starting with setting for compact_level0_bypass_page_cache");
+    info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {

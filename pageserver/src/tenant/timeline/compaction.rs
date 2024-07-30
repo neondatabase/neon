@@ -705,7 +705,7 @@ impl Timeline {
         // option and validation code once we've reached confidence.
         enum AllValuesIter<'a> {
             #[allow(dead_code)]
-            PageCachedBlobIoWithLoadedIndex { all_keys_iter: VecIter<'a> },
+            PageCachedBlobIo { all_keys_iter: VecIter<'a> },
             #[allow(dead_code)]
             StreamingKmergeBypassingPageCache { merge_iter: MergeIterator<'a> },
             ValidatingStreamingKmergeBypassingPageCache {
@@ -737,7 +737,7 @@ impl Timeline {
                 ctx: &RequestContext,
             ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
                 match self {
-                    AllValuesIter::PageCachedBlobIoWithLoadedIndex { all_keys_iter: iter } => {
+                    AllValuesIter::PageCachedBlobIo { all_keys_iter: iter } => {
                       Self::next_all_keys_iter(iter, ctx).await
                     }
                     AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter } => merge_iter.next().await,
@@ -807,13 +807,11 @@ impl Timeline {
                 }
             }
         }
-        let mut all_values_iter = match &self.conf.compact_level0_bypass_page_cache {
-            CompactL0BypassPageCache::PageCachedBlobIoWithLoadedIndex => {
-                AllValuesIter::PageCachedBlobIoWithLoadedIndex {
-                    all_keys_iter: all_keys.iter(),
-                }
-            }
-            CompactL0BypassPageCache::StreamingKmergeBypassingPageCache { validate } => {
+        let mut all_values_iter = match &self.conf.compact_level0_phase1_value_access {
+            CompactL0Phase1ValueAccess::PageCachedBlobIo => AllValuesIter::PageCachedBlobIo {
+                all_keys_iter: all_keys.iter(),
+            },
+            CompactL0Phase1ValueAccess::StreamingKmerge { validate } => {
                 let merge_iter = {
                     let mut deltas = Vec::with_capacity(deltas_to_compact.len());
                     for l in deltas_to_compact.iter() {
@@ -1206,22 +1204,35 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 
 #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum CompactL0BypassPageCache {
-    PageCachedBlobIoWithLoadedIndex,
-    StreamingKmergeBypassingPageCache {
+pub enum CompactL0Phase1ValueAccess {
+    /// The old way.
+    PageCachedBlobIo,
+    /// The new way.
+    StreamingKmerge {
+        /// If set, we run both the old way and the new way, validate that
+        /// they are identical (=> [`CompactL0BypassPageCacheValidation`]),
+        /// and if the validation fails,
+        /// - in tests: fail them with a panic or
+        /// - in prod, log a rate-limited warning and use the old way's results.
+        ///
+        /// If not set, we only run the new way and trust its results.
         validate: Option<CompactL0BypassPageCacheValidation>,
     },
 }
+
+/// See [`CompactL0Phase1ValueAccess::StreamingKmerge`].
 #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CompactL0BypassPageCacheValidation {
+    /// Validate that the series of (key, lsn) pairs are the same.
     KeyLsn,
+    /// Validate that the entire output of old and new way is identical.
     KeyLsnValue,
 }
 
-impl Default for CompactL0BypassPageCache {
+impl Default for CompactL0Phase1ValueAccess {
     fn default() -> Self {
-        CompactL0BypassPageCache::StreamingKmergeBypassingPageCache {
+        CompactL0Phase1ValueAccess::StreamingKmerge {
             // TODO(https://github.com/neondatabase/neon/issues/8184): change to None once confident
             validate: Some(CompactL0BypassPageCacheValidation::KeyLsnValue),
         }
