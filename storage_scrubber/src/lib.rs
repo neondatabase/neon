@@ -126,7 +126,7 @@ impl S3Target {
     pub fn with_sub_segment(&self, new_segment: &str) -> Self {
         let mut new_self = self.clone();
         if new_self.prefix_in_bucket.is_empty() {
-            new_self.prefix_in_bucket = format!("{}/", new_segment);
+            new_self.prefix_in_bucket = format!("/{}/", new_segment);
         } else {
             if new_self.prefix_in_bucket.ends_with('/') {
                 new_self.prefix_in_bucket.pop();
@@ -428,7 +428,11 @@ fn stream_objects_with_retries<'a>(
     async_stream::stream! {
         let mut trial = 0;
         let cancel = CancellationToken::new();
-        let prefix = RemotePath::from_string(&s3_target.prefix_in_bucket)?;
+        let prefix_str = &s3_target
+            .prefix_in_bucket
+            .strip_prefix("/")
+            .unwrap_or(&s3_target.prefix_in_bucket);
+        let prefix = RemotePath::from_string(prefix_str)?;
         let mut list_stream =
             storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
         while let Some(res) = list_stream.next().await {
