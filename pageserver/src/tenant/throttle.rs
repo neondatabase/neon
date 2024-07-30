@@ -203,6 +203,8 @@ impl RateLimiter {
     async fn acquire(&self, count: usize) -> bool {
         let mut throttled = false;
 
+        let start = tokio::time::Instant::now();
+
         // wait until we are the first in the queue
         if let Some(queue) = &self.queue {
             let mut notified = std::pin::pin!(queue.notified());
@@ -220,13 +222,11 @@ impl RateLimiter {
         };
 
         loop {
-            let now = tokio::time::Instant::now();
-
             let res = self
                 .state
                 .lock()
                 .unwrap()
-                .add_tokens(&self.config, now, count as f64);
+                .add_tokens(&self.config, start, count as f64);
             match res {
                 Ok(()) => return throttled,
                 Err(ready_at) => {

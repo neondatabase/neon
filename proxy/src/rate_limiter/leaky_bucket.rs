@@ -112,9 +112,9 @@ mod tests {
 
         // should work for 2000 requests this second
         for _ in 0..2000 {
-            assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_ok());
+            bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
         }
-        assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_err());
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
         assert_eq!(
             bucket.end - (Instant::now() - config.epoch),
             config.bucket_width
@@ -123,30 +123,30 @@ mod tests {
         // in 1ms we should drain 0.5 tokens.
         // make sure we don't lose any tokens
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_err());
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_ok());
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
 
         // in 10ms we should drain 5 tokens
         tokio::time::advance(Duration::from_millis(10)).await;
         for _ in 0..5 {
-            assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_ok());
+            bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
         }
-        assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_err());
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
 
         // in 10s we should drain 5000 tokens
         // but cap is only 2000
         tokio::time::advance(Duration::from_secs(10)).await;
         for _ in 0..2000 {
-            assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_ok());
+            bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
         }
-        assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_err());
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
 
         // should sustain 500rps
         for _ in 0..2000 {
             tokio::time::advance(Duration::from_millis(10)).await;
             for _ in 0..5 {
-                assert!(bucket.add_tokens(&config, Instant::now(), 1.0).is_ok());
+                bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
             }
         }
     }

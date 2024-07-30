@@ -66,21 +66,40 @@ impl LeakyBucketState {
         config.prev_multiple_of_drain(now - config.epoch) <= self.end
     }
 
-    /// Immedaitely adds tokens to the bucket, if there is space.
+    /// Immediately adds tokens to the bucket, if there is space.
+    ///
+    /// In a scenario where you are waiting for available rate,
+    /// rather than just erroring immediately, `started` corresponds to when this waiting started.
+    ///
+    /// `n` is the number of tokens that will be filled in the bucket.
+    ///
+    /// # Errors
+    ///
     /// If there is not enough space, no tokens are added. Instead, an error is returned with the time when
     /// there will be space again.
     pub fn add_tokens(
         &mut self,
         config: &LeakyBucketConfig,
-        now: Instant,
+        started: Instant,
         n: f64,
     ) -> Result<(), Instant> {
+        let now = Instant::now();
+
         // round down to the last time we would have drained the bucket.
         let now = config.prev_multiple_of_drain(now - config.epoch);
+        let started = config.prev_multiple_of_drain(started - config.epoch);
+
+        // invariant: started <= now
+        debug_assert!(started <= now);
+
+        // If the bucket was empty when we started our search, bump the end up accordingly.
+        let mut end = self.end;
+        if end < started {
+            end = started;
+        }
 
         let n = config.cost.mul_f64(n);
-
-        let end_plus_n = self.end + n;
+        let end_plus_n = end + n;
         let start_plus_n = end_plus_n.saturating_sub(config.bucket_width);
 
         //       start          end
@@ -93,10 +112,7 @@ impl LeakyBucketState {
         // at now2, the bucket would be partially filled if we add n tokens.
         // at now3, the bucket would start completely empty before we add n tokens.
 
-        if end_plus_n <= now {
-            self.end = now + n;
-            Ok(())
-        } else if start_plus_n <= now {
+        if start_plus_n <= now {
             self.end = end_plus_n;
             Ok(())
         } else {
@@ -178,6 +194,32 @@ mod tests {
                 tokio::time::advance(Duration::from_millis(10)).await;
                 state.add_tokens(&config, Instant::now(), 1.0).unwrap();
             }
+        }
+
+        // supports requesting more tokens than can be stored in the bucket
+        // we just wait a little bit longer upfront.
+        {
+            // start the bucket completely empty
+            tokio::time::advance(Duration::from_secs(5)).await;
+            assert!(state.bucket_is_empty(&config, Instant::now()));
+
+            // requesting 200 tokens of space should take 200*cost = 2s
+            // but we already have 1s available, so we wait 1s from start.
+            let start = Instant::now();
+
+            let ready = state.add_tokens(&config, start, 200.0).unwrap_err();
+            assert_eq!(ready - Instant::now(), Duration::from_secs(1));
+
+            tokio::time::advance(Duration::from_millis(500)).await;
+            let ready = state.add_tokens(&config, start, 200.0).unwrap_err();
+            assert_eq!(ready - Instant::now(), Duration::from_millis(500));
+
+            tokio::time::advance(Duration::from_millis(500)).await;
+            state.add_tokens(&config, start, 200.0).unwrap();
+
+            // bucket should be completely full now
+            let ready = state.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
+            assert_eq!(ready - Instant::now(), Duration::from_millis(500));
         }
     }
 }
