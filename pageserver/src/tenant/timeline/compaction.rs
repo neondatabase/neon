@@ -1542,16 +1542,19 @@ impl Timeline {
                 return Ok(None);
             }
             let end_lsn = deltas.iter().map(|(_, lsn, _)| lsn).max().copied().unwrap() + 1;
-            let key_start = deltas.first().unwrap().0;
-            let key_end = deltas.last().unwrap().0.next();
-            {
-                // Hack: skip delta layer if we need to produce a layer of a same key-lsn.
-                let guard = tline.layers.read().await;
-                let key = PersistentLayerKey {
-                    key_range: key_start..key_end,
+            let key = PersistentLayerKey {
+                    key_range: {
+                        let key_start = deltas.first().unwrap().0;
+                        let key_end = deltas.last().unwrap().0.next();
+                        key_start..key_end
+                    },
                     lsn_range: lowest_retain_lsn..end_lsn,
                     is_delta: true,
                 };
+            {
+                // Hack: skip delta layer if we need to produce a layer of a same key-lsn.
+                let guard = tline.layers.read().await;
+               
 
                 if guard.contains_key(&key) {
                     let layer_generation = guard.get_from_key(&key).metadata().generation;
