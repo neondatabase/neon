@@ -291,6 +291,33 @@ impl ServiceState {
             0,
         );
     }
+
+    fn become_leader(&mut self) {
+        self.leadership_status = LeadershipStatus::Leader;
+
+        let status = &crate::metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_leadership_status;
+
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::Leader,
+            },
+            1,
+        );
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::SteppedDown,
+            },
+            0,
+        );
+        status.set(
+            LeadershipStatusGroup {
+                status: LeadershipStatus::Candidate,
+            },
+            0,
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -519,6 +546,7 @@ impl Service {
     #[instrument(skip_all)]
     async fn startup_reconcile(
         self: &Arc<Service>,
+        leader_step_down_state: Option<LeaderStepDownState>,
         bg_compute_notify_result_tx: tokio::sync::mpsc::Sender<
             Result<(), (TenantShardId, NotifyError)>,
         >,
@@ -536,7 +564,19 @@ impl Service {
             .checked_add(STARTUP_RECONCILE_TIMEOUT / 2)
             .expect("Reconcile timeout is a modest constant");
 
-        let observed = self.build_global_observed_state(node_scan_deadline).await;
+        let (observed, current_leader) = if let Some(state) = leader_step_down_state {
+            tracing::info!(
+                "Using observed state received from leader at {}:{}",
+                state.leader.hostname,
+                state.leader.port
+            );
+            (state.observed, Some(state.leader))
+        } else {
+            (
+                self.build_global_observed_state(node_scan_deadline).await,
+                None,
+            )
+        };
 
         // Accumulate a list of any tenant locations that ought to be detached
         let mut cleanup = Vec::new();
@@ -611,6 +651,22 @@ impl Service {
 
             tenants.len()
         };
+
+        // Before making any obeservable changes to the cluster, persist self
+        // as leader in database and memory.
+
+        let proposed_leader = self.get_proposed_leader_info();
+
+        if let Err(err) = self
+            .persistence
+            .update_leader(current_leader, proposed_leader)
+            .await
+        {
+            tracing::error!("Failed to persist self as leader: {err}. Aborting start-up ...");
+            std::process::exit(1);
+        }
+
+        self.inner.write().unwrap().become_leader();
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
         // generation_pageserver in the database.
@@ -1362,7 +1418,16 @@ impl Service {
                     return;
                 };
 
-                this.startup_reconcile(bg_compute_notify_result_tx).await;
+                let leadership_status = this.inner.read().unwrap().get_leadership_status();
+                let peer_observed_state = match leadership_status {
+                    LeadershipStatus::Candidate => this.request_step_down().await,
+                    LeadershipStatus::Leader => None,
+                    LeadershipStatus::SteppedDown => unreachable!(),
+                };
+
+                this.startup_reconcile(peer_observed_state, bg_compute_notify_result_tx)
+                    .await;
+
                 drop(startup_completion);
             }
         });
