@@ -1057,6 +1057,8 @@ impl Timeline {
             }
         }
 
+        // Without this, rustc complains about deltas_to_compact still
+        // being borrowed when we `.into_iter()` below.
         drop(all_values_iter);
 
         Ok(CompactLevel0Phase1Result {
