@@ -490,7 +490,8 @@ async fn list_objects_with_retries_generic(
                     s3_target.delimiter,
                     DisplayErrorContext(e),
                 );
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             }
         }
     }
