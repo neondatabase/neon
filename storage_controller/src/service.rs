@@ -16,8 +16,10 @@ use crate::{
     compute_hook::NotifyError,
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     metrics::LeadershipStatusGroup,
-    peer_client::GlobalObservedState,
-    persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
+    peer_client::{GlobalObservedState, PeerClient},
+    persistence::{
+        AbortShardSplitStatus, LeaderPersistence, MetadataHealthPersistence, TenantFilter,
+    },
     reconciler::{ReconcileError, ReconcileUnits},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
@@ -324,6 +326,8 @@ pub struct Config {
     pub neon_local_repo_dir: Option<PathBuf>,
 
     pub start_as_candidate: bool,
+
+    pub http_service_port: i32,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -489,6 +493,11 @@ impl std::fmt::Display for StopReconciliationsReason {
 pub(crate) enum ReconcileResultRequest {
     ReconcileResult(ReconcileResult),
     Stop,
+}
+
+struct LeaderStepDownState {
+    observed: GlobalObservedState,
+    leader: LeaderPersistence,
 }
 
 impl Service {
@@ -6193,5 +6202,89 @@ impl Service {
         }
 
         global_observed
+    }
+
+    /// Collect the details for the current proccess wishing to become the storage controller
+    /// leader.
+    ///
+    /// On failures to discover and resolve the hostname the process is killed and we rely on k8s to retry.
+    fn get_proposed_leader_info(&self) -> LeaderPersistence {
+        let hostname = match dns_lookup::get_hostname() {
+            Ok(name) => name,
+            Err(err) => {
+                tracing::error!("Failed to discover hostname: {err}. Aborting start-up ...");
+                std::process::exit(1);
+            }
+        };
+
+        let mut addrs = match dns_lookup::lookup_host(&hostname) {
+            Ok(addrs) => addrs,
+            Err(err) => {
+                tracing::error!("Failed to resolve hostname: {err}. Aborting start-up ...");
+                std::process::exit(1);
+            }
+        };
+
+        let addr = addrs
+            .pop()
+            .expect("k8s configured hostname always resolves");
+
+        let proposed = LeaderPersistence {
+            hostname: addr.to_string(),
+            port: self.get_config().http_service_port,
+            started_at: chrono::Utc::now(),
+        };
+
+        tracing::info!("Proposed leader details are: {proposed:?}");
+
+        proposed
+    }
+
+    /// Request step down from the currently registered leader in the database
+    ///
+    /// If such an entry is persisted, the success path returns the observed
+    /// state and details of the leader. Otherwise, None is returned indicating
+    /// there is no leader currently.
+    ///
+    /// On failures to query the database or step down error responses the process is killed
+    /// and we rely on k8s to retry.
+    async fn request_step_down(&self) -> Option<LeaderStepDownState> {
+        let leader = match self.persistence.get_leader().await {
+            Ok(leader) => leader,
+            Err(err) => {
+                tracing::error!(
+                    "Failed to query database for current leader: {err}. Aborting start-up ..."
+                );
+                std::process::exit(1);
+            }
+        };
+
+        match leader {
+            Some(leader) => {
+                // TODO: jwt token
+                let client = PeerClient::new(
+                    leader.hostname.to_owned(),
+                    leader.port,
+                    self.config.jwt_token.clone(),
+                );
+                let state = client.step_down(&self.cancel).await;
+                match state {
+                    Ok(state) => Some(LeaderStepDownState {
+                        observed: state,
+                        leader: leader.clone(),
+                    }),
+                    Err(err) => {
+                        tracing::error!(
+                            "Leader ({}:{}) did not respond to step-down request: {}",
+                            leader.hostname,
+                            leader.port,
+                            err
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
     }
 }
