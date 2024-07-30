@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
@@ -293,6 +293,42 @@ pub enum PlacementPolicy {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateResponse {}
+
+/// Metadata health record posted from scrubber.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthRecord {
+    pub tenant_shard_id: TenantShardId,
+    pub healthy: bool,
+    pub last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthUpdateRequest {
+    pub healthy_tenant_shards: Vec<TenantShardId>,
+    pub unhealthy_tenant_shards: Vec<TenantShardId>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthUpdateResponse {}
+
+#[derive(Serialize, Deserialize, Debug)]
+
+pub struct MetadataHealthListUnhealthyResponse {
+    pub unhealthy_tenant_shards: Vec<TenantShardId>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+
+pub struct MetadataHealthListOutdatedRequest {
+    #[serde(with = "humantime_serde")]
+    pub not_scrubbed_for: Duration,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+
+pub struct MetadataHealthListOutdatedResponse {
+    pub health_records: Vec<MetadataHealthRecord>,
+}
 
 #[cfg(test)]
 mod test {
