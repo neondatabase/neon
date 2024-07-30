@@ -7,6 +7,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 def gc_feedback_impl(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker, mode: str):
+    assert mode == "normal" or mode == "with_snapshots"
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
