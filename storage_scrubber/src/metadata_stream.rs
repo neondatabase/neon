@@ -1,11 +1,40 @@
-use anyhow::Context;
+use std::str::FromStr;
+
+use anyhow::{anyhow, Context};
 use async_stream::{stream, try_stream};
 use aws_sdk_s3::{types::ObjectIdentifier, Client};
+use futures::StreamExt;
+use remote_storage::{GenericRemoteStorage, ListingMode};
 use tokio_stream::Stream;
 
-use crate::{list_objects_with_retries, RootTarget, S3Target, TenantShardTimelineId};
+use crate::{
+    list_objects_with_retries, stream_objects_with_retries, RootTarget, S3Target,
+    TenantShardTimelineId,
+};
 use pageserver_api::shard::TenantShardId;
 use utils::id::{TenantId, TimelineId};
+
+/// Given a remote storage and a target, output a stream of TenantIds discovered via listing prefixes
+pub fn stream_tenants_generic<'a>(
+    remote_client: &'a GenericRemoteStorage,
+    target: &'a RootTarget,
+) -> impl Stream<Item = anyhow::Result<TenantShardId>> + 'a {
+    try_stream! {
+        let tenants_target = target.tenants_root();
+        let mut tenants_stream =
+            std::pin::pin!(stream_objects_with_retries(remote_client, ListingMode::WithDelimiter, &tenants_target));
+        while let Some(chunk) = tenants_stream.next().await {
+            let chunk = chunk?;
+            let entry_ids = chunk.prefixes.iter()
+                .map(|prefix| prefix.get_path().file_name().ok_or_else(|| anyhow!("no final component in path '{prefix}'")));
+            for dir_name_res in entry_ids {
+                let dir_name = dir_name_res?;
+                let id = TenantShardId::from_str(dir_name)?;
+                yield id;
+            }
+        }
+    }
+}
 
 /// Given an S3 bucket, output a stream of TenantIds discovered via ListObjectsv2
 pub fn stream_tenants<'a>(
