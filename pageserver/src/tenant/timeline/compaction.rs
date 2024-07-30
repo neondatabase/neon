@@ -1565,8 +1565,7 @@ impl Timeline {
                         // layer guard, and in case it creates duplicated layer key, we will still error
                         // in the end.
                         info!(
-                            "discard delta layer due to duplicated layer key in the same generation: {}..{} {}..{} gen={:?}",
-                            key_start, key_end, lowest_retain_lsn, end_lsn, layer_generation
+                            %key, %layer_generation, "discard delta layer due to duplicated layer in the same generation"
                         );
                         return Ok(Some(FlushDeltaResult::KeepLayer(key)));
                     }
