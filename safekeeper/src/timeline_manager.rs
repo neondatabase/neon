@@ -522,8 +522,8 @@ impl Manager {
 
     /// Spawns partial WAL backup task if needed.
     async fn update_partial_backup(&mut self, state: &StateSnapshot) {
-        // check if partial backup is enabled and should be started
-        if !self.conf.is_wal_backup_enabled() || !self.conf.partial_backup_enabled {
+        // check if WAL backup is enabled and should be started
+        if !self.conf.is_wal_backup_enabled() {
             return;
         }
 
