@@ -565,7 +565,7 @@ impl RemoteStorage for S3Bucket {
                         }
                     };
 
-                    let size = object.size.unwrap_or_else(|| 0) as u64;
+                    let size = object.size.unwrap_or(0) as u64;
 
                     result.keys.push(ListingObject{
                         key,
