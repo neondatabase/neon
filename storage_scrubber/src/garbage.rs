@@ -510,7 +510,7 @@ pub async fn purge_garbage(
         input_path
     );
 
-    let remote_client =
+    let (remote_client, _target) =
         init_remote_generic(garbage_list.bucket_config.clone(), garbage_list.node_kind).await?;
 
     assert_eq!(
