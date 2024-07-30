@@ -22,17 +22,19 @@ use aws_sdk_s3::Client;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
+use futures::{Stream, StreamExt};
 use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{
-    GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
-    DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+    GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+    S3Config, DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use storage_controller_client::control_api;
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -326,27 +328,35 @@ fn default_prefix_in_bucket(node_kind: NodeKind) -> &'static str {
     }
 }
 
+fn make_root_target(
+    bucket_name: String,
+    prefix_in_bucket: String,
+    node_kind: NodeKind,
+) -> RootTarget {
+    let s3_target = S3Target {
+        bucket_name,
+        prefix_in_bucket,
+        delimiter: "/".to_string(),
+    };
+    match node_kind {
+        NodeKind::Pageserver => RootTarget::Pageserver(s3_target),
+        NodeKind::Safekeeper => RootTarget::Safekeeper(s3_target),
+    }
+}
+
 async fn init_remote(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
 ) -> anyhow::Result<(Arc<Client>, RootTarget)> {
     let bucket_region = Region::new(bucket_config.region);
-    let delimiter = "/".to_string();
     let s3_client = Arc::new(init_s3_client(bucket_region).await);
     let default_prefix = default_prefix_in_bucket(node_kind).to_string();
 
-    let s3_root = match node_kind {
-        NodeKind::Pageserver => RootTarget::Pageserver(S3Target {
-            bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
-            delimiter,
-        }),
-        NodeKind::Safekeeper => RootTarget::Safekeeper(S3Target {
-            bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
-            delimiter,
-        }),
-    };
+    let s3_root = make_root_target(
+        bucket_config.bucket,
+        bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
+        node_kind,
+    );
 
     Ok((s3_client, s3_root))
 }
@@ -354,12 +364,12 @@ async fn init_remote(
 async fn init_remote_generic(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
-) -> anyhow::Result<GenericRemoteStorage> {
+) -> anyhow::Result<(GenericRemoteStorage, RootTarget)> {
     let endpoint = env::var("AWS_ENDPOINT_URL").ok();
     let default_prefix = default_prefix_in_bucket(node_kind).to_string();
     let prefix_in_bucket = Some(bucket_config.prefix_in_bucket.unwrap_or(default_prefix));
     let storage = S3Config {
-        bucket_name: bucket_config.bucket,
+        bucket_name: bucket_config.bucket.clone(),
         bucket_region: bucket_config.region,
         prefix_in_bucket,
         endpoint,
@@ -373,7 +383,13 @@ async fn init_remote_generic(
         storage: RemoteStorageKind::AwsS3(storage),
         timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
     };
-    GenericRemoteStorage::from_config(&storage_config).await
+
+    // We already pass the prefix to the remote client above
+    let prefix_in_root_target = String::new();
+    let s3_root = make_root_target(bucket_config.bucket, prefix_in_root_target, node_kind);
+
+    let client = GenericRemoteStorage::from_config(&storage_config).await?;
+    Ok((client, s3_root))
 }
 
 async fn list_objects_with_retries(
@@ -409,6 +425,44 @@ async fn list_objects_with_retries(
         }
     }
     Err(anyhow!("unreachable unless MAX_RETRIES==0"))
+}
+
+fn stream_objects_with_retries<'a>(
+    storage_client: &'a GenericRemoteStorage,
+    listing_mode: ListingMode,
+    s3_target: &'a S3Target,
+) -> impl Stream<Item = Result<Listing, anyhow::Error>> + 'a {
+    async_stream::stream! {
+        let mut trial = 0;
+        let cancel = CancellationToken::new();
+        let prefix_str = &s3_target
+            .prefix_in_bucket
+            .strip_prefix("/")
+            .unwrap_or(&s3_target.prefix_in_bucket);
+        let prefix = RemotePath::from_string(prefix_str)?;
+        let mut list_stream =
+            storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
+        while let Some(res) = list_stream.next().await {
+            if let Err(err) = res {
+                let yield_err = if err.is_permanent() {
+                    true
+                } else {
+                    let backoff_time = 1 << trial.max(5);
+                    tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+                    trial += 1;
+                    trial == MAX_RETRIES - 1
+                };
+                if yield_err {
+                    yield Err(err)
+                        .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                    break;
+                }
+            } else {
+                trial = 0;
+                yield res.map_err(anyhow::Error::from);
+            }
+        }
+    }
 }
 
 async fn download_object_with_retries(

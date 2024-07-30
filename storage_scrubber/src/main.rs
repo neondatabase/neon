@@ -51,6 +51,8 @@ enum Command {
         input_path: String,
         #[arg(short, long, default_value_t = PurgeMode::DeletedOnly)]
         mode: PurgeMode,
+        #[arg(long = "min-age")]
+        min_age: humantime::Duration,
     },
     #[command(verbatim_doc_comment)]
     ScanMetadata {
@@ -226,9 +228,11 @@ async fn main() -> anyhow::Result<()> {
             let console_config = ConsoleConfig::from_env()?;
             find_garbage(bucket_config, console_config, depth, node_kind, output_path).await
         }
-        Command::PurgeGarbage { input_path, mode } => {
-            purge_garbage(input_path, mode, !cli.delete).await
-        }
+        Command::PurgeGarbage {
+            input_path,
+            mode,
+            min_age,
+        } => purge_garbage(input_path, mode, min_age.into(), !cli.delete).await,
         Command::TenantSnapshot {
             tenant_id,
             output_path,
