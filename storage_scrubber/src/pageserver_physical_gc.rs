@@ -567,13 +567,7 @@ pub async fn pageserver_physical_gc(
     }
 
     // Execute cross-shard GC, using the accumulator's full view of all the shards built in the per-shard GC
-    let Some(controller_client) = controller_client_conf.as_ref().map(|c| {
-        let ControllerClientConfig {
-            controller_api,
-            controller_jwt,
-        } = c;
-        control_api::Client::new(controller_api.clone(), Some(controller_jwt.clone()))
-    }) else {
+    let Some(controller_client) = controller_client_conf.map(|c| c.build_client()) else {
         tracing::info!("Skipping ancestor layer GC, because no `--controller-api` was specified");
         return Ok(summary);
     };

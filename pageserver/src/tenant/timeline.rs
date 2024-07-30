@@ -58,7 +58,7 @@ use std::{
     sync::atomic::AtomicU64,
 };
 use std::{
-    cmp::{max, min, Ordering},
+    cmp::{max, min},
     ops::ControlFlow,
 };
 use std::{
@@ -174,25 +174,6 @@ pub enum ImageLayerCreationMode {
 impl std::fmt::Display for ImageLayerCreationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
-    }
-}
-
-/// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Hole {
-    key_range: Range<Key>,
-    coverage_size: usize,
-}
-
-impl Ord for Hole {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.coverage_size.cmp(&self.coverage_size) // inverse order
-    }
-}
-
-impl PartialOrd for Hole {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 

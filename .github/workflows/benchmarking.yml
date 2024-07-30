@@ -63,11 +63,9 @@ jobs:
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
-            provisioner: 'k8s-pod' 
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
-            provisioner: 'k8s-neonvm'
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
@@ -100,7 +98,6 @@ jobs:
         region_id: ${{ matrix.region_id }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
-        provisioner: ${{ matrix.provisioner }}
 
     - name: Run benchmark
       uses: ./.github/actions/run-python-test-set
@@ -216,11 +213,11 @@ jobs:
     # Create matrices for the benchmarking jobs, so we run benchmarks on rds only once a week (on Saturday)
     #
     # Available platforms:
-    # - neon-captest-new: Freshly created project (1 CU)
-    # - neon-captest-freetier: Use freetier-sized compute (0.25 CU)
+    # - neonvm-captest-new: Freshly created project (1 CU)
+    # - neonvm-captest-freetier: Use freetier-sized compute (0.25 CU)
     # - neonvm-captest-azure-new: Freshly created project (1 CU) in azure region
     # - neonvm-captest-azure-freetier: Use freetier-sized compute (0.25 CU) in azure region
-    # - neon-captest-reuse: Reusing existing project
+    # - neonvm-captest-reuse: Reusing existing project
     # - rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
     # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
     env:
@@ -245,18 +242,16 @@ jobs:
             "'"$region_id_default"'"
             ],
           "platform": [
-            "neon-captest-new",
-            "neon-captest-reuse",
+            "neonvm-captest-new",
+            "neonvm-captest-reuse",
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neon-captest-freetier",         "db_size": "3gb"  },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neon-captest-new",              "db_size": "50gb" },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
+          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
-                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",      "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
         }'
 
@@ -271,7 +266,7 @@ jobs:
       run: |
         matrix='{
           "platform": [
-            "neon-captest-reuse"
+            "neonvm-captest-reuse"
           ]
         }'
 
@@ -287,7 +282,7 @@ jobs:
       run: |
         matrix='{
           "platform": [
-            "neon-captest-reuse"
+            "neonvm-captest-reuse"
           ],
           "scale": [
             "10"
@@ -338,7 +333,7 @@ jobs:
         prefix: latest
 
     - name: Create Neon Project
-      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier", "neonvm-captest-new", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
+      if: contains(fromJson('["neonvm-captest-new", "neonvm-captest-freetier", "neonvm-azure-captest-freetier", "neonvm-azure-captest-new"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -346,19 +341,18 @@ jobs:
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
         compute_units: ${{ (contains(matrix.platform, 'captest-freetier') && '[0.25, 0.25]') || '[1, 1]' }}
-        provisioner: ${{ (contains(matrix.platform, 'neonvm-') && 'k8s-neonvm') || 'k8s-pod' }}
 
     - name: Set up Connection String
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-reuse)
+          neonvm-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
           neonvm-captest-sharding-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_SHARDING_CONNSTR }}
             ;;
-          neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier | neonvm-azure-captest-new | neonvm-azure-captest-freetier)
+          neonvm-captest-new | neonvm-captest-freetier | neonvm-azure-captest-new | neonvm-azure-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
@@ -442,9 +436,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - PLATFORM: "neon-captest-pgvector"
+          - PLATFORM: "neonvm-captest-pgvector"
           - PLATFORM: "azure-captest-pgvector"
-            
+
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
       TEST_PG_BENCH_SCALES_MATRIX: "1"
@@ -486,7 +480,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-pgvector)
+          neonvm-captest-pgvector)
             CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR }}
             ;;
           azure-captest-pgvector)
@@ -585,7 +579,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-reuse)
+          neonvm-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_10M_CONNSTR }}
             ;;
           rds-aurora)
@@ -595,7 +589,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CLICKBENCH_10M_CONNSTR }}
             ;;
           *)
-            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neonvm-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -672,7 +666,7 @@ jobs:
     - name: Get Connstring Secret Name
       run: |
         case "${PLATFORM}" in
-          neon-captest-reuse)
+          neonvm-captest-reuse)
             ENV_PLATFORM=CAPTEST_TPCH
             ;;
           rds-aurora)
@@ -682,7 +676,7 @@ jobs:
             ENV_PLATFORM=RDS_AURORA_TPCH
             ;;
           *)
-            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neonvm-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -759,7 +753,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-reuse)
+          neonvm-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_CAPTEST_CONNSTR }}
             ;;
           rds-aurora)
@@ -769,7 +763,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neonvm-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac

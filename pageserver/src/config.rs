@@ -360,8 +360,6 @@ struct PageServerConfigBuilder {
     auth_validation_public_key_path: BuilderValue<Option<Utf8PathBuf>>,
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
-    id: BuilderValue<NodeId>,
-
     broker_endpoint: BuilderValue<Uri>,
     broker_keepalive_interval: BuilderValue<Duration>,
 
@@ -412,11 +410,8 @@ struct PageServerConfigBuilder {
 }
 
 impl PageServerConfigBuilder {
-    fn new(node_id: NodeId) -> Self {
-        let mut this = Self::default();
-        this.id(node_id);
-
-        this
+    fn new() -> Self {
+        Self::default()
     }
 
     #[inline(always)]
@@ -444,7 +439,6 @@ impl PageServerConfigBuilder {
             pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
-            id: NotSet,
             broker_endpoint: Set(storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint")),
@@ -575,10 +569,6 @@ impl PageServerConfigBuilder {
         self.broker_keepalive_interval = BuilderValue::Set(broker_keepalive_interval)
     }
 
-    pub fn id(&mut self, node_id: NodeId) {
-        self.id = BuilderValue::Set(node_id)
-    }
-
     pub fn log_format(&mut self, log_format: LogFormat) {
         self.log_format = BuilderValue::Set(log_format)
     }
@@ -694,7 +684,7 @@ impl PageServerConfigBuilder {
         self.compact_level0_bypass_page_cache = BuilderValue::Set(value);
     }
 
-    pub fn build(self) -> anyhow::Result<PageServerConf> {
+    pub fn build(self, id: NodeId) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
         macro_rules! conf {
@@ -727,7 +717,6 @@ impl PageServerConfigBuilder {
                 pg_auth_type,
                 auth_validation_public_key_path,
                 remote_storage_config,
-                id,
                 broker_endpoint,
                 broker_keepalive_interval,
                 log_format,
@@ -756,6 +745,7 @@ impl PageServerConfigBuilder {
             }
             CUSTOM LOGIC
             {
+                id: id,
                 // TenantConf is handled separately
                 default_tenant_conf: TenantConf::default(),
                 concurrent_tenant_warmup: ConfigurableSemaphore::new({
@@ -905,7 +895,7 @@ impl PageServerConf {
         toml: &Document,
         workdir: &Utf8Path,
     ) -> anyhow::Result<Self> {
-        let mut builder = PageServerConfigBuilder::new(node_id);
+        let mut builder = PageServerConfigBuilder::new();
         builder.workdir(workdir.to_owned());
 
         let mut t_conf = TenantConfOpt::default();
@@ -936,8 +926,6 @@ impl PageServerConf {
                 "tenant_config" => {
                     t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
-                "id" => {}, // Ignoring `id` field in pageserver.toml - using identity.toml as the source of truth
-                            // Logging is not set up yet, so we can't do it.
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
                 "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
@@ -1033,7 +1021,7 @@ impl PageServerConf {
             }
         }
 
-        let mut conf = builder.build().context("invalid config")?;
+        let mut conf = builder.build(node_id).context("invalid config")?;
 
         if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
@@ -1271,7 +1259,6 @@ max_file_descriptors = 333
 
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zzzz'
-id = 10
 
 metric_collection_interval = '222 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
@@ -1288,9 +1275,8 @@ background_task_maximum_delay = '334 s'
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
         // we have to create dummy values to overcome the validation errors
-        let config_string = format!(
-            "pg_distrib_dir='{pg_distrib_dir}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
-        );
+        let config_string =
+            format!("pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",);
         let toml = config_string.parse()?;
 
         let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
@@ -1597,7 +1583,6 @@ broker_endpoint = '{broker_endpoint}'
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [disk_usage_based_eviction]
 max_usage_pct = 80
@@ -1667,7 +1652,6 @@ threshold = "20m"
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [tenant_config]
 evictions_low_residence_duration_metric_threshold = "20m"

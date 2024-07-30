@@ -127,10 +127,13 @@ impl PageServerNode {
         }
 
         // Apply the user-provided overrides
-        overrides.push(
-            toml_edit::ser::to_string_pretty(&conf)
-                .expect("we deserialized this from toml earlier"),
-        );
+        overrides.push({
+            let mut doc =
+                toml_edit::ser::to_document(&conf).expect("we deserialized this from toml earlier");
+            // `id` is written out to `identity.toml` instead of `pageserver.toml`
+            doc.remove("id").expect("it's part of the struct");
+            doc.to_string()
+        });
 
         // Turn `overrides` into a toml document.
         // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
