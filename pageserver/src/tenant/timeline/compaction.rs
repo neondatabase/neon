@@ -704,10 +704,12 @@ impl Timeline {
         // TODO(https://github.com/neondatabase/neon/issues/8184): remove the page cached blob_io
         // option and validation code once we've reached confidence.
         enum AllValuesIter<'a> {
-            #[allow(dead_code)]
-            PageCachedBlobIo { all_keys_iter: VecIter<'a> },
-            #[allow(dead_code)]
-            StreamingKmergeBypassingPageCache { merge_iter: MergeIterator<'a> },
+            PageCachedBlobIo {
+                all_keys_iter: VecIter<'a>,
+            },
+            StreamingKmergeBypassingPageCache {
+                merge_iter: MergeIterator<'a>,
+            },
             ValidatingStreamingKmergeBypassingPageCache {
                 mode: CompactL0BypassPageCacheValidation,
                 merge_iter: MergeIterator<'a>,
