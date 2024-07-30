@@ -214,12 +214,11 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     # Having written a mixture of generation-aware and legacy index_part.json,
     # ensure the scrubber handles the situation as expected.
-    metadata_summary = env.storage_scrubber.scan_metadata()
+    healthy, metadata_summary = env.storage_scrubber.scan_metadata()
     assert metadata_summary["tenant_count"] == 1  # Scrubber should have seen our timeline
     assert metadata_summary["timeline_count"] == 1
     assert metadata_summary["timeline_shard_count"] == 1
-    assert not metadata_summary["with_errors"]
-    assert not metadata_summary["with_warnings"]
+    assert healthy
 
 
 def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):

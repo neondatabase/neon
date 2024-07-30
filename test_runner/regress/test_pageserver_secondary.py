@@ -563,7 +563,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # Scrub the remote storage
     # ========================
     # This confirms that the scrubber isn't upset by the presence of the heatmap
-    env.storage_scrubber.scan_metadata()
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
 
     # Detach secondary and delete tenant
     # ===================================
