@@ -669,23 +669,21 @@ impl Timeline {
         // we're compacting, in key, LSN order.
         // If there's both a Value::Image and Value::WalRecord for the same (key,lsn),
         // then the Value::Image is ordered before Value::WalRecord.
+        //
+        // TODO(https://github.com/neondatabase/neon/issues/8184): remove the page cached blob_io
+        // option and validation code once we've reached confidence.
         enum AllValuesIter<'a> {
             #[allow(dead_code)]
             PageCachedBlobIoWithLoadedIndex { all_keys_iter: VecIter<'a> },
             #[allow(dead_code)]
             StreamingKmergeBypassingPageCache { merge_iter: MergeIterator<'a> },
             ValidatingStreamingKmergeBypassingPageCache {
-                mode: ValidationMode,
+                mode: CompactL0BypassPageCacheValidation,
                 merge_iter: MergeIterator<'a>,
                 all_keys_iter: VecIter<'a>,
             },
         }
         type VecIter<'a> = std::slice::Iter<'a, DeltaEntry<'a>>; // TODO: distinguished lifetimes
-        enum ValidationMode {
-            #[allow(dead_code)]
-            KeyLsn,
-            KeyLsnValue,
-        }
         impl AllValuesIter<'_> {
             async fn next_all_keys_iter(
                 iter: &mut VecIter<'_>,
@@ -751,14 +749,14 @@ impl Timeline {
                             (Ok(Some((all_keys_key, all_keys_lsn, all_keys_value))), Ok(Some((merge_key, merge_lsn, merge_value)))) => {
                                 match mode {
                                     // TODO: in this mode, we still load the value from disk for both iterators, even though we only need the all_keys_iter one
-                                    ValidationMode::KeyLsn => {
+                                    CompactL0BypassPageCacheValidation::KeyLsn => {
                                         let all_keys = (all_keys_key, all_keys_lsn);
                                         let merge = (merge_key, merge_lsn);
                                         if all_keys != merge {
                                             rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN) than all_keys_iter");
                                         }
                                     }
-                                    ValidationMode::KeyLsnValue => {
+                                    CompactL0BypassPageCacheValidation::KeyLsnValue => {
                                         let all_keys = (all_keys_key, all_keys_lsn, all_keys_value);
                                         let merge = (merge_key, merge_lsn, merge_value);
                                         if all_keys != merge {
@@ -774,17 +772,30 @@ impl Timeline {
                 }
             }
         }
-        let mut all_values_iter = AllValuesIter::ValidatingStreamingKmergeBypassingPageCache {
-            mode: ValidationMode::KeyLsnValue,
-            merge_iter: {
-                let mut deltas = Vec::with_capacity(deltas_to_compact.len());
-                for l in deltas_to_compact.iter() {
-                    let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
-                    deltas.push(l);
+        let mut all_values_iter = match &self.conf.compact_level0_bypass_page_cache {
+            CompactL0BypassPageCache::PageCachedBlobIoWithLoadedIndex => {
+                AllValuesIter::PageCachedBlobIoWithLoadedIndex {
+                    all_keys_iter: all_keys.iter(),
                 }
-                MergeIterator::create(&deltas, &[], ctx)
-            },
-            all_keys_iter: all_keys.iter(),
+            }
+            CompactL0BypassPageCache::StreamingKmergeBypassingPageCache { validate } => {
+                let merge_iter = {
+                    let mut deltas = Vec::with_capacity(deltas_to_compact.len());
+                    for l in deltas_to_compact.iter() {
+                        let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                        deltas.push(l);
+                    }
+                    MergeIterator::create(&deltas, &[], ctx)
+                };
+                match validate {
+                    None => AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter },
+                    Some(validate) => AllValuesIter::ValidatingStreamingKmergeBypassingPageCache {
+                        mode: validate.clone(),
+                        merge_iter,
+                        all_keys_iter: all_keys.iter(),
+                    },
+                }
+            }
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
@@ -1152,6 +1163,30 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .new_deltas_size
                 .ok_or_else(|| anyhow!("new_deltas_size not set"))?,
         })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum CompactL0BypassPageCache {
+    PageCachedBlobIoWithLoadedIndex,
+    StreamingKmergeBypassingPageCache {
+        validate: Option<CompactL0BypassPageCacheValidation>,
+    },
+}
+#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompactL0BypassPageCacheValidation {
+    KeyLsn,
+    KeyLsnValue,
+}
+
+impl Default for CompactL0BypassPageCache {
+    fn default() -> Self {
+        CompactL0BypassPageCache::StreamingKmergeBypassingPageCache {
+            // TODO(https://github.com/neondatabase/neon/issues/8184): change to None once confident
+            validate: Some(CompactL0BypassPageCacheValidation::KeyLsnValue),
+        }
     }
 }
 
