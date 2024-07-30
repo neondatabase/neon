@@ -1,6 +1,7 @@
 mod classic;
 mod hacks;
 mod link;
+mod jwt;
 
 use std::net::IpAddr;
 use std::sync::Arc;

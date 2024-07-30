@@ -4270,6 +4270,7 @@ dependencies = [
  "indexmap 2.0.1",
  "ipnet",
  "itertools 0.10.5",
+ "jsonwebtoken",
  "lasso",
  "md5",
  "measured",
