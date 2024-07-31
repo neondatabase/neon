@@ -67,7 +67,9 @@ def measure_logical_replication_lag(sub_cur, pub_cur, timeout_sec=600):
     pub_lsn = Lsn(pub_cur.fetchall()[0][0])
     while (time.time() - start) < timeout_sec:
         sub_cur.execute("SELECT latest_end_lsn FROM pg_catalog.pg_stat_subscription")
-        res = sub_cur.fetchall()[0][0]
+        res = sub_cur.fetchall()
+        log.info(res)
+        res = res[0][0]
         if res:
             log.info(f"subscriber_lsn={res}")
             sub_lsn = Lsn(res)
