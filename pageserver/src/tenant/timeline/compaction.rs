@@ -1872,6 +1872,8 @@ impl Timeline {
             is_delta: false,
         };
 
+        // Like with delta layers, it can happen that we re-produce an already existing image layer.
+        // TODO: explain why it's safe to skip.
         let discard_image_layer = {
             let guard = self.layers.read().await;
             if guard.contains_key(&image_layer_key) {
