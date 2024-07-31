@@ -2200,7 +2200,9 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def assert_no_errors(self):
         assert_no_errors(
-            self.env.repo_dir / "storage_controller.log", "storage_controller", self.allowed_errors
+            self.env.repo_dir / "storage_controller_1" / "storage_controller.log",
+            "storage_controller",
+            self.allowed_errors,
         )
 
     def pageserver_api(self) -> PageserverHttpClient:
