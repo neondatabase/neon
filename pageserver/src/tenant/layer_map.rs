@@ -954,7 +954,7 @@ impl LayerMap {
         // Ordering: we want to iterate like this:
         // 1. Highest LSNs first
         // 2. Consider images before deltas if they end at the same LSNs (images cover deltas)
-        // 2. Consider ReadPoints before image layers if they're at the same LSN (readpoints make that image visible)
+        // 3. Consider ReadPoints before image layers if they're at the same LSN (readpoints make that image visible)
         items.sort_by_key(|item| {
             std::cmp::Reverse(match item {
                 Item::Layer(layer) => {
