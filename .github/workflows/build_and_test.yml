@@ -213,6 +213,8 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
+      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
+      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16"]' || '["v16"]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
