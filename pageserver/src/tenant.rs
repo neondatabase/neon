@@ -384,12 +384,13 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
-    pub(crate) async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) -> bool {
         match self {
             Self::Prod(_, mgr) => mgr.shutdown().await,
             #[cfg(test)]
             Self::Test(_) => {
                 // Not applicable to test redo manager
+                true
             }
         }
     }

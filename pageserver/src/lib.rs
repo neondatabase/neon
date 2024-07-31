@@ -138,13 +138,24 @@ pub async fn shutdown_pageserver(
                 .collect();
             info!(count=%futs.len(), "built FuturesUnordered");
             let mut last_log_at = std::time::Instant::now();
-            while let Some(()) = rt.block_on(futs.next()) {
+            #[derive(Debug, Default)]
+            struct Results {
+                initiated: u64,
+                already: u64,
+            }
+            let mut results = Results::default();
+            while let Some(we_initiated) = rt.block_on(futs.next()) {
+                if we_initiated {
+                    results.initiated += 1;
+                } else {
+                    results.already += 1;
+                }
                 if last_log_at.elapsed() > Duration::from_millis(100) {
-                    info!(remaining=%futs.len(), "progress");
+                    info!(remaining=%futs.len(), ?results, "progress");
                     last_log_at = std::time::Instant::now();
                 }
             }
-            info!("done");
+            info!(?results, "done");
         }
     });
 
