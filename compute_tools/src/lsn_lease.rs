@@ -1,17 +1,14 @@
 use anyhow::bail;
+use anyhow::Context;
 use anyhow::Result;
 use postgres::{NoTls, SimpleQueryMessage};
-use std::{
-    str::FromStr,
-    sync::Arc,
-    thread,
-    time::{Duration, SystemTime},
-};
+use std::time::SystemTime;
+use std::{str::FromStr, sync::Arc, thread, time::Duration};
 use utils::id::TenantId;
 use utils::id::TimelineId;
 
 use compute_api::spec::ComputeMode;
-use tracing::{error, info};
+use tracing::{info, warn};
 use utils::{
     lsn::Lsn,
     shard::{ShardCount, ShardNumber, TenantShardId},
@@ -19,7 +16,9 @@ use utils::{
 
 use crate::compute::{ComputeNode, ComputeState};
 
-pub fn launch_lsn_lease_loop_for_static(compute: &Arc<ComputeNode>) {
+/// Spawns a background thread to periodically renew LSN leases for static compute.
+/// Do nothing if the compute is not in static mode.
+pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
     let lsn = {
         let state = compute.state.lock().unwrap();
         let spec = state.pspec.as_ref().expect("spec must be set");
@@ -29,7 +28,12 @@ pub fn launch_lsn_lease_loop_for_static(compute: &Arc<ComputeNode>) {
         }
     };
     let compute = compute.clone();
-    thread::spawn(move || lsn_lease_loop(compute, lsn));
+    thread::spawn(move || {
+        if let Err(e) = lsn_lease_bg_task(compute, lsn) {
+            // TODO: might need stronger error feedback than logging an warning.
+            warn!("lsn_lease_bg_task failed: {e}");
+        }
+    });
 }
 
 fn postgres_configs_from_state(compute_state: &ComputeState) -> Vec<postgres::Config> {
@@ -50,7 +54,8 @@ fn postgres_configs_from_state(compute_state: &ComputeState) -> Vec<postgres::Co
         .collect::<Vec<_>>()
 }
 
-fn lsn_lease_loop(compute: Arc<ComputeNode>, lsn: Lsn) {
+/// Renews lsn lease periodically so static compute are not affected by GC.
+fn lsn_lease_bg_task(compute: Arc<ComputeNode>, lsn: Lsn) -> Result<()> {
     loop {
         let (tenant_id, timeline_id, configs) = {
             let state = compute.state.lock().unwrap();
@@ -61,47 +66,71 @@ fn lsn_lease_loop(compute: Arc<ComputeNode>, lsn: Lsn) {
             (spec.tenant_id, spec.timeline_id, configs)
         };
 
-        match lsn_lease_request(tenant_id, timeline_id, lsn, &configs) {
-            Ok(valid_until) => {
-                let valid_until_duration = Duration::from_millis(valid_until as u64);
+        let valid_until = acquire_lsn_lease_with_retry(tenant_id, timeline_id, lsn, &configs)
+            .with_context(|| {
+                format!("failed to get lsn lease for {tenant_id}/{timeline_id}@{lsn}")
+            })?;
 
-                let sleep_duration = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .checked_sub(valid_until_duration)
-                    .unwrap_or(Duration::ZERO)
-                    .checked_sub(Duration::from_secs(60))
-                    .unwrap_or(Duration::ZERO);
+        let valid_duration = valid_until
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
 
-                // Ensure the sleep duration is at least 60 seconds to avoid busy loops
-                let sleep_duration = std::cmp::max(sleep_duration, Duration::from_secs(60));
+        // Sleep for 60 seconds less than the valid duration but no more than half of the valid duration.
+        let sleep_duration = valid_duration
+            .saturating_sub(Duration::from_secs(60))
+            .max(valid_duration / 2);
 
-                info!(
-                    "lsn_lease_request succeeded, sleeping for {} seconds",
-                    sleep_duration.as_secs()
-                );
-                thread::sleep(sleep_duration);
-            }
-            Err(e) => {
-                error!("lsn_lease_request failed: {:#}", e);
-                thread::sleep(Duration::from_secs(10));
-            }
-        }
+        info!(
+            "lsn_lease_request succeeded, sleeping for {} seconds",
+            sleep_duration.as_secs()
+        );
+        thread::sleep(sleep_duration);
     }
 }
 
-fn lsn_lease_request(
+/// Acquires lsn lease in a retry loop.
+fn acquire_lsn_lease_with_retry(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
     configs: &[postgres::Config],
-) -> Result<u128> {
+) -> Result<SystemTime> {
+    const MAX_ATTEMPTS: usize = 10;
+    let mut attempts = 0;
+    let mut retry_period_ms = 500.0;
+
+    loop {
+        let result = try_acquire_lsn_lease(tenant_id, timeline_id, lsn, &configs);
+        match result {
+            Ok(_) => {
+                return result;
+            }
+            Err(ref e) if attempts < MAX_ATTEMPTS => {
+                warn!("Failed to acquire lsn lease: {e} (attempt {attempts}/{MAX_ATTEMPTS})",);
+                thread::sleep(Duration::from_millis(retry_period_ms as u64));
+                retry_period_ms *= 1.5;
+            }
+            Err(_) => {
+                return result;
+            }
+        }
+        attempts += 1;
+    }
+}
+
+/// Tries to acquire an LSN lease through PS page_service API.
+fn try_acquire_lsn_lease(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    lsn: Lsn,
+    configs: &[postgres::Config],
+) -> Result<SystemTime> {
     fn get_valid_until(
         config: &postgres::Config,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         lsn: Lsn,
-    ) -> Result<u128> {
+    ) -> Result<SystemTime> {
         let mut client = config.connect(NoTls)?;
         let cmd = format!("lease lsn {} {} {} ", tenant_shard_id, timeline_id, lsn);
         info!("lsn_lease_request: {}", cmd);
@@ -118,7 +147,13 @@ fn lsn_lease_request(
             Some(valid_until) => valid_until,
             None => bail!("valid_until not found"),
         };
-        Ok(u128::from_str(valid_until_str)?)
+
+        let valid_until = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_millis(
+                u128::from_str(valid_until_str)? as u64
+            ))
+            .expect("Time larger than max SystemTime could handle");
+        Ok(valid_until)
     }
 
     let shard_count = configs.len();
@@ -135,12 +170,11 @@ fn lsn_lease_request(
                 };
                 get_valid_until(config, tenant_shard_id, timeline_id, lsn)
             })
-            .collect::<Result<Vec<u128>>>()?
+            .collect::<Result<Vec<SystemTime>>>()?
             .into_iter()
             .min()
             .unwrap()
     } else {
-        info!("Unsharded!");
         get_valid_until(
             &configs[0],
             TenantShardId::unsharded(tenant_id),
