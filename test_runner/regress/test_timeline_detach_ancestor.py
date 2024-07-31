@@ -452,7 +452,9 @@ def test_compaction_induced_by_detaches_in_history(
         }
     )
     env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
-    env.pageserver.allowed_errors.append(".*await_initial_logical_size: can't get semaphore cancel token, skipping")
+    env.pageserver.allowed_errors.append(
+        ".*await_initial_logical_size: can't get semaphore cancel token, skipping"
+    )
     client = env.pageserver.http_client()
 
     def delta_layers(timeline_id: TimelineId):
@@ -526,7 +528,6 @@ def test_compaction_induced_by_detaches_in_history(
 
     skip_main = branches[1:]
 
-
     branch_lsn = client.timeline_detail(env.initial_tenant, branch_timeline_id)["ancestor_lsn"]
 
     # take the fullbackup before and after inheriting the new L0s
@@ -537,7 +538,9 @@ def test_compaction_induced_by_detaches_in_history(
 
     # force initial logical sizes, so we can evict all layers from all
     # timelines and exercise on-demand download for copy lsn prefix
-    client.timeline_detail(env.initial_tenant, env.initial_timeline, force_await_initial_logical_size=True)
+    client.timeline_detail(
+        env.initial_tenant, env.initial_timeline, force_await_initial_logical_size=True
+    )
     client.evict_all_layers(env.initial_tenant, env.initial_timeline)
 
     for _, timeline_id in skip_main:
