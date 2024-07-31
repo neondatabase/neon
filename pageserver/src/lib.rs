@@ -103,42 +103,49 @@ pub async fn shutdown_pageserver(
         span.follows_from(tracing::Span::current());
         span
     };
-    let walredo_extraordinary_shutdown_thread = std::thread::spawn(move || {
-        let _entered = walredo_extraordinary_shutdown_thread_span.enter();
-        std::thread::sleep(Duration::from_secs(8));
-        let managers = tenant::WALREDO_MANAGERS
-            .lock()
-            .unwrap()
-            // prevents new walredo managers from being inserted
-            .take()
-            .expect("only we take()");
-        // Use FuturesUnordered to get in queue early for each manager's
-        // heavier_once_cell semaphore wait list.
-        // Also, for idle tenants that for some reason haven't
-        // shut down yet, it's quite likely that we're not going
-        // to get Poll::Pending once.
-        let mut futs: FuturesUnordered<_> = managers
-            .into_iter()
-            .filter_map(|(_, mgr)| mgr.upgrade())
-            .map(|mgr| async move { tokio::task::unconstrained(mgr.shutdown()).await })
-            .collect();
-        if futs.is_empty() {
-            info!("no walredo managers left");
-            return;
-        }
-        info!(count=%futs.len(), "starting shutdown");
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let mut last_log_at = std::time::Instant::now();
-        while let Some(()) = rt.block_on(futs.next()) {
-            if last_log_at.elapsed() > Duration::from_secs(1) {
-                info!(remaining=%futs.len(), "progress");
-                last_log_at = std::time::Instant::now();
+    let walredo_extraordinary_shutdown_thread_cancel = CancellationToken::new();
+    let walredo_extraordinary_shutdown_thread = std::thread::spawn({
+        let walredo_extraordinary_shutdown_thread_cancel =
+            walredo_extraordinary_shutdown_thread_cancel.clone();
+        move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _entered = walredo_extraordinary_shutdown_thread_span.enter();
+            if let Ok(()) = rt.block_on(tokio::time::timeout(
+                Duration::from_secs(8),
+                walredo_extraordinary_shutdown_thread_cancel.cancelled(),
+            )) {
+                info!("cancellation requested");
+                return;
             }
+            let managers = tenant::WALREDO_MANAGERS
+                .lock()
+                .unwrap()
+                // prevents new walredo managers from being inserted
+                .take()
+                .expect("only we take()");
+            // Use FuturesUnordered to get in queue early for each manager's
+            // heavier_once_cell semaphore wait list.
+            // Also, for idle tenants that for some reason haven't
+            // shut down yet, it's quite likely that we're not going
+            // to get Poll::Pending once.
+            let mut futs: FuturesUnordered<_> = managers
+                .into_iter()
+                .filter_map(|(_, mgr)| mgr.upgrade())
+                .map(|mgr| async move { tokio::task::unconstrained(mgr.shutdown()).await })
+                .collect();
+            info!(count=%futs.len(), "built FuturesUnordered");
+            let mut last_log_at = std::time::Instant::now();
+            while let Some(()) = rt.block_on(futs.next()) {
+                if last_log_at.elapsed() > Duration::from_secs(1) {
+                    info!(remaining=%futs.len(), "progress");
+                    last_log_at = std::time::Instant::now();
+                }
+            }
+            info!("done");
         }
-        info!("done");
     });
 
     // Shut down the libpq endpoint task. This prevents new connections from
@@ -217,7 +224,8 @@ pub async fn shutdown_pageserver(
     )
     .await;
 
-    info!("join walredo_extraordinary_shutdown_thread");
+    info!("cancel & join walredo_extraordinary_shutdown_thread");
+    walredo_extraordinary_shutdown_thread_cancel.cancel();
     walredo_extraordinary_shutdown_thread.join().unwrap();
     info!("walredo_extraordinary_shutdown_thread done");
 

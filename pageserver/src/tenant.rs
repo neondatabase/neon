@@ -354,7 +354,7 @@ impl Drop for WalRedoManager {
     }
 }
 
-/// Global registro of all walredo managers so that [`crate::shutdown_pageserver`] can shut down
+/// Global registry of all walredo managers so that [`crate::shutdown_pageserver`] can shut down
 /// the walredo processes outside of the regular order.
 ///
 /// This is necessary to work around a systemd bug where it freezes if there are
