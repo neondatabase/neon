@@ -601,7 +601,11 @@ impl SharedStateBuilder {
     pub(crate) fn build(self, target: &SharedState) {
         let mut g = target.inner.lock().unwrap();
 
-        assert_eq!(g.latest.is_none(), g.known_ongoing.is_empty());
+        assert_eq!(
+            g.latest.is_none(),
+            g.known_ongoing.is_empty(),
+            "either we continued existing attempt or SharedState should be empty"
+        );
 
         g.known_ongoing.extend(self.inprogress);
         if g.latest.is_none() && !g.known_ongoing.is_empty() {
