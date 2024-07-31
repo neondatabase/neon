@@ -468,7 +468,7 @@ impl SharedStateInner {
             if let ExistingAttempt::Actual(_, barrier) = attempt {
                 assert!(
                     barrier.is_ready(),
-                    "the attempt is still ongoing; is this call happening before closing the gate?"
+                    "the attempt is still ongoing; is this call happening before closing the Timeline::gate?"
                 );
             }
         }
