@@ -5,6 +5,4 @@ pub use limit_algorithm::{
 };
 pub use limiter::{BucketRateLimiter, GlobalRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
 mod leaky_bucket;
-pub use leaky_bucket::{
-    EndpointRateLimiter, LeakyBucketConfig, LeakyBucketRateLimiter, LeakyBucketState,
-};
+pub use leaky_bucket::{EndpointRateLimiter, LeakyBucketConfig, LeakyBucketRateLimiter};

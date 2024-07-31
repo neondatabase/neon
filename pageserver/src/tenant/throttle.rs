@@ -9,7 +9,9 @@ use std::{
 
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
+use tokio::sync::Notify;
 use tracing::{error, warn};
+use utils::leaky_bucket::{LeakyBucketConfig, LeakyBucketState};
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
@@ -33,8 +35,7 @@ pub struct Throttle<M: Metric> {
 
 pub struct Inner {
     task_kinds: EnumSet<TaskKind>,
-    rate_limiter: Arc<leaky_bucket::RateLimiter>,
-    config: Config,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 pub type Config = pageserver_api::models::ThrottleConfig;
@@ -78,7 +79,7 @@ where
             refill_amount,
             max,
             fair,
-        } = &config;
+        } = config;
         let task_kinds: EnumSet<TaskKind> = task_kinds
             .iter()
             .filter_map(|s| match TaskKind::from_str(s) {
@@ -93,18 +94,34 @@ where
                 }
             })
             .collect();
+
+        // how frequently we drain a single token on average
+        let time_cost = refill_interval / refill_amount.get() as u32;
+        let bucket_width = time_cost * (max as u32);
+
+        // initial tracks how many tokens are available to put in the bucket
+        // we want how many tokens are currently in the bucket
+        let initial_tokens = (max - initial) as u32;
+        let end = time_cost * initial_tokens;
+
+        let rate_limiter = RateLimiter {
+            config: LeakyBucketConfig {
+                epoch: tokio::time::Instant::now(),
+                drain_interval: refill_interval,
+                cost: time_cost,
+                bucket_width,
+            },
+            state: Mutex::new(LeakyBucketState::new(end)),
+            queue: fair.then(|| {
+                let queue = Notify::new();
+                queue.notify_one();
+                queue
+            }),
+        };
+
         Inner {
             task_kinds,
-            rate_limiter: Arc::new(
-                leaky_bucket::RateLimiter::builder()
-                    .initial(*initial)
-                    .interval(*refill_interval)
-                    .refill(refill_amount.get())
-                    .max(*max)
-                    .fair(*fair)
-                    .build(),
-            ),
-            config,
+            rate_limiter: Arc::new(rate_limiter),
         }
     }
     pub fn reconfigure(&self, config: Config) {
@@ -127,7 +144,7 @@ where
 
     /// See [`Config::steady_rps`].
     pub fn steady_rps(&self) -> f64 {
-        self.inner.load().config.steady_rps()
+        self.inner.load().rate_limiter.steady_rps()
     }
 
     pub async fn throttle(&self, ctx: &RequestContext, key_count: usize) -> Option<Duration> {
@@ -136,18 +153,9 @@ where
             return None;
         };
         let start = std::time::Instant::now();
-        let mut did_throttle = false;
-        let acquire = inner.rate_limiter.acquire(key_count);
-        // turn off runtime-induced preemption (aka coop) so our `did_throttle` is accurate
-        let acquire = tokio::task::unconstrained(acquire);
-        let mut acquire = std::pin::pin!(acquire);
-        std::future::poll_fn(|cx| {
-            use std::future::Future;
-            let poll = acquire.as_mut().poll(cx);
-            did_throttle = did_throttle || poll.is_pending();
-            poll
-        })
-        .await;
+
+        let did_throttle = inner.rate_limiter.acquire(key_count).await;
+
         self.count_accounted.fetch_add(1, Ordering::Relaxed);
         if did_throttle {
             self.count_throttled.fetch_add(1, Ordering::Relaxed);
@@ -173,6 +181,59 @@ where
             Some(wait_time)
         } else {
             None
+        }
+    }
+}
+
+struct RateLimiter {
+    config: LeakyBucketConfig,
+    state: Mutex<LeakyBucketState>,
+
+    /// if this rate limiter is fair,
+    /// provide a queue to provide this fair ordering.
+    queue: Option<Notify>,
+}
+
+impl RateLimiter {
+    fn steady_rps(&self) -> f64 {
+        self.config.cost.as_secs_f64().recip()
+    }
+
+    /// returns true if we did throttle
+    async fn acquire(&self, count: usize) -> bool {
+        let mut throttled = false;
+
+        let start = tokio::time::Instant::now();
+
+        // wait until we are the first in the queue
+        if let Some(queue) = &self.queue {
+            let mut notified = std::pin::pin!(queue.notified());
+            if !notified.as_mut().enable() {
+                throttled = true;
+                notified.await;
+            }
+        }
+
+        // notify the next waiter in the queue when we are done.
+        scopeguard::defer! {
+            if let Some(queue) = &self.queue {
+                queue.notify_one();
+            }
+        };
+
+        loop {
+            let res = self
+                .state
+                .lock()
+                .unwrap()
+                .add_tokens(&self.config, start, count as f64);
+            match res {
+                Ok(()) => return throttled,
+                Err(ready_at) => {
+                    throttled = true;
+                    tokio::time::sleep_until(ready_at).await;
+                }
+            }
         }
     }
 }

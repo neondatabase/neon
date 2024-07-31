@@ -107,7 +107,6 @@ ipnet = "2.9.0"
 itertools = "0.10"
 jsonwebtoken = "9"
 lasso = "0.7"
-leaky-bucket = "1.0.1"
 libc = "0.2"
 md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
