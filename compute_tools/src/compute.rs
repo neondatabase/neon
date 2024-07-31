@@ -1457,6 +1457,7 @@ impl ComputeNode {
         let pgdata_path = Path::new(&self.params.pgdata);
 
         let tls_config = self.tls_config(&pspec.spec);
+        let databricks_settings = spec.databricks_settings.as_ref();
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
@@ -1466,6 +1467,7 @@ impl ComputeNode {
             &pspec.spec,
             self.params.internal_http_port,
             tls_config,
+            databricks_settings,
         )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
@@ -1505,16 +1507,16 @@ impl ComputeNode {
             )
         })?;
 
-        if let Some(databricks_settings) = spec.databricks_settings.as_ref() {
+        if let Some(settings) = databricks_settings {
             copy_tls_certificates(
-                &databricks_settings.pg_compute_tls_settings.key_file,
-                &databricks_settings.pg_compute_tls_settings.cert_file,
+                &settings.pg_compute_tls_settings.key_file,
+                &settings.pg_compute_tls_settings.cert_file,
                 pgdata_path,
             )?;
 
             // Update pg_hba.conf received with basebackup including additional databricks settings.
-            update_pg_hba(pgdata_path, Some(&databricks_settings.databricks_pg_hba))?;
-            update_pg_ident(pgdata_path, Some(&databricks_settings.databricks_pg_ident))?;
+            update_pg_hba(pgdata_path, Some(&settings.databricks_pg_hba))?;
+            update_pg_ident(pgdata_path, Some(&settings.databricks_pg_ident))?;
         } else {
             // Update pg_hba.conf received with basebackup.
             update_pg_hba(pgdata_path, None)?;
@@ -1964,6 +1966,7 @@ impl ComputeNode {
             &spec,
             self.params.internal_http_port,
             tls_config,
+            spec.databricks_settings.as_ref(),
         )?;
 
         self.pg_reload_conf()?;
