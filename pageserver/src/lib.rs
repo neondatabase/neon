@@ -112,6 +112,7 @@ pub async fn shutdown_pageserver(
                 .enable_all()
                 .build()
                 .unwrap();
+            let _entered = rt.enter();
             let _entered = walredo_extraordinary_shutdown_thread_span.enter();
             if let Ok(()) = rt.block_on(tokio::time::timeout(
                 Duration::from_secs(8),
