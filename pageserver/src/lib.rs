@@ -139,7 +139,7 @@ pub async fn shutdown_pageserver(
             info!(count=%futs.len(), "built FuturesUnordered");
             let mut last_log_at = std::time::Instant::now();
             while let Some(()) = rt.block_on(futs.next()) {
-                if last_log_at.elapsed() > Duration::from_secs(1) {
+                if last_log_at.elapsed() > Duration::from_millis(100) {
                     info!(remaining=%futs.len(), "progress");
                     last_log_at = std::time::Instant::now();
                 }
