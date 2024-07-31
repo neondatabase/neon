@@ -368,6 +368,7 @@ impl RemoteStorage for LocalFs {
                             key: k.clone(),
                             // LocalFs is just for testing, so just specify a dummy time
                             last_modified: SystemTime::now(),
+                            size: 0,
                         })
                     }
                 })
@@ -411,6 +412,7 @@ impl RemoteStorage for LocalFs {
                             key: RemotePath::from_string(&relative_key).unwrap(),
                             // LocalFs is just for testing
                             last_modified: SystemTime::now(),
+                            size: 0,
                         });
                     }
                 }

@@ -28,6 +28,12 @@ use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
 
+#[derive(Copy, Clone, Debug)]
+pub struct CompressionInfo {
+    pub written_compressed: bool,
+    pub compressed_size: Option<usize>,
+}
+
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
     pub async fn read_blob(
@@ -273,8 +279,10 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
     ) -> (B::Buf, Result<u64, Error>) {
-        self.write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
-            .await
+        let (buf, res) = self
+            .write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
+            .await;
+        (buf, res.map(|(off, _compression_info)| off))
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
@@ -284,8 +292,12 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         srcbuf: B,
         ctx: &RequestContext,
         algorithm: ImageCompressionAlgorithm,
-    ) -> (B::Buf, Result<u64, Error>) {
+    ) -> (B::Buf, Result<(u64, CompressionInfo), Error>) {
         let offset = self.offset;
+        let mut compression_info = CompressionInfo {
+            written_compressed: false,
+            compressed_size: None,
+        };
 
         let len = srcbuf.bytes_init();
 
@@ -328,7 +340,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         encoder.write_all(&slice[..]).await.unwrap();
                         encoder.shutdown().await.unwrap();
                         let compressed = encoder.into_inner();
+                        compression_info.compressed_size = Some(compressed.len());
                         if compressed.len() < len {
+                            compression_info.written_compressed = true;
                             let compressed_len = compressed.len();
                             compressed_buf = Some(compressed);
                             (BYTE_ZSTD, compressed_len, slice.into_inner())
@@ -359,7 +373,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         } else {
             self.write_all(srcbuf, ctx).await
         };
-        (srcbuf, res.map(|_| offset))
+        (srcbuf, res.map(|_| (offset, compression_info)))
     }
 }
 
@@ -416,12 +430,14 @@ pub(crate) mod tests {
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
-                    wtr.write_blob_maybe_compressed(
-                        blob.clone(),
-                        ctx,
-                        ImageCompressionAlgorithm::Zstd { level: Some(1) },
-                    )
-                    .await
+                    let res = wtr
+                        .write_blob_maybe_compressed(
+                            blob.clone(),
+                            ctx,
+                            ImageCompressionAlgorithm::Zstd { level: Some(1) },
+                        )
+                        .await;
+                    (res.0, res.1.map(|(off, _)| off))
                 } else {
                     wtr.write_blob(blob.clone(), ctx).await
                 };
