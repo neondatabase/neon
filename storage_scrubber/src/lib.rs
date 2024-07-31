@@ -495,7 +495,7 @@ async fn list_objects_with_retries_generic(
             }
         }
     }
-    Err(anyhow!("unreachable unless MAX_RETRIES==0"))
+    panic!("MAX_RETRIES is not allowed to be 0");
 }
 
 async fn download_object_with_retries(
