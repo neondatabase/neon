@@ -33,6 +33,7 @@ use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
 use tokio::io::BufReader;
@@ -312,14 +313,66 @@ impl std::fmt::Debug for Tenant {
 }
 
 pub(crate) enum WalRedoManager {
-    Prod(PostgresRedoManager),
+    Prod(WalredoManagerId, PostgresRedoManager),
     #[cfg(test)]
     Test(harness::TestRedoManager),
 }
 
-impl From<PostgresRedoManager> for WalRedoManager {
-    fn from(mgr: PostgresRedoManager) -> Self {
-        Self::Prod(mgr)
+#[derive(thiserror::Error, Debug)]
+#[error("pageserver is shutting down")]
+pub(crate) struct GlobalShutDown;
+
+impl WalRedoManager {
+    pub(crate) fn new(mgr: PostgresRedoManager) -> Result<Arc<Self>, GlobalShutDown> {
+        let id = WalredoManagerId::next();
+        let arc = Arc::new(Self::Prod(id, mgr));
+        let mut guard = WALREDO_MANAGERS.lock().unwrap();
+        match &mut *guard {
+            Some(map) => {
+                map.insert(id, Arc::downgrade(&arc));
+                Ok(arc)
+            }
+            None => Err(GlobalShutDown),
+        }
+    }
+}
+
+impl Drop for WalRedoManager {
+    fn drop(&mut self) {
+        match self {
+            Self::Prod(id, _) => {
+                let mut guard = WALREDO_MANAGERS.lock().unwrap();
+                if let Some(map) = &mut *guard {
+                    map.remove(id).expect("new() registers, drop() unregisters");
+                }
+            }
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+}
+
+/// Global registro of all walredo managers so that [`crate::shutdown_pageserver`] can shut down
+/// the walredo processes outside of the regular order.
+///
+/// This is necessary to work around a systemd bug where it freezes if there are
+/// walredo processes left => <https://github.com/neondatabase/cloud/issues/11387>
+#[allow(clippy::type_complexity)]
+pub(crate) static WALREDO_MANAGERS: once_cell::sync::Lazy<
+    Mutex<Option<HashMap<WalredoManagerId, Weak<WalRedoManager>>>>,
+> = once_cell::sync::Lazy::new(|| Mutex::new(Some(HashMap::new())));
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+pub(crate) struct WalredoManagerId(u64);
+impl WalredoManagerId {
+    pub fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if id == 0 {
+            panic!("WalredoManagerId::new() returned 0, indicating wraparound, risking it's no longer unique");
+        }
+        Self(id)
     }
 }
 
@@ -333,7 +386,7 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 impl WalRedoManager {
     pub(crate) async fn shutdown(&self) {
         match self {
-            Self::Prod(mgr) => mgr.shutdown().await,
+            Self::Prod(_, mgr) => mgr.shutdown().await,
             #[cfg(test)]
             Self::Test(_) => {
                 // Not applicable to test redo manager
@@ -343,7 +396,7 @@ impl WalRedoManager {
 
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
-            Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
+            Self::Prod(_, mgr) => mgr.maybe_quiesce(idle_timeout),
             #[cfg(test)]
             Self::Test(_) => {
                 // Not applicable to test redo manager
@@ -363,7 +416,7 @@ impl WalRedoManager {
         pg_version: u32,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
-            Self::Prod(mgr) => {
+            Self::Prod(_, mgr) => {
                 mgr.request_redo(key, lsn, base_img, records, pg_version)
                     .await
             }
@@ -377,7 +430,7 @@ impl WalRedoManager {
 
     pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         match self {
-            WalRedoManager::Prod(m) => Some(m.status()),
+            WalRedoManager::Prod(_, m) => Some(m.status()),
             #[cfg(test)]
             WalRedoManager::Test(_) => None,
         }
@@ -677,11 +730,9 @@ impl Tenant {
         init_order: Option<InitializationOrder>,
         mode: SpawnMode,
         ctx: &RequestContext,
-    ) -> Arc<Tenant> {
-        let wal_redo_manager = Arc::new(WalRedoManager::from(PostgresRedoManager::new(
-            conf,
-            tenant_shard_id,
-        )));
+    ) -> Result<Arc<Tenant>, GlobalShutDown> {
+        let wal_redo_manager =
+            WalRedoManager::new(PostgresRedoManager::new(conf, tenant_shard_id))?;
 
         let TenantSharedResources {
             broker_client,
@@ -880,7 +931,7 @@ impl Tenant {
             }
             .instrument(tracing::info_span!(parent: None, "attach", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), gen=?generation)),
         );
-        tenant
+        Ok(tenant)
     }
 
     #[instrument(skip_all)]

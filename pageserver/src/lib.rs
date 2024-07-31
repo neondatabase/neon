@@ -12,6 +12,8 @@ pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub mod l0_flush;
+
+use futures::{stream::FuturesUnordered, StreamExt};
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
 pub mod aux_file;
@@ -36,7 +38,7 @@ use tenant::{
     mgr::{BackgroundPurges, TenantManager},
     secondary,
 };
-use tracing::info;
+use tracing::{info, info_span};
 
 /// Current storage format version
 ///
@@ -85,6 +87,50 @@ pub async fn shutdown_pageserver(
     exit_code: i32,
 ) {
     use std::time::Duration;
+
+    let walredo_extraordinary_shutdown_thread_span = {
+        let span = info_span!(parent: None, "walredo_extraordinary_shutdown_thread");
+        span.follows_from(tracing::Span::current());
+        span
+    };
+    let walredo_extraordinary_shutdown_thread = std::thread::spawn(move || {
+        let _entered = walredo_extraordinary_shutdown_thread_span.enter();
+        std::thread::sleep(Duration::from_secs(8));
+        let managers = tenant::WALREDO_MANAGERS
+            .lock()
+            .unwrap()
+            // prevents new walredo managers from being inserted
+            .take()
+            .expect("only we take()");
+        // Use FuturesUnordered to get in queue early for each manager's
+        // heavier_once_cell semaphore wait list.
+        // Also, for idle tenants that for some reason haven't
+        // shut down yet, it's quite likely that we're not going
+        // to get Poll::Pending once.
+        let mut futs: FuturesUnordered<_> = managers
+            .into_iter()
+            .filter_map(|(_, mgr)| mgr.upgrade())
+            .map(|mgr| async move { tokio::task::unconstrained(mgr.shutdown()).await })
+            .collect();
+        if futs.is_empty() {
+            info!("no walredo managers left");
+            return;
+        }
+        info!(count=%futs.len(), "starting shutdown");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut last_log_at = std::time::Instant::now();
+        while let Some(()) = rt.block_on(futs.next()) {
+            if last_log_at.elapsed() > Duration::from_secs(1) {
+                info!(remaining=%futs.len(), "progress");
+                last_log_at = std::time::Instant::now();
+            }
+        }
+        info!("done");
+    });
+
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
     let remaining_connections = timed(
@@ -160,6 +206,11 @@ pub async fn shutdown_pageserver(
         Duration::from_secs(1),
     )
     .await;
+
+    info!("join walredo_extraordinary_shutdown_thread");
+    walredo_extraordinary_shutdown_thread.join().unwrap();
+    info!("walredo_extraordinary_shutdown_thread done");
+
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
 }
