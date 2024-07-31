@@ -11,7 +11,7 @@
 #ifndef INMEM_SMGR_H
 #define INMEM_SMGR_H
 
-extern const f_smgr *smgr_inmem(BackendId backend, NRelFileInfo rinfo);
+extern const f_smgr *smgr_inmem(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_inmem(void);
 
 #endif /* INMEM_SMGR_H */
