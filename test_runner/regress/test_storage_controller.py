@@ -3,7 +3,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -12,6 +12,8 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    PageserverAvailability,
+    PageserverSchedulingPolicy,
     PgBin,
     StorageControllerApiException,
     TokenScope,
@@ -918,6 +920,8 @@ def test_storage_controller_tenant_deletion(
 
 class Failure:
     pageserver_id: int
+    offline_timeout: int
+    must_detect_after: int
 
     def apply(self, env: NeonEnv):
         raise NotImplementedError()
@@ -930,9 +934,11 @@ class Failure:
 
 
 class NodeStop(Failure):
-    def __init__(self, pageserver_ids, immediate):
+    def __init__(self, pageserver_ids, immediate, offline_timeout, must_detect_after):
         self.pageserver_ids = pageserver_ids
         self.immediate = immediate
+        self.offline_timeout = offline_timeout
+        self.must_detect_after = must_detect_after
 
     def apply(self, env: NeonEnv):
         for ps_id in self.pageserver_ids:
@@ -948,10 +954,42 @@ class NodeStop(Failure):
         return self.pageserver_ids
 
 
+class NodeRestartWithSlowReattach(Failure):
+    def __init__(self, pageserver_id, offline_timeout, must_detect_after):
+        self.pageserver_id = pageserver_id
+        self.offline_timeout = offline_timeout
+        self.must_detect_after = must_detect_after
+        self.thread = None
+
+    def apply(self, env: NeonEnv):
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.stop(immediate=False)
+
+        def start_ps():
+            pageserver.start(
+                extra_env_vars={"FAILPOINTS": "control-plane-client-re-attach=return(30000)"}
+            )
+
+        self.thread = threading.Thread(target=start_ps)
+        self.thread.start()
+
+    def clear(self, env: NeonEnv):
+        if self.thread is not None:
+            self.thread.join()
+
+        pageserver = env.get_pageserver(self.pageserver_id)
+        pageserver.http_client().configure_failpoints(("control-plane-client-re-attach", "off"))
+
+    def nodes(self):
+        return [self.pageserver_id]
+
+
 class PageserverFailpoint(Failure):
-    def __init__(self, failpoint, pageserver_id):
+    def __init__(self, failpoint, pageserver_id, offline_timeout, must_detect_after):
         self.failpoint = failpoint
         self.pageserver_id = pageserver_id
+        self.offline_timeout = offline_timeout
+        self.must_detect_after = must_detect_after
 
     def apply(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
@@ -987,15 +1025,28 @@ def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
 @pytest.mark.parametrize(
     "failure",
     [
-        NodeStop(pageserver_ids=[1], immediate=False),
-        NodeStop(pageserver_ids=[1], immediate=True),
-        NodeStop(pageserver_ids=[1, 2], immediate=True),
-        PageserverFailpoint(pageserver_id=1, failpoint="get-utilization-http-handler"),
+        NodeStop(pageserver_ids=[1], immediate=False, offline_timeout=20, must_detect_after=5),
+        NodeStop(pageserver_ids=[1], immediate=True, offline_timeout=20, must_detect_after=5),
+        NodeStop(pageserver_ids=[1, 2], immediate=True, offline_timeout=20, must_detect_after=5),
+        PageserverFailpoint(
+            pageserver_id=1,
+            failpoint="get-utilization-http-handler",
+            offline_timeout=20,
+            must_detect_after=5,
+        ),
+        # Instrument a scenario where the node is slow to re-attach. The re-attach request itself
+        # should serve as a signal to the storage controller to use a more lenient heartbeat timeout.
+        NodeRestartWithSlowReattach(pageserver_id=1, offline_timeout=60, must_detect_after=15),
     ],
 )
 def test_storage_controller_heartbeats(
     neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, failure: Failure
 ):
+    neon_env_builder.storage_controller_config = {
+        "max_offline": "10s",
+        "max_warming_up": "20s",
+    }
+
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
     env.start()
@@ -1061,9 +1112,12 @@ def test_storage_controller_heartbeats(
             if node["id"] in offline_node_ids:
                 assert node["availability"] == "Offline"
 
-    # A node is considered offline if the last successful heartbeat
-    # was more than 10 seconds ago (hardcoded in the storage controller).
-    wait_until(20, 1, nodes_offline)
+    start = time.time()
+    wait_until(failure.offline_timeout, 1, nodes_offline)
+    detected_after = time.time() - start
+    log.info(f"Detected node failures after {detected_after}s")
+
+    assert detected_after >= failure.must_detect_after
 
     # .. expecting the tenant on the offline node to be migrated
     def tenant_migrated():
@@ -1546,7 +1600,13 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        env.storage_controller.poll_node_status(ps.id, "PauseForRestart", max_attempts=6, backoff=5)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
+            max_attempts=6,
+            backoff=5,
+        )
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after draining node {ps.id}: {shard_counts}")
@@ -1556,12 +1616,24 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         assert sum(shard_counts.values()) == total_shards
 
         ps.restart()
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=10, backoff=1)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
+            max_attempts=10,
+            backoff=1,
+        )
 
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=6, backoff=5)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
+            max_attempts=6,
+            backoff=5,
+        )
 
         shard_counts = get_node_shard_counts(env, tenant_ids)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
@@ -1606,8 +1678,303 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
         backoff=2,
     )
 
-    env.storage_controller.poll_node_status(ps_id_to_drain, "Draining", max_attempts=6, backoff=2)
+    env.storage_controller.poll_node_status(
+        ps_id_to_drain,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.DRAINING,
+        max_attempts=6,
+        backoff=2,
+    )
 
     env.storage_controller.cancel_node_drain(ps_id_to_drain)
 
-    env.storage_controller.poll_node_status(ps_id_to_drain, "Active", max_attempts=6, backoff=2)
+    env.storage_controller.poll_node_status(
+        ps_id_to_drain,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.ACTIVE,
+        max_attempts=6,
+        backoff=2,
+    )
+
+
+@pytest.mark.parametrize("while_offline", [True, False])
+def test_storage_controller_node_deletion(
+    neon_env_builder: NeonEnvBuilder,
+    compute_reconfigure_listener: ComputeReconfigure,
+    while_offline: bool,
+):
+    """
+    Test that deleting a node works & properly reschedules everything that was on the node.
+    """
+    neon_env_builder.num_pageservers = 3
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_count = 10
+    shard_count_per_tenant = 8
+    tenant_ids = []
+    for _ in range(0, tenant_count):
+        tid = TenantId.generate()
+        tenant_ids.append(tid)
+        env.neon_cli.create_tenant(
+            tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
+        )
+
+    victim = env.pageservers[-1]
+
+    # The procedure a human would follow is:
+    # 1. Mark pageserver scheduling=pause
+    # 2. Mark pageserver availability=offline to trigger migrations away from it
+    # 3. Wait for attachments to all move elsewhere
+    # 4. Call deletion API
+    # 5. Stop the node.
+
+    env.storage_controller.node_configure(victim.id, {"scheduling": "Pause"})
+
+    if while_offline:
+        victim.stop(immediate=True)
+        env.storage_controller.node_configure(victim.id, {"availability": "Offline"})
+
+        def assert_shards_migrated():
+            counts = get_node_shard_counts(env, tenant_ids)
+            elsewhere = sum(v for (k, v) in counts.items() if k != victim.id)
+            log.info(f"Shards on nodes other than on victim: {elsewhere}")
+            assert elsewhere == tenant_count * shard_count_per_tenant
+
+        wait_until(30, 1, assert_shards_migrated)
+
+    log.info(f"Deleting pageserver {victim.id}")
+    env.storage_controller.node_delete(victim.id)
+
+    if not while_offline:
+
+        def assert_victim_evacuated():
+            counts = get_node_shard_counts(env, tenant_ids)
+            count = counts[victim.id]
+            log.info(f"Shards on node {victim.id}: {count}")
+            assert count == 0
+
+        wait_until(30, 1, assert_victim_evacuated)
+
+    # The node should be gone from the list API
+    assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+
+    # No tenants should refer to the node in their intent
+    for tenant_id in tenant_ids:
+        describe = env.storage_controller.tenant_describe(tenant_id)
+        for shard in describe["shards"]:
+            assert shard["node_attached"] != victim.id
+            assert victim.id not in shard["node_secondary"]
+
+    # Reconciles running during deletion should all complete
+    # FIXME: this currently doesn't work because the deletion schedules shards without a proper ScheduleContext, resulting
+    # in states that background_reconcile wants to optimize, but can't proceed with migrations yet because this is a short3
+    # test that hasn't uploaded any heatmaps for secondaries.
+    # In the interim, just do a reconcile_all to enable the consistency check.
+    # env.storage_controller.reconcile_until_idle()
+    env.storage_controller.reconcile_all()
+
+    # Controller should pass its own consistency checks
+    env.storage_controller.consistency_check()
+
+    # The node should stay gone across a restart
+    env.storage_controller.stop()
+    env.storage_controller.start()
+    assert victim.id not in [n["id"] for n in env.storage_controller.node_list()]
+    env.storage_controller.reconcile_all()  # FIXME: workaround for optimizations happening on startup, see FIXME above.
+    env.storage_controller.consistency_check()
+
+
+@pytest.mark.parametrize("shard_count", [None, 2])
+def test_storage_controller_metadata_health(
+    neon_env_builder: NeonEnvBuilder,
+    shard_count: Optional[int],
+):
+    """
+    Create three tenants A, B, C.
+
+    Phase 1:
+    - A: Post healthy status.
+    - B: Post unhealthy status.
+    - C: No updates.
+
+    Phase 2:
+    - B: Post healthy status.
+    - C: Post healthy status.
+
+    Phase 3:
+    - A: Post unhealthy status.
+
+    Phase 4:
+    - Delete tenant A, metadata health status should be deleted as well.
+    """
+
+    def update_and_query_metadata_health(
+        env: NeonEnv,
+        healthy: List[TenantShardId],
+        unhealthy: List[TenantShardId],
+        outdated_duration: str = "1h",
+    ) -> Tuple[Set[str], Set[str]]:
+        """
+        Update metadata health. Then list tenant shards with unhealthy and
+        outdated metadata health status.
+        """
+        if healthy or unhealthy:
+            env.storage_controller.metadata_health_update(healthy, unhealthy)
+        result = env.storage_controller.metadata_health_list_unhealthy()
+        unhealthy_res = set(result["unhealthy_tenant_shards"])
+        result = env.storage_controller.metadata_health_list_outdated(outdated_duration)
+        outdated_res = set(record["tenant_shard_id"] for record in result["health_records"])
+
+        return unhealthy_res, outdated_res
+
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_start()
+
+    # Mock tenant (`initial_tenant``) with healthy scrubber scan result
+    tenant_a_shard_ids = (
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(env.initial_tenant, 0, 0)]
+    )
+
+    # Mock tenant with unhealthy scrubber scan result
+    tenant_b, _ = env.neon_cli.create_tenant(shard_count=shard_count)
+    tenant_b_shard_ids = (
+        env.storage_controller.tenant_shard_split(tenant_b, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(tenant_b, 0, 0)]
+    )
+
+    # Mock tenant that never gets a health update from scrubber
+    tenant_c, _ = env.neon_cli.create_tenant(shard_count=shard_count)
+
+    tenant_c_shard_ids = (
+        env.storage_controller.tenant_shard_split(tenant_c, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(tenant_c, 0, 0)]
+    )
+
+    # Metadata health table also updated as tenant shards are created.
+    assert env.storage_controller.metadata_health_is_healthy()
+
+    # post "fake" updates to storage controller db
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=tenant_a_shard_ids, unhealthy=tenant_b_shard_ids
+    )
+
+    log.info(f"After Phase 1: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == len(tenant_b_shard_ids)
+    for t in tenant_b_shard_ids:
+        assert str(t) in unhealthy
+    assert len(outdated) == 0
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=tenant_b_shard_ids + tenant_c_shard_ids, unhealthy=[]
+    )
+
+    log.info(f"After Phase 2: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == 0
+    assert len(outdated) == 0
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=[], unhealthy=tenant_a_shard_ids
+    )
+
+    log.info(f"After Phase 3: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == len(tenant_a_shard_ids)
+    for t in tenant_a_shard_ids:
+        assert str(t) in unhealthy
+    assert len(outdated) == 0
+
+    # Phase 4: Delete A
+    env.storage_controller.pageserver_api().tenant_delete(env.initial_tenant)
+
+    # A's unhealthy metadata health status should be deleted as well.
+    assert env.storage_controller.metadata_health_is_healthy()
+
+    # All shards from B and C are not fresh if set outdated duration to 0 seconds.
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=[], unhealthy=tenant_a_shard_ids, outdated_duration="0s"
+    )
+    assert len(unhealthy) == 0
+    for t in tenant_b_shard_ids + tenant_c_shard_ids:
+        assert str(t) in outdated
+
+
+def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
+    """
+    Test the `/control/v1/step_down` storage controller API. Upon receiving such
+    a request, the storage controller cancels any on-going reconciles and replies
+    with 503 to all requests apart from `/control/v1/step_down`, `/status` and `/metrics`.
+    """
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tid = TenantId.generate()
+    tsid = str(TenantShardId(tid, shard_number=0, shard_count=0))
+    env.storage_controller.tenant_create(tid)
+
+    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.configure_failpoints(("sleep-on-reconcile-epilogue", "return(10000)"))
+
+    # Make a change to the tenant config to trigger a slow reconcile
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
+    virtual_ps_http.patch_tenant_config_client_side(tid, {"compaction_threshold": 5}, None)
+    env.storage_controller.allowed_errors.append(
+        ".*Accepted configuration update but reconciliation failed.*"
+    )
+
+    observed_state = env.storage_controller.step_down()
+    log.info(f"Storage controller stepped down with {observed_state=}")
+
+    # Validate that we waited for the slow reconcile to complete
+    # and updated the observed state in the storcon before stepping down.
+    node_id = str(env.pageserver.id)
+    assert tsid in observed_state
+    assert node_id in observed_state[tsid]["locations"]
+    assert "conf" in observed_state[tsid]["locations"][node_id]
+    assert "tenant_conf" in observed_state[tsid]["locations"][node_id]["conf"]
+
+    tenant_conf = observed_state[tsid]["locations"][node_id]["conf"]["tenant_conf"]
+    assert "compaction_threshold" in tenant_conf
+    assert tenant_conf["compaction_threshold"] == 5
+
+    # Validate that we propagated the change to the pageserver
+    ps_tenant_conf = env.pageserver.http_client().tenant_config(tid)
+    assert "compaction_threshold" in ps_tenant_conf.effective_config
+    assert ps_tenant_conf.effective_config["compaction_threshold"] == 5
+
+    # Validate that the storcon is not replying to the usual requests
+    # once it has stepped down.
+    with pytest.raises(StorageControllerApiException, match="stepped_down"):
+        env.storage_controller.tenant_list()
+
+    # Validate that we can step down multiple times and the observed state
+    # doesn't change.
+    observed_state_again = env.storage_controller.step_down()
+    assert observed_state == observed_state_again
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "leader"}
+        )
+        == 0
+    )
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "stepped_down"}
+        )
+        == 1
+    )
+
+    assert (
+        env.storage_controller.get_metric_value(
+            "storage_controller_leadership_status", filter={"status": "candidate"}
+        )
+        == 0
+    )

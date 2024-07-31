@@ -8,14 +8,14 @@ use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
 use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use aws_sdk_s3::Client;
 use futures_util::{StreamExt, TryStreamExt};
-use histogram::Histogram;
 use pageserver::tenant::remote_timeline_client::remote_layer_path;
-use pageserver::tenant::IndexPart;
+use pageserver_api::controller_api::MetadataHealthUpdateRequest;
 use pageserver_api::shard::TenantShardId;
 use serde::Serialize;
 use utils::id::TenantId;
+use utils::shard::ShardCount;
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub struct MetadataSummary {
     tenant_count: usize,
     timeline_count: usize,
@@ -25,94 +25,15 @@ pub struct MetadataSummary {
     with_orphans: HashSet<TenantShardTimelineId>,
     indices_by_version: HashMap<usize, usize>,
 
-    layer_count: MinMaxHisto,
-    timeline_size_bytes: MinMaxHisto,
-    layer_size_bytes: MinMaxHisto,
-}
-
-/// A histogram plus minimum and maximum tracking
-#[derive(Serialize)]
-struct MinMaxHisto {
     #[serde(skip)]
-    histo: Histogram,
-    min: u64,
-    max: u64,
-}
-
-impl MinMaxHisto {
-    fn new() -> Self {
-        Self {
-            histo: histogram::Histogram::builder()
-                .build()
-                .expect("Bad histogram params"),
-            min: u64::MAX,
-            max: 0,
-        }
-    }
-
-    fn sample(&mut self, v: u64) -> Result<(), histogram::Error> {
-        self.min = std::cmp::min(self.min, v);
-        self.max = std::cmp::max(self.max, v);
-        let r = self.histo.increment(v, 1);
-
-        if r.is_err() {
-            tracing::warn!("Bad histogram sample: {v}");
-        }
-
-        r
-    }
-
-    fn oneline(&self) -> String {
-        let percentiles = match self.histo.percentiles(&[1.0, 10.0, 50.0, 90.0, 99.0]) {
-            Ok(p) => p,
-            Err(e) => return format!("No data: {}", e),
-        };
-
-        let percentiles: Vec<u64> = percentiles
-            .iter()
-            .map(|p| p.bucket().low() + p.bucket().high() / 2)
-            .collect();
-
-        format!(
-            "min {}, 1% {}, 10% {}, 50% {}, 90% {}, 99% {}, max {}",
-            self.min,
-            percentiles[0],
-            percentiles[1],
-            percentiles[2],
-            percentiles[3],
-            percentiles[4],
-            self.max,
-        )
-    }
+    pub(crate) healthy_tenant_shards: HashSet<TenantShardId>,
+    #[serde(skip)]
+    pub(crate) unhealthy_tenant_shards: HashSet<TenantShardId>,
 }
 
 impl MetadataSummary {
     fn new() -> Self {
-        Self {
-            tenant_count: 0,
-            timeline_count: 0,
-            timeline_shard_count: 0,
-            with_errors: HashSet::new(),
-            with_warnings: HashSet::new(),
-            with_orphans: HashSet::new(),
-            indices_by_version: HashMap::new(),
-            layer_count: MinMaxHisto::new(),
-            timeline_size_bytes: MinMaxHisto::new(),
-            layer_size_bytes: MinMaxHisto::new(),
-        }
-    }
-
-    fn update_histograms(&mut self, index_part: &IndexPart) -> Result<(), histogram::Error> {
-        self.layer_count
-            .sample(index_part.layer_metadata.len() as u64)?;
-        let mut total_size: u64 = 0;
-        for meta in index_part.layer_metadata.values() {
-            total_size += meta.file_size;
-            self.layer_size_bytes.sample(meta.file_size)?;
-        }
-        self.timeline_size_bytes.sample(total_size)?;
-
-        Ok(())
+        Self::default()
     }
 
     fn update_data(&mut self, data: &S3TimelineBlobData) {
@@ -127,18 +48,17 @@ impl MetadataSummary {
                 .indices_by_version
                 .entry(index_part.version())
                 .or_insert(0) += 1;
-
-            if let Err(e) = self.update_histograms(index_part) {
-                // Value out of range?  Warn that the results are untrustworthy
-                tracing::warn!(
-                    "Error updating histograms, summary stats may be wrong: {}",
-                    e
-                );
-            }
         }
     }
 
     fn update_analysis(&mut self, id: &TenantShardTimelineId, analysis: &TimelineAnalysis) {
+        if analysis.is_healthy() {
+            self.healthy_tenant_shards.insert(id.tenant_shard_id);
+        } else {
+            self.healthy_tenant_shards.remove(&id.tenant_shard_id);
+            self.unhealthy_tenant_shards.insert(id.tenant_shard_id);
+        }
+
         if !analysis.errors.is_empty() {
             self.with_errors.insert(*id);
         }
@@ -169,9 +89,6 @@ With errors: {}
 With warnings: {}
 With orphan layers: {}
 Index versions: {version_summary}
-Timeline size bytes: {}
-Layer size bytes: {}
-Timeline layer count: {}
 ",
             self.tenant_count,
             self.timeline_count,
@@ -179,9 +96,6 @@ Timeline layer count: {}
             self.with_errors.len(),
             self.with_warnings.len(),
             self.with_orphans.len(),
-            self.timeline_size_bytes.oneline(),
-            self.layer_size_bytes.oneline(),
-            self.layer_count.oneline(),
         )
     }
 
@@ -192,6 +106,13 @@ Timeline layer count: {}
     pub fn is_empty(&self) -> bool {
         self.timeline_shard_count == 0
     }
+
+    pub fn build_health_update_request(&self) -> MetadataHealthUpdateRequest {
+        MetadataHealthUpdateRequest {
+            healthy_tenant_shards: self.healthy_tenant_shards.clone(),
+            unhealthy_tenant_shards: self.unhealthy_tenant_shards.clone(),
+        }
+    }
 }
 
 /// Scan the pageserver metadata in an S3 bucket, reporting errors and statistics.
@@ -199,7 +120,7 @@ pub async fn scan_metadata(
     bucket_config: BucketConfig,
     tenant_ids: Vec<TenantShardId>,
 ) -> anyhow::Result<MetadataSummary> {
-    let (s3_client, target) = init_remote(bucket_config, NodeKind::Pageserver)?;
+    let (s3_client, target) = init_remote(bucket_config, NodeKind::Pageserver).await?;
 
     let tenants = if tenant_ids.is_empty() {
         futures::future::Either::Left(stream_tenants(&s3_client, &target))
@@ -235,33 +156,60 @@ pub async fn scan_metadata(
     let mut tenant_objects = TenantObjectListing::default();
     let mut tenant_timeline_results = Vec::new();
 
-    fn analyze_tenant(
+    async fn analyze_tenant(
+        s3_client: &Client,
+        target: &RootTarget,
         tenant_id: TenantId,
         summary: &mut MetadataSummary,
         mut tenant_objects: TenantObjectListing,
         timelines: Vec<(TenantShardTimelineId, S3TimelineBlobData)>,
+        highest_shard_count: ShardCount,
     ) {
         summary.tenant_count += 1;
 
         let mut timeline_ids = HashSet::new();
         let mut timeline_generations = HashMap::new();
         for (ttid, data) in timelines {
-            timeline_ids.insert(ttid.timeline_id);
-            // Stash the generation of each timeline, for later use identifying orphan layers
-            if let BlobDataParseResult::Parsed {
-                index_part: _index_part,
-                index_part_generation,
-                s3_layers: _s3_layers,
-            } = &data.blob_data
-            {
-                timeline_generations.insert(ttid, *index_part_generation);
-            }
+            if ttid.tenant_shard_id.shard_count == highest_shard_count {
+                // Only analyze `TenantShardId`s with highest shard count.
 
-            // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
-            // reference counts for layers across the tenant.
-            let analysis =
-                branch_cleanup_and_check_errors(&ttid, &mut tenant_objects, None, None, Some(data));
-            summary.update_analysis(&ttid, &analysis);
+                // Stash the generation of each timeline, for later use identifying orphan layers
+                if let BlobDataParseResult::Parsed {
+                    index_part,
+                    index_part_generation,
+                    s3_layers: _s3_layers,
+                } = &data.blob_data
+                {
+                    if index_part.deleted_at.is_some() {
+                        // skip deleted timeline.
+                        tracing::info!("Skip analysis of {} b/c timeline is already deleted", ttid);
+                        continue;
+                    }
+                    timeline_generations.insert(ttid, *index_part_generation);
+                }
+
+                // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
+                // reference counts for layers across the tenant.
+                let analysis = branch_cleanup_and_check_errors(
+                    s3_client,
+                    target,
+                    &ttid,
+                    &mut tenant_objects,
+                    None,
+                    None,
+                    Some(data),
+                )
+                .await;
+                summary.update_analysis(&ttid, &analysis);
+
+                timeline_ids.insert(ttid.timeline_id);
+            } else {
+                tracing::info!(
+                    "Skip analysis of {} b/c a lower shard count than {}",
+                    ttid,
+                    highest_shard_count.0,
+                );
+            }
         }
 
         summary.timeline_count += timeline_ids.len();
@@ -309,18 +257,35 @@ pub async fn scan_metadata(
     // all results for the same tenant will be adjacent.  We accumulate these,
     // and then call `analyze_tenant` to flush, when we see the next tenant ID.
     let mut summary = MetadataSummary::new();
+    let mut highest_shard_count = ShardCount::MIN;
     while let Some(i) = timelines.next().await {
         let (ttid, data) = i?;
         summary.update_data(&data);
 
         match tenant_id {
-            None => tenant_id = Some(ttid.tenant_shard_id.tenant_id),
+            None => {
+                tenant_id = Some(ttid.tenant_shard_id.tenant_id);
+                highest_shard_count = highest_shard_count.max(ttid.tenant_shard_id.shard_count);
+            }
             Some(prev_tenant_id) => {
                 if prev_tenant_id != ttid.tenant_shard_id.tenant_id {
+                    // New tenant: analyze this tenant's timelines, clear accumulated tenant_timeline_results
                     let tenant_objects = std::mem::take(&mut tenant_objects);
                     let timelines = std::mem::take(&mut tenant_timeline_results);
-                    analyze_tenant(prev_tenant_id, &mut summary, tenant_objects, timelines);
+                    analyze_tenant(
+                        &s3_client,
+                        &target,
+                        prev_tenant_id,
+                        &mut summary,
+                        tenant_objects,
+                        timelines,
+                        highest_shard_count,
+                    )
+                    .await;
                     tenant_id = Some(ttid.tenant_shard_id.tenant_id);
+                    highest_shard_count = ttid.tenant_shard_id.shard_count;
+                } else {
+                    highest_shard_count = highest_shard_count.max(ttid.tenant_shard_id.shard_count);
                 }
             }
         }
@@ -338,11 +303,15 @@ pub async fn scan_metadata(
 
     if !tenant_timeline_results.is_empty() {
         analyze_tenant(
+            &s3_client,
+            &target,
             tenant_id.expect("Must be set if results are present"),
             &mut summary,
             tenant_objects,
             tenant_timeline_results,
-        );
+            highest_shard_count,
+        )
+        .await;
     }
 
     Ok(summary)

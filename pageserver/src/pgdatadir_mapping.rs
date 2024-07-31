@@ -284,6 +284,16 @@ impl Timeline {
         if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
             return Ok(true);
         }
+        // then check if the database was already initialized.
+        // get_rel_exists can be called before dbdir is created.
+        let buf = version.get(self, DBDIR_KEY, ctx).await?;
+        let dbdirs = match DbDirectory::des(&buf).context("deserialization failure") {
+            Ok(dir) => Ok(dir.dbdirs),
+            Err(e) => Err(PageReconstructError::from(e)),
+        }?;
+        if !dbdirs.contains_key(&(tag.spcnode, tag.dbnode)) {
+            return Ok(false);
+        }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = version.get(self, key, ctx).await?;
@@ -522,7 +532,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Option<TimestampTz>, PageReconstructError> {
         let mut max: Option<TimestampTz> = None;
-        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+        self.map_all_timestamps::<()>(probe_lsn, ctx, |timestamp| {
             if let Some(max_prev) = max {
                 max = Some(max_prev.max(timestamp));
             } else {
@@ -2031,7 +2041,7 @@ mod tests {
     #[tokio::test]
     async fn aux_files_round_trip() -> anyhow::Result<()> {
         let name = "aux_files_round_trip";
-        let harness = TenantHarness::create(name)?;
+        let harness = TenantHarness::create(name).await?;
 
         pub const TIMELINE_ID: TimelineId =
             TimelineId::from_array(hex!("11223344556677881122334455667788"));

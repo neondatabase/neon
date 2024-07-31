@@ -26,7 +26,7 @@ use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
-use futures::stream::Stream;
+use futures::{stream::Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -149,10 +149,17 @@ pub enum ListingMode {
     NoDelimiter,
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub struct ListingObject {
+    pub key: RemotePath,
+    pub last_modified: SystemTime,
+    pub size: u64,
+}
+
 #[derive(Default)]
 pub struct Listing {
     pub prefixes: Vec<RemotePath>,
-    pub keys: Vec<RemotePath>,
+    pub keys: Vec<ListingObject>,
 }
 
 /// Storage (potentially remote) API to manage its state.
@@ -160,13 +167,18 @@ pub struct Listing {
 /// providing basic CRUD operations for storage files.
 #[allow(async_fn_in_trait)]
 pub trait RemoteStorage: Send + Sync + 'static {
-    /// List objects in remote storage, with semantics matching AWS S3's ListObjectsV2.
-    /// (see `<https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>`)
+    /// List objects in remote storage, with semantics matching AWS S3's [`ListObjectsV2`].
+    ///
+    /// The stream is guaranteed to return at least one element, even in the case of errors
+    /// (in that case it's an `Err()`), or an empty `Listing`.
+    ///
+    /// The stream is not ending if it returns an error, as long as [`is_permanent`] returns false on the error.
+    /// The `next` function can be retried, and maybe in a future retry, there will be success.
     ///
     /// Note that the prefix is relative to any `prefix_in_bucket` configured for the client, not
     /// from the absolute root of the bucket.
     ///
-    /// `mode` configures whether to use a delimiter.  Without a delimiter all keys
+    /// `mode` configures whether to use a delimiter.  Without a delimiter, all keys
     /// within the prefix are listed in the `keys` of the result.  With a delimiter, any "directories" at the top level of
     /// the prefix are returned in the `prefixes` of the result, and keys in the top level of the prefix are
     /// returned in `keys` ().
@@ -175,13 +187,32 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// will iteratively call listobjects until it runs out of keys.  Note that this is not safe to use on
     /// unlimted size buckets, as the full list of objects is allocated into a monolithic data structure.
     ///
+    /// [`ListObjectsV2`]: <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>
+    /// [`is_permanent`]: DownloadError::is_permanent
+    fn list_streaming(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + Send;
+
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
-        _mode: ListingMode,
+        mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> Result<Listing, DownloadError>;
+    ) -> Result<Listing, DownloadError> {
+        let mut stream = std::pin::pin!(self.list_streaming(prefix, mode, max_keys, cancel));
+        let mut combined = stream.next().await.expect("At least one item required")?;
+        while let Some(list) = stream.next().await {
+            let list = list?;
+            combined.keys.extend(list.keys.into_iter());
+            combined.prefixes.extend_from_slice(&list.prefixes);
+        }
+        Ok(combined)
+    }
 
     /// Streams the local file contents into remote into the remote storage entry.
     ///
@@ -288,8 +319,8 @@ impl Debug for Download {
 
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
-#[derive(Clone)]
 // Require Clone for `Other` due to https://github.com/rust-lang/rust/issues/26925
+#[derive(Clone)]
 pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
@@ -298,18 +329,36 @@ pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
 }
 
 impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
+    // See [`RemoteStorage::list`].
     pub async fn list(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<Listing, DownloadError> {
+    ) -> Result<Listing, DownloadError> {
         match self {
             Self::LocalFs(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::AwsS3(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::AzureBlob(s) => s.list(prefix, mode, max_keys, cancel).await,
             Self::Unreliable(s) => s.list(prefix, mode, max_keys, cancel).await,
+        }
+    }
+
+    // See [`RemoteStorage::list_streaming`].
+    pub fn list_streaming<'a>(
+        &'a self,
+        prefix: Option<&'a RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &'a CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + 'a + Send {
+        match self {
+            Self::LocalFs(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel))
+                as Pin<Box<dyn Stream<Item = Result<Listing, DownloadError>> + Send>>,
+            Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+            Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+            Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
         }
     }
 
@@ -443,7 +492,7 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
 }
 
 impl GenericRemoteStorage {
-    pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
+    pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         let timeout = storage_config.timeout;
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs { local_path: path } => {
@@ -458,7 +507,7 @@ impl GenericRemoteStorage {
                     std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "<none>".into());
                 info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
-                Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout)?))
+                Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout).await?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
                 let storage_account = azure_config
@@ -502,6 +551,16 @@ impl GenericRemoteStorage {
         match byte_range {
             Some((start, end)) => self.download_byte_range(from, start, end, cancel).await,
             None => self.download(from, cancel).await,
+        }
+    }
+
+    /// The name of the bucket/container/etc.
+    pub fn bucket_name(&self) -> Option<&str> {
+        match self {
+            Self::LocalFs(_s) => None,
+            Self::AwsS3(s) => Some(s.bucket_name()),
+            Self::AzureBlob(s) => Some(s.container_name()),
+            Self::Unreliable(_s) => None,
         }
     }
 }

@@ -262,7 +262,7 @@ where
 
     pub fn iter<'a>(self, start_key: &'a [u8; L], ctx: &'a RequestContext) -> DiskBtreeIterator<'a>
     where
-        R: 'a,
+        R: 'a + Send,
     {
         DiskBtreeIterator {
             stream: Box::pin(self.into_stream(start_key, ctx)),
@@ -296,13 +296,19 @@ where
             let mut stack = Vec::new();
             stack.push((self.root_blk, None));
             let block_cursor = self.reader.block_cursor();
+            let mut node_buf = [0_u8; PAGE_SZ];
             while let Some((node_blknum, opt_iter)) = stack.pop() {
-                // Locate the node.
-                let node_buf = block_cursor
+                // Read the node, through the PS PageCache, into local variable `node_buf`.
+                // We could keep the page cache read guard alive, but, at the time of writing,
+                // we run quite small PS PageCache s => can't risk running out of
+                // PageCache space because this stream isn't consumed fast enough.
+                let page_read_guard = block_cursor
                     .read_blk(self.start_blk + node_blknum, ctx)
                     .await?;
+                node_buf.copy_from_slice(page_read_guard.as_ref());
+                drop(page_read_guard); // drop page cache read guard early
 
-                let node = OnDiskNode::deparse(node_buf.as_ref())?;
+                let node = OnDiskNode::deparse(&node_buf)?;
                 let prefix_len = node.prefix_len as usize;
                 let suffix_len = node.suffix_len as usize;
 
@@ -344,6 +350,7 @@ where
                     };
                     Either::Left(idx..node.num_children.into())
                 };
+
 
                 // idx points to the first match now. Keep going from there
                 while let Some(idx) = iter.next() {
@@ -521,7 +528,7 @@ where
 pub struct DiskBtreeIterator<'a> {
     #[allow(clippy::type_complexity)]
     stream: std::pin::Pin<
-        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a>,
+        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a + Send>,
     >,
 }
 
@@ -550,10 +557,10 @@ where
     /// We maintain the length of the stack to be always greater than zero.
     /// Two exceptions are:
     /// 1. `Self::flush_node`. The method will push the new node if it extracted the last one.
-    ///   So because other methods cannot see the intermediate state invariant still holds.
+    ///    So because other methods cannot see the intermediate state invariant still holds.
     /// 2. `Self::finish`. It consumes self and does not return it back,
-    ///  which means that this is where the structure is destroyed.
-    ///  Thus stack of zero length cannot be observed by other methods.
+    ///    which means that this is where the structure is destroyed.
+    ///    Thus stack of zero length cannot be observed by other methods.
     stack: Vec<BuildNode<L>>,
 
     /// Last key that was appended to the tree. Used to sanity check that append

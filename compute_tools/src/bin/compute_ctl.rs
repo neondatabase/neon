@@ -6,7 +6,7 @@
 //! - Every start is a fresh start, so the data directory is removed and
 //!   initialized again on each run.
 //! - If remote_extension_config is provided, it will be used to fetch extensions list
-//!  and download `shared_preload_libraries` from the remote storage.
+//!   and download `shared_preload_libraries` from the remote storage.
 //! - Next it will put configuration files into the `PGDATA` directory.
 //! - Sync safekeepers and get commit LSN.
 //! - Get `basebackup` from pageserver using the returned on the previous step LSN.
@@ -33,7 +33,6 @@
 //!             -b /usr/local/bin/postgres \
 //!             -r http://pg-ext-s3-gateway \
 //! ```
-//!
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
@@ -65,6 +64,7 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 use compute_tools::swap::resize_swap;
+use rlimit::{setrlimit, Resource};
 
 // this is an arbitrary build tag. Fine as a default / for testing purposes
 // in-case of not-set environment var
@@ -72,6 +72,9 @@ const BUILD_TAG_DEFAULT: &str = "latest";
 
 fn main() -> Result<()> {
     let (build_tag, clap_args) = init()?;
+
+    // enable core dumping for all child processes
+    setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
 
     let (pg_handle, start_pg_result) = {
         // Enter startup tracing context

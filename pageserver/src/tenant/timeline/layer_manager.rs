@@ -255,6 +255,14 @@ impl LayerManager {
                 new_layer.layer_desc().lsn_range
             );
 
+            // Transfer visibilty hint from old to new layer, since the new layer covers the same key space.  This is not guaranteed to
+            // be accurate (as the new layer may cover a different subset of the key range), but is a sensible default, and prevents
+            // always marking rewritten layers as visible.
+            new_layer
+                .as_ref()
+                .access_stats()
+                .set_visibility(old_layer.access_stats().visibility());
+
             // Safety: we may never rewrite the same file in-place.  Callers are responsible
             // for ensuring that they only rewrite layers after something changes the path,
             // such as an increment in the generation number.
@@ -339,6 +347,10 @@ impl LayerManager {
         self.layer_fmgr.contains(layer)
     }
 
+    pub(crate) fn contains_key(&self, key: &PersistentLayerKey) -> bool {
+        self.layer_fmgr.contains_key(key)
+    }
+
     pub(crate) fn all_persistent_layers(&self) -> Vec<PersistentLayerKey> {
         self.layer_fmgr.0.keys().cloned().collect_vec()
     }
@@ -361,6 +373,10 @@ impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
             .with_context(|| format!("get layer from desc: {}", desc.layer_name()))
             .expect("not found")
             .clone()
+    }
+
+    fn contains_key(&self, key: &PersistentLayerKey) -> bool {
+        self.0.contains_key(key)
     }
 
     pub(crate) fn insert(&mut self, layer: T) {

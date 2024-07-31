@@ -69,6 +69,8 @@ CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
 # Set PQ_LIB_DIR to make sure `storage_controller` get linked with bundled libpq (through diesel)
 CARGO_CMD_PREFIX += PQ_LIB_DIR=$(POSTGRES_INSTALL_DIR)/v16/lib
 
+CACHEDIR_TAG_CONTENTS := "Signature: 8a477f597d28d172789f06886806bc55"
+
 #
 # Top level Makefile to build Neon and PostgreSQL
 #
@@ -79,15 +81,24 @@ all: neon postgres neon-pg-ext
 #
 # The 'postgres_ffi' depends on the Postgres headers.
 .PHONY: neon
-neon: postgres-headers walproposer-lib
+neon: postgres-headers walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
+.PHONY: cargo-target-dir
+cargo-target-dir:
+	# https://github.com/rust-lang/cargo/issues/14281
+	mkdir -p target
+	test -e target/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > target/CACHEDIR.TAG
 
 ### PostgreSQL parts
 # Some rules are duplicated for Postgres v14 and 15. We may want to refactor
 # to avoid the duplication in the future, but it's tolerable for now.
 #
 $(POSTGRES_INSTALL_DIR)/build/%/config.status:
+
+	mkdir -p $(POSTGRES_INSTALL_DIR)
+	test -e $(POSTGRES_INSTALL_DIR)/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > $(POSTGRES_INSTALL_DIR)/CACHEDIR.TAG
+
 	+@echo "Configuring Postgres $* build"
 	@test -s $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure || { \
 		echo "\nPostgres submodule not found in $(ROOT_PROJECT_DIR)/vendor/postgres-$*/, execute "; \

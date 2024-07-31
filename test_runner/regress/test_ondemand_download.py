@@ -764,7 +764,9 @@ def test_layer_download_timeouted(neon_env_builder: NeonEnvBuilder):
     """
     Pause using a pausable_failpoint longer than the client timeout to simulate the timeout happening.
     """
-    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    # running this test is not reliable against REAL_S3, because operations can
+    # take longer than 1s we want to use as a timeout
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
     assert isinstance(neon_env_builder.pageserver_remote_storage, S3Storage)
     neon_env_builder.pageserver_remote_storage.custom_timeout = "1s"
 

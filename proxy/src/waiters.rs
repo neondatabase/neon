@@ -111,7 +111,7 @@ mod tests {
 
         let waiters = Arc::clone(&waiters);
         let notifier = tokio::spawn(async move {
-            waiters.notify(key, Default::default())?;
+            waiters.notify(key, ())?;
             Ok(())
         });
 

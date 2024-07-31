@@ -147,8 +147,8 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
                 last_record_lsn=Lsn(timeline_detail["last_record_lsn"]),
             )
             for sk_m in sk_metrics:
-                m.flush_lsns.append(Lsn(sk_m.flush_lsn_inexact[(tenant_id, timeline_id)]))
-                m.commit_lsns.append(Lsn(sk_m.commit_lsn_inexact[(tenant_id, timeline_id)]))
+                m.flush_lsns.append(Lsn(int(sk_m.flush_lsn_inexact(tenant_id, timeline_id))))
+                m.commit_lsns.append(Lsn(int(sk_m.commit_lsn_inexact(tenant_id, timeline_id))))
 
             for flush_lsn, commit_lsn in zip(m.flush_lsns, m.commit_lsns):
                 # Invariant. May be < when transaction is in progress.
@@ -2065,6 +2065,11 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
         log.info(f"Original digest: {orig_digest}")
 
         for sk in env.safekeepers:
+            wait(
+                partial(is_flush_lsn_caught_up, sk, tenant_id, timeline_id, lsn),
+                f"sk_id={sk.id} to flush {lsn}",
+            )
+
             sk.http_client().copy_timeline(
                 tenant_id,
                 timeline_id,
@@ -2191,24 +2196,25 @@ def test_s3_eviction(
 ):
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "checkpoint_timeout": "100ms",
-        }
-    )
 
-    extra_opts = [
+    neon_env_builder.safekeeper_extra_opts = [
         "--enable-offload",
         "--partial-backup-timeout",
         "50ms",
         "--control-file-save-interval",
         "1s",
+        # Safekeepers usually wait a while before evicting something: for this test we want them to
+        # evict things as soon as they are inactive.
+        "--eviction-min-resident=100ms",
     ]
     if delete_offloaded_wal:
-        extra_opts.append("--delete-offloaded-wal")
+        neon_env_builder.safekeeper_extra_opts.append("--delete-offloaded-wal")
 
-    for sk in env.safekeepers:
-        sk.stop().start(extra_opts=extra_opts)
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "checkpoint_timeout": "100ms",
+        }
+    )
 
     n_timelines = 5
 
@@ -2236,6 +2242,8 @@ def test_s3_eviction(
 
     check_values = [0] * n_timelines
 
+    event_metrics_seen = False
+
     n_iters = 20
     for _ in range(n_iters):
         if log.isEnabledFor(logging.DEBUG):
@@ -2260,10 +2268,31 @@ def test_s3_eviction(
         # update remote_consistent_lsn on pageserver
         ps_client.timeline_checkpoint(env.initial_tenant, timelines[i], wait_until_uploaded=True)
 
+        # Do metrics check before restarts, since these will reset to zero across a restart
+        event_metrics_seen |= any(
+            sk.http_client().get_metric_value(
+                "safekeeper_eviction_events_started_total", {"kind": "evict"}
+            )
+            or 0 > 0
+            and sk.http_client().get_metric_value(
+                "safekeeper_eviction_events_completed_total", {"kind": "evict"}
+            )
+            or 0 > 0
+            and sk.http_client().get_metric_value(
+                "safekeeper_eviction_events_started_total", {"kind": "restore"}
+            )
+            or 0 > 0
+            and sk.http_client().get_metric_value(
+                "safekeeper_eviction_events_completed_total", {"kind": "restore"}
+            )
+            or 0 > 0
+            for sk in env.safekeepers
+        )
+
         # restarting random safekeepers
         for sk in env.safekeepers:
             if random.random() < restart_chance:
-                sk.stop().start(extra_opts=extra_opts)
+                sk.stop().start()
         time.sleep(0.5)
 
     # require at least one successful eviction in at least one safekeeper
@@ -2273,3 +2302,5 @@ def test_s3_eviction(
         and sk.log_contains("successfully restored evicted timeline")
         for sk in env.safekeepers
     )
+
+    assert event_metrics_seen

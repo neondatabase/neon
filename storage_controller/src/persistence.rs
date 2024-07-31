@@ -5,11 +5,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use self::split_state::SplitState;
-use camino::Utf8Path;
-use camino::Utf8PathBuf;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
+use pageserver_api::controller_api::MetadataHealthRecord;
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
 use pageserver_api::models::TenantConfig;
@@ -55,11 +54,6 @@ use crate::node::Node;
 /// we can UPDATE a node's scheduling mode reasonably quickly to mark a bad node offline.
 pub struct Persistence {
     connection_pool: diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<PgConnection>>,
-
-    // In test environments, we support loading+saving a JSON file.  This is temporary, for the benefit of
-    // test_compatibility.py, so that we don't have to commit to making the database contents fully backward/forward
-    // compatible just yet.
-    json_path: Option<Utf8PathBuf>,
 }
 
 /// Legacy format, for use in JSON compat objects in test environment
@@ -97,6 +91,10 @@ pub(crate) enum DatabaseOperation {
     UpdateTenantShard,
     DeleteTenant,
     UpdateTenantConfig,
+    UpdateMetadataHealth,
+    ListMetadataHealth,
+    ListMetadataHealthUnhealthy,
+    ListMetadataHealthOutdated,
 }
 
 #[must_use]
@@ -124,7 +122,7 @@ impl Persistence {
     const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 
-    pub fn new(database_url: String, json_path: Option<Utf8PathBuf>) -> Self {
+    pub fn new(database_url: String) -> Self {
         let manager = diesel::r2d2::ConnectionManager::<PgConnection>::new(database_url);
 
         // We will use a connection pool: this is primarily to _limit_ our connection count, rather than to optimize time
@@ -139,10 +137,7 @@ impl Persistence {
             .build(manager)
             .expect("Could not build connection pool");
 
-        Self {
-            connection_pool,
-            json_path,
-        }
+        Self { connection_pool }
     }
 
     /// A helper for use during startup, where we would like to tolerate concurrent restarts of the
@@ -302,85 +297,13 @@ impl Persistence {
     /// At startup, load the high level state for shards, such as their config + policy.  This will
     /// be enriched at runtime with state discovered on pageservers.
     pub(crate) async fn list_tenant_shards(&self) -> DatabaseResult<Vec<TenantShardPersistence>> {
-        let loaded = self
-            .with_measured_conn(
-                DatabaseOperation::ListTenantShards,
-                move |conn| -> DatabaseResult<_> {
-                    Ok(crate::schema::tenant_shards::table.load::<TenantShardPersistence>(conn)?)
-                },
-            )
-            .await?;
-
-        if loaded.is_empty() {
-            if let Some(path) = &self.json_path {
-                if tokio::fs::try_exists(path)
-                    .await
-                    .map_err(|e| DatabaseError::Logical(format!("Error stat'ing JSON file: {e}")))?
-                {
-                    tracing::info!("Importing from legacy JSON format at {path}");
-                    return self.list_tenant_shards_json(path).await;
-                }
-            }
-        }
-        Ok(loaded)
-    }
-
-    /// Shim for automated compatibility tests: load tenants from a JSON file instead of database
-    pub(crate) async fn list_tenant_shards_json(
-        &self,
-        path: &Utf8Path,
-    ) -> DatabaseResult<Vec<TenantShardPersistence>> {
-        let bytes = tokio::fs::read(path)
-            .await
-            .map_err(|e| DatabaseError::Logical(format!("Failed to load JSON: {e}")))?;
-
-        let mut decoded = serde_json::from_slice::<JsonPersistence>(&bytes)
-            .map_err(|e| DatabaseError::Logical(format!("Deserialization error: {e}")))?;
-        for shard in decoded.tenants.values_mut() {
-            if shard.placement_policy == "\"Single\"" {
-                // Backward compat for test data after PR https://github.com/neondatabase/neon/pull/7165
-                shard.placement_policy = "{\"Attached\":0}".to_string();
-            }
-
-            if shard.scheduling_policy.is_empty() {
-                shard.scheduling_policy =
-                    serde_json::to_string(&ShardSchedulingPolicy::default()).unwrap();
-            }
-        }
-
-        let tenants: Vec<TenantShardPersistence> = decoded.tenants.into_values().collect();
-
-        // Synchronize database with what is in the JSON file
-        self.insert_tenant_shards(tenants.clone()).await?;
-
-        Ok(tenants)
-    }
-
-    /// For use in testing environments, where we dump out JSON on shutdown.
-    pub async fn write_tenants_json(&self) -> anyhow::Result<()> {
-        let Some(path) = &self.json_path else {
-            anyhow::bail!("Cannot write JSON if path isn't set (test environment bug)");
-        };
-        tracing::info!("Writing state to {path}...");
-        let tenants = self.list_tenant_shards().await?;
-        let mut tenants_map = HashMap::new();
-        for tsp in tenants {
-            let tenant_shard_id = TenantShardId {
-                tenant_id: TenantId::from_str(tsp.tenant_id.as_str())?,
-                shard_number: ShardNumber(tsp.shard_number as u8),
-                shard_count: ShardCount::new(tsp.shard_count as u8),
-            };
-
-            tenants_map.insert(tenant_shard_id, tsp);
-        }
-        let json = serde_json::to_string(&JsonPersistence {
-            tenants: tenants_map,
-        })?;
-
-        tokio::fs::write(path, &json).await?;
-        tracing::info!("Wrote {} bytes to {path}...", json.len());
-
-        Ok(())
+        self.with_measured_conn(
+            DatabaseOperation::ListTenantShards,
+            move |conn| -> DatabaseResult<_> {
+                Ok(crate::schema::tenant_shards::table.load::<TenantShardPersistence>(conn)?)
+            },
+        )
+        .await
     }
 
     /// Tenants must be persisted before we schedule them for the first time.  This enables us
@@ -389,15 +312,32 @@ impl Persistence {
         &self,
         shards: Vec<TenantShardPersistence>,
     ) -> DatabaseResult<()> {
-        use crate::schema::tenant_shards::dsl::*;
+        use crate::schema::metadata_health;
+        use crate::schema::tenant_shards;
+
+        let now = chrono::Utc::now();
+
+        let metadata_health_records = shards
+            .iter()
+            .map(|t| MetadataHealthPersistence {
+                tenant_id: t.tenant_id.clone(),
+                shard_number: t.shard_number,
+                shard_count: t.shard_count,
+                healthy: true,
+                last_scrubbed_at: now,
+            })
+            .collect::<Vec<_>>();
+
         self.with_measured_conn(
             DatabaseOperation::InsertTenantShards,
             move |conn| -> DatabaseResult<()> {
-                for tenant in &shards {
-                    diesel::insert_into(tenant_shards)
-                        .values(tenant)
-                        .execute(conn)?;
-                }
+                diesel::insert_into(tenant_shards::table)
+                    .values(&shards)
+                    .execute(conn)?;
+
+                diesel::insert_into(metadata_health::table)
+                    .values(&metadata_health_records)
+                    .execute(conn)?;
                 Ok(())
             },
         )
@@ -411,10 +351,10 @@ impl Persistence {
         self.with_measured_conn(
             DatabaseOperation::DeleteTenant,
             move |conn| -> DatabaseResult<()> {
+                // `metadata_health` status (if exists) is also deleted based on the cascade behavior.
                 diesel::delete(tenant_shards)
                     .filter(tenant_id.eq(del_tenant_id.to_string()))
                     .execute(conn)?;
-
                 Ok(())
             },
         )
@@ -542,6 +482,7 @@ impl Persistence {
         Ok(Generation::new(g as u32))
     }
 
+    #[allow(non_local_definitions)]
     /// For use when updating a persistent property of a tenant, such as its config or placement_policy.
     ///
     /// Do not use this for settting generation, unless in the special onboarding code path (/location_config)
@@ -756,6 +697,94 @@ impl Persistence {
         )
         .await
     }
+
+    /// Stores all the latest metadata health updates durably. Updates existing entry on conflict.
+    ///
+    /// **Correctness:** `metadata_health_updates` should all belong the tenant shards managed by the storage controller.
+    #[allow(dead_code)]
+    pub(crate) async fn update_metadata_health_records(
+        &self,
+        healthy_records: Vec<MetadataHealthPersistence>,
+        unhealthy_records: Vec<MetadataHealthPersistence>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> DatabaseResult<()> {
+        use crate::schema::metadata_health::dsl::*;
+
+        self.with_measured_conn(
+            DatabaseOperation::UpdateMetadataHealth,
+            move |conn| -> DatabaseResult<_> {
+                diesel::insert_into(metadata_health)
+                    .values(&healthy_records)
+                    .on_conflict((tenant_id, shard_number, shard_count))
+                    .do_update()
+                    .set((healthy.eq(true), last_scrubbed_at.eq(now)))
+                    .execute(conn)?;
+
+                diesel::insert_into(metadata_health)
+                    .values(&unhealthy_records)
+                    .on_conflict((tenant_id, shard_number, shard_count))
+                    .do_update()
+                    .set((healthy.eq(false), last_scrubbed_at.eq(now)))
+                    .execute(conn)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Lists all the metadata health records.
+    #[allow(dead_code)]
+    pub(crate) async fn list_metadata_health_records(
+        &self,
+    ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
+        self.with_measured_conn(
+            DatabaseOperation::ListMetadataHealth,
+            move |conn| -> DatabaseResult<_> {
+                Ok(
+                    crate::schema::metadata_health::table
+                        .load::<MetadataHealthPersistence>(conn)?,
+                )
+            },
+        )
+        .await
+    }
+
+    /// Lists all the metadata health records that is unhealthy.
+    #[allow(dead_code)]
+    pub(crate) async fn list_unhealthy_metadata_health_records(
+        &self,
+    ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
+        use crate::schema::metadata_health::dsl::*;
+        self.with_measured_conn(
+            DatabaseOperation::ListMetadataHealthUnhealthy,
+            move |conn| -> DatabaseResult<_> {
+                Ok(crate::schema::metadata_health::table
+                    .filter(healthy.eq(false))
+                    .load::<MetadataHealthPersistence>(conn)?)
+            },
+        )
+        .await
+    }
+
+    /// Lists all the metadata health records that have not been updated since an `earlier` time.
+    #[allow(dead_code)]
+    pub(crate) async fn list_outdated_metadata_health_records(
+        &self,
+        earlier: chrono::DateTime<chrono::Utc>,
+    ) -> DatabaseResult<Vec<MetadataHealthPersistence>> {
+        use crate::schema::metadata_health::dsl::*;
+
+        self.with_measured_conn(
+            DatabaseOperation::ListMetadataHealthOutdated,
+            move |conn| -> DatabaseResult<_> {
+                let query = metadata_health.filter(last_scrubbed_at.lt(earlier));
+                let res = query.load::<MetadataHealthPersistence>(conn)?;
+
+                Ok(res)
+            },
+        )
+        .await
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
@@ -824,4 +853,60 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_http_port: i32,
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
+}
+
+/// Tenant metadata health status that are stored durably.
+#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[diesel(table_name = crate::schema::metadata_health)]
+pub(crate) struct MetadataHealthPersistence {
+    #[serde(default)]
+    pub(crate) tenant_id: String,
+    #[serde(default)]
+    pub(crate) shard_number: i32,
+    #[serde(default)]
+    pub(crate) shard_count: i32,
+
+    pub(crate) healthy: bool,
+    pub(crate) last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl MetadataHealthPersistence {
+    pub fn new(
+        tenant_shard_id: TenantShardId,
+        healthy: bool,
+        last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_number = tenant_shard_id.shard_number.0 as i32;
+        let shard_count = tenant_shard_id.shard_count.literal() as i32;
+
+        MetadataHealthPersistence {
+            tenant_id,
+            shard_number,
+            shard_count,
+            healthy,
+            last_scrubbed_at,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn get_tenant_shard_id(&self) -> Result<TenantShardId, hex::FromHexError> {
+        Ok(TenantShardId {
+            tenant_id: TenantId::from_str(self.tenant_id.as_str())?,
+            shard_number: ShardNumber(self.shard_number as u8),
+            shard_count: ShardCount::new(self.shard_count as u8),
+        })
+    }
+}
+
+impl From<MetadataHealthPersistence> for MetadataHealthRecord {
+    fn from(value: MetadataHealthPersistence) -> Self {
+        MetadataHealthRecord {
+            tenant_shard_id: value
+                .get_tenant_shard_id()
+                .expect("stored tenant id should be valid"),
+            healthy: value.healthy,
+            last_scrubbed_at: value.last_scrubbed_at,
+        }
+    }
 }

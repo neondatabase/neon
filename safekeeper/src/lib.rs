@@ -53,6 +53,11 @@ pub mod defaults {
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
     pub const DEFAULT_PARTIAL_BACKUP_CONCURRENCY: &str = "5";
+
+    // By default, our required residency before eviction is the same as the period that passes
+    // before uploading a partial segment, so that in normal operation the eviction can happen
+    // as soon as we have done the partial segment upload.
+    pub const DEFAULT_EVICTION_MIN_RESIDENT: &str = DEFAULT_PARTIAL_BACKUP_TIMEOUT;
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +98,7 @@ pub struct SafeKeeperConf {
     pub delete_offloaded_wal: bool,
     pub control_file_save_interval: Duration,
     pub partial_backup_concurrency: usize,
+    pub eviction_min_resident: Duration,
 }
 
 impl SafeKeeperConf {
@@ -136,6 +142,7 @@ impl SafeKeeperConf {
             delete_offloaded_wal: false,
             control_file_save_interval: Duration::from_secs(1),
             partial_backup_concurrency: 1,
+            eviction_min_resident: Duration::ZERO,
         }
     }
 }
@@ -166,28 +173,10 @@ pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create broker runtime")
 });
 
-pub static WAL_REMOVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("WAL remover")
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
-});
-
 pub static WAL_BACKUP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("WAL backup worker")
         .enable_all()
         .build()
         .expect("Failed to create WAL backup runtime")
-});
-
-pub static METRICS_SHIFTER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("metric shifter")
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
 });
