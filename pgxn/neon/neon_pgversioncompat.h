@@ -113,4 +113,9 @@
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
 #endif
 
+#if PG_MAJORVERSION_NUM < 17
+#define ProcNumber BackendId
+#define INVALID_PROC_NUMBER InvalidBackendId
+#endif
+
 #endif							/* NEON_PGVERSIONCOMPAT_H */

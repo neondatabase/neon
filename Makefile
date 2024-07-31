@@ -119,6 +119,8 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 # I'm not sure why it wouldn't work, but this is the only place (apart from
 # the "build-all-versions" entry points) where direct mention of PostgreSQL
 # versions is used.
+.PHONY: postgres-configure-v17
+postgres-configure-v17: $(POSTGRES_INSTALL_DIR)/build/v17/config.status
 .PHONY: postgres-configure-v16
 postgres-configure-v16: $(POSTGRES_INSTALL_DIR)/build/v16/config.status
 .PHONY: postgres-configure-v15
@@ -245,38 +247,44 @@ walproposer-lib-clean:
 neon-pg-ext: \
 	neon-pg-ext-v14 \
 	neon-pg-ext-v15 \
-	neon-pg-ext-v16
+	neon-pg-ext-v16 \
+	neon-pg-ext-v17
 
 .PHONY: neon-pg-clean-ext
 neon-pg-clean-ext: \
 	neon-pg-clean-ext-v14 \
 	neon-pg-clean-ext-v15 \
-	neon-pg-clean-ext-v16
+	neon-pg-clean-ext-v16 \
+	neon-pg-clean-ext-v17
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
 postgres: \
 	postgres-v14 \
 	postgres-v15 \
-	postgres-v16
+	postgres-v16 \
+	postgres-v17
 
 .PHONY: postgres-headers
 postgres-headers: \
 	postgres-headers-v14 \
 	postgres-headers-v15 \
-	postgres-headers-v16
+	postgres-headers-v16 \
+	postgres-headers-v17
 
 .PHONY: postgres-clean
 postgres-clean: \
 	postgres-clean-v14 \
 	postgres-clean-v15 \
-	postgres-clean-v16
+	postgres-clean-v16 \
+	postgres-clean-v17
 
 .PHONY: postgres-check
 postgres-check: \
 	postgres-check-v14 \
 	postgres-check-v15 \
-	postgres-check-v16
+	postgres-check-v16 \
+	postgres-check-v17
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
@@ -293,7 +301,7 @@ distclean:
 fmt:
 	./pre-commit.py --fix-inplace
 
-postgres-%-pg-bsd-indent: postgres-%
+postgres-%-pg-bsd-indent: postgres-configure-%
 	+@echo "Compiling pg_bsd_indent"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/tools/pg_bsd_indent/
 
@@ -321,7 +329,7 @@ postgres-%-pgindent: postgres-%-pg-bsd-indent postgres-%-typedefs.list
 	rm -f pg*.BAK
 
 # Indent pxgn/neon.
-.PHONY: pgindent
+.PHONY: neon-pgindent
 neon-pgindent: postgres-v16-pg-bsd-indent neon-pg-ext-v16
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v16/src/tools/find_typedef \

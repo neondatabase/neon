@@ -537,7 +537,12 @@ walprop_pg_init_walsender(void)
 	/* Create replication slot for WAL proposer if not exists */
 	if (SearchNamedReplicationSlot(WAL_PROPOSER_SLOT_NAME, false) == NULL)
 	{
+#if PG_MAJORVERSION_NUM >= 17
+		ReplicationSlotCreate(WAL_PROPOSER_SLOT_NAME, false, RS_PERSISTENT,
+							  false, false, false);
+#else
 		ReplicationSlotCreate(WAL_PROPOSER_SLOT_NAME, false, RS_PERSISTENT, false);
+#endif
 		ReplicationSlotReserveWal();
 		/* Write this slot to disk */
 		ReplicationSlotMarkDirty();

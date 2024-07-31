@@ -566,7 +566,10 @@ CreateFakeSharedMemoryAndSemaphores()
 	/*
 	 * Set up other modules that need some shared memory space
 	 */
+#if PG_MAJORVERSION_NUM < 17
+	/* "snapshot too old" was removed in PG17, and with it the SnapMgr */
 	SnapMgrInit();
+#endif
 	BTreeShmemInit();
 	SyncScanShmemInit();
 	/* Skip due to the 'pg_notify' directory check */
@@ -742,7 +745,7 @@ BeginRedoForBlock(StringInfo input_message)
 		 target_redo_tag.forkNum,
 		 target_redo_tag.blockNum);
 
-	reln = smgropen(rinfo, InvalidBackendId, RELPERSISTENCE_PERMANENT);
+	reln = smgropen(rinfo, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT);
 	if (reln->smgr_cached_nblocks[forknum] == InvalidBlockNumber ||
 		reln->smgr_cached_nblocks[forknum] < blknum + 1)
 	{
