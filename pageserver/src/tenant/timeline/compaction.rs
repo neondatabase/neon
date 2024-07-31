@@ -1723,7 +1723,6 @@ impl Timeline {
             KeepLayer(PersistentLayerKey),
         }
 
-
         #[allow(clippy::too_many_arguments)]
         async fn flush_deltas(
             deltas: &mut Vec<(Key, Lsn, crate::repository::Value)>,
