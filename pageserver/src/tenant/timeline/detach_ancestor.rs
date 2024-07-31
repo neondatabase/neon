@@ -1284,7 +1284,7 @@ pub(super) async fn detach_and_reparent(
         tracing::info!(
             reparented = reparented.len(),
             candidates = reparenting_candidates,
-            "failed to reparent all candidates; they can be retried after the restart",
+            "failed to reparent all candidates; they can be retried after the tenant_reset",
         );
         let must_restart = !reparented.is_empty() || was_detached;
         Ok(DetachingAndReparenting::SomeReparentingFailed { must_restart })
