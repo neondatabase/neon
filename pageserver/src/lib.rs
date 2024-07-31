@@ -88,6 +88,16 @@ pub async fn shutdown_pageserver(
 ) {
     use std::time::Duration;
 
+    // If the orderly shutdown below takes too long, we still want to make
+    // sure that all walredo processes are killed and wait()ed on by us, not systemd.
+    //
+    // (Leftover walredo processes are the hypothesized trigger for the systemd freezes
+    //  that we keep seeing in prod => https://github.com/neondatabase/cloud/issues/11387.
+    //
+    // We use a thread instead of a tokio task because the background runtime is likely busy
+    // with the final flushing / uploads. This activity here has priority, and due to lack
+    // of scheduling priority feature sin the tokio scheduler, using a separate thread is
+    // an effective priority booster.
     let walredo_extraordinary_shutdown_thread_span = {
         let span = info_span!(parent: None, "walredo_extraordinary_shutdown_thread");
         span.follows_from(tracing::Span::current());
