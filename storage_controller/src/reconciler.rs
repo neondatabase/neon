@@ -667,7 +667,7 @@ impl Reconciler {
                             let generations_match = observed.generation == wanted_conf.generation;
 
                             // We may skip incrementing the generation if the location is already in the expected mode and
-                            // generation.  In principal it would also be safe to skip from certain other modes (e.g. AttachedStale),
+                            // generation.  In principle it would also be safe to skip from certain other modes (e.g. AttachedStale),
                             // but such states are handled inside `live_migrate`, and if we see that state here we're cleaning up
                             // after a restart/crash, so fall back to the universally safe path of incrementing generation.
                             !generations_match || (observed.mode != wanted_conf.mode)
