@@ -16,6 +16,7 @@ humantime.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 postgres.workspace = true
+procfs.workspace = true
 hex.workspace = true
 humantime-serde.workspace = true
 hyper.workspace = true

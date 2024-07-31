@@ -1341,6 +1341,7 @@ dependencies = [
  "postgres",
  "postgres_backend",
  "postgres_connection",
+ "procfs 0.14.2",
  "regex",
  "reqwest 0.12.4",
  "safekeeper_api",
