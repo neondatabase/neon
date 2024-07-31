@@ -258,8 +258,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-        pg_version: ${{ fromJson(inputs.build-type == 'release' && '["v14", "v15", "v16"]' || '["v16"]') }}
+        pg_version: ${{ fromJson(inputs.pg-versions) }}
     steps:
       - uses: actions/checkout@v4
         with:
