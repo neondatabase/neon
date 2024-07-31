@@ -246,11 +246,13 @@ impl Lineage {
     /// Returns true if anything changed.
     pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) -> bool {
         if let Some((id, lsn, _)) = self.original_ancestor {
-            assert_eq!(id, branchpoint.0);
-            assert_eq!(lsn, branchpoint.1);
+            assert_eq!(
+                &(id, lsn),
+                branchpoint,
+                "detaching attempt has to be for the same ancestor we are already detached from"
+            );
             false
         } else {
-            assert!(self.original_ancestor.is_none());
             self.original_ancestor =
                 Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
             true
