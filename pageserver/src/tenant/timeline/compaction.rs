@@ -1458,6 +1458,12 @@ impl Timeline {
         };
 
         /// Returns None if there is no ancestor branch. Throw an error when the key is not found.
+        ///
+        /// Currently, we always get the ancestor image for each key in the child branch no matter whether the image
+        /// is needed for reconstruction. This should be fixed in the future.
+        ///
+        /// Furthermore, we should do vectored get instead of a single get, or better, use k-merge for ancestor
+        /// images.
         async fn get_ancestor_image(
             tline: &Arc<Timeline>,
             key: Key,
