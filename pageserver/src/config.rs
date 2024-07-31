@@ -29,6 +29,7 @@ use utils::{
     logging::LogFormat,
 };
 
+use crate::tenant::timeline::compaction::CompactL0Phase1ValueAccess;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -295,6 +296,10 @@ pub struct PageServerConf {
     pub ephemeral_bytes_per_memory_kb: usize,
 
     pub l0_flush: L0FlushConfig,
+
+    /// This flag is temporary and will be removed after gradual rollout.
+    /// See <https://github.com/neondatabase/neon/issues/8184>.
+    pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -401,6 +406,8 @@ struct PageServerConfigBuilder {
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
 
     l0_flush: BuilderValue<L0FlushConfig>,
+
+    compact_level0_phase1_value_access: BuilderValue<CompactL0Phase1ValueAccess>,
 }
 
 impl PageServerConfigBuilder {
@@ -490,6 +497,7 @@ impl PageServerConfigBuilder {
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: Set(L0FlushConfig::default()),
+            compact_level0_phase1_value_access: Set(CompactL0Phase1ValueAccess::default()),
         }
     }
 }
@@ -673,6 +681,10 @@ impl PageServerConfigBuilder {
         self.l0_flush = BuilderValue::Set(value);
     }
 
+    pub fn compact_level0_phase1_value_access(&mut self, value: CompactL0Phase1ValueAccess) {
+        self.compact_level0_phase1_value_access = BuilderValue::Set(value);
+    }
+
     pub fn build(self, id: NodeId) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
@@ -730,6 +742,7 @@ impl PageServerConfigBuilder {
                 image_compression,
                 ephemeral_bytes_per_memory_kb,
                 l0_flush,
+                compact_level0_phase1_value_access,
             }
             CUSTOM LOGIC
             {
@@ -1002,6 +1015,9 @@ impl PageServerConf {
                 "l0_flush" => {
                     builder.l0_flush(utils::toml_edit_ext::deserialize_item(item).context("l0_flush")?)
                 }
+                "compact_level0_phase1_value_access" => {
+                    builder.compact_level0_phase1_value_access(utils::toml_edit_ext::deserialize_item(item).context("compact_level0_phase1_value_access")?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -1086,6 +1102,7 @@ impl PageServerConf {
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             l0_flush: L0FlushConfig::default(),
+            compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
         }
     }
 }
@@ -1327,6 +1344,7 @@ background_task_maximum_delay = '334 s'
                 image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
+                compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1401,6 +1419,7 @@ background_task_maximum_delay = '334 s'
                 image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
+                compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
             },
             "Should be able to parse all basic config values correctly"
         );

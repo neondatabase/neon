@@ -15,6 +15,7 @@ use super::{
 };
 
 use anyhow::{anyhow, Context};
+use bytes::Bytes;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
@@ -69,17 +70,21 @@ impl KeyHistoryRetention {
         self,
         key: Key,
         delta_writer: &mut Vec<(Key, Lsn, Value)>,
-        image_writer: &mut ImageLayerWriter,
+        mut image_writer: Option<&mut ImageLayerWriter>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
-        for (_, KeyLogAtLsn(logs)) in self.below_horizon {
+        for (cutoff_lsn, KeyLogAtLsn(logs)) in self.below_horizon {
             if first_batch {
                 if logs.len() == 1 && logs[0].1.is_image() {
                     let Value::Image(img) = &logs[0].1 else {
                         unreachable!()
                     };
-                    image_writer.put_image(key, img.clone(), ctx).await?;
+                    if let Some(image_writer) = image_writer.as_mut() {
+                        image_writer.put_image(key, img.clone(), ctx).await?;
+                    } else {
+                        delta_writer.push((key, cutoff_lsn, Value::Image(img.clone())));
+                    }
                 } else {
                     for (lsn, val) in logs {
                         delta_writer.push((key, lsn, val));
@@ -698,7 +703,140 @@ impl Timeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter = all_keys.iter();
+        // If there's both a Value::Image and Value::WalRecord for the same (key,lsn),
+        // then the Value::Image is ordered before Value::WalRecord.
+        //
+        // TODO(https://github.com/neondatabase/neon/issues/8184): remove the page cached blob_io
+        // option and validation code once we've reached confidence.
+        enum AllValuesIter<'a> {
+            PageCachedBlobIo {
+                all_keys_iter: VecIter<'a>,
+            },
+            StreamingKmergeBypassingPageCache {
+                merge_iter: MergeIterator<'a>,
+            },
+            ValidatingStreamingKmergeBypassingPageCache {
+                mode: CompactL0BypassPageCacheValidation,
+                merge_iter: MergeIterator<'a>,
+                all_keys_iter: VecIter<'a>,
+            },
+        }
+        type VecIter<'a> = std::slice::Iter<'a, DeltaEntry<'a>>; // TODO: distinguished lifetimes
+        impl AllValuesIter<'_> {
+            async fn next_all_keys_iter(
+                iter: &mut VecIter<'_>,
+                ctx: &RequestContext,
+            ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+                let Some(DeltaEntry {
+                    key,
+                    lsn,
+                    val: value_ref,
+                    ..
+                }) = iter.next()
+                else {
+                    return Ok(None);
+                };
+                let value = value_ref.load(ctx).await?;
+                Ok(Some((*key, *lsn, value)))
+            }
+            async fn next(
+                &mut self,
+                ctx: &RequestContext,
+            ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+                match self {
+                    AllValuesIter::PageCachedBlobIo { all_keys_iter: iter } => {
+                      Self::next_all_keys_iter(iter, ctx).await
+                    }
+                    AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter } => merge_iter.next().await,
+                    AllValuesIter::ValidatingStreamingKmergeBypassingPageCache { mode, merge_iter, all_keys_iter } => async {
+                        // advance both iterators
+                        let all_keys_iter_item = Self::next_all_keys_iter(all_keys_iter, ctx).await;
+                        let merge_iter_item = merge_iter.next().await;
+                        // compare results & log warnings as needed
+                        macro_rules! rate_limited_warn {
+                            ($($arg:tt)*) => {{
+                                if cfg!(debug_assertions) || cfg!(feature = "testing") {
+                                    warn!($($arg)*);
+                                    panic!("CompactL0BypassPageCacheValidation failure, check logs");
+                                }
+                                use once_cell::sync::Lazy;
+                                use utils::rate_limit::RateLimit;
+                                use std::sync::Mutex;
+                                use std::time::Duration;
+                                static LOGGED: Lazy<Mutex<RateLimit>> =
+                                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
+                                let mut rate_limit = LOGGED.lock().unwrap();
+                                rate_limit.call(|| {
+                                    warn!($($arg)*);
+                                });
+                            }}
+                        }
+                        match (&all_keys_iter_item, &merge_iter_item) {
+                            (Err(_), Err(_)) => {
+                                // don't bother asserting equivality of the errors
+                            }
+                            (Err(all_keys), Ok(merge)) => {
+                                rate_limited_warn!(?merge, "all_keys_iter returned an error where merge did not: {all_keys:?}");
+                            },
+                            (Ok(all_keys), Err(merge)) => {
+                                rate_limited_warn!(?all_keys, "merge returned an error where all_keys_iter did not: {merge:?}");
+                            },
+                            (Ok(None), Ok(None)) => { }
+                            (Ok(Some(all_keys)), Ok(None)) => {
+                                rate_limited_warn!(?all_keys, "merge returned None where all_keys_iter returned Some");
+                            }
+                            (Ok(None), Ok(Some(merge))) => {
+                                rate_limited_warn!(?merge, "all_keys_iter returned None where merge returned Some");
+                            }
+                            (Ok(Some((all_keys_key, all_keys_lsn, all_keys_value))), Ok(Some((merge_key, merge_lsn, merge_value)))) => {
+                                match mode {
+                                    // TODO: in this mode, we still load the value from disk for both iterators, even though we only need the all_keys_iter one
+                                    CompactL0BypassPageCacheValidation::KeyLsn => {
+                                        let all_keys = (all_keys_key, all_keys_lsn);
+                                        let merge = (merge_key, merge_lsn);
+                                        if all_keys != merge {
+                                            rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN) than all_keys_iter");
+                                        }
+                                    }
+                                    CompactL0BypassPageCacheValidation::KeyLsnValue => {
+                                        let all_keys = (all_keys_key, all_keys_lsn, all_keys_value);
+                                        let merge = (merge_key, merge_lsn, merge_value);
+                                        if all_keys != merge {
+                                            rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN,Value) than all_keys_iter");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // in case of mismatch, trust the legacy all_keys_iter_item
+                        all_keys_iter_item
+                    }.instrument(info_span!("next")).await
+                }
+            }
+        }
+        let mut all_values_iter = match &self.conf.compact_level0_phase1_value_access {
+            CompactL0Phase1ValueAccess::PageCachedBlobIo => AllValuesIter::PageCachedBlobIo {
+                all_keys_iter: all_keys.iter(),
+            },
+            CompactL0Phase1ValueAccess::StreamingKmerge { validate } => {
+                let merge_iter = {
+                    let mut deltas = Vec::with_capacity(deltas_to_compact.len());
+                    for l in deltas_to_compact.iter() {
+                        let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                        deltas.push(l);
+                    }
+                    MergeIterator::create(&deltas, &[], ctx)
+                };
+                match validate {
+                    None => AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter },
+                    Some(validate) => AllValuesIter::ValidatingStreamingKmergeBypassingPageCache {
+                        mode: validate.clone(),
+                        merge_iter,
+                        all_keys_iter: all_keys.iter(),
+                    },
+                }
+            }
+        };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
         let mut all_keys_iter = all_keys
@@ -771,11 +909,11 @@ impl Timeline {
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
         let mut next_hole = 0; // index of next hole in holes vector
 
-        for &DeltaEntry {
-            key, lsn, ref val, ..
-        } in all_values_iter
+        while let Some((key, lsn, value)) = all_values_iter
+            .next(ctx)
+            .await
+            .map_err(CompactionError::Other)?
         {
-            let value = val.load(ctx).await.map_err(CompactionError::Other)?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -960,6 +1098,10 @@ impl Timeline {
             }
         }
 
+        // Without this, rustc complains about deltas_to_compact still
+        // being borrowed when we `.into_iter()` below.
+        drop(all_values_iter);
+
         Ok(CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact: deltas_to_compact
@@ -1067,6 +1209,43 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum CompactL0Phase1ValueAccess {
+    /// The old way.
+    PageCachedBlobIo,
+    /// The new way.
+    StreamingKmerge {
+        /// If set, we run both the old way and the new way, validate that
+        /// they are identical (=> [`CompactL0BypassPageCacheValidation`]),
+        /// and if the validation fails,
+        /// - in tests: fail them with a panic or
+        /// - in prod, log a rate-limited warning and use the old way's results.
+        ///
+        /// If not set, we only run the new way and trust its results.
+        validate: Option<CompactL0BypassPageCacheValidation>,
+    },
+}
+
+/// See [`CompactL0Phase1ValueAccess::StreamingKmerge`].
+#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompactL0BypassPageCacheValidation {
+    /// Validate that the series of (key, lsn) pairs are the same.
+    KeyLsn,
+    /// Validate that the entire output of old and new way is identical.
+    KeyLsnValue,
+}
+
+impl Default for CompactL0Phase1ValueAccess {
+    fn default() -> Self {
+        CompactL0Phase1ValueAccess::StreamingKmerge {
+            // TODO(https://github.com/neondatabase/neon/issues/8184): change to None once confident
+            validate: Some(CompactL0BypassPageCacheValidation::KeyLsnValue),
+        }
+    }
+}
+
 impl Timeline {
     /// Entry point for new tiered compaction algorithm.
     ///
@@ -1154,6 +1333,7 @@ impl Timeline {
         horizon: Lsn,
         retain_lsn_below_horizon: &[Lsn],
         delta_threshold_cnt: usize,
+        base_img_from_ancestor: Option<(Key, Lsn, Bytes)>,
     ) -> anyhow::Result<KeyHistoryRetention> {
         // Pre-checks for the invariants
         if cfg!(debug_assertions) {
@@ -1183,6 +1363,7 @@ impl Timeline {
                 );
             }
         }
+        let has_ancestor = base_img_from_ancestor.is_some();
         // Step 1: split history into len(retain_lsn_below_horizon) + 2 buckets, where the last bucket is for all deltas above the horizon,
         // and the second-to-last bucket is for the horizon. Each bucket contains lsn_last_bucket < deltas <= lsn_this_bucket.
         let (mut split_history, lsn_split_points) = {
@@ -1216,6 +1397,9 @@ impl Timeline {
                         // For example, we have delta layer key1@0x10, key1@0x20, and image layer key1@0x10, we will
                         // keep the image for key1@0x10 and the delta for key1@0x20. key1@0x10 delta will be simply
                         // dropped.
+                        //
+                        // TODO: in case we have both delta + images for a given LSN and it does not exceed the delta
+                        // threshold, we could have kept delta instead to save space. This is an optimization for the future.
                         continue;
                     }
                 }
@@ -1233,9 +1417,13 @@ impl Timeline {
             "should have at least below + above horizon batches"
         );
         let mut replay_history: Vec<(Key, Lsn, Value)> = Vec::new();
+        if let Some((key, lsn, img)) = base_img_from_ancestor {
+            replay_history.push((key, lsn, Value::Image(img)));
+        }
         for (i, split_for_lsn) in split_history.into_iter().enumerate() {
+            // TODO: there could be image keys inside the splits, and we can compute records_since_last_image accordingly.
             records_since_last_image += split_for_lsn.len();
-            let generate_image = if i == 0 {
+            let generate_image = if i == 0 && !has_ancestor {
                 // We always generate images for the first batch (below horizon / lowest retain_lsn)
                 true
             } else if i == batch_cnt - 1 {
@@ -1358,20 +1546,25 @@ impl Timeline {
             retain_lsns_below_horizon.sort();
             (selected_layers, gc_cutoff, retain_lsns_below_horizon)
         };
-        let lowest_retain_lsn = retain_lsns_below_horizon
-            .first()
-            .copied()
-            .unwrap_or(gc_cutoff);
-        if cfg!(debug_assertions) {
-            assert_eq!(
-                lowest_retain_lsn,
-                retain_lsns_below_horizon
-                    .iter()
-                    .min()
-                    .copied()
-                    .unwrap_or(gc_cutoff)
-            );
-        }
+        let lowest_retain_lsn = if self.ancestor_timeline.is_some() {
+            Lsn(self.ancestor_lsn.0 + 1)
+        } else {
+            let res = retain_lsns_below_horizon
+                .first()
+                .copied()
+                .unwrap_or(gc_cutoff);
+            if cfg!(debug_assertions) {
+                assert_eq!(
+                    res,
+                    retain_lsns_below_horizon
+                        .iter()
+                        .min()
+                        .copied()
+                        .unwrap_or(gc_cutoff)
+                );
+            }
+            res
+        };
         info!(
             "picked {} layers for compaction with gc_cutoff={} lowest_retain_lsn={}",
             layer_selection.len(),
@@ -1412,6 +1605,7 @@ impl Timeline {
         let mut accumulated_values = Vec::new();
         let mut last_key: Option<Key> = None;
 
+        #[allow(clippy::too_many_arguments)]
         async fn flush_deltas(
             deltas: &mut Vec<(Key, Lsn, crate::repository::Value)>,
             last_key: Key,
@@ -1420,6 +1614,7 @@ impl Timeline {
             tline: &Arc<Timeline>,
             lowest_retain_lsn: Lsn,
             ctx: &RequestContext,
+            last_batch: bool,
         ) -> anyhow::Result<Option<ResidentLayer>> {
             // Check if we need to split the delta layer. We split at the original delta layer boundary to avoid
             // overlapping layers.
@@ -1440,7 +1635,7 @@ impl Timeline {
                 *current_delta_split_point += 1;
                 need_split = true;
             }
-            if !need_split {
+            if !need_split && !last_batch {
                 return Ok(None);
             }
             let deltas = std::mem::take(deltas);
@@ -1465,15 +1660,44 @@ impl Timeline {
             Ok(Some(delta_layer))
         }
 
-        let mut image_layer_writer = ImageLayerWriter::new(
-            self.conf,
-            self.timeline_id,
-            self.tenant_shard_id,
-            &(Key::MIN..Key::MAX), // covers the full key range
-            lowest_retain_lsn,
-            ctx,
-        )
-        .await?;
+        // Only create image layers when there is no ancestor branches. TODO: create covering image layer
+        // when some condition meet.
+        let mut image_layer_writer = if self.ancestor_timeline.is_none() {
+            Some(
+                ImageLayerWriter::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_shard_id,
+                    &(Key::MIN..Key::MAX), // covers the full key range
+                    lowest_retain_lsn,
+                    ctx,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        /// Returns None if there is no ancestor branch. Throw an error when the key is not found.
+        ///
+        /// Currently, we always get the ancestor image for each key in the child branch no matter whether the image
+        /// is needed for reconstruction. This should be fixed in the future.
+        ///
+        /// Furthermore, we should do vectored get instead of a single get, or better, use k-merge for ancestor
+        /// images.
+        async fn get_ancestor_image(
+            tline: &Arc<Timeline>,
+            key: Key,
+            ctx: &RequestContext,
+        ) -> anyhow::Result<Option<(Key, Lsn, Bytes)>> {
+            if tline.ancestor_timeline.is_none() {
+                return Ok(None);
+            };
+            // This function is implemented as a get of the current timeline at ancestor LSN, therefore reusing
+            // as much existing code as possible.
+            let img = tline.get(key, tline.ancestor_lsn, ctx).await?;
+            Ok(Some((key, tline.ancestor_lsn, img)))
+        }
 
         let mut delta_values = Vec::new();
         let delta_split_points = delta_split_points.into_iter().collect_vec();
@@ -1494,11 +1718,17 @@ impl Timeline {
                         gc_cutoff,
                         &retain_lsns_below_horizon,
                         COMPACTION_DELTA_THRESHOLD,
+                        get_ancestor_image(self, *last_key, ctx).await?,
                     )
                     .await?;
                 // Put the image into the image layer. Currently we have a single big layer for the compaction.
                 retention
-                    .pipe_to(*last_key, &mut delta_values, &mut image_layer_writer, ctx)
+                    .pipe_to(
+                        *last_key,
+                        &mut delta_values,
+                        image_layer_writer.as_mut(),
+                        ctx,
+                    )
                     .await?;
                 delta_layers.extend(
                     flush_deltas(
@@ -1509,6 +1739,7 @@ impl Timeline {
                         self,
                         lowest_retain_lsn,
                         ctx,
+                        false,
                     )
                     .await?,
                 );
@@ -1527,11 +1758,17 @@ impl Timeline {
                 gc_cutoff,
                 &retain_lsns_below_horizon,
                 COMPACTION_DELTA_THRESHOLD,
+                get_ancestor_image(self, last_key, ctx).await?,
             )
             .await?;
         // Put the image into the image layer. Currently we have a single big layer for the compaction.
         retention
-            .pipe_to(last_key, &mut delta_values, &mut image_layer_writer, ctx)
+            .pipe_to(
+                last_key,
+                &mut delta_values,
+                image_layer_writer.as_mut(),
+                ctx,
+            )
             .await?;
         delta_layers.extend(
             flush_deltas(
@@ -1542,19 +1779,25 @@ impl Timeline {
                 self,
                 lowest_retain_lsn,
                 ctx,
+                true,
             )
             .await?,
         );
+        assert!(delta_values.is_empty(), "unprocessed keys");
 
-        let image_layer = image_layer_writer.finish(self, ctx).await?;
+        let image_layer = if let Some(writer) = image_layer_writer {
+            Some(writer.finish(self, ctx).await?)
+        } else {
+            None
+        };
         info!(
             "produced {} delta layers and {} image layers",
             delta_layers.len(),
-            1
+            if image_layer.is_some() { 1 } else { 0 }
         );
         let mut compact_to = Vec::new();
         compact_to.extend(delta_layers);
-        compact_to.push(image_layer);
+        compact_to.extend(image_layer);
         // Step 3: Place back to the layer map.
         {
             let mut guard = self.layers.write().await;
