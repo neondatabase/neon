@@ -1772,6 +1772,16 @@ impl Timeline {
             };
             {
                 // Hack: skip delta layer if we need to produce a layer of a same key-lsn.
+                //
+                // This can happen if we have removed some deltas in "the middle" of some existing layer's key-lsn-range.
+                // For example, consider the case where a single delta with range [0x10,0x50) exists.
+                // And we have branches at LSN 0x10, 0x20, 0x30.
+                // Then we delete branch @ 0x20.
+                // Bottom-most compaction may now delete the delta [0x20,0x30).
+                // And that wouldnt' change the shape of the layer.
+                //
+                // Note that bottom-most-gc-compaction never _adds_ new data in that case, only removes.
+                // That's why it's safe to skip.
                 let guard = tline.layers.read().await;
 
                 if guard.contains_key(&delta_key) {
