@@ -55,7 +55,7 @@ impl RW {
         self.rw.write_all_borrowed(srcbuf, ctx).await
     }
 
-    pub(crate) fn bytes_written(&self) -> u64 {
+    pub(crate) fn bytes_written(&self) -> u32 {
         self.rw.bytes_written()
     }
 
