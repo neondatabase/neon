@@ -43,7 +43,6 @@ use crate::basebackup;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
 use crate::metrics;
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
@@ -62,6 +61,12 @@ use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
+
+/// How long we may wait for a [`crate::tenant::mgr::TenantSlot::InProgress`]` and/or a [`crate::tenant::Tenant`] which
+/// is not yet in state [`TenantState::Active`].
+///
+/// NB: this is a different value than [`crate::http::routes::ACTIVE_TENANT_TIMEOUT`].
+const ACTIVE_TENANT_TIMEOUT: Duration = Duration::from_millis(30000);
 
 ///////////////////////////////////////////////////////////////////////////////
 
