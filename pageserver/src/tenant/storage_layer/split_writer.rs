@@ -100,7 +100,10 @@ impl SplitImageLayerWriter {
 #[cfg(test)]
 mod tests {
     use crate::{
-        tenant::harness::{TenantHarness, TIMELINE_ID},
+        tenant::{
+            harness::{TenantHarness, TIMELINE_ID},
+            storage_layer::AsLayerDesc,
+        },
         DEFAULT_PG_VERSION,
     };
 
@@ -188,6 +191,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(layers.len(), N / 512 + 1);
+        for idx in 0..layers.len() {
+            assert_ne!(layers[idx].layer_desc().key_range.start, Key::MIN);
+            assert_ne!(layers[idx].layer_desc().key_range.end, Key::MAX);
+            if idx > 0 {
+                assert_eq!(
+                    layers[idx - 1].layer_desc().key_range.end,
+                    layers[idx].layer_desc().key_range.start
+                );
+            }
+        }
     }
 
     #[tokio::test]
