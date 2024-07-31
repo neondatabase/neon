@@ -1133,34 +1133,46 @@ pub(super) async fn detach_and_reparent(
         "cannot (detach? reparent)? complete if the operation is not still ongoing"
     );
 
-    let ancestor = if let Some(ancestor) = detached.ancestor_timeline.as_ref() {
-        assert!(
-            recorded_branchpoint.is_none(),
-            "it should be impossible to get to here without having gone through the tenant reset; if the tenant was reset, then the ancestor_timeline would be None"
-        );
-        Ancestor::NotDetached(ancestor.clone(), detached.ancestor_lsn)
-    } else if let Some((ancestor_id, ancestor_lsn)) = recorded_branchpoint {
-        // it has been either:
-        // - detached but still exists => we can try reparenting
-        // - detached and deleted
-        //
-        // either way, we must complete
-        assert!(
-            layers.is_empty(),
-            "no layers should had been copied as detach is done"
-        );
-        let existing = tenant.timelines.lock().unwrap().get(&ancestor_id).cloned();
-
-        if let Some(ancestor) = existing {
-            Ancestor::Detached(ancestor, ancestor_lsn)
-        } else {
-            let direct_children = reparented_direct_children(detached, tenant)?;
-            return Ok(DetachingAndReparenting::AlreadyDone(direct_children));
+    let ancestor = match (detached.ancestor_timeline.as_ref(), recorded_branchpoint) {
+        (Some(ancestor), None) => {
+            assert!(
+                !layers.is_empty(),
+                "there should always be at least one layer to inherit"
+            );
+            Ancestor::NotDetached(ancestor.clone(), detached.ancestor_lsn)
         }
-    } else {
-        // TODO: make sure there are no `?` before tenant_reset from after a questionmark from
-        // here.
-        panic!("bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor");
+        (Some(_), Some(_)) => {
+            panic!(
+                "it should be impossible to get to here without having gone through the tenant reset; if the tenant was reset, then the ancestor_timeline would be None"
+            );
+        }
+        (None, Some((ancestor_id, ancestor_lsn))) => {
+            // it has been either:
+            // - detached but still exists => we can try reparenting
+            // - detached and deleted
+            //
+            // either way, we must complete
+            assert!(
+                layers.is_empty(),
+                "no layers should had been copied as detach is done"
+            );
+
+            let existing = tenant.timelines.lock().unwrap().get(&ancestor_id).cloned();
+
+            if let Some(ancestor) = existing {
+                Ancestor::Detached(ancestor, ancestor_lsn)
+            } else {
+                let direct_children = reparented_direct_children(detached, tenant)?;
+                return Ok(DetachingAndReparenting::AlreadyDone(direct_children));
+            }
+        }
+        (None, None) => {
+            // TODO: make sure there are no `?` before tenant_reset from after a questionmark from
+            // here.
+            panic!(
+            "bug: detach_and_reparent called on a timeline which has not been detached or which has no live ancestor"
+            );
+        }
     };
 
     // publish the prepared layers before we reparent any of the timelines, so that on restart
