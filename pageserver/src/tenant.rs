@@ -386,6 +386,8 @@ impl WalRedoManager {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum GetTimelineError {
+    #[error("Timeline is shutting down")]
+    ShuttingDown,
     #[error("Timeline {tenant_id}/{timeline_id} is not active, state: {state:?}")]
     NotActive {
         tenant_id: TenantShardId,
