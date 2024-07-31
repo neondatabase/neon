@@ -174,7 +174,7 @@ def debezium(remote_pg):
     assert resp.status_code == 204
 
 
-def get_kafka_msg(consumer, ts_ms, before=None, after=None):
+def get_kafka_msg(consumer, ts_ms, before=None, after=None) -> None:
     """
     Gets the message from Kafka and checks its validity
     """
