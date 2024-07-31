@@ -1083,22 +1083,20 @@ class NeonEnv:
         # loop would eventually throw from get_port() if we run out of ports (extremely
         # unlikely): usually we find two adjacent free ports on the first iteration.
         while True:
-            self.storage_controller_port = self.port_distributor.get_port()
+            storage_controller_port = self.port_distributor.get_port()
             storage_controller_pg_port = self.port_distributor.get_port()
-            if storage_controller_pg_port == self.storage_controller_port + 1:
+            if storage_controller_pg_port == storage_controller_port + 1:
                 break
 
+        self.storage_controller: NeonStorageController = NeonStorageController(
+            self, storage_controller_port, config.auth_enabled
+        )
+
         # The URL for the pageserver to use as its control_plane_api config
-        self.control_plane_api: str = f"http://127.0.0.1:{self.storage_controller_port}/upcall/v1"
-        # The base URL of the storage controller
-        self.storage_controller_api: str = f"http://127.0.0.1:{self.storage_controller_port}"
+        self.control_plane_api: str = self.storage_controller.upcall_api_endpoint()
 
         # For testing this with a fake HTTP server, enable passing through a URL from config
         self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
-
-        self.storage_controller: NeonStorageController = NeonStorageController(
-            self, config.auth_enabled
-        )
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
@@ -2145,8 +2143,10 @@ class PageserverSchedulingPolicy(str, Enum):
 
 
 class NeonStorageController(MetricsGetter, LogUtils):
-    def __init__(self, env: NeonEnv, auth_enabled: bool):
+    def __init__(self, env: NeonEnv, port: int, auth_enabled: bool):
         self.env = env
+        self.port: int = port
+        self.api: str = f"http://127.0.0.1:{port}"
         self.running = False
         self.auth_enabled = auth_enabled
         self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
@@ -2163,6 +2163,12 @@ class NeonStorageController(MetricsGetter, LogUtils):
             self.env.neon_cli.storage_controller_stop(immediate)
             self.running = False
         return self
+
+    def upcall_api_endpoint(self) -> str:
+        return f"{self.api}/upcall/v1"
+
+    def api_root(self) -> str:
+        return self.api
 
     @staticmethod
     def retryable_node_operation(op, ps_id, max_attempts, backoff):
@@ -2206,7 +2212,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         auth_token = None
         if self.auth_enabled:
             auth_token = self.env.auth_keys.generate_token(scope=TokenScope.PAGE_SERVER_API)
-        return PageserverHttpClient(self.env.storage_controller_port, lambda: True, auth_token)
+        return PageserverHttpClient(self.port, lambda: True, auth_token)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
         resp = requests.request(method, *args, **kwargs)
@@ -2223,13 +2229,13 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return headers
 
     def get_metrics(self) -> Metrics:
-        res = self.request("GET", f"{self.env.storage_controller_api}/metrics")
+        res = self.request("GET", f"{self.api}/metrics")
         return parse_metrics(res.text)
 
     def ready(self) -> bool:
         status = None
         try:
-            resp = self.request("GET", f"{self.env.storage_controller_api}/ready")
+            resp = self.request("GET", f"{self.api}/ready")
             status = resp.status_code
         except StorageControllerApiException as e:
             status = e.status_code
@@ -2262,7 +2268,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/attach-hook",
+            f"{self.api}/debug/v1/attach-hook",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2273,7 +2279,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def attach_hook_drop(self, tenant_shard_id: Union[TenantId, TenantShardId]):
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/attach-hook",
+            f"{self.api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": None},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2284,7 +2290,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         response = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/inspect",
+            f"{self.api}/debug/v1/inspect",
             json={"tenant_shard_id": str(tenant_shard_id)},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2307,7 +2313,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_register({body})")
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/control/v1/node",
+            f"{self.api}/control/v1/node",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2316,7 +2322,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_delete({node_id})")
         self.request(
             "DELETE",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            f"{self.api}/control/v1/node/{node_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2324,7 +2330,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_drain({node_id})")
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            f"{self.api}/control/v1/node/{node_id}/drain",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2332,7 +2338,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"cancel_node_drain({node_id})")
         self.request(
             "DELETE",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            f"{self.api}/control/v1/node/{node_id}/drain",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2340,7 +2346,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_fill({node_id})")
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            f"{self.api}/control/v1/node/{node_id}/fill",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2348,14 +2354,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"cancel_node_fill({node_id})")
         self.request(
             "DELETE",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            f"{self.api}/control/v1/node/{node_id}/fill",
             headers=self.headers(TokenScope.ADMIN),
         )
 
     def node_status(self, node_id):
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            f"{self.api}/control/v1/node/{node_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2363,7 +2369,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def node_list(self):
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/node",
+            f"{self.api}/control/v1/node",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2371,7 +2377,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def tenant_list(self):
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/debug/v1/tenant",
+            f"{self.api}/debug/v1/tenant",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2381,7 +2387,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         body["node_id"] = node_id
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/config",
+            f"{self.api}/control/v1/node/{node_id}/config",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2416,7 +2422,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/v1/tenant",
+            f"{self.api}/v1/tenant",
             json=body,
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
@@ -2429,7 +2435,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/locate",
+            f"{self.api}/debug/v1/tenant/{tenant_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
@@ -2442,7 +2448,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}",
+            f"{self.api}/control/v1/tenant/{tenant_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
         response.raise_for_status()
@@ -2453,7 +2459,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     ) -> list[TenantShardId]:
         response = self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/shard_split",
+            f"{self.api}/control/v1/tenant/{tenant_id}/shard_split",
             json={"new_shard_count": shard_count, "new_stripe_size": shard_stripe_size},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2465,7 +2471,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_shard_id}/migrate",
+            f"{self.api}/control/v1/tenant/{tenant_shard_id}/migrate",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2476,7 +2482,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"tenant_policy_update({tenant_id}, {body})")
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/policy",
+            f"{self.api}/control/v1/tenant/{tenant_id}/policy",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2484,14 +2490,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def tenant_import(self, tenant_id: TenantId):
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/import",
+            f"{self.api}/debug/v1/tenant/{tenant_id}/import",
             headers=self.headers(TokenScope.ADMIN),
         )
 
     def reconcile_all(self):
         r = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/reconcile_all",
+            f"{self.api}/debug/v1/reconcile_all",
             headers=self.headers(TokenScope.ADMIN),
         )
         r.raise_for_status()
@@ -2524,7 +2530,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/consistency_check",
+            f"{self.api}/debug/v1/consistency_check",
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info("storage controller passed consistency check")
@@ -2597,7 +2603,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/control/v1/metadata_health/update",
+            f"{self.api}/control/v1/metadata_health/update",
             json=body,
             headers=self.headers(TokenScope.SCRUBBER),
         )
@@ -2605,7 +2611,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def metadata_health_list_unhealthy(self):
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/metadata_health/unhealthy",
+            f"{self.api}/control/v1/metadata_health/unhealthy",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2615,7 +2621,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/control/v1/metadata_health/outdated",
+            f"{self.api}/control/v1/metadata_health/outdated",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2638,7 +2644,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info("Asking storage controller to step down")
         response = self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/step_down",
+            f"{self.api}/control/v1/step_down",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2655,7 +2661,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         res = self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/debug/v1/failpoints",
+            f"{self.api}/debug/v1/failpoints",
             json=[{"name": name, "actions": actions} for name, actions in pairs],
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -4379,7 +4385,7 @@ class StorageScrubber:
 
         base_args = [
             str(self.env.neon_binpath / "storage_scrubber"),
-            f"--controller-api={self.env.storage_controller_api}",
+            f"--controller-api={self.env.storage_controller.api_root()}",
         ]
         args = base_args + args
 
