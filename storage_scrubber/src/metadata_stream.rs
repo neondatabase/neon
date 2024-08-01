@@ -189,6 +189,63 @@ pub async fn stream_tenant_timelines<'a>(
     })
 }
 
+/// Given a `TenantShardId`, output a stream of the timelines within that tenant, discovered
+/// using a listing. The listing is done before the stream is built, so that this
+/// function can be used to generate concurrency on a stream using buffer_unordered.
+pub async fn stream_tenant_timelines_generic<'a>(
+    remote_client: &'a GenericRemoteStorage,
+    target: &'a RootTarget,
+    tenant: TenantShardId,
+) -> anyhow::Result<impl Stream<Item = Result<TenantShardTimelineId, anyhow::Error>> + 'a> {
+    let mut timeline_ids: Vec<Result<TimelineId, anyhow::Error>> = Vec::new();
+    let timelines_target = target.timelines_root(&tenant);
+
+    let mut objects_stream = std::pin::pin!(stream_objects_with_retries(
+        remote_client,
+        ListingMode::WithDelimiter,
+        &timelines_target
+    ));
+    loop {
+        tracing::debug!("Listing in {tenant}");
+        let fetch_response = match objects_stream.next().await {
+            None => break,
+            Some(Err(e)) => {
+                timeline_ids.push(Err(e));
+                break;
+            }
+            Some(Ok(r)) => r,
+        };
+
+        let new_entry_ids = fetch_response
+            .prefixes
+            .iter()
+            .filter_map(|prefix| -> Option<&str> {
+                prefix
+                    .get_path()
+                    .as_str()
+                    .strip_prefix(&timelines_target.prefix_in_bucket)?
+                    .strip_suffix('/')
+            })
+            .map(|entry_id_str| {
+                entry_id_str
+                    .parse::<TimelineId>()
+                    .with_context(|| format!("Incorrect entry id str: {entry_id_str}"))
+            });
+
+        for i in new_entry_ids {
+            timeline_ids.push(i);
+        }
+    }
+
+    tracing::debug!("Yielding for {}", tenant);
+    Ok(stream! {
+        for i in timeline_ids {
+            let id = i?;
+            yield Ok(TenantShardTimelineId::new(tenant, id));
+        }
+    })
+}
+
 pub(crate) fn stream_listing<'a>(
     s3_client: &'a Client,
     target: &'a S3Target,
