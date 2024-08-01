@@ -1,0 +1,625 @@
+name: Build and Test Images
+
+on:
+  pull_request:
+    types:
+      - ready_for_review
+  workflow_call:
+    inputs:
+      build-tag:
+        description: 'build tag'
+        required: true
+        type: string
+      build-tools-image-tag:
+        description: 'build-tools image tag'
+        required: true
+        type: string
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+  # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
+  E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+
+jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name }}
+
+  neon-image-arch:
+    needs: [ check-permissions ]
+    strategy:
+      matrix:
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+      - uses: docker/setup-buildx-action@v3
+        with:
+          cache-binary: false
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: cache.neon.build
+          username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
+          password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            BUILD_TAG=${{ inputs.build-tag }}
+            TAG=${{ inputs.build-tools-image-tag }}
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile
+          cache-from: type=registry,ref=cache.neon.build/neon:cache-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0},mode=max', matrix.arch) || '' }}
+          tags: |
+            neondatabase/neon:${{ inputs.build-tag }}-${{ matrix.arch }}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
+
+  neon-image:
+    needs: [ neon-image-arch ]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Create multi-arch image
+        run: |
+          docker buildx imagetools create -t neondatabase/neon:${{ inputs.build-tag }} \
+                                             neondatabase/neon:${{ inputs.build-tag }}-x64 \
+                                             neondatabase/neon:${{ inputs.build-tag }}-arm64
+
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - name: Push multi-arch image to ECR
+        run: |
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{ inputs.build-tag }} \
+                                                                                neondatabase/neon:${{ inputs.build-tag }}
+
+  compute-node-image-arch:
+    needs: [ check-permissions ]
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ v14, v15, v16 ]
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+      - uses: docker/setup-buildx-action@v3
+        with:
+          cache-binary: false
+          # Disable parallelism for docker buildkit.
+          # As we already build everything with `make -j$(nproc)`, running it in additional level of parallelisam blows up the Runner.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: cache.neon.build
+          username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
+          password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
+
+      - name: Build compute-node image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            PG_VERSION=${{ matrix.version }}
+            BUILD_TAG=${{ inputs.build-tag }}
+            TAG=${{ inputs.build-tools-image-tag }}
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-node
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          tags: |
+            neondatabase/compute-node-${{ matrix.version }}:${{ inputs.build-tag }}-${{ matrix.arch }}
+
+      - name: Build neon extensions test image
+        if: matrix.version == 'v16'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            PG_VERSION=${{ matrix.version }}
+            BUILD_TAG=${{ inputs.build-tag }}
+            TAG=${{ inputs.build-tools-image-tag }}
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-node
+          target: neon-pg-ext-test
+          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          tags: |
+            neondatabase/neon-test-extensions-${{ matrix.version }}:${{inputs.build-tag}}-${{ matrix.arch }}
+
+      - name: Build compute-tools image
+        # compute-tools are Postgres independent, so build it only once
+        if: matrix.version == 'v16'
+        uses: docker/build-push-action@v6
+        with:
+          target: compute-tools-image
+          context: .
+          build-args: |
+            GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
+            BUILD_TAG=${{ inputs.build-tag }}
+            TAG=${{ inputs.build-tools-image-tag }}
+          provenance: false
+          push: true
+          pull: true
+          file: Dockerfile.compute-node
+          tags: |
+            neondatabase/compute-tools:${{ inputs.build-tag }}-${{ matrix.arch }}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
+
+  compute-node-image:
+    needs: [ compute-node-image-arch ]
+    runs-on: ubuntu-22.04
+
+    strategy:
+      matrix:
+        version: [ v14, v15, v16 ]
+
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Create multi-arch compute-node image
+        run: |
+          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version }}:${{ inputs.build-tag }} \
+                                             neondatabase/compute-node-${{ matrix.version }}:${{ inputs.build-tag }}-x64 \
+                                             neondatabase/compute-node-${{ matrix.version }}:${{ inputs.build-tag }}-arm64
+
+      - name: Create multi-arch neon-test-extensions image
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ inputs.build-tag }} \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ inputs.build-tag }}-x64 \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ inputs.build-tag }}-arm64
+
+      - name: Create multi-arch compute-tools image
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t neondatabase/compute-tools:${{ inputs.build-tag }} \
+                                             neondatabase/compute-tools:${{ inputs.build-tag }}-x64 \
+                                             neondatabase/compute-tools:${{ inputs.build-tag }}-arm64
+
+      - uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - name: Push multi-arch compute-node-${{ matrix.version }} image to ECR
+        run: |
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{ inputs.build-tag }} \
+                                                                                neondatabase/compute-node-${{ matrix.version }}:${{ inputs.build-tag }}
+
+      - name: Push multi-arch compute-tools image to ECR
+        if: matrix.version == 'v16'
+        run: |
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ inputs.build-tag }} \
+                                                                                neondatabase/compute-tools:${{ inputs.build-tag }}
+
+  vm-compute-node-image:
+    needs: [ compute-node-image ]
+    runs-on: [ self-hosted, gen3, large ]
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ v14, v15, v16 ]
+    env:
+      VM_BUILDER_VERSION: v0.29.3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Downloading vm-builder
+        run: |
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
+          chmod +x vm-builder
+
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
+      # it won't have the proper authentication (written at v0.6.0)
+      - name: Pulling compute-node image
+        run: |
+          docker pull neondatabase/compute-node-${{ matrix.version }}:${{ inputs.build-tag }}
+
+      - name: Build vm image
+        run: |
+          ./vm-builder \
+            -spec=vm-image-spec.yaml \
+            -src=neondatabase/compute-node-${{ matrix.version }}:${{ inputs.build-tag }} \
+            -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{ inputs.build-tag }}
+
+      - name: Pushing vm-compute-node image
+        run: |
+          docker push neondatabase/vm-compute-node-${{ matrix.version }}:${{ inputs.build-tag }}
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
+
+  test-images:
+    needs: [ neon-image, compute-node-image ]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ x64, arm64 ]
+
+    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
+      # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
+      # Regular pageserver version string looks like
+      #   Neon page server git-env:32d14403bd6ab4f4520a94cbfd81a6acef7a526c failpoints: true, features: []
+      # Bad versions might loop like:
+      #   Neon page server git-env:local failpoints: true, features: ["testing"]
+      # Ensure that we don't have bad versions.
+      - name: Verify image versions
+        shell: bash # ensure no set -e for better error messages
+        run: |
+          pageserver_version=$(docker run --rm neondatabase/neon:${{ inputs.build-tag }} "/bin/sh" "-c" "/usr/local/bin/pageserver --version")
+
+          echo "Pageserver version string: $pageserver_version"
+
+          if ! echo "$pageserver_version" | grep -qv 'git-env:local' ; then
+            echo "Pageserver version should not be the default Dockerfile one"
+            exit 1
+          fi
+
+          if ! echo "$pageserver_version" | grep -qv '"testing"' ; then
+            echo "Pageserver version should have no testing feature enabled"
+            exit 1
+          fi
+
+      - name: Verify docker-compose example and test extensions
+        timeout-minutes: 20
+        run: env TAG=${{inputs.build-tag}} ./docker-compose/docker_compose_test.sh
+
+      - name: Print logs and clean up
+        if: always()
+        run: |
+          docker compose -f ./docker-compose/docker-compose.yml logs || 0
+          docker compose -f ./docker-compose/docker-compose.yml down
+
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
+
+  promote-images:
+    needs: [ test-images, vm-compute-node-image ]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read  # This is required for actions/checkout
+      id-token: write # This is required for Azure Login to work.
+
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
+      - name: Login to dev ECR
+        uses: docker/login-action@v3
+        with:
+          registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
+
+      - name: Copy vm-compute-node images to ECR
+        run: |
+          for image in vm-compute-node-{v14,v15,v16}; do
+            docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ inputs.build-tag }} \
+                                               neondatabase/${image}:${{ inputs.build-tag }}
+          done
+
+      - name: Azure login
+        if: github.ref_name == 'main'
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        if: github.ref_name == 'main'
+        run: |
+          az acr login --name=neoneastus2
+
+      - name: Copy docker images to ACR-dev
+        if: github.ref_name == 'main'
+        run: |
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+            docker buildx imagetools create \
+              -t neoneastus2.azurecr.io/neondatabase/${image}:${{ inputs.build-tag }} \
+                                        neondatabase/${image}:${{ inputs.build-tag }}
+          done
+
+      - name: Add latest tag to images
+        if: github.ref_name == 'main'
+        run: |
+          for repo in neondatabase 369495373322.dkr.ecr.eu-central-1.amazonaws.com; do
+            for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+              docker buildx imagetools create -t ${repo}/${image}:latest \
+                                                 ${repo}/${image}:${{ inputs.build-tag }}
+
+            done
+          done
+
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
+                                             neondatabase/neon-test-extensions-v16:${{ inputs.build-tag }}
+
+      - name: Login to prod ECR
+        uses: docker/login-action@v3
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        with:
+          registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_ACCESS_KEY_ID }}
+          password: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Copy all images to prod ECR
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        run: |
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+            docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ inputs.build-tag }} \
+                                               369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ inputs.build-tag }}
+          done
+
+  trigger-custom-extensions-build-and-wait:
+    needs: [ check-permissions ]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Set PR's status to pending and request a remote CI test
+        run: |
+          COMMIT_SHA=${{ github.event.pull_request.head.sha || github.sha }}
+          REMOTE_REPO="${{ github.repository_owner }}/build-custom-extensions"
+
+          curl -f -X POST \
+          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"state\": \"pending\",
+              \"context\": \"build-and-upload-extensions\",
+              \"description\": \"[$REMOTE_REPO] Remote CI job is about to start\"
+            }"
+
+          curl -f -X POST \
+          https://api.github.com/repos/$REMOTE_REPO/actions/workflows/build_and_upload_extensions.yml/dispatches \
+          -H "Accept: application/vnd.github.v3+json" \
+          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
+          --data \
+            "{
+              \"ref\": \"main\",
+              \"inputs\": {
+                \"ci_job_name\": \"build-and-upload-extensions\",
+                \"commit_hash\": \"$COMMIT_SHA\",
+                \"remote_repo\": \"${{ github.repository }}\",
+                \"compute_image_tag\": \"${{ inputs.build-tag }}\",
+                \"remote_branch_name\": \"${{ github.ref_name }}\"
+              }
+            }"
+
+      - name: Wait for extension build to finish
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          TIMEOUT=1800 # 30 minutes, usually it takes ~2-3 minutes, but if runners are busy, it might take longer
+          INTERVAL=15 # try each N seconds
+
+          last_status="" # a variable to carry the last status of the "build-and-upload-extensions" context
+
+          for ((i=0; i <= TIMEOUT; i+=INTERVAL)); do
+            sleep $INTERVAL
+
+            # Get statuses for the latest commit in the PR / branch
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }}" > statuses.json
+
+            # Get the latest status for the "build-and-upload-extensions" context
+            last_status=$(jq --raw-output '[.[] | select(.context == "build-and-upload-extensions")] | sort_by(.created_at)[-1].state' statuses.json)
+            if [ "${last_status}" = "pending" ]; then
+              # Extension build is still in progress.
+              continue
+            elif [ "${last_status}" = "success" ]; then
+              # Extension build is successful.
+              exit 0
+            else
+              # Status is neither "pending" nor "success", exit the loop and fail the job.
+              break
+            fi
+          done
+
+          # Extension build failed, print `statuses.json` for debugging and fail the job.
+          jq '.' statuses.json
+
+          echo >&2 "Status of extension build is '${last_status}' != 'success'"
+          exit 1
+
+  cancel-previous-e2e-tests:
+    needs: [ check-permissions ]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Cancel previous e2e-tests runs for this PR
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          gh workflow --repo neondatabase/cloud \
+            run cancel-previous-in-concurrency-group.yml \
+              --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
+
+  trigger-e2e-tests:
+    needs: [ promote-images, cancel-previous-e2e-tests ]
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ inputs.build-tag }}
+    steps:
+      - name: Set e2e-platforms
+        id: e2e-platforms
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Default set of platforms to run e2e tests on
+          platforms='["docker", "k8s"]'
+
+          # If the PR changes vendor/, pgxn/ or libs/vm_monitor/ directories, or Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
+          # If the workflow run is not a pull request, add k8s-neonvm to the list.
+          if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+            for f in $(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename'); do
+              case "$f" in
+                vendor/*|pgxn/*|libs/vm_monitor/*|Dockerfile.compute-node)
+                  platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
+                  ;;
+                *)
+                  # no-op
+                  ;;
+              esac
+            done
+          else
+            platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
+          fi
+
+          echo "e2e-platforms=${platforms}" | tee -a $GITHUB_OUTPUT
+
+      - name: Set PR's status to pending and request a remote CI test
+        env:
+          E2E_PLATFORMS: ${{ steps.e2e-platforms.outputs.e2e-platforms }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          REMOTE_REPO="${GITHUB_REPOSITORY_OWNER}/cloud"
+
+          gh api "/repos/${GITHUB_REPOSITORY}/statuses/${COMMIT_SHA}" \
+            --method POST \
+            --raw-field "state=pending" \
+            --raw-field "description=[$REMOTE_REPO] Remote CI job is about to start" \
+            --raw-field "context=neon-cloud-e2e"
+
+          gh workflow --repo ${REMOTE_REPO} \
+            run testing.yml \
+              --ref "main" \
+              --raw-field "ci_job_name=neon-cloud-e2e" \
+              --raw-field "commit_hash=$COMMIT_SHA" \
+              --raw-field "remote_repo=${GITHUB_REPOSITORY}" \
+              --raw-field "storage_image_tag=${TAG}" \
+              --raw-field "compute_image_tag=${TAG}" \
+              --raw-field "concurrency_group=${E2E_CONCURRENCY_GROUP}" \
+              --raw-field "e2e-platforms=${E2E_PLATFORMS}"
