@@ -129,6 +129,7 @@ pub struct DecodedBkpBlock {
     pub apply_image: bool,
     /* has image that should be restored */
     pub will_init: bool,
+    pub opaque: bool,
     /* record doesn't need previous page version to apply */
     //char	   *bkp_image;
     pub hole_offset: u16,
@@ -1000,6 +1001,7 @@ pub fn decode_wal_record(
                 blk.has_image = (fork_flags & pg_constants::BKPBLOCK_HAS_IMAGE) != 0;
                 blk.has_data = (fork_flags & pg_constants::BKPBLOCK_HAS_DATA) != 0;
                 blk.will_init = (fork_flags & pg_constants::BKPBLOCK_WILL_INIT) != 0;
+                blk.opaque = (fork_flags & pg_constants::BKPBLOCK_OPAQUE) != 0;
                 blk.data_len = buf.get_u16_le();
 
                 /* TODO cross-check that the HAS_DATA flag is set iff data_length > 0 */

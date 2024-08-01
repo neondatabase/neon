@@ -203,8 +203,9 @@ pub const XLR_BLOCK_ID_DATA_LONG: u8 = 254;
 pub const XLR_BLOCK_ID_ORIGIN: u8 = 253;
 pub const XLR_BLOCK_ID_TOPLEVEL_XID: u8 = 252;
 
-pub const BKPBLOCK_FORK_MASK: u8 = 0x0F;
-pub const _BKPBLOCK_FLAG_MASK: u8 = 0xF0;
+pub const BKPBLOCK_FORK_MASK: u8 = 0x07;
+pub const BKPBLOCK_FLAG_MASK: u8 = 0xF8;
+pub const BKPBLOCK_OPAQUE: u8 = 0x08; /* page has no page header */
 pub const BKPBLOCK_HAS_IMAGE: u8 = 0x10; /* block data is an XLogRecordBlockImage */
 pub const BKPBLOCK_HAS_DATA: u8 = 0x20;
 pub const BKPBLOCK_WILL_INIT: u8 = 0x40; /* redo will re-init the page */
