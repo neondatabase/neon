@@ -313,6 +313,7 @@ def test_remote_storage_upload_queue_retries(
 
     def churn_while_failpoints_active(result):
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver("c")
+        # this call will wait for the failpoints to be turned off
         client.timeline_checkpoint(tenant_id, timeline_id)
         client.timeline_compact(tenant_id, timeline_id)
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver("d")
@@ -332,8 +333,8 @@ def test_remote_storage_upload_queue_retries(
     # Exponential back-off in upload queue, so, gracious timeouts.
 
     wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 2))
-    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1))
+    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
