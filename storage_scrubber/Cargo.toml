@@ -10,6 +10,7 @@ aws-smithy-async.workspace = true
 either.workspace = true
 tokio-rustls.workspace = true
 anyhow.workspace = true
+git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
 thiserror.workspace = true

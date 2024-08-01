@@ -3,6 +3,7 @@ pub(crate) mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
+pub(crate) mod handle;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
@@ -17,6 +18,7 @@ use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
@@ -74,6 +76,7 @@ use crate::{
         metadata::TimelineMetadata,
         storage_layer::PersistentLayerDesc,
     },
+    walredo,
 };
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -424,6 +427,8 @@ pub struct Timeline {
     pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
+
+    pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 }
 
 pub struct WalReceiverInfo {
@@ -529,7 +534,6 @@ impl GetVectoredError {
     }
 }
 
-#[derive(Debug)]
 pub struct MissingKeyError {
     key: Key,
     shard: ShardNumber,
@@ -538,6 +542,12 @@ pub struct MissingKeyError {
     ancestor_lsn: Option<Lsn>,
     traversal_path: Vec<TraversalPathItem>,
     backtrace: Option<std::backtrace::Backtrace>,
+}
+
+impl std::fmt::Debug for MissingKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
 impl std::fmt::Display for MissingKeyError {
@@ -991,7 +1001,10 @@ impl Timeline {
             .for_get_kind(GetKind::Singular)
             .observe(elapsed.as_secs_f64());
 
-        if cfg!(feature = "testing") && res.is_err() {
+        if cfg!(feature = "testing")
+            && res.is_err()
+            && !matches!(res, Err(PageReconstructError::Cancelled))
+        {
             // it can only be walredo issue
             use std::fmt::Write;
 
@@ -1910,6 +1923,9 @@ impl Timeline {
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
+        // Ensure Prevent new page service requests from starting.
+        self.handles.shutdown();
+
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         self.remote_client.stop();
@@ -2435,6 +2451,8 @@ impl Timeline {
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
 
                 l0_flush_global_state: resources.l0_flush_global_state,
+
+                handles: Default::default(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -2717,6 +2735,10 @@ impl Timeline {
         self.remote_client.schedule_barrier()?;
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
+
+        // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
+        drop(guard); // drop write lock, update_layer_visibility will take a read lock.
+        self.update_layer_visibility().await;
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
@@ -3704,6 +3726,17 @@ impl Timeline {
         &self.shard_identity
     }
 
+    #[inline(always)]
+    pub(crate) fn shard_timeline_id(&self) -> ShardTimelineId {
+        ShardTimelineId {
+            shard_index: ShardIndex {
+                shard_number: self.shard_identity.number,
+                shard_count: self.shard_identity.count,
+            },
+            timeline_id: self.timeline_id,
+        }
+    }
+
     ///
     /// Get a handle to the latest layer for appending.
     ///
@@ -4648,27 +4681,6 @@ impl Timeline {
             }
         }
 
-        // The writer.finish() above already did the fsync of the inodes.
-        // We just need to fsync the directory in which these inodes are linked,
-        // which we know to be the timeline directory.
-        if !image_layers.is_empty() {
-            // We use fatal_err() below because the after writer.finish() returns with success,
-            // the in-memory state of the filesystem already has the layer file in its final place,
-            // and subsequent pageserver code could think it's durable while it really isn't.
-            let timeline_dir = VirtualFile::open(
-                &self
-                    .conf
-                    .timeline_path(&self.tenant_shard_id, &self.timeline_id),
-                ctx,
-            )
-            .await
-            .fatal_err("VirtualFile::open for timeline dir fsync");
-            timeline_dir
-                .sync_all()
-                .await
-                .fatal_err("VirtualFile::sync_all timeline dir");
-        }
-
         let mut guard = self.layers.write().await;
 
         // FIXME: we could add the images to be uploaded *before* returning from here, but right
@@ -4676,6 +4688,9 @@ impl Timeline {
         guard.track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
         timer.stop_and_record();
+
+        // Creating image layers may have caused some previously visible layers to be covered
+        self.update_layer_visibility().await;
 
         Ok(image_layers)
     }
@@ -5441,20 +5456,22 @@ impl Timeline {
                 } else {
                     trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
                 };
-
-                let img = match self
+                let res = self
                     .walredo_mgr
                     .as_ref()
                     .context("timeline has no walredo manager")
                     .map_err(PageReconstructError::WalRedo)?
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
-                    .await
-                    .context("reconstruct a page image")
-                {
+                    .await;
+                let img = match res {
                     Ok(img) => img,
-                    Err(e) => return Err(PageReconstructError::WalRedo(e)),
+                    Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
+                    Err(walredo::Error::Other(e)) => {
+                        return Err(PageReconstructError::WalRedo(
+                            e.context("reconstruct a page image"),
+                        ))
+                    }
                 };
-
                 Ok(img)
             }
         }
