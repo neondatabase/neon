@@ -402,7 +402,7 @@ impl ComputeNode {
         let mut attempts = 0;
         const DEFAULT_ATTEMPTS: u16 = 10;
         #[cfg(feature = "testing")]
-        let max_attempts = if let Ok(v) = env::var("NEON_COMPUTE_TESTING_BASEBACKUP_TRIES") {
+        let max_attempts = if let Ok(v) = env::var("NEON_COMPUTE_TESTING_BASEBACKUP_RETRIES") {
             u16::from_str(&v).unwrap()
         } else {
             DEFAULT_ATTEMPTS
