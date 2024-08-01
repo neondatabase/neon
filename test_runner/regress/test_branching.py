@@ -18,7 +18,6 @@ from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
 from requests import RequestException
-from requests.exceptions import RetryError
 
 
 # Test branch creation
