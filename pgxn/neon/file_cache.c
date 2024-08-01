@@ -127,13 +127,14 @@ lfc_disable(char const *op)
 	{
 		HASH_SEQ_STATUS status;
 		FileCacheEntry *entry;
+		size_t n_chunks = SIZE_MB_TO_CHUNKS(lfc_max_size);
 
 		hash_seq_init(&status, lfc_hash);
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
 			hash_search_with_hash_value(lfc_hash, &entry->key, entry->hash, HASH_REMOVE, NULL);
 		}
-		memset(lfc_ctl->bitmap, 0, (lfc_ctl->size+31)/32*4);
+		memset(lfc_ctl->bitmap, 0, (n_chunks+31)/32*4);
 		lfc_ctl->generation += 1;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
@@ -202,10 +203,12 @@ lfc_ensure_opened(void)
 	}
 	return enabled;
 }
+
 static size_t
 lfc_ctl_sizeof(void)
 {
-	return offsetof(FileCacheControl, bitmap) + (lfc_max_size+31)/32*4;
+	size_t n_chunks = SIZE_MB_TO_CHUNKS(lfc_max_size);
+	return offsetof(FileCacheControl, bitmap) + (n_chunks+31)/32*4;
 }
 
 static void
@@ -225,21 +228,21 @@ lfc_shmem_startup(void)
 	if (!found)
 	{
 		int			fd;
-		uint32		lfc_size = SIZE_MB_TO_CHUNKS(lfc_max_size);
+		uint32		n_chunks = SIZE_MB_TO_CHUNKS(lfc_max_size);
 
 		lfc_lock = (LWLockId) GetNamedLWLockTranche("lfc_lock");
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(FileCacheEntry);
 
 		/*
-		 * lfc_size+1 because we add new element to hash table before eviction
+		 * n_chunks+1 because we add new element to hash table before eviction
 		 * of victim
 		 */
 		lfc_hash = ShmemInitHash("lfc_hash",
-								 lfc_size + 1, lfc_size + 1,
+								 n_chunks + 1, n_chunks + 1,
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
-		memset(lfc_ctl->bitmap, 0, (lfc_ctl->size+31)/32*4);
+		memset(lfc_ctl->bitmap, 0, (n_chunks+31)/32*4);
 		lfc_ctl->generation = 0;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
@@ -332,7 +335,7 @@ lfc_change_limit_hook(int newval, void *extra)
 			neon_log(LOG, "Failed to punch hole in file: %m");
 #endif
 		lfc_ctl->bitmap[victim->offset >> 5] |= 1 << (victim->offset & 31);
-		if (victim->offset < lfc_ctl->first_hole)
+		if (lfc_ctl->n_holes == 0 || victim->offset < lfc_ctl->first_hole)
 			lfc_ctl->first_hole = victim->offset;
 		lfc_ctl->n_holes += 1;
 		hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
