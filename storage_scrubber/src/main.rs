@@ -106,11 +106,7 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    tracing::info!(
-        "neon-storage-scrubber version: {}, build_tag {}",
-        GIT_VERSION,
-        BUILD_TAG
-    );
+    tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
 
     let bucket_config = BucketConfig::from_env()?;
 
