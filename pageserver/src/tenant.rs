@@ -1634,7 +1634,7 @@ impl Tenant {
         self: Arc<Self>,
         timeline_id: TimelineId,
     ) -> Result<(), DeleteTimelineError> {
-        DeleteTimelineFlow::run(&self, timeline_id, false).await?;
+        DeleteTimelineFlow::run(&self, timeline_id).await?;
 
         Ok(())
     }
