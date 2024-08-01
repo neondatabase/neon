@@ -85,9 +85,12 @@ typedef struct FileCacheControl
 	uint64		hits;
 	uint64		misses;
 	uint64		writes;
-	dlist_head	lru;			/* double linked list for LRU replacement
+	uint32		n_holes;
+	uint32		first_hole;
+ 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	HyperLogLogState wss_estimation; /* estimation of working set size */
+	uint32		bitmap[FLEXIBLE_ARRAY_MEMBER];
 } FileCacheControl;
 
 static HTAB *lfc_hash;
@@ -130,10 +133,13 @@ lfc_disable(char const *op)
 		{
 			hash_search_with_hash_value(lfc_hash, &entry->key, entry->hash, HASH_REMOVE, NULL);
 		}
+		memset(lfc_ctl->bitmap, 0, (lfc_ctl->size+31)/32*4);
 		lfc_ctl->generation += 1;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
 		lfc_ctl->limit = 0;
+		lfc_ctl->n_holes = 0;
+		lfc_ctl->first_hole = 0;
 		dlist_init(&lfc_ctl->lru);
 
 		if (lfc_desc > 0)
@@ -196,6 +202,11 @@ lfc_ensure_opened(void)
 	}
 	return enabled;
 }
+static size_t
+lfc_ctl_sizeof(void)
+{
+	return offsetof(FileCacheControl, bitmap) + (lfc_max_size+31)/32*4;
+}
 
 static void
 lfc_shmem_startup(void)
@@ -210,7 +221,7 @@ lfc_shmem_startup(void)
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
-	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", sizeof(FileCacheControl), &found);
+	lfc_ctl = (FileCacheControl *) ShmemInitStruct("lfc", lfc_ctl_sizeof(), &found);
 	if (!found)
 	{
 		int			fd;
@@ -228,12 +239,15 @@ lfc_shmem_startup(void)
 								 lfc_size + 1, lfc_size + 1,
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
+		memset(lfc_ctl->bitmap, 0, (lfc_ctl->size+31)/32*4);
 		lfc_ctl->generation = 0;
 		lfc_ctl->size = 0;
 		lfc_ctl->used = 0;
 		lfc_ctl->hits = 0;
 		lfc_ctl->misses = 0;
 		lfc_ctl->writes = 0;
+		lfc_ctl->n_holes = 0;
+		lfc_ctl->first_hole = 0;
 		dlist_init(&lfc_ctl->lru);
 
 		/* Initialize hyper-log-log structure for estimating working set size */
@@ -263,7 +277,7 @@ lfc_shmem_request(void)
 		prev_shmem_request_hook();
 #endif
 
-	RequestAddinShmemSpace(sizeof(FileCacheControl) + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, sizeof(FileCacheEntry)));
+	RequestAddinShmemSpace(lfc_ctl_sizeof() + hash_estimate_size(SIZE_MB_TO_CHUNKS(lfc_max_size) + 1, sizeof(FileCacheEntry)));
 	RequestNamedLWLockTranche("lfc_lock", 1);
 }
 
@@ -317,6 +331,10 @@ lfc_change_limit_hook(int newval, void *extra)
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0)
 			neon_log(LOG, "Failed to punch hole in file: %m");
 #endif
+		lfc_ctl->bitmap[victim->offset >> 5] |= 1 << (victim->offset & 31);
+		if (victim->offset < lfc_ctl->first_hole)
+			lfc_ctl->first_hole = victim->offset;
+		lfc_ctl->n_holes += 1;
 		hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 		lfc_ctl->used -= 1;
 	}
@@ -665,8 +683,23 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 		else
 		{
 			lfc_ctl->used += 1;
-			entry->offset = lfc_ctl->size++;	/* allocate new chunk at end
-												 * of file */
+			if (lfc_ctl->n_holes != 0)
+			{
+				/* Reuse one of holes */
+				size_t i = lfc_ctl->first_hole;
+				entry->offset = i;
+				lfc_ctl->bitmap[i >> 5] &= ~(1 << (i & 31));
+				if (--lfc_ctl->n_holes != 0)
+				{
+					do {
+						i += 1;
+					} while (!(lfc_ctl->bitmap[i >> 5] & (1 << (i & 31))));
+					lfc_ctl->first_hole = i;
+				}
+			}
+			else
+				entry->offset = lfc_ctl->size++;	/* allocate new chunk at end
+													 * of file */
 		}
 		entry->access_count = 1;
 		entry->hash = hash;
@@ -708,7 +741,6 @@ typedef struct
 } NeonGetStatsCtx;
 
 #define NUM_NEON_GET_STATS_COLS	2
-#define NUM_NEON_GET_STATS_ROWS	3
 
 PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
 Datum
@@ -744,7 +776,6 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 						   INT8OID, -1, 0);
 
 		fctx->tupdesc = BlessTupleDesc(tupledesc);
-		funcctx->max_calls = NUM_NEON_GET_STATS_ROWS;
 		funcctx->user_fctx = fctx;
 
 		/* Return to original context when allocating transient memory */
@@ -777,6 +808,16 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 			key = "file_cache_writes";
 			if (lfc_ctl)
 				value = lfc_ctl->writes;
+			break;
+		case 4:
+			key = "file_cache_size";
+			if (lfc_ctl)
+				value = lfc_ctl->size;
+			break;
+		case 5:
+			key = "file_cache_holes";
+			if (lfc_ctl)
+				value = lfc_ctl->n_holes;
 			break;
 		default:
 			SRF_RETURN_DONE(funcctx);
