@@ -13,9 +13,7 @@ import requests
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import wait_until
-
-# type: ignore
-from kafka import KafkaConsumer
+from kafka import KafkaConsumer  # type: ignore
 
 
 def query_clickhouse(
@@ -197,6 +195,7 @@ def get_kafka_msg(consumer, ts_ms, before=None, after=None) -> None:
                         raise ValueError(pname + " mismatches")
 
 
+# pylint: disable=redefined-outer-name
 @pytest.mark.remote_cluster
 def test_debezium(debezium):
     """
