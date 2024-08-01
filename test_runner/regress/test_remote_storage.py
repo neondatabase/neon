@@ -816,6 +816,7 @@ def test_paused_upload_stalls_checkpoint(
             client.timeline_checkpoint(tenant_id, timeline_id, timeout=5)
         client.configure_failpoints(("before-upload-layer-pausable", "off"))
 
+
 def wait_upload_queue_empty(
     client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
