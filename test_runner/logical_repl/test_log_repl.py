@@ -13,13 +13,15 @@ import requests
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import wait_until
-from kafka import KafkaConsumer  #type: ignore
+
+# type: ignore
+from kafka import KafkaConsumer
 
 
 def query_clickhouse(
-        client,
-        query: str,
-        digest: str,
+    client,
+    query: str,
+    digest: str,
 ) -> None:
     """
     Run the query on the client
