@@ -241,6 +241,9 @@ impl PostgresRedoManager {
 
     /// Shut down the WAL redo manager.
     ///
+    /// Returns `true` if this call was the one that initiated shutdown.
+    /// `true` may be observed by no caller if the first caller stops polling.
+    ///
     /// After this future completes
     /// - no redo process is running
     /// - no new redo process will be spawned
@@ -250,22 +253,32 @@ impl PostgresRedoManager {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> bool {
         // prevent new processes from being spawned
-        let permit = match self.redo_process.get_or_init_detached().await {
+        let maybe_permit = match self.redo_process.get_or_init_detached().await {
             Ok(guard) => {
-                let (proc, permit) = guard.take_and_deinit();
-                drop(proc); // this just drops the Arc, its refcount may not be zero yet
-                permit
+                if matches!(&*guard, ProcessOnceCell::ManagerShutDown) {
+                    None
+                } else {
+                    let (proc, permit) = guard.take_and_deinit();
+                    drop(proc); // this just drops the Arc, its refcount may not be zero yet
+                    Some(permit)
+                }
             }
-            Err(permit) => permit,
+            Err(permit) => Some(permit),
         };
-        self.redo_process
-            .set(ProcessOnceCell::ManagerShutDown, permit);
+        let it_was_us = if let Some(permit) = maybe_permit {
+            self.redo_process
+                .set(ProcessOnceCell::ManagerShutDown, permit);
+            true
+        } else {
+            false
+        };
         // wait for ongoing requests to drain and the refcounts of all Arc<WalRedoProcess> that
         // we ever launched to drop to zero, which when it happens synchronously kill()s & wait()s
         // for the underlying process.
         self.launched_processes.close().await;
+        it_was_us
     }
 
     /// This type doesn't have its own background task to check for idleness: we

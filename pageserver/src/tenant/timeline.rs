@@ -76,6 +76,7 @@ use crate::{
         metadata::TimelineMetadata,
         storage_layer::PersistentLayerDesc,
     },
+    walredo,
 };
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -1000,7 +1001,10 @@ impl Timeline {
             .for_get_kind(GetKind::Singular)
             .observe(elapsed.as_secs_f64());
 
-        if cfg!(feature = "testing") && res.is_err() {
+        if cfg!(feature = "testing")
+            && res.is_err()
+            && !matches!(res, Err(PageReconstructError::Cancelled))
+        {
             // it can only be walredo issue
             use std::fmt::Write;
 
@@ -5452,20 +5456,22 @@ impl Timeline {
                 } else {
                     trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
                 };
-
-                let img = match self
+                let res = self
                     .walredo_mgr
                     .as_ref()
                     .context("timeline has no walredo manager")
                     .map_err(PageReconstructError::WalRedo)?
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
-                    .await
-                    .context("reconstruct a page image")
-                {
+                    .await;
+                let img = match res {
                     Ok(img) => img,
-                    Err(e) => return Err(PageReconstructError::WalRedo(e)),
+                    Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
+                    Err(walredo::Error::Other(e)) => {
+                        return Err(PageReconstructError::WalRedo(
+                            e.context("reconstruct a page image"),
+                        ))
+                    }
                 };
-
                 Ok(img)
             }
         }

@@ -427,6 +427,7 @@ async fn list_objects_with_retries(
     Err(anyhow!("unreachable unless MAX_RETRIES==0"))
 }
 
+/// Listing possibly large amounts of keys in a streaming fashion.
 fn stream_objects_with_retries<'a>(
     storage_client: &'a GenericRemoteStorage,
     listing_mode: ListingMode,
@@ -463,6 +464,45 @@ fn stream_objects_with_retries<'a>(
             }
         }
     }
+}
+
+/// If you want to list a bounded amount of prefixes or keys. For larger numbers of keys/prefixes,
+/// use [`stream_objects_with_retries`] instead.
+async fn list_objects_with_retries_generic(
+    remote_client: &GenericRemoteStorage,
+    listing_mode: ListingMode,
+    s3_target: &S3Target,
+) -> anyhow::Result<Listing> {
+    let cancel = CancellationToken::new();
+    let prefix_str = &s3_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&s3_target.prefix_in_bucket);
+    let prefix = RemotePath::from_string(prefix_str)?;
+    for trial in 0..MAX_RETRIES {
+        match remote_client
+            .list(Some(&prefix), listing_mode, None, &cancel)
+            .await
+        {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                if trial == MAX_RETRIES - 1 {
+                    return Err(e)
+                        .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                }
+                error!(
+                    "list_objects_v2 query failed: bucket_name={}, prefix={}, delimiter={}, error={}",
+                    s3_target.bucket_name,
+                    s3_target.prefix_in_bucket,
+                    s3_target.delimiter,
+                    DisplayErrorContext(e),
+                );
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+            }
+        }
+    }
+    panic!("MAX_RETRIES is not allowed to be 0");
 }
 
 async fn download_object_with_retries(
