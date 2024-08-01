@@ -66,7 +66,6 @@ class DebeziumAPI:
                 "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
                 "tasks.max": "1",
                 "database.hostname": conn_options["host"],
-                # "database.port": conn_options['port'],
                 "database.port": "5432",
                 "database.user": conn_options["user"],
                 "database.password": conn_options["password"],
@@ -201,7 +200,6 @@ def test_debezium(debezium):
     """
     Test the logical replication having Debezium as a client
     """
-    # conn_options = remote_pg.conn_options()
     conn, consumer = debezium
     cur = conn.cursor()
     ts_ms = time.time() * 1000
