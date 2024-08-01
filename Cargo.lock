@@ -5758,6 +5758,7 @@ dependencies = [
  "either",
  "futures",
  "futures-util",
+ "git-version",
  "hex",
  "humantime",
  "itertools 0.10.5",
