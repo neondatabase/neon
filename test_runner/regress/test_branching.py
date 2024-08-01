@@ -151,7 +151,7 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
     env.pageserver.allowed_errors.extend(
         [
             ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
-            ".*page_service_conn_main.*: query handler for 'basebackup .* is not active, state: Loading",
+            ".*page_service_conn_main.*: query handler for 'basebackup .* ERROR: Not found: Timeline",
         ]
     )
     ps_http = env.pageserver.http_client()
@@ -176,10 +176,10 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
 
         env.neon_cli.map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
 
-        with pytest.raises(RuntimeError, match="is not active, state: Loading"):
+        with pytest.raises(RuntimeError, match="ERROR: Not found: Timeline"):
             env.endpoints.create_start(initial_branch, tenant_id=env.initial_tenant)
+        ps_http.configure_failpoints(("before-upload-index-pausable", "off"))
     finally:
-        # FIXME: paused uploads bother shutdown
         env.pageserver.stop(immediate=True)
 
         t.join()
