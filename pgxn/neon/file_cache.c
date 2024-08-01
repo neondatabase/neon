@@ -60,10 +60,11 @@
  *    1Mb chunks can reduce hash map size to 320Mb.
  * 2. Improve access locality, subsequent pages will be allocated together improving seqscan speed
  */
-#define BLOCKS_PER_CHUNK	128 /* 1Mb chunk */
+#define BLOCKS_PER_CHUNK	8 /* 64kb chunk */
 #define MB					((uint64)1024*1024)
 
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ / BLOCKS_PER_CHUNK))
+#define CHUNK_BITMAP_SIZE ((BLOCKS_PER_CHUNK + 31) / 32)
 
 typedef struct FileCacheEntry
 {
@@ -71,7 +72,7 @@ typedef struct FileCacheEntry
 	uint32		hash;
 	uint32		offset;
 	uint32		access_count;
-	uint32		bitmap[BLOCKS_PER_CHUNK / 32];
+	uint32		bitmap[CHUNK_BITMAP_SIZE];
 	dlist_node	lru_node;		/* LRU list node */
 } FileCacheEntry;
 
@@ -491,7 +492,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	{
 		bool		has_remaining_pages;
 
-		for (int i = 0; i < (BLOCKS_PER_CHUNK / 32); i++)
+		for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
 		{
 			if (entry->bitmap[i] != 0)
 			{
@@ -945,7 +946,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				hash_seq_init(&status, lfc_hash);
 				while ((entry = hash_seq_search(&status)) != NULL)
 				{
-					for (int i = 0; i < BLOCKS_PER_CHUNK / 32; i++)
+					for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
 						n_pages += pg_popcount32(entry->bitmap[i]);
 				}
 			}
