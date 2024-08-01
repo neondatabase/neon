@@ -2736,6 +2736,10 @@ impl Timeline {
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
 
+        // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
+        drop(guard); // drop write lock, update_layer_visibility will take a read lock.
+        self.update_layer_visibility().await;
+
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
@@ -4677,27 +4681,6 @@ impl Timeline {
             }
         }
 
-        // The writer.finish() above already did the fsync of the inodes.
-        // We just need to fsync the directory in which these inodes are linked,
-        // which we know to be the timeline directory.
-        if !image_layers.is_empty() {
-            // We use fatal_err() below because the after writer.finish() returns with success,
-            // the in-memory state of the filesystem already has the layer file in its final place,
-            // and subsequent pageserver code could think it's durable while it really isn't.
-            let timeline_dir = VirtualFile::open(
-                &self
-                    .conf
-                    .timeline_path(&self.tenant_shard_id, &self.timeline_id),
-                ctx,
-            )
-            .await
-            .fatal_err("VirtualFile::open for timeline dir fsync");
-            timeline_dir
-                .sync_all()
-                .await
-                .fatal_err("VirtualFile::sync_all timeline dir");
-        }
-
         let mut guard = self.layers.write().await;
 
         // FIXME: we could add the images to be uploaded *before* returning from here, but right
@@ -4705,6 +4688,9 @@ impl Timeline {
         guard.track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
         timer.stop_and_record();
+
+        // Creating image layers may have caused some previously visible layers to be covered
+        self.update_layer_visibility().await;
 
         Ok(image_layers)
     }
