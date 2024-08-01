@@ -1873,7 +1873,8 @@ impl Timeline {
         };
 
         // Like with delta layers, it can happen that we re-produce an already existing image layer.
-        // TODO: explain why it's safe to skip.
+        // This could happen when a user triggers force compaction and image generation. In this case,
+        // it's always safe to rewrite the layer.
         let discard_image_layer = {
             let guard = self.layers.read().await;
             if guard.contains_key(&image_layer_key) {
