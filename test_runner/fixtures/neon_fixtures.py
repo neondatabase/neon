@@ -4529,6 +4529,13 @@ def test_output_dir(
 
     yield test_dir
 
+    # Allure artifacts creation might involve the creation of `.tar.zst` archives,
+    # which aren't going to be used if Allure results collection is not enabled
+    # (i.e. --alluredir is not set).
+    # Skip `allure_attach_from_dir` in this case
+    if not request.config.getoption("--alluredir"):
+        return
+
     preserve_database_files = False
     for k, v in request.node.user_properties:
         # NB: the neon_env_builder fixture uses this fixture (test_output_dir).
