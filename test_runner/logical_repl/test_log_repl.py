@@ -238,7 +238,7 @@ def test_debezium(debezium):
     )
     log.info("Update")
     ts_ms = time.time() * 1000
-    cur.execute("update inventory.customers set first_name = 'Alexander' " "where id = 2")
+    cur.execute("update inventory.customers set first_name = 'Alexander' where id = 2")
     conn.commit()
     wait_until(100, 0.5, lambda: get_kafka_msg(consumer, ts_ms, after={"first_name": "Alexander"}))
     time.sleep(3)
