@@ -993,9 +993,10 @@ impl ImageLayerWriter {
     }
 
     #[cfg(test)]
-    /// Estimated size of the image layer. Currently, this is the blob (compressed) size without the index.
+    /// Estimated size of the image layer.
     pub(crate) fn estimated_size(&self) -> u64 {
-        self.inner.as_ref().unwrap().blob_writer.size()
+        let inner = self.inner.as_ref().unwrap();
+        inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
     }
 
     #[cfg(test)]
