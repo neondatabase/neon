@@ -193,9 +193,10 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
     env = neon_env_builder.init_configs()
     env.start()
 
-    env.pageserver.allowed_errors.append(
-        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
-    )
+    env.pageserver.allowed_errors.extend([
+        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
+        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: .*Cannot branch off the timeline that's not present in pageserver.*"
+    ])
     ps_http = env.pageserver.http_client()
 
     # pause all uploads
@@ -216,7 +217,7 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
 
         branch_id = TimelineId.generate()
 
-        with pytest.raises(RetryError, match="too many 503 error responses"):
+        with pytest.raises(PageserverApiException, match="Cannot branch off the timeline that's not present in pageserver"):
             ps_http.timeline_create(
                 env.pg_version,
                 env.initial_tenant,
