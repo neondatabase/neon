@@ -400,7 +400,15 @@ impl ComputeNode {
     pub fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let mut retry_period_ms = 500.0;
         let mut attempts = 0;
-        let max_attempts = 10;
+        const DEFAULT_ATTEMPTS: u16 = 10;
+        #[cfg(feature = "testing")]
+        let max_attempts = if let Ok(v) = env::var("NEON_COMPUTE_TESTING_BASEBACKUP_TRIES") {
+            u16::from_str(&v).unwrap()
+        } else {
+            DEFAULT_ATTEMPTS
+        };
+        #[cfg(not(feature = "testing"))]
+        let max_attempts = DEFAULT_ATTEMPTS;
         loop {
             let result = self.try_get_basebackup(compute_state, lsn);
             match result {
