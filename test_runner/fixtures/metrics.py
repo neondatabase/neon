@@ -150,6 +150,7 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_pitr_history_size",
     "pageserver_layer_bytes",
     "pageserver_layer_count",
+    "pageserver_visible_physical_size",
     "pageserver_storage_operations_seconds_count_total",
     "pageserver_storage_operations_seconds_sum_total",
     "pageserver_evictions_total",
