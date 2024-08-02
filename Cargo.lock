@@ -7443,6 +7443,7 @@ dependencies = [
  "axum",
  "base64 0.21.1",
  "base64ct",
+ "byteorder",
  "bytes",
  "camino",
  "cc",
