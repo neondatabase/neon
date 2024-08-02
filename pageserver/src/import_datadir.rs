@@ -155,17 +155,9 @@ async fn import_rel(
     //
     // FIXME: Keep track of which relations we've already created?
     // https://github.com/neondatabase/neon/issues/3309
-    if let Err(e) = modification
+    modification
         .put_rel_creation(rel, nblocks as u32, ctx)
-        .await
-    {
-        match e {
-            RelationError::AlreadyExists => {
-                debug!("Relation {} already exist. We must be extending it.", rel)
-            }
-            _ => return Err(e.into()),
-        }
-    }
+        .await?;
 
     loop {
         let r = reader.read_exact(&mut buf).await;
