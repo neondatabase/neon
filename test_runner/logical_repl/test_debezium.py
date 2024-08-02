@@ -21,7 +21,7 @@ class DebeziumAPI:
     """
 
     def __init__(self):
-        self.__host = 'debezium' if ('CI' in os.environ) else '127.0.0.1'
+        self.__host = "debezium" if ("CI" in os.environ) else "127.0.0.1"
         self.__base_url = f"http://{self.__host}:8083"
         self.__connectors_url = f"{self.__base_url}/connectors"
 

@@ -40,7 +40,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
     """
     Test the logical replication having ClickHouse as a client
     """
-    clickhouse_host = 'clickhouse' if ('CI' in os.environ) else '127.0.0.1'
+    clickhouse_host = "clickhouse" if ("CI" in os.environ) else "127.0.0.1"
     conn_options = remote_pg.conn_options()
     conn = psycopg2.connect(remote_pg.connstr())
     cur = conn.cursor()
