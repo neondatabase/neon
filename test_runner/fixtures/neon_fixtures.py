@@ -496,6 +496,7 @@ class NeonEnvBuilder:
         pageserver_aux_file_policy: Optional[AuxFileStore] = None,
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
+        storage_controller_port_override: Optional[int] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -547,6 +548,8 @@ class NeonEnvBuilder:
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
         self.safekeeper_extra_opts = safekeeper_extra_opts
+
+        self.storage_controller_port_override = storage_controller_port_override
 
         assert test_name.startswith(
             "test_"
@@ -1053,6 +1056,7 @@ class NeonEnv:
     """
 
     BASE_PAGESERVER_ID = 1
+    storage_controller: NeonStorageController | NeonProxiedStorageController
 
     def __init__(self, config: NeonEnvBuilder):
         self.repo_dir = config.repo_dir
@@ -1083,20 +1087,36 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        # Find two adjacent ports for storage controller and its postgres DB.  This
-        # loop would eventually throw from get_port() if we run out of ports (extremely
-        # unlikely): usually we find two adjacent free ports on the first iteration.
-        while True:
-            storage_controller_port = self.port_distributor.get_port()
-            storage_controller_pg_port = self.port_distributor.get_port()
-            if storage_controller_pg_port == storage_controller_port + 1:
-                break
-
-        self.storage_controller: NeonStorageController = NeonStorageController(
-            self, storage_controller_port, config.auth_enabled
-        )
-
         # The URL for the pageserver to use as its control_plane_api config
+        if config.storage_controller_port_override is not None:
+            log.info(
+                f"Using storage controller api override {config.storage_controller_port_override}"
+            )
+
+            self.storage_controller_port = config.storage_controller_port_override
+            self.storage_controller = NeonProxiedStorageController(
+                self, config.storage_controller_port_override, config.auth_enabled
+            )
+        else:
+            # Find two adjacent ports for storage controller and its postgres DB.  This
+            # loop would eventually throw from get_port() if we run out of ports (extremely
+            # unlikely): usually we find two adjacent free ports on the first iteration.
+            while True:
+                storage_controller_port = self.port_distributor.get_port()
+                storage_controller_pg_port = self.port_distributor.get_port()
+                if storage_controller_pg_port == storage_controller_port + 1:
+                    break
+
+            self.storage_controller_port = storage_controller_port
+            self.storage_controller = NeonStorageController(
+                self, storage_controller_port, config.auth_enabled
+            )
+
+            log.info(
+                f"Using generated control_plane_api: {self.storage_controller.upcall_api_endpoint()}"
+            )
+
+        self.storage_controller_api: str = self.storage_controller.api_root()
         self.control_plane_api: str = self.storage_controller.upcall_api_endpoint()
 
         # For testing this with a fake HTTP server, enable passing through a URL from config
@@ -1830,16 +1850,24 @@ class NeonCli(AbstractNeonCli):
     def storage_controller_start(
         self,
         timeout_in_seconds: Optional[int] = None,
+        instance_id: Optional[int] = None,
+        base_port: Optional[int] = None,
     ):
         cmd = ["storage_controller", "start"]
         if timeout_in_seconds is not None:
             cmd.append(f"--start-timeout={timeout_in_seconds}s")
+        if instance_id is not None:
+            cmd.append(f"--instance-id={instance_id}")
+        if base_port is not None:
+            cmd.append(f"--base-port={base_port}")
         return self.raw_cli(cmd)
 
-    def storage_controller_stop(self, immediate: bool):
+    def storage_controller_stop(self, immediate: bool, instance_id: Optional[int] = None):
         cmd = ["storage_controller", "stop"]
         if immediate:
             cmd.extend(["-m", "immediate"])
+        if instance_id is not None:
+            cmd.append(f"--instance-id={instance_id}")
         return self.raw_cli(cmd)
 
     def pageserver_start(
@@ -2158,11 +2186,16 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.running = False
         self.auth_enabled = auth_enabled
         self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
-        self.logfile = self.workdir / "storage_controller.log"
+        self.logfile = self.env.repo_dir / "storage_controller_1" / "storage_controller.log"
 
-    def start(self, timeout_in_seconds: Optional[int] = None):
+    def start(
+        self,
+        timeout_in_seconds: Optional[int] = None,
+        instance_id: Optional[int] = None,
+        base_port: Optional[int] = None,
+    ):
         assert not self.running
-        self.env.neon_cli.storage_controller_start(timeout_in_seconds)
+        self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
         self.running = True
         return self
 
@@ -2206,7 +2239,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def assert_no_errors(self):
         assert_no_errors(
-            self.env.repo_dir / "storage_controller_1" / "storage_controller.log",
+            self.logfile,
             "storage_controller",
             self.allowed_errors,
         )
@@ -2749,6 +2782,59 @@ class NeonStorageController(MetricsGetter, LogUtils):
         tb: Optional[TracebackType],
     ):
         self.stop(immediate=True)
+
+
+class NeonProxiedStorageController(NeonStorageController):
+    def __init__(self, env: NeonEnv, proxy_port: int, auth_enabled: bool):
+        super(NeonProxiedStorageController, self).__init__(env, proxy_port, auth_enabled)
+        self.instances: dict[int, dict[str, Any]] = {}
+
+    def start(
+        self,
+        timeout_in_seconds: Optional[int] = None,
+        instance_id: Optional[int] = None,
+        base_port: Optional[int] = None,
+    ):
+        assert instance_id is not None and base_port is not None
+
+        self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
+        self.instances[instance_id] = {"running": True}
+
+        self.running = True
+        return self
+
+    def stop_instance(
+        self, immediate: bool = False, instance_id: Optional[int] = None
+    ) -> "NeonStorageController":
+        assert instance_id in self.instances
+        if self.instances[instance_id]["running"]:
+            self.env.neon_cli.storage_controller_stop(immediate, instance_id)
+            self.instances[instance_id]["running"] = False
+
+        self.running = any(meta["running"] for meta in self.instances.values())
+        return self
+
+    def stop(self, immediate: bool = False) -> "NeonStorageController":
+        for iid, details in self.instances.items():
+            if details["running"]:
+                self.env.neon_cli.storage_controller_stop(immediate, iid)
+                self.instances[iid]["running"] = False
+
+        self.running = False
+        return self
+
+    def assert_no_errors(self):
+        for instance_id in self.instances.keys():
+            assert_no_errors(
+                self.env.repo_dir / f"storage_controller_{instance_id}" / "storage_controller.log",
+                "storage_controller",
+                self.allowed_errors,
+            )
+
+    def log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Optional[Tuple[str, LogCursor]]:
+        raise NotImplementedError()
 
 
 @dataclass
