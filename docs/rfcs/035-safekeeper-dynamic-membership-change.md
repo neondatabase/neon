@@ -191,7 +191,8 @@ considerations.
    I don't think we'll observe this in practice, but can add waking up compute if needed.
 4) In the end timeline should be locally deleted on the safekeeper(s) which are
    in the old set but not in the new one, unless they are unreachable. To be
-   safe this also should be done under generation number.
+   safe this also should be done under generation number (deletion proceeds only if 
+   current configuration is <= than one in request and safekeeper is not memeber of it).
 5) If current conf fetched on step 1 is already not joint and members equal to `desired_set`,
    jump to step 7, using it as `new_conf`.
 
@@ -207,7 +208,7 @@ This assumes that migration will be fully usable only after we migrate all
 tenants/timelines to storage_controller. It is discussible whether we want also
 to manage pageserver attachments for all of these, but likely we do.
 
-This requires us to define
+This requires us to define storcon <-> cplane interface.
 
 ### storage_controller <-> control plane interface
 
@@ -273,14 +274,14 @@ similarly, in the first version it is ok to trigger it manually).
 
 `safekeepers` table mirroring current `nodes` should be added, except that for
 `scheduling_policy` field (seems like `status` is a better name for it): it is enough
-to have at least in the beginning only 3 fields: 1) `active` 2) `unavailable` 3)
+to have at least in the beginning only 3 fields: 1) `active` 2) `offline` 3)
 `decomissioned`.
 
 `timelines` table:
 ```
 table! {
     // timeline_id is primary key
-    timelines (timeline_id) {
+    timelines (tenant_id, timeline_id) {
         timeline_id -> Varchar,
         tenant_id -> Varchar,
         generation -> Int4,
