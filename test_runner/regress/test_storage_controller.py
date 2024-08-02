@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import threading
 import time
@@ -16,6 +17,7 @@ from fixtures.neon_fixtures import (
     PageserverSchedulingPolicy,
     PgBin,
     StorageControllerApiException,
+    StorageControllerLeadershipStatus,
     TokenScope,
     last_flush_lsn_upload,
 )
@@ -30,7 +32,9 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
+from fixtures.storage_controller_proxy import StorageControllerProxy
 from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
 from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
@@ -2091,3 +2095,128 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
         )
         == 0
     )
+
+
+# This is a copy of NeonEnv.start which injects the instance id and port
+# into the call to NeonStorageController.start
+def start_env(env: NeonEnv, storage_controller_port: int):
+    timeout_in_seconds = 30
+
+    # Storage controller starts first, so that pageserver /re-attach calls don't
+    # bounce through retries on startup
+    env.storage_controller.start(timeout_in_seconds, 1, storage_controller_port)
+
+    # Wait for storage controller readiness to prevent unnecessary post start-up
+    # reconcile.
+    env.storage_controller.wait_until_ready()
+
+    # Start up broker, pageserver and all safekeepers
+    futs = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=2 + len(env.pageservers) + len(env.safekeepers)
+    ) as executor:
+        futs.append(
+            executor.submit(lambda: env.broker.try_start() or None)
+        )  # The `or None` is for the linter
+
+        for pageserver in env.pageservers:
+            futs.append(
+                executor.submit(
+                    lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)
+                )
+            )
+
+        for safekeeper in env.safekeepers:
+            futs.append(
+                executor.submit(
+                    lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)
+                )
+            )
+
+    for f in futs:
+        f.result()
+
+
+@pytest.mark.parametrize("step_down_times_out", [False, True])
+def test_storage_controller_leadership_transfer(
+    neon_env_builder: NeonEnvBuilder,
+    storage_controller_proxy: StorageControllerProxy,
+    port_distributor: PortDistributor,
+    step_down_times_out: bool,
+):
+    neon_env_builder.num_pageservers = 3
+
+    neon_env_builder.storage_controller_config = {
+        "database_url": f"127.0.0.1:{port_distributor.get_port()}",
+        "start_as_candidate": True,
+    }
+
+    neon_env_builder.storage_controller_port_override = storage_controller_proxy.port()
+
+    storage_controller_1_port = port_distributor.get_port()
+    storage_controller_2_port = port_distributor.get_port()
+
+    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+
+    env = neon_env_builder.init_configs()
+    start_env(env, storage_controller_1_port)
+
+    assert (
+        env.storage_controller.get_leadership_status() == StorageControllerLeadershipStatus.LEADER
+    )
+    leader = env.storage_controller.get_leader()
+    assert leader["address"] == f"http://127.0.0.1:{storage_controller_1_port}/"
+
+    if step_down_times_out:
+        env.storage_controller.configure_failpoints(
+            ("sleep-on-step-down-handling", "return(10000)")
+        )
+        env.storage_controller.allowed_errors.append(".*request was dropped before completing.*")
+
+    tenant_count = 2
+    shard_count = 4
+    tenants = set(TenantId.generate() for _ in range(0, tenant_count))
+
+    for tid in tenants:
+        env.storage_controller.tenant_create(
+            tid, shard_count=shard_count, placement_policy={"Attached": 1}
+        )
+    env.storage_controller.reconcile_until_idle()
+
+    env.storage_controller.start(
+        timeout_in_seconds=30, instance_id=2, base_port=storage_controller_2_port
+    )
+
+    if not step_down_times_out:
+
+        def previous_stepped_down():
+            assert (
+                env.storage_controller.get_leadership_status()
+                == StorageControllerLeadershipStatus.STEPPED_DOWN
+            )
+
+        wait_until(5, 1, previous_stepped_down)
+
+    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_2_port}")
+
+    def new_becomes_leader():
+        assert (
+            env.storage_controller.get_leadership_status()
+            == StorageControllerLeadershipStatus.LEADER
+        )
+
+    wait_until(15, 1, new_becomes_leader)
+    leader = env.storage_controller.get_leader()
+    assert leader["address"] == f"http://127.0.0.1:{storage_controller_2_port}/"
+
+    env.storage_controller.wait_until_ready()
+    env.storage_controller.consistency_check()
+
+    if step_down_times_out:
+        env.storage_controller.allowed_errors.extend(
+            [
+                ".*Leader.*did not respond to step-down request.*",
+                ".*Send step down request failed.*",
+                ".*Send step down request still failed.*",
+            ]
+        )

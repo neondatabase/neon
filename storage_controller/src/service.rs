@@ -6329,6 +6329,7 @@ impl Service {
 
     pub(crate) async fn step_down(&self) -> GlobalObservedState {
         tracing::info!("Received step down request from peer");
+        failpoint_support::sleep_millis_async!("sleep-on-step-down-handling");
 
         self.inner.write().unwrap().step_down();
         // TODO: would it make sense to have a time-out for this?

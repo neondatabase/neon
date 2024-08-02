@@ -2178,6 +2178,12 @@ class PageserverSchedulingPolicy(str, Enum):
     PAUSE_FOR_RESTART = "PauseForRestart"
 
 
+class StorageControllerLeadershipStatus(str, Enum):
+    LEADER = "leader"
+    STEPPED_DOWN = "stepped_down"
+    CANDIDATE = "candidate"
+
+
 class NeonStorageController(MetricsGetter, LogUtils):
     def __init__(self, env: NeonEnv, port: int, auth_enabled: bool):
         self.env = env
@@ -2403,6 +2409,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def get_leader(self):
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/leader",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2771,6 +2785,22 @@ class NeonStorageController(MetricsGetter, LogUtils):
             self.env.get_pageserver(secondary_id).http_client().tenant_secondary_download(
                 parsed_tid, wait_ms=250
             )
+
+    def get_leadership_status(self) -> StorageControllerLeadershipStatus:
+        metric_values = {}
+        for status in StorageControllerLeadershipStatus:
+            metric_value = self.get_metric_value(
+                "storage_controller_leadership_status", filter={"status": status}
+            )
+            metric_values[status] = metric_value
+
+        assert list(metric_values.values()).count(1) == 1
+
+        for status, metric_value in metric_values.items():
+            if metric_value == 1:
+                return status
+
+        raise AssertionError("unreachable")
 
     def __enter__(self) -> "NeonStorageController":
         return self
