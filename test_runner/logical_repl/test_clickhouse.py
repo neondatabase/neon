@@ -14,9 +14,9 @@ from fixtures.utils import wait_until
 
 
 def query_clickhouse(
-        client,
-        query: str,
-        digest: str,
+    client,
+    query: str,
+    digest: str,
 ) -> None:
     """
     Run the query on the client
