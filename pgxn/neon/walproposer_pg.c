@@ -1449,7 +1449,11 @@ walprop_pg_init_event_set(WalProposer *wp)
 		wpg_log(FATAL, "double-initialization of event set");
 
 	/* for each sk, we have socket plus potentially socket for neon walreader */
+#if PG_MAJORVERSION_NUM >= 17
+	waitEvents = CreateWaitEventSet(NULL, 2 + 2 * wp->n_safekeepers);
+#else
 	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + 2 * wp->n_safekeepers);
+#endif
 	AddWaitEventToSet(waitEvents, WL_LATCH_SET, PGINVALID_SOCKET,
 					  MyLatch, NULL);
 	AddWaitEventToSet(waitEvents, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,

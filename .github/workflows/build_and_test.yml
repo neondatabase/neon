@@ -211,7 +211,7 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16"]' || '["v16"]' }}
+      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16", "v17"]' || '["v16"]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -547,7 +547,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
         arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
@@ -648,7 +648,7 @@ jobs:
 
     strategy:
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
 
     steps:
       - uses: docker/login-action@v3
@@ -699,7 +699,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
     env:
       VM_BUILDER_VERSION: v0.29.3
 
@@ -800,7 +800,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      VERSIONS: v14 v15 v16
+      VERSIONS: v14 v15 v16 v17
 
     steps:
       - uses: docker/login-action@v3
@@ -838,7 +838,7 @@ jobs:
       - name: Copy docker images to ACR-dev
         if: github.ref_name == 'main'
         run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create \
               -t neoneastus2.azurecr.io/neondatabase/${image}:${{ needs.tag.outputs.build-tag }} \
                                         neondatabase/${image}:${{ needs.tag.outputs.build-tag }}
@@ -876,7 +876,7 @@ jobs:
       - name: Copy all images to prod ECR
         if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
                                                369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
           done
@@ -971,7 +971,7 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16; do
+          for r in 14 15 16 17; do
             git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
             git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
           done
