@@ -459,6 +459,9 @@ RUN case "${PG_VERSION}" in \
         export PG_HINT_PLAN_VERSION=16_1_6_0 \
         export PG_HINT_PLAN_CHECKSUM=fc85a9212e7d2819d4ae4ac75817481101833c3cfa9f0fe1f980984e12347d00 \
         ;; \
+      "v17") \
+        echo "TODO: PG17 pg_hint_plan support" && exit 0 \
+        ;; \
       *) \
         echo "Export the valid PG_HINT_PLAN_VERSION variable" && exit 1 \
         ;; \
@@ -854,8 +857,8 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
     case "${PG_VERSION}" in \
         "v14" | "v15") \
         ;; \
-        "v16") \
-            echo "Skipping HNSW for PostgreSQL 16" && exit 0 \
+        "v16" | "v17") \
+            echo "Skipping HNSW for PostgreSQL ${PG_VERSION}" && exit 0 \
         ;; \
         *) \
             echo "unexpected PostgreSQL version" && exit 1 \
