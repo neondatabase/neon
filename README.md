@@ -23,16 +23,55 @@ See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more informati
 
 ## Running local installation
 
+Build support scripts can be found at `./scripts/build/`.
 
-#### Installing dependencies on Linux
+### Installing dependencies on Linux
 1. Install build dependencies and other applicable packages
 
-* On Ubuntu or Debian, this set of packages should be sufficient to build the code:
+* On Ubuntu or Debian, the following base packages are needed to compile:
+
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler \
-libcurl4-openssl-dev openssl python3-poetry lsof libicu-dev
+libssl-dev clang pkg-config libpq-dev cmake postgresql-client libcurl4-openssl-dev \
+openssl python3-poetry lsof libicu-dev
 ```
+
+Ubuntu 22.04.4 LTS or similar still do not provide suitable protobuf .deb packages, compile by yourself.
+
+#### Get Protobuf 27.3 Source
+
+```bash
+wget https://github.com/protocolbuffers/protobuf/releases/download/v27.3/protobuf-27.3.tar.gz
+```
+
+#### Add Bazel Build Tool Repository
+
+Protobuf CMake build is broken, so bazel has to be used.
+
+
+```bash
+# add external bazel repository
+sudo apt install apt-transport-https curl gnupg -y
+curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
+sudo mv bazel-archive-keyring.gpg /usr/share/keyrings
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
+```
+
+#### Build
+
+```bash
+bazel build :protoc :protobuf
+```
+
+#### Install (as root)
+```bash
+cp bazel-bin/protoc /usr/local/bin
+chown root:root /usr/local/bin/protoc
+
+cp -R src/google /usr/local/include
+chown -R root:root /usr/local/include/google
+```
+
 * On Fedora, these packages are needed:
 ```bash
 dnf install flex bison readline-devel zlib-devel openssl-devel \
@@ -40,7 +79,9 @@ dnf install flex bison readline-devel zlib-devel openssl-devel \
   protobuf-devel libcurl-devel openssl poetry lsof libicu-devel libpq-devel python3-devel \
   libffi-devel
 ```
+
 * On Arch based systems, these packages are needed:
+
 ```bash
 pacman -S base-devel readline zlib libseccomp openssl clang \
 postgresql-libs cmake postgresql protobuf curl lsof
