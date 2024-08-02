@@ -1037,6 +1037,7 @@ impl Timeline {
 
 /// Write something other than a simple postgres key/value: unlike regular relation page writes, these
 /// require access to a Timeline in order to do read-modify-write.
+#[derive(Debug)]
 enum MetadataOp {
     // - Insert to DBDIR_KEY if this (spcnode, dbnode) does not already exist
     // - Insert to rel_dir_to_key(spcnode, dbnode)
@@ -1149,6 +1150,7 @@ impl MetadataOp {
         data_dir_mod: &mut DatadirModification<'a>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        eprintln!("MetadataOp::apply: {self:?}");
         match self {
             Self::UpsertRelDirectory { spcnode, dbnode } => {
                 // Add it to the directory (if it doesn't exist already)
@@ -1319,6 +1321,7 @@ impl<'a> DatadirModification<'a> {
 
     /// While applying a metadata op, write a materialized page.
     fn put_metadata_page(&mut self, lsn: Lsn, key: Key, value: Bytes) {
+        eprintln!("put_metadata_page {key} @ {lsn}");
         self.put_at_lsn(lsn, key, Value::Image(value.clone()));
 
         self.metadata_state.put(lsn, key, value);

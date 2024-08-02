@@ -92,6 +92,7 @@ impl WalIngest {
         decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
+        eprintln!("ingest_record @ {lsn}");
         WAL_INGEST.records_received.inc();
         let pg_version = modification.tline.pg_version;
         let prev_len = modification.len();
