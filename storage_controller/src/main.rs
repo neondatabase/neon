@@ -278,6 +278,7 @@ async fn async_main() -> anyhow::Result<()> {
         neon_local_repo_dir: args.neon_local_repo_dir,
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
+        dev: args.dev,
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations

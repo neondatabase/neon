@@ -355,6 +355,8 @@ pub struct Config {
     pub start_as_candidate: bool,
 
     pub http_service_port: i32,
+
+    pub dev: bool,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -6274,6 +6276,18 @@ impl Service {
     ///
     /// On failures to discover and resolve the hostname the process is killed and we rely on k8s to retry.
     fn get_proposed_leader_info(&self) -> LeaderPersistence {
+        if self.get_config().dev {
+            let proposed = LeaderPersistence {
+                hostname: "127.0.0.1".to_string(),
+                port: self.get_config().http_service_port,
+                started_at: chrono::Utc::now(),
+            };
+
+            tracing::info!("Proposed leader details in dev mode are: {proposed:?}");
+
+            return proposed;
+        }
+
         let hostname = match dns_lookup::get_hostname() {
             Ok(name) => name,
             Err(err) => {
