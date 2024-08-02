@@ -20,7 +20,7 @@ use pageserver_api::key::{
     dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
     relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
-    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+    CompactKey, AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::models::AuxFilePolicy;
@@ -1835,10 +1835,13 @@ impl<'a> DatadirModification<'a> {
         if !self.pending_updates.is_empty() {
             // The put_batch call below expects expects the inputs to be sorted by Lsn,
             // so we do that first.
-            let lsn_ordered_batch: VecMap<Lsn, (Key, Value)> = VecMap::from_iter(
+            let lsn_ordered_batch: VecMap<Lsn, (CompactKey, Value)> = VecMap::from_iter(
                 self.pending_updates
                     .drain()
-                    .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (lsn, (key, val))))
+                    .map(|(key, vals)| {
+                        vals.into_iter()
+                            .map(move |(lsn, val)| (lsn, (key.to_compact(), val)))
+                    })
                     .kmerge_by(|lhs, rhs| lhs.0 < rhs.0),
                 VecMapOrdering::GreaterOrEqual,
             );

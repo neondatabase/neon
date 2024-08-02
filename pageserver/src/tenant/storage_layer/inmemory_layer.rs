@@ -430,6 +430,43 @@ impl InMemoryLayer {
         self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
     }
 
+    pub(crate) async fn put_batch(
+        &self,
+        buf: Vec<u8>,
+        values: Vec<(CompactKey, Lsn, u64)>,
+        ctx: &RequestContext,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().await;
+        self.assert_writable();
+
+        let base_off = {
+            inner
+                .file
+                .write_raw(
+                    &buf,
+                    &RequestContextBuilder::extend(ctx)
+                        .page_content_kind(PageContentKind::InMemoryLayer)
+                        .build(),
+                )
+                .await?
+        };
+
+        for (key, lsn, relative_off) in values {
+            let off = base_off + relative_off;
+            let vec_map = inner.index.entry(key).or_default();
+            let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
+            if old.is_some() {
+                // We already had an entry for this LSN. That's odd..
+                warn!("Key {} at {} already exists", key, lsn);
+            }
+        }
+
+        let size = inner.file.len();
+        inner.resource_units.maybe_publish_size(size);
+
+        Ok(())
+    }
+
     async fn put_value_locked(
         &self,
         locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
