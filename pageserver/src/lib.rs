@@ -12,6 +12,8 @@ pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub mod l0_flush;
+
+use futures::{stream::FuturesUnordered, StreamExt};
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
 pub mod aux_file;
@@ -30,14 +32,13 @@ pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
 
-use crate::task_mgr::TaskKind;
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;
 use tenant::{
     mgr::{BackgroundPurges, TenantManager},
     secondary,
 };
-use tracing::info;
+use tracing::{info, info_span};
 
 /// Current storage format version
 ///
@@ -63,7 +64,6 @@ pub struct CancellableTask {
     pub cancel: CancellationToken,
 }
 pub struct HttpEndpointListener(pub CancellableTask);
-pub struct LibpqEndpointListener(pub CancellableTask);
 pub struct ConsumptionMetricsTasks(pub CancellableTask);
 pub struct DiskUsageEvictionTask(pub CancellableTask);
 impl CancellableTask {
@@ -77,7 +77,7 @@ impl CancellableTask {
 #[allow(clippy::too_many_arguments)]
 pub async fn shutdown_pageserver(
     http_listener: HttpEndpointListener,
-    libpq_listener: LibpqEndpointListener,
+    page_service: page_service::Listener,
     consumption_metrics_worker: ConsumptionMetricsTasks,
     disk_usage_eviction_task: Option<DiskUsageEvictionTask>,
     tenant_manager: &TenantManager,
@@ -87,10 +87,83 @@ pub async fn shutdown_pageserver(
     exit_code: i32,
 ) {
     use std::time::Duration;
+
+    // If the orderly shutdown below takes too long, we still want to make
+    // sure that all walredo processes are killed and wait()ed on by us, not systemd.
+    //
+    // (Leftover walredo processes are the hypothesized trigger for the systemd freezes
+    //  that we keep seeing in prod => https://github.com/neondatabase/cloud/issues/11387.
+    //
+    // We use a thread instead of a tokio task because the background runtime is likely busy
+    // with the final flushing / uploads. This activity here has priority, and due to lack
+    // of scheduling priority feature sin the tokio scheduler, using a separate thread is
+    // an effective priority booster.
+    let walredo_extraordinary_shutdown_thread_span = {
+        let span = info_span!(parent: None, "walredo_extraordinary_shutdown_thread");
+        span.follows_from(tracing::Span::current());
+        span
+    };
+    let walredo_extraordinary_shutdown_thread_cancel = CancellationToken::new();
+    let walredo_extraordinary_shutdown_thread = std::thread::spawn({
+        let walredo_extraordinary_shutdown_thread_cancel =
+            walredo_extraordinary_shutdown_thread_cancel.clone();
+        move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _entered = rt.enter();
+            let _entered = walredo_extraordinary_shutdown_thread_span.enter();
+            if let Ok(()) = rt.block_on(tokio::time::timeout(
+                Duration::from_secs(8),
+                walredo_extraordinary_shutdown_thread_cancel.cancelled(),
+            )) {
+                info!("cancellation requested");
+                return;
+            }
+            let managers = tenant::WALREDO_MANAGERS
+                .lock()
+                .unwrap()
+                // prevents new walredo managers from being inserted
+                .take()
+                .expect("only we take()");
+            // Use FuturesUnordered to get in queue early for each manager's
+            // heavier_once_cell semaphore wait list.
+            // Also, for idle tenants that for some reason haven't
+            // shut down yet, it's quite likely that we're not going
+            // to get Poll::Pending once.
+            let mut futs: FuturesUnordered<_> = managers
+                .into_iter()
+                .filter_map(|(_, mgr)| mgr.upgrade())
+                .map(|mgr| async move { tokio::task::unconstrained(mgr.shutdown()).await })
+                .collect();
+            info!(count=%futs.len(), "built FuturesUnordered");
+            let mut last_log_at = std::time::Instant::now();
+            #[derive(Debug, Default)]
+            struct Results {
+                initiated: u64,
+                already: u64,
+            }
+            let mut results = Results::default();
+            while let Some(we_initiated) = rt.block_on(futs.next()) {
+                if we_initiated {
+                    results.initiated += 1;
+                } else {
+                    results.already += 1;
+                }
+                if last_log_at.elapsed() > Duration::from_millis(100) {
+                    info!(remaining=%futs.len(), ?results, "progress");
+                    last_log_at = std::time::Instant::now();
+                }
+            }
+            info!(?results, "done");
+        }
+    });
+
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
-    timed(
-        libpq_listener.0.shutdown(),
+    let remaining_connections = timed(
+        page_service.stop_accepting(),
         "shutdown LibpqEndpointListener",
         Duration::from_secs(1),
     )
@@ -108,7 +181,7 @@ pub async fn shutdown_pageserver(
     // Shut down any page service tasks: any in-progress work for particular timelines or tenants
     // should already have been canclled via mgr::shutdown_all_tenants
     timed(
-        task_mgr::shutdown_tasks(Some(TaskKind::PageRequestHandler), None, None),
+        remaining_connections.shutdown(),
         "shutdown PageRequestHandlers",
         Duration::from_secs(1),
     )
@@ -162,6 +235,12 @@ pub async fn shutdown_pageserver(
         Duration::from_secs(1),
     )
     .await;
+
+    info!("cancel & join walredo_extraordinary_shutdown_thread");
+    walredo_extraordinary_shutdown_thread_cancel.cancel();
+    walredo_extraordinary_shutdown_thread.join().unwrap();
+    info!("walredo_extraordinary_shutdown_thread done");
+
     info!("Shut down successfully completed");
     std::process::exit(exit_code);
 }

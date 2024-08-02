@@ -17,11 +17,9 @@ use pageserver::config::PageserverIdentity;
 use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
-use pageserver::task_mgr::WALRECEIVER_RUNTIME;
+use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
 use pageserver::tenant::{secondary, TenantSharedResources};
-use pageserver::{
-    CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener, LibpqEndpointListener,
-};
+use pageserver::{CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener};
 use remote_storage::GenericRemoteStorage;
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
@@ -31,11 +29,9 @@ use tracing::*;
 use metrics::set_build_info_metric;
 use pageserver::{
     config::PageServerConf,
-    context::{DownloadBehavior, RequestContext},
     deletion_queue::DeletionQueue,
     http, page_cache, page_service, task_mgr,
-    task_mgr::TaskKind,
-    task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
+    task_mgr::{BACKGROUND_RUNTIME, MGMT_REQUEST_RUNTIME},
     tenant::mgr,
     virtual_file,
 };
@@ -129,6 +125,7 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.get_impl, "starting with get page implementation");
     info!(?conf.get_vectored_impl, "starting with vectored get page implementation");
+    info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
@@ -593,30 +590,13 @@ fn start_pageserver(
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
-    let libpq_listener = {
-        let cancel = CancellationToken::new();
-        let libpq_ctx = RequestContext::todo_child(
-            TaskKind::LibpqEndpointListener,
-            // listener task shouldn't need to download anything. (We will
-            // create a separate sub-contexts for each connection, with their
-            // own download behavior. This context is used only to listen and
-            // accept connections.)
-            DownloadBehavior::Error,
-        );
-
-        let task = COMPUTE_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
-            "libpq listener",
-            page_service::libpq_listener_main(
-                tenant_manager.clone(),
-                pg_auth,
-                pageserver_listener,
-                conf.pg_auth_type,
-                libpq_ctx,
-                cancel.clone(),
-            ),
-        ));
-        LibpqEndpointListener(CancellableTask { task, cancel })
-    };
+    let page_service = page_service::spawn(conf, tenant_manager.clone(), pg_auth, {
+        let _entered = COMPUTE_REQUEST_RUNTIME.enter(); // TcpListener::from_std requires it
+        pageserver_listener
+            .set_nonblocking(true)
+            .context("set listener to nonblocking")?;
+        tokio::net::TcpListener::from_std(pageserver_listener).context("create tokio listener")?
+    });
 
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
@@ -644,7 +624,7 @@ fn start_pageserver(
             shutdown_pageserver.take();
             pageserver::shutdown_pageserver(
                 http_endpoint_listener,
-                libpq_listener,
+                page_service,
                 consumption_metrics_tasks,
                 disk_usage_eviction_task,
                 &tenant_manager,
