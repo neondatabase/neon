@@ -168,7 +168,8 @@ impl Timeline {
         DatadirModification {
             tline: self,
             pending_lsns: Vec::new(),
-            pending_updates: HashMap::new(),
+            pending_metadata_pages: HashMap::new(),
+            pending_data_pages: Vec::new(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
             pending_directory_entries: Vec::new(),
@@ -1031,9 +1032,11 @@ pub struct DatadirModification<'a> {
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_lsns: Vec<Lsn>,
-    pending_updates: HashMap<Key, Vec<(Lsn, usize, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
+
+    pending_metadata_pages: HashMap<CompactKey, Vec<(Lsn, usize, Value)>>,
+    pending_data_pages: Vec<(CompactKey, Lsn, usize, Value)>,
 
     /// For special "directory" keys that store key-value maps, track the size of the map
     /// if it was updated in this modification.
@@ -1789,26 +1792,10 @@ impl<'a> DatadirModification<'a> {
         let mut writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
-        for (key, values) in self.pending_updates.drain() {
-            let mut write_batch = Vec::new();
-            for (lsn, value_ser_size, value) in values {
-                if key.is_rel_block_key() || key.is_slru_block_key() {
-                    // This bails out on first error without modifying pending_updates.
-                    // That's Ok, cf this function's doc comment.
-                    write_batch.push((key.to_compact(), lsn, value_ser_size, value));
-                } else {
-                    retained_pending_updates.entry(key).or_default().push((
-                        lsn,
-                        value_ser_size,
-                        value,
-                    ));
-                }
-            }
-            writer.put_batch(write_batch, ctx).await?;
-        }
-
-        self.pending_updates = retained_pending_updates;
+        let pending_data_pages = std::mem::take(&mut self.pending_data_pages);
+        // This bails out on first error without modifying pending_updates.
+        // That's Ok, cf this function's doc comment.
+        writer.put_batch(pending_data_pages, ctx).await?;
         self.pending_bytes = 0;
 
         if pending_nblocks != 0 {
@@ -1834,21 +1821,23 @@ impl<'a> DatadirModification<'a> {
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
-        if !self.pending_updates.is_empty() {
-            // Ordering: the items in this batch do not need to be in any global order, but values for
-            // a particular Key must be in Lsn order relative to one another.  InMemoryLayer relies on
-            // this to do efficient updates to its index.
-            let batch: Vec<(CompactKey, Lsn, usize, Value)> = self
-                .pending_updates
+        // Ordering: the items in this batch do not need to be in any global order, but values for
+        // a particular Key must be in Lsn order relative to one another.  InMemoryLayer relies on
+        // this to do efficient updates to its index.
+        let mut write_batch = std::mem::take(&mut self.pending_data_pages);
+
+        write_batch.extend(
+            self.pending_metadata_pages
                 .drain()
                 .flat_map(|(key, values)| {
-                    values.into_iter().map(move |(lsn, val_ser_size, value)| {
-                        (key.to_compact(), lsn, val_ser_size, value)
-                    })
-                })
-                .collect::<Vec<_>>();
+                    values
+                        .into_iter()
+                        .map(move |(lsn, value_size, value)| (key, lsn, value_size, value))
+                }),
+        );
 
-            writer.put_batch(batch, ctx).await?;
+        if !write_batch.is_empty() {
+            writer.put_batch(write_batch, ctx).await?;
         }
 
         if !self.pending_deletions.is_empty() {
@@ -1879,33 +1868,40 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.pending_updates.len() + self.pending_deletions.len()
+        self.pending_metadata_pages.len()
+            + self.pending_data_pages.len()
+            + self.pending_deletions.len()
     }
 
-    // Internal helper functions to batch the modifications
-
+    // Read a page from the Timeline we are writing to.  For metadata pages, this passes through
+    // a cache in Self, which makes writes earlier in this modification visible to WAL records later
+    // in the modification.
     async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
-        // Have we already updated the same key? Read the latest pending updated
-        // version in that case.
-        //
-        // Note: we don't check pending_deletions. It is an error to request a
-        // value that has been removed, deletion only avoids leaking storage.
-        if let Some(values) = self.pending_updates.get(&key) {
-            if let Some((_, _, value)) = values.last() {
-                return if let Value::Image(img) = value {
-                    Ok(img.clone())
-                } else {
-                    // Currently, we never need to read back a WAL record that we
-                    // inserted in the same "transaction". All the metadata updates
-                    // work directly with Images, and we never need to read actual
-                    // data pages. We could handle this if we had to, by calling
-                    // the walredo manager, but let's keep it simple for now.
-                    Err(PageReconstructError::Other(anyhow::anyhow!(
-                        "unexpected pending WAL record"
-                    )))
-                };
+        if !key.is_rel_block_key() && !key.is_slru_block_key() {
+            // Have we already updated the same key? Read the latest pending updated
+            // version in that case.
+            //
+            // Note: we don't check pending_deletions. It is an error to request a
+            // value that has been removed, deletion only avoids leaking storage.
+            if let Some(values) = self.pending_metadata_pages.get(&key.to_compact()) {
+                if let Some((_, _, value)) = values.last() {
+                    return if let Value::Image(img) = value {
+                        Ok(img.clone())
+                    } else {
+                        // Currently, we never need to read back a WAL record that we
+                        // inserted in the same "transaction". All the metadata updates
+                        // work directly with Images, and we never need to read actual
+                        // data pages. We could handle this if we had to, by calling
+                        // the walredo manager, but let's keep it simple for now.
+                        Err(PageReconstructError::Other(anyhow::anyhow!(
+                            "unexpected pending WAL record"
+                        )))
+                    };
+                }
             }
         }
+
+        // Metadata page cache miss, or we're reading a data page.
         let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
         self.tline.get(key, lsn, ctx).await
     }
@@ -1917,7 +1913,27 @@ impl<'a> DatadirModification<'a> {
     }
 
     fn put(&mut self, key: Key, val: Value) {
-        let values = self.pending_updates.entry(key).or_default();
+        if key.is_rel_block_key() || key.is_slru_block_key() {
+            self.put_data(key, val)
+        } else {
+            self.put_metadata(key, val)
+        }
+    }
+
+    fn put_data(&mut self, key: Key, val: Value) {
+        // TODO: old code had logic for eliding multiple updates at the same lsn to the same key: was that really
+        // needed for data pages?
+
+        let key = key.to_compact();
+        let val_serialized_size = val.serialized_size().unwrap() as usize;
+        self.pending_bytes += val_serialized_size;
+        self.pending_data_pages
+            .push((key, self.lsn, val_serialized_size, val))
+    }
+
+    fn put_metadata(&mut self, key: Key, val: Value) {
+        let key = key.to_compact();
+        let values = self.pending_metadata_pages.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
         if let Some((last_lsn, last_value_ser_size, last_value)) = values.last_mut() {
             if *last_lsn == self.lsn {
