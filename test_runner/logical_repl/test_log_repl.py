@@ -44,7 +44,7 @@ class DebeziumAPI:
 
     def __init__(self, base_url: str):
         self.__base_url = base_url
-        self.__connectors_url = self.__base_url + "/connectors"
+        self.__connectors_url = f"{self.__base_url}/connectors"
 
     def __request(self, method, addurl="", **kwargs):
         return requests.request(
@@ -176,6 +176,14 @@ def debezium(remote_pg):
 def get_kafka_msg(consumer, ts_ms, before=None, after=None) -> None:
     """
     Gets the message from Kafka and checks its validity
+    Arguments:
+        consumer: the consumer object
+        ts_ms:    timestamp in milliseconds of the change of db, the corresponding message must have
+                  the later timestamp
+        before:   a dictionary, if not None, the before field from the kafka message must
+                  have the same values for the same keys
+        after:    a dictionary, if not None, the after field from the kafka message must
+                  have the same values for the same keys
     """
     msg = consumer.poll()
     if not msg:
@@ -234,7 +242,7 @@ def test_debezium(debezium):
             after={"first_name": "Alex", "last_name": "Row", "email": "alexrow@example.com"},
         ),
     )
-    log.info("Update")
+    log.info("Update ts_ms: %s", ts_ms)
     ts_ms = time.time() * 1000
     cur.execute("update inventory.customers set first_name = 'Alexander' where id = 2")
     conn.commit()

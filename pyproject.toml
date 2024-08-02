@@ -76,6 +76,7 @@ module = [
     "allure.*",
     "allure_commons.*",
     "allure_pytest.*",
+    "kafka.*",
 ]
 ignore_missing_imports = true
 
