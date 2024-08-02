@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
+use aws_config::retry::{RetryConfigBuilder, RetryMode};
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::DisplayErrorContext;
 use aws_sdk_s3::Client;
@@ -314,8 +315,15 @@ pub fn init_logging(file_name: &str) -> Option<WorkerGuard> {
 }
 
 async fn init_s3_client(bucket_region: Region) -> Client {
+    let mut retry_config_builder = RetryConfigBuilder::new();
+
+    retry_config_builder
+        .set_max_attempts(Some(3))
+        .set_mode(Some(RetryMode::Adaptive));
+
     let config = aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
         .region(bucket_region)
+        .retry_config(retry_config_builder.build())
         .load()
         .await;
     Client::new(&config)
