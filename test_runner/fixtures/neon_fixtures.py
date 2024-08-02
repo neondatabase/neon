@@ -2739,10 +2739,6 @@ class NeonStorageController(MetricsGetter, LogUtils):
                 parsed_tid, wait_ms=250
             )
 
-    @property
-    def workdir(self) -> Path:
-        return self.env.repo_dir
-
     def __enter__(self) -> "NeonStorageController":
         return self
 
