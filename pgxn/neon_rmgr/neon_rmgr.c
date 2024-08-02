@@ -186,7 +186,7 @@ static void
 fix_infomask_from_infobits(uint8 infobits, uint16 *infomask, uint16 *infomask2)
 {
 	*infomask &= ~(HEAP_XMAX_IS_MULTI | HEAP_XMAX_LOCK_ONLY |
-				   HEAP_XMAX_KEYSHR_LOCK | HEAP_XMAX_EXCL_LOCK);
+				   HEAP_XMAX_KEYSHR_LOCK | HEAP_XMAX_EXCL_LOCK | HEAP_COMBOCID);
 	*infomask2 &= ~HEAP_KEYS_UPDATED;
 
 	if (infobits & XLHL_XMAX_IS_MULTI)
@@ -195,6 +195,8 @@ fix_infomask_from_infobits(uint8 infobits, uint16 *infomask, uint16 *infomask2)
 		*infomask |= HEAP_XMAX_LOCK_ONLY;
 	if (infobits & XLHL_XMAX_EXCL_LOCK)
 		*infomask |= HEAP_XMAX_EXCL_LOCK;
+	if (infobits & XLHL_COMBOCID)
+		*infomask |= HEAP_COMBOCID;
 	/* note HEAP_XMAX_SHR_LOCK isn't considered here */
 	if (infobits & XLHL_XMAX_KEYSHR_LOCK)
 		*infomask |= HEAP_XMAX_KEYSHR_LOCK;
