@@ -208,12 +208,12 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         if summary.is_fatal() {
-                            eprintln!("Fatal scrub errors detected");
+                            tracing::error!("Fatal scrub errors detected");
                         } else if summary.is_empty() {
                             // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
                             // scrubber they were likely expecting to scan something, and if we see no timelines
                             // at all then it's likely due to some configuration issues like a bad prefix
-                            eprintln!(
+                            tracing::error!(
                                 "No timelines found in bucket {} prefix {}",
                                 bucket_config.bucket,
                                 bucket_config
