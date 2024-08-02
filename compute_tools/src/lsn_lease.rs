@@ -100,7 +100,7 @@ fn acquire_lsn_lease_with_retry(
     let mut retry_period_ms = 500.0;
 
     loop {
-        let result = try_acquire_lsn_lease(tenant_id, timeline_id, lsn, &configs);
+        let result = try_acquire_lsn_lease(tenant_id, timeline_id, lsn, configs);
         match result {
             Ok(_) => {
                 return result;
