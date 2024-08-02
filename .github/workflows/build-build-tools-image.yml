@@ -99,7 +99,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/test-tools:cache-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/test-tools:cache-{0},mode=max', matrix.arch) || '' }}
           build-args: |
-            BUILD_TOOLS_BASE_IMAGE=neondatabase/build-tools:${{ github.sha }}-${{ matrix.arch }}
+            BUILD_TOOLS_BASE_IMAGE=neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
           tags: neondatabase/test-tools:${{ inputs.image-tag }}-${{ matrix.arch }}    
 
       - name: Remove custom docker config directory
