@@ -2668,10 +2668,6 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"Got failpoints request response code {res.status_code}")
         res.raise_for_status()
 
-    @property
-    def workdir(self) -> Path:
-        return self.env.repo_dir
-
     def __enter__(self) -> "NeonStorageController":
         return self
 
