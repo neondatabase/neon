@@ -67,9 +67,7 @@ def measure_logical_replication_lag(sub_cur, pub_cur, timeout_sec=600):
     pub_lsn = Lsn(pub_cur.fetchall()[0][0])
     while (time.time() - start) < timeout_sec:
         sub_cur.execute("SELECT latest_end_lsn FROM pg_catalog.pg_stat_subscription")
-        res = sub_cur.fetchall()
-        log.info(res)
-        res = res[0][0]
+        res = sub_cur.fetchall()[0][0]
         if res:
             log.info(f"subscriber_lsn={res}")
             sub_lsn = Lsn(res)
@@ -102,6 +100,10 @@ def test_subscriber_lag(
     pub_connstr = benchmark_project_pub.connstr
     sub_connstr = benchmark_project_sub.connstr
 
+    with psycopg2.connect(pub_connstr) as conn:
+        with conn.cursor() as cur:
+
+
     if benchmark_project_pub.is_new:
         pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
     if benchmark_project_sub.is_new:
@@ -112,16 +114,28 @@ def test_subscriber_lag(
     pub_conn.autocommit = True
     sub_conn.autocommit = True
     with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
-        if benchmark_project_pub.is_new:
-            pub_cur.execute("create publication pub1 for table pgbench_accounts, pgbench_history")
+        pub_cur.execute("""
+            DO $$
+              BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'pub1')
+                THEN CREATE PUBLICATION pub1 FOR TABLE pgbench_accounts, pgbench_history
+              END
+            $$
+            """)
 
-        if benchmark_project_sub.is_new:
-            sub_cur.execute("truncate table pgbench_accounts")
-            sub_cur.execute("truncate table pgbench_history")
-
-            sub_cur.execute(f"create subscription sub1 connection '{pub_connstr}' publication pub1")
-
+        sub_cur.execute("truncate table pgbench_accounts")
+        sub_cur.execute("truncate table pgbench_history")
+        
+        sub_cur.execute(f"""
+            DO $$
+              BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_subscription WHERE subname = 'sub1')
+                THEN CREATE SUBSCRIPTION sub1 CONNECTION '{pub_connstr}' PUBLICATION pub1
+              END
+            $$
+        """)
         initial_sync_lag = measure_logical_replication_lag(sub_cur, pub_cur)
+
     pub_conn.close()
     sub_conn.close()
 
