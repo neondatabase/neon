@@ -206,7 +206,7 @@ def get_kafka_msg(consumer, ts_ms, before=None, after=None) -> None:
 @pytest.mark.remote_cluster
 def test_debezium(debezium):
     """
-    Test the logical replication having Debezium as a client
+    Test the logical replication having Debezium as a subscriber
     """
     conn, consumer = debezium
     cur = conn.cursor()
