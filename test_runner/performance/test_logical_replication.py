@@ -100,10 +100,6 @@ def test_subscriber_lag(
     pub_connstr = benchmark_project_pub.connstr
     sub_connstr = benchmark_project_sub.connstr
 
-    with psycopg2.connect(pub_connstr) as conn:
-        with conn.cursor() as cur:
-
-
     if benchmark_project_pub.is_new:
         pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
     if benchmark_project_sub.is_new:
