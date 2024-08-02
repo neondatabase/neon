@@ -68,9 +68,9 @@ case of sk->wp message.
 
 Basic rule: once safekeeper observes configuration higher than his own it
 immediately switches to it. It must refuse all messages with lower generation
-that his. It also refuses messages if it is not member of the current
-generation, though it is likely not unsafe to process them (walproposer should
-ignore them anyway).
+that his. It also refuses messages if it is not member of the current generation
+(that is, of either `sk_set` of `sk_new_set`), though it is likely not unsafe to
+process them (walproposer should ignore result anyway).
 
 If there is non null configuration in `ProposerGreeting` and it is higher than
 current safekeeper one, safekeeper switches to it.
@@ -87,9 +87,9 @@ current one and ignores it otherwise. In any case it replies with
 ```
 struct ConfigurationSwitchResponse {
     conf: Configuration,
+    term: Term,
     last_log_term: Term,
     flush_lsn: Lsn,
-    term: Term, // not used by this RFC, but might be useful for observability
 }
 ```
 
@@ -142,29 +142,33 @@ storage are reachable.
    delivering them `joint_conf`. Collecting responses from majority is required
    to proceed. If any response returned generation higher than 
    `joint_conf.generation`, abort (another switch raced us). Otherwise, choose
-   max `<last_log_term, flush_lsn>` among responses and establish it as 
-   (in memory) `sync_position`. We can't finish switch until majority 
-   of the new set catches up to this position because data before it 
-   could be committed without ack from the new set.
-4) Initialize timeline on safekeeper(s) from `new_sk_set` where it 
+   max `<last_log_term, flush_lsn>` among responses and establish it as
+   (in memory) `sync_position`. Also choose max `term` and establish it as (in
+   memory) `sync_term`. We can't finish the switch until majority of the new set
+   catches up to this `sync_position` because data before it could be committed
+   without ack from the new set. Similarly, we'll bump term on new majority
+   to `sync_term` so that two computes with the same term are never elected.
+4) Initialize timeline on safekeeper(s) from `new_sk_set` where it
    doesn't exist yet by doing `pull_timeline` from the majority of the 
-   current set. Doing  that on majority of `new_sk_set` is enough to
+   current set. Doing that on majority of `new_sk_set` is enough to
    proceed, but it is reasonable to ensure that all `new_sk_set` members
    are initialized -- if some of them are down why are we migrating there?
-5) Call `PUT` `configuration` on safekeepers from the new set,
+5) Call `POST` `bump_term(sync_term)` on safekeepers from the new set. 
+   Success on majority is enough.
+6) Repeatedly call `PUT` `configuration` on safekeepers from the new set,
    delivering them `joint_conf` and collecting their positions. This will
    switch them to the `joint_conf` which generally won't be needed 
    because `pull_timeline` already includes it and plus additionally would be
-   broadcast by compute. More importantly, we may proceed to the next step 
+   broadcast by compute. More importantly, we may proceed to the next step
    only when `<last_log_term, flush_lsn>` on the majority of the new set reached 
-   `sync_position`. Similarly, on the happy path this is not needed because 
-   `pull_timeline` already includes it. However, it is better to double
+   `sync_position`. Similarly, on the happy path no waiting is not needed because 
+   `pull_timeline` already includes it. However, we should double
     check to be safe. For example, timeline could have been created earlier e.g.
-    manually or after try-to-migrate, abort, try-to-migrate-again sequence.   
-6) Create `new_conf: Configuration` incrementing `join_conf` generation and having new 
+    manually or after try-to-migrate, abort, try-to-migrate-again sequence. 
+7) Create `new_conf: Configuration` incrementing `join_conf` generation and having new 
    safekeeper set as `sk_set` and None `new_sk_set`. Write it to configuration 
    storage under one more CAS.
-7) Call `PUT` `configuration` on safekeepers from the new set,
+8) Call `PUT` `configuration` on safekeepers from the new set,
    delivering them `new_conf`. It is enough to deliver it to the majority 
    of the new set; the rest can be updated by compute.
 
@@ -469,13 +473,12 @@ implement proper migration before doing smarter timeline archival.
 
 ## Possible optimizations
 
-
-Algorithm suggested above forces walproposer re-election (technically restart)
-and thus reconnection to safekeepers; essentially we treat generation as part of
-term and don't allow leader to survive configuration change. It is possible to
-optimize this, but this is untrivial and I don't think needed. Reconnection is
-very fast and it is much more important to avoid compute restart than
-millisecond order of write stall.
+Steps above suggest walproposer restart (with re-election) and thus reconnection
+to safekeepers. Since by bumping term on new majority we ensure that leader
+terms are unique even across generation switches it is possible to preserve
+connections. However, it is more complicated, reconnection is very fast and it
+is much more important to avoid compute restart than millisecond order of write
+stall.
 
 Multiple joint consensus: algorithm above rejects attempt to change membership
 while another attempt is in progress. It is possible to overlay them and AFAIK
