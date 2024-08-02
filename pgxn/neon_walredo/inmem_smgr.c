@@ -70,7 +70,7 @@ static bool inmem_exists(SMgrRelation reln, ForkNumber forknum);
 static void inmem_unlink(NRelFileInfoBackend rinfo, ForkNumber forknum, bool isRedo);
 #if PG_MAJORVERSION_NUM >= 17
 static bool inmem_prefetch(SMgrRelation reln, ForkNumber forknum,
-						   BlockNumber blocknum, BlockNumber nblocks);
+						   BlockNumber blocknum, int nblocks);
 #else
 static bool inmem_prefetch(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber blocknum);
@@ -198,7 +198,7 @@ inmem_close(SMgrRelation reln, ForkNumber forknum)
 #if PG_MAJORVERSION_NUM >= 17
 static bool
 inmem_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			   BlockNumber nblocks)
+			   int nblocks)
 {
 	return true;
 }
