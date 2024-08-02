@@ -39,7 +39,7 @@ def query_clickhouse(
 
 class DebeziumAPI:
     """
-    The class for Debeziym API calls
+    The class for Debezium API calls
     """
 
     def __init__(self, base_url: str):
