@@ -1,5 +1,5 @@
 """
-Test the logical replication in Neon with the different consumers
+Test the logical replication in Neon with Debezium as a consumer
 """
 
 import json

@@ -1,5 +1,5 @@
 """
-Test the logical replication in Neon with ClickHouse as a consumers
+Test the logical replication in Neon with ClickHouse as a consumer
 """
 
 import hashlib
