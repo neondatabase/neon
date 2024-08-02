@@ -47,7 +47,6 @@ use utils::{
     bin_ser::BeSer,
     fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
-    vec_map::VecMap,
 };
 
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -5672,7 +5671,7 @@ impl<'a> TimelineWriter<'a> {
     /// The batch is sorted by Lsn (enforced by usage of [`utils::vec_map::VecMap`].
     pub(crate) async fn put_batch(
         &mut self,
-        batch: VecMap<Lsn, (CompactKey, Value)>,
+        batch: Vec<(CompactKey, Lsn, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         if batch.is_empty() {
@@ -5683,7 +5682,7 @@ impl<'a> TimelineWriter<'a> {
         let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
         let mut batch_max_lsn: Lsn = Lsn(0);
         let mut value_buf = smallvec::SmallVec::<[u8; 256]>::new();
-        for (lsn, (key, val)) in batch {
+        for (key, lsn, val) in batch {
             let relative_off = cursor.position();
 
             value_buf.clear();
