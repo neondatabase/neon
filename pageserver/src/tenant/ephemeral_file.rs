@@ -103,6 +103,19 @@ impl EphemeralFile {
 
         Ok(pos)
     }
+
+    pub(crate) async fn write_raw(
+        &mut self,
+        srcbuf: &[u8],
+        ctx: &RequestContext,
+    ) -> Result<u64, io::Error> {
+        let pos = self.rw.bytes_written();
+
+        // Write the payload
+        self.rw.write_all_borrowed(srcbuf, ctx).await?;
+
+        Ok(pos)
+    }
 }
 
 /// Does the given filename look like an ephemeral file?
