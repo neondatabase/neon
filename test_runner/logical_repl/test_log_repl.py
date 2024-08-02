@@ -139,7 +139,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
 
 
 @pytest.fixture(scope="function")
-def debezium(remote_pg):
+def debezium(remote_pg: RemotePostgres):
     """
     Prepare the Debezium API handler, connection
     """
