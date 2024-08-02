@@ -84,6 +84,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod chaos_injector;
+
 // For operations that should be quick, like attaching a new tenant
 const SHORT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 
