@@ -555,6 +555,43 @@ async fn download_object_with_retries(
     anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
 }
 
+async fn download_object_with_retries_generic(
+    remote_client: &GenericRemoteStorage,
+    key: &RemotePath,
+) -> anyhow::Result<Vec<u8>> {
+    for trial in 0..MAX_RETRIES {
+        let mut buf = Vec::new();
+        let download = match remote_client.download(key, &CancellationToken::new()).await {
+            Ok(response) => response,
+            Err(e) => {
+                error!("Failed to download object for key {key}: {e}");
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+                continue;
+            }
+        };
+
+        match tokio::io::copy_buf(
+            &mut tokio_util::io::StreamReader::new(download.download_stream),
+            &mut buf,
+        )
+        .await
+        {
+            Ok(bytes_read) => {
+                tracing::debug!("Downloaded {bytes_read} bytes for object {key}");
+                return Ok(buf);
+            }
+            Err(e) => {
+                error!("Failed to stream object body for key {key}: {e}");
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+            }
+        }
+    }
+
+    anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
+}
+
 async fn download_object_to_file(
     s3_client: &Client,
     bucket_name: &str,
