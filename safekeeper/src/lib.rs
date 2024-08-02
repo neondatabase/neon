@@ -21,6 +21,7 @@ pub mod json_ctrl;
 pub mod metrics;
 pub mod patch_control_file;
 pub mod pull_timeline;
+pub mod rate_limit;
 pub mod receive_wal;
 pub mod recovery;
 pub mod remove_wal;
@@ -53,6 +54,7 @@ pub mod defaults {
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
     pub const DEFAULT_PARTIAL_BACKUP_CONCURRENCY: &str = "5";
+    pub const DEFAULT_EVICTION_CONCURRENCY: usize = 2;
 
     // By default, our required residency before eviction is the same as the period that passes
     // before uploading a partial segment, so that in normal operation the eviction can happen
