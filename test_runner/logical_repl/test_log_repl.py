@@ -202,7 +202,6 @@ def get_kafka_msg(consumer, ts_ms, before=None, after=None) -> None:
                         raise ValueError(pname + " mismatches")
 
 
-# pylint: disable=redefined-outer-name
 @pytest.mark.remote_cluster
 def test_debezium(debezium):
     """
