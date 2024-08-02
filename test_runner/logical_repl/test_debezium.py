@@ -3,6 +3,7 @@ Test the logical replication in Neon with Debezium as a consumer
 """
 
 import json
+import os
 import time
 
 import psycopg2
@@ -19,8 +20,9 @@ class DebeziumAPI:
     The class for Debezium API calls
     """
 
-    def __init__(self, base_url: str):
-        self.__base_url = base_url
+    def __init__(self):
+        self.__host = 'debezium' if ('CI' in os.environ) else '127.0.0.1'
+        self.__base_url = f"http://{self.__host}:8083"
         self.__connectors_url = f"{self.__base_url}/connectors"
 
     def __request(self, method, addurl="", **kwargs):
@@ -86,7 +88,7 @@ def debezium(remote_pg: RemotePostgres):
         "email character varying(255) NOT NULL)"
     )
     conn.commit()
-    dbz = DebeziumAPI("http://debezium:8083")
+    dbz = DebeziumAPI()
     assert len(dbz.list_connectors()) == 0
     dbz_conn_name = "inventory-connector"
     resp = dbz.create_pg_connector(remote_pg, dbz_conn_name)

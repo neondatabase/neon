@@ -3,6 +3,7 @@ Test the logical replication in Neon with ClickHouse as a consumer
 """
 
 import hashlib
+import os
 import time
 
 import clickhouse_connect
@@ -39,6 +40,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
     """
     Test the logical replication having ClickHouse as a client
     """
+    clickhouse_host = 'clickhouse' if ('CI' in os.environ) else '127.0.0.1'
     conn_options = remote_pg.conn_options()
     conn = psycopg2.connect(remote_pg.connstr())
     cur = conn.cursor()
@@ -46,7 +48,7 @@ def test_clickhouse(remote_pg: RemotePostgres):
     cur.execute("CREATE TABLE table1 (id integer primary key, column1 varchar(10));")
     cur.execute("INSERT INTO table1 (id, column1) VALUES (1, 'abc'), (2, 'def');")
     conn.commit()
-    client = clickhouse_connect.get_client(host="clickhouse")
+    client = clickhouse_connect.get_client(host=clickhouse_host)
     client.command("SET allow_experimental_database_materialized_postgresql=1")
     client.command(
         "CREATE DATABASE db1_postgres ENGINE = "
