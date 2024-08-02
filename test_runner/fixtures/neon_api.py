@@ -285,7 +285,7 @@ class NeonApiEndpoint:
             self.project_id = project_id
             eps = neon_api.get_endpoints(project_id)["endpoints"]
             self.endpoint_id = eps[0]["id"]
-            self.connstr = neon_api.get_connection_uri(project_id, endpoint_id=self.endpoint_id)[
+            self.connstr = neon_api.get_connection_uri(project_id, endpoint_id=self.endpoint_id, pooled=False)[
                 "uri"
             ]
             pw = self.connstr.split("@")[0].split(":")[-1]
