@@ -110,26 +110,20 @@ def test_subscriber_lag(
     pub_conn.autocommit = True
     sub_conn.autocommit = True
     with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
-        pub_cur.execute("""
-            DO $$
-              BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'pub1')
-                THEN CREATE PUBLICATION pub1 FOR TABLE pgbench_accounts, pgbench_history
-              END
-            $$
-            """)
+        pub_cur.execute("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'pub1'")
+        pub_exists = len(pub_cur.fetchall()) != 0
 
-        sub_cur.execute("truncate table pgbench_accounts")
-        sub_cur.execute("truncate table pgbench_history")
-        
-        sub_cur.execute(f"""
-            DO $$
-              BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_subscription WHERE subname = 'sub1')
-                THEN CREATE SUBSCRIPTION sub1 CONNECTION '{pub_connstr}' PUBLICATION pub1
-              END
-            $$
-        """)
+        if not pub_exists:
+            pub_cur.execute("CREATE PUBLICATION pub1 FOR TABLE pgbench_accounts, pgbench_history")
+
+        sub_cur.execute("SELECT 1 FROM pg_catalog.pg_subscription WHERE subname = 'sub1'")
+        sub_exists = len(sub_cur.fetchall()) != 0
+        if not sub_exists:
+            sub_cur.execute("truncate table pgbench_accounts")
+            sub_cur.execute("truncate table pgbench_history")
+
+            sub_cur.execute(f"CREATE SUBSCRIPTION sub1 CONNECTION '{pub_connstr}' PUBLICATION pub1")
+
         initial_sync_lag = measure_logical_replication_lag(sub_cur, pub_cur)
 
     pub_conn.close()
@@ -201,20 +195,23 @@ def test_publisher_restart(
     pub_connstr = benchmark_project_pub.connstr
     sub_connstr = benchmark_project_sub.connstr
 
-    if benchmark_project_pub.is_new:
-        pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
-    if benchmark_project_sub.is_new:
-        pg_bin.run_capture(["pgbench", "-i", "-s100"], env=sub_env)
+    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
+    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=sub_env)
 
     pub_conn = psycopg2.connect(pub_connstr)
     sub_conn = psycopg2.connect(sub_connstr)
     pub_conn.autocommit = True
     sub_conn.autocommit = True
     with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
-        if benchmark_project_pub.is_new:
+        pub_cur.execute("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'pub1'")
+        pub_exists = len(pub_cur.fetchall()) != 0
+
+        if not pub_exists:
             pub_cur.execute("create publication pub1 for table pgbench_accounts, pgbench_history")
 
-        if benchmark_project_sub.is_new:
+        sub_cur.execute("SELECT 1 FROM pg_catalog.pg_subscription WHERE subname = 'sub1'")
+        sub_exists = len(sub_cur.fetchall()) != 0
+        if not sub_exists:
             sub_cur.execute("truncate table pgbench_accounts")
             sub_cur.execute("truncate table pgbench_history")
 
