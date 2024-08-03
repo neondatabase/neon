@@ -15,7 +15,7 @@ See [Connect from any application](https://neon.tech/docs/connect/connect-from-a
 
 ## Build Instructions
 
-Build instructions (run a local installation) see: [Build Instructions](/docs/build/README.md)
+Build instructions (run a local installation) see: [Build Instructions](/docs/build/BUILD.md)
 
 ## Architecture Overview
 
