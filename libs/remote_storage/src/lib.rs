@@ -150,7 +150,7 @@ pub enum ListingMode {
     NoDelimiter,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ListingObject {
     pub key: RemotePath,
     pub last_modified: SystemTime,
