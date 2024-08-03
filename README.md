@@ -13,7 +13,7 @@ Then connect to it with your preferred Postgres client (psql, dbeaver, etc) or u
 
 See [Connect from any application](https://neon.tech/docs/connect/connect-from-any-app/) for connection instructions.
 
-## Build Instructons
+## Build Instructions
 
 Build instructions (run a local installation) see: [Build Instructions](/docs/build/README.md)
 
