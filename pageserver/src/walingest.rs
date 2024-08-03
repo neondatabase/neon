@@ -408,11 +408,16 @@ impl WalIngest {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
                 if info == pg_constants::XLOG_REPLORIGIN_SET {
                     let xlrec = crate::walrecord::XlReploriginSet::decode(&mut buf);
+                    info!(
+                        "Set replication origin_id={}, origin_lsn={}",
+                        xlrec.node_id, xlrec.remote_lsn
+                    );
                     modification
                         .set_replorigin(xlrec.node_id, xlrec.remote_lsn)
                         .await?
                 } else if info == pg_constants::XLOG_REPLORIGIN_DROP {
                     let xlrec = crate::walrecord::XlReploriginDrop::decode(&mut buf);
+                    info!("Drop replication origin_id={}", xlrec.node_id);
                     modification.drop_replorigin(xlrec.node_id).await?
                 }
             }
@@ -1286,6 +1291,10 @@ impl WalIngest {
             }
         }
         if origin_id != 0 {
+            info!(
+                "Commit origin_id={}, origin_lsn={}",
+                origin_id, parsed.origin_lsn
+            );
             modification
                 .set_replorigin(origin_id, parsed.origin_lsn)
                 .await?;
