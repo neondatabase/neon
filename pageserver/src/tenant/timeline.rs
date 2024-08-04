@@ -4369,6 +4369,15 @@ impl Timeline {
         detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
     }
 
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        attempt: detach_ancestor::Attempt,
+        ctx: &RequestContext,
+    ) -> Result<(), detach_ancestor::Error> {
+        detach_ancestor::complete(self, tenant, attempt, ctx).await
+    }
+
     /// Switch aux file policy and schedule upload to the index part.
     pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
         self.last_aux_file_policy.store(Some(policy));

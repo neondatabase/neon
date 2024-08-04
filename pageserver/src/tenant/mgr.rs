@@ -2031,14 +2031,34 @@ impl TenantManager {
         if let Some(reparented) = resp.completed() {
             // finally ask the restarted tenant to complete the detach
             tenant
-                .ongoing_timeline_detach
-                .complete(attempt, &tenant)
-                .await?;
-            Ok(reparented)
+                .wait_to_become_active(std::time::Duration::from_secs(9999))
+                .await
+                .map_err(|e| {
+                    use pageserver_api::models::TenantState;
+                    use GetActiveTenantError::{Cancelled, WillNotBecomeActive};
+                    match e {
+                        Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                            Error::ShuttingDown
+                        }
+                        other => Error::Complete(other.into()),
+                    }
+                })?;
+
+            utils::pausable_failpoint!(
+                "timeline-detach-ancestor::after_activating_before_finding-pausable"
+            );
+
+            let timeline = tenant
+                .get_timeline(attempt.timeline_id, true)
+                .map_err(Error::NotFound)?;
+
+            timeline
+                .complete_detaching_timeline_ancestor(&tenant, attempt, ctx)
+                .await
+                .map(|()| reparented)
         } else {
             // at least the latest versions have now been downloaded and refreshed; be ready to
             // retry another time.
-            tenant.ongoing_timeline_detach.cancel(attempt);
             Err(anyhow::anyhow!(
                 "failed to reparent all candidate timelines, please retry"
             ))

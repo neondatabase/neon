@@ -854,7 +854,7 @@ def test_timeline_detach_ancestor_interrupted_by_deletion(
         msg, offset = victim.assert_log_contains(f"at failpoint {pausepoint}")
         log.info(f"found {msg}")
         msg, offset = victim.assert_log_contains(
-            ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+            ".* gc_loop.*: Skipping GC: .*",
             offset,
         )
         log.info(f"found {msg}")
@@ -1188,7 +1188,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     )
     _, offset = env.pageserver.assert_log_contains(".*: attach finished, activating", offset)
     _, offset = env.pageserver.assert_log_contains(
-        ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+        ".* gc_loop.*: Skipping GC: .*",
         offset,
     )
     metric = remote_storage_copy_requests()
@@ -1200,7 +1200,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
     _, offset = env.pageserver.assert_log_contains(".*: attach finished, activating", offset)
     assert env.pageserver.log_contains(".* gc_loop.*: [0-9] timelines need GC", offset) is None
     _, offset = env.pageserver.assert_log_contains(
-        ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+        ".* gc_loop.*: Skipping GC: .*",
         offset,
     )
     # restore failpoint for the next reparented
@@ -1310,7 +1310,7 @@ def test_timeline_is_deleted_before_timeline_detach_ancestor_completes(
             def pausepoint_hit_with_gc_paused() -> LogCursor:
                 env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
                 _, at = env.pageserver.assert_log_contains(
-                    ".* gc_loop.*: Skipping GC while there is an ongoing detach_ancestor attempt",
+                    ".* gc_loop.*: Skipping GC: .*",
                     offset,
                 )
                 return at

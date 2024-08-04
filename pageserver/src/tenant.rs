@@ -303,11 +303,12 @@ pub struct Tenant {
     pub(crate) timeline_get_throttle:
         Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
 
-    /// An ongoing timeline detach must be checked during attempts to GC a timeline.
+    /// An ongoing timeline detach concurrency limiter.
     ///
-    /// After starting the timeline detach ancestor, blocking GC until it completes allows retrying
-    /// the ancestor detach, until we can be certain that all reparentings have been done.
-    ongoing_timeline_detach: timeline::detach_ancestor::SharedState,
+    /// As a tenant will likely be restarted as part of timeline detach ancestor it makes no sense
+    /// to have two running at the same time. A different one can be started if an earlier one
+    /// has failed for whatever reason.
+    ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
 
     /// `index_part.json` based gc blocking reason tracking.
     ///
@@ -785,12 +786,6 @@ impl Tenant {
             deletion_queue_client,
             l0_flush_global_state,
         ));
-
-        if let Some(attempt) = existing_detach_attempt {
-            tenant
-                .ongoing_timeline_detach
-                .continue_existing_attempt(attempt);
-        }
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
         // we shut down while attaching.

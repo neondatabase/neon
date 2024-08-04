@@ -12,11 +12,13 @@ use crate::{
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 use anyhow::Context;
-use pageserver_api::models::detach_ancestor::AncestorDetached;
+use pageserver_api::models::detach_ancestor::{self, AncestorDetached};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
+use utils::{
+    completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn, sync::gate,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -247,6 +249,8 @@ impl SharedState {
             return Err(Error::ShuttingDown);
         }
 
+        // insert_block
+
         let mut guard = self.inner.lock().unwrap();
         let completion = guard.start_new(&detached.timeline_id)?;
         // now that we changed the contents, notify any long-sleeping gc
@@ -333,12 +337,6 @@ impl SharedState {
                 "timeline-detach-ancestor::complete_before_uploading"
             ))
         );
-
-        timeline
-            .remote_client
-            .schedule_completed_detach_ancestor_mark_and_wait()
-            .await
-            .map_err(|_| Error::ShuttingDown)?;
 
         // now that the upload has gone through, we must remove this timeline from inprogress
         let attempt = scopeguard::ScopeGuard::into_inner(attempt);
@@ -560,7 +558,7 @@ impl ExistingAttempt {
 /// Represents an across tenant reset exclusive single attempt to detach ancestor.
 #[derive(Debug)]
 pub(crate) struct Attempt {
-    timeline_id: TimelineId,
+    pub(crate) timeline_id: TimelineId,
 
     _guard: completion::Completion,
     gate_entered: Option<utils::sync::gate::GateGuard>,
@@ -649,10 +647,7 @@ pub(super) async fn prepare(
         if still_in_progress {
             // gc is still blocked, we can still reparent and complete.
             // we are safe to reparent remaining, because they were locked in in the beginning.
-            let attempt = tenant
-                .ongoing_timeline_detach
-                .start_new_attempt(detached)
-                .await?;
+            let attempt = continue_with_blocked_gc(detached, tenant).await?;
 
             // because the ancestor of detached is already set to none, we have published all
             // of the layers, so we are still "prepared."
@@ -680,18 +675,7 @@ pub(super) async fn prepare(
         return Err(TooManyAncestors);
     }
 
-    let attempt = tenant
-        .ongoing_timeline_detach
-        .start_new_attempt(detached)
-        .await?;
-
-    // if it wasn't persistently started already, mark the ancestor detach persistently started.
-    detached
-        .remote_client
-        .schedule_started_detach_ancestor_mark_and_wait()
-        .await
-        // FIXME: aaaargh
-        .map_err(|_| Error::ShuttingDown)?;
+    let attempt = start_new_attempt(detached, tenant).await?;
 
     utils::pausable_failpoint!("timeline-detach-ancestor::before_starting_after_locking_pausable");
 
@@ -860,6 +844,54 @@ pub(super) async fn prepare(
     let prepared = PreparedTimelineDetach { layers: new_layers };
 
     Ok(Progress::Prepared(attempt, prepared))
+}
+
+async fn start_new_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
+    let attempt = obtain_exclusive_attempt(detached, tenant)?;
+
+    // insert the block in the index_part.json, if not already there.
+    let _dont_care = tenant
+        .gc_block
+        .insert(
+            detached,
+            crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
+        )
+        .await
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
+
+    Ok(attempt)
+}
+
+async fn continue_with_blocked_gc(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
+    // FIXME: it would be nice to confirm that there is an in-memory version, since we've just
+    // verified there is a persistent one?
+    obtain_exclusive_attempt(detached, tenant)
+}
+
+fn obtain_exclusive_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attempt, Error> {
+    use Error::{OtherTimelineDetachOngoing, ShuttingDown};
+
+    // ensure we are the only active attempt for this tenant
+    let (guard, barrier) = completion::channel();
+    {
+        let mut guard = tenant.ongoing_timeline_detach.lock().unwrap();
+        if let Some((tl, other)) = guard.as_ref() {
+            if !other.is_ready() {
+                return Err(OtherTimelineDetachOngoing(*tl));
+            }
+            // FIXME: no test enters here
+        }
+        *guard = Some((detached.timeline_id, barrier));
+    }
+
+    // ensure the gate is still open
+    let _gate_entered = detached.gate.enter().map_err(|_| ShuttingDown)?;
+
+    Ok(Attempt {
+        timeline_id: detached.timeline_id,
+        _guard: guard,
+        gate_entered: Some(_gate_entered),
+    })
 }
 
 fn reparented_direct_children(
@@ -1301,6 +1333,43 @@ pub(super) async fn detach_and_reparent(
         let must_restart = !reparented.is_empty() || was_detached;
         Ok(DetachingAndReparenting::SomeReparentingFailed { must_restart })
     }
+}
+
+pub(super) async fn complete(
+    detached: &Arc<Timeline>,
+    tenant: &Tenant,
+    mut attempt: Attempt,
+    _ctx: &RequestContext,
+) -> Result<(), Error> {
+    assert_eq!(detached.timeline_id, attempt.timeline_id);
+
+    if attempt.gate_entered.is_none() {
+        let entered = detached.gate.enter().map_err(|_| Error::ShuttingDown)?;
+        attempt.gate_entered = Some(entered);
+    } else {
+        // Some(gate_entered) means the tenant was not restarted, as is not required
+    }
+
+    assert!(detached.ancestor_timeline.is_none());
+
+    // this should be an 503 at least...?
+    fail::fail_point!(
+        "timeline-detach-ancestor::complete_before_uploading",
+        |_| Err(Error::Failpoint(
+            "timeline-detach-ancestor::complete_before_uploading"
+        ))
+    );
+
+    tenant
+        .gc_block
+        .remove(
+            detached,
+            crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
+        )
+        .await
+        .map_err(|e| Error::launder(e, Error::Complete))?;
+
+    Ok(())
 }
 
 /// Query against a locked `Tenant::timelines`.
