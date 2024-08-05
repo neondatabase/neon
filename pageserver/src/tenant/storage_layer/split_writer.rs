@@ -100,6 +100,7 @@ impl SplitImageLayerWriter {
     }
 
     /// When split writer fails, the caller should call this function and handle partially generated layers.
+    #[allow(dead_code)]
     pub(crate) async fn take(self) -> anyhow::Result<(Vec<ResidentLayer>, ImageLayerWriter)> {
         Ok((self.generated_layers, self.inner))
     }
@@ -195,6 +196,7 @@ impl SplitDeltaLayerWriter {
     }
 
     /// When split writer fails, the caller should call this function and handle partially generated layers.
+    #[allow(dead_code)]
     pub(crate) async fn take(self) -> anyhow::Result<(Vec<ResidentLayer>, DeltaLayerWriter)> {
         Ok((self.generated_layers, self.inner))
     }
