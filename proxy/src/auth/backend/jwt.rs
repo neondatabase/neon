@@ -23,7 +23,7 @@ pub struct JWKCacheEntry {
     urls: Vec<url::Url>,
 
     /// cplane will return multiple JWKs urls that we need to scrape.
-    key_sets: Vec<JwkSet>,
+    key_sets: Vec<jose_jwk::JwkSet>,
 }
 
 impl JWKCache {
@@ -32,7 +32,23 @@ impl JWKCache {
         endpoint: EndpointIdInt,
         jwt: String,
     ) -> Result<(), anyhow::Error> {
-        let header = jsonwebtoken::decode_header(&jwt).context("could not parse JWT")?;
+        // JWT compact form is defined to be
+        // <B64(Header)> || . || <B64(Payload)> || . || <B64(Signature)>
+        // where Signature = alg(<B64(Header)> || . || <B64(Payload)>);
+
+        let (header_payload, signature) = jwt
+            .rsplit_once(".")
+            .context("not a valid compact JWT encoding")?;
+        let (header, _payload) = header_payload
+            .split_once(".")
+            .context("not a valid compact JWT encoding")?;
+
+        let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)
+            .context("not a valid compact JWT encoding")?;
+        let header = serde_json::from_slice::<JWTHeader>(&header)
+            .context("not a valid compact JWT encoding")?;
+
+        // let header = jsonwebtoken::decode_header(&jwt).context("could not parse JWT")?;
         let kid = header.kid.context("missing key id")?;
 
         let entry = match self.map.get(&endpoint) {
@@ -54,13 +70,9 @@ impl JWKCache {
             // can we use arcswap compare_and_swap here?
         }
 
-        let mut jwk = None;
-        for jwks in &entry.key_sets {
-            jwk = jwks.find(&kid);
-            if jwk.is_some_and(|k| k.is_supported()) {
-                break;
-            }
-        }
+        let jwk = entry.key_sets.iter().flat_map(|jwks| &jwks.keys).find(|jwk| {
+            jwk.prm.kid.as_deref() == Some(kid) && jwk.prm.alg == Some(header.alg)
+        });
 
         let key = match jwk {
             Some(jwk) if jwk.is_supported() => DecodingKey::from_jwk(jwk).context("invalid key")?,
@@ -110,4 +122,47 @@ impl JWKCache {
 
         Ok(())
     }
+}
+
+/// <https://datatracker.ietf.org/doc/html/rfc7515#section-4.1>
+#[derive(serde::Deserialize)]
+struct JWTHeader<'a> {
+    /// must be "JWT"
+    typ: &'a str,
+    /// must be a supported alg
+    alg: jose_jwa::Algorithm,
+    /// key id, must be provided for our usecase
+    kid: Option<&'a str>,
+}
+
+enum JwsAlg {
+    // we do not support symmetric key algorithms such as HMAC.
+
+    // RSASSA PKCS1-v1_5: <https://www.rfc-editor.org/rfc/rfc7518#section-3.3>
+    /// RSASSA-PKCS1-v1_5 using SHA-256
+    RS256,
+    /// RSASSA-PKCS1-v1_5 using SHA-384
+    RS384,
+    /// RSASSA-PKCS1-v1_5 using SHA-512
+    RS512,
+
+    // ECDSA: <https://www.rfc-editor.org/rfc/rfc7518#section-3.4>
+    /// ECDSA using P-256 and SHA-256
+    ES256,
+    /// ECDSA using P-384 and SHA-384
+    ES384,
+    /// ECDSA using P-521 and SHA-512
+    ES512,
+
+    // RSASSA-PSS: <https://www.rfc-editor.org/rfc/rfc7518#section-3.5>
+    /// RSASSA-PSS using SHA-256 and MGF1 with SHA-256
+    PS256,
+    /// RSASSA-PSS using SHA-384 and MGF1 with SHA-384
+    PS384,
+    /// RSASSA-PSS using SHA-512 and MGF1 with SHA-512
+    PS512,
+
+    // EdDSA: <https://datatracker.ietf.org/doc/html/rfc8037#section-3.1>
+    /// Edwards-curve Digital Signature Algorithm (EdDSA)
+    EdDSA,
 }

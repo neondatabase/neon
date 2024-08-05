@@ -46,6 +46,8 @@ http-body-util = { version = "0.1" }
 indexmap.workspace = true
 ipnet.workspace = true
 itertools.workspace = true
+jose-jwa = "0.1.2"
+jose-jwk = "0.1.2"
 jsonwebtoken.workspace = true
 lasso = { workspace = true, features = ["multi-threaded"] }
 md5.workspace = true
