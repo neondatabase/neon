@@ -929,11 +929,6 @@ impl Timeline {
             .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
             .await;
 
-        if self.conf.validate_vectored_get {
-            self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                .await;
-        }
-
         let key_value = vectored_res?.pop_first();
         match key_value {
             Some((got_key, value)) => {
@@ -1067,23 +1062,14 @@ impl Timeline {
             .throttle(ctx, key_count as usize)
             .await;
 
-        let res = {
-            let vectored_res = self
-                .get_vectored_impl(
-                    keyspace.clone(),
-                    lsn,
-                    &mut ValuesReconstructState::new(),
-                    ctx,
-                )
-                .await;
-
-            if self.conf.validate_vectored_get {
-                self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                    .await;
-            }
-
-            vectored_res
-        };
+        let res = self
+            .get_vectored_impl(
+                keyspace.clone(),
+                lsn,
+                &mut ValuesReconstructState::new(),
+                ctx,
+            )
+            .await;
 
         if let Some((metric, start)) = start {
             let elapsed = start.elapsed();
