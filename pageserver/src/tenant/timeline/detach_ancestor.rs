@@ -167,6 +167,10 @@ impl Attempt {
         let taken = self.gate_entered.take();
         assert!(taken.is_some());
     }
+
+    pub(crate) fn new_barrier(&self) -> completion::Barrier {
+        self._guard.barrier()
+    }
 }
 
 /// See [`Timeline::prepare_to_detach_from_ancestor`]

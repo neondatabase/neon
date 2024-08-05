@@ -21,6 +21,10 @@ impl Completion {
     pub fn blocks(&self, barrier: &Barrier) -> bool {
         TaskTracker::ptr_eq(self._token.task_tracker(), &barrier.0)
     }
+
+    pub fn barrier(&self) -> Barrier {
+        Barrier(self._token.task_tracker().clone())
+    }
 }
 
 /// Barrier will wait until all clones of [`Completion`] have been dropped.
