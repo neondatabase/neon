@@ -862,7 +862,7 @@ impl RemoteTimelineClient {
     ///
     /// A retryable step of timeline detach ancestor.
     ///
-    /// Waits until the completion of the upload.
+    /// Returns a future which waits until the completion of the upload.
     pub(crate) fn schedule_remove_gc_block_reason(
         self: &Arc<Self>,
         reason: index::GcBlockingReason,
