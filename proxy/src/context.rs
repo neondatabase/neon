@@ -4,9 +4,10 @@ use chrono::Utc;
 use once_cell::sync::OnceCell;
 use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
-use std::{net::IpAddr, sync::Mutex};
+use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tracing::{field::display, info, info_span, Span};
+use try_lock::TryLock;
 use uuid::Uuid;
 
 use crate::{
@@ -28,7 +29,13 @@ pub static LOG_CHAN_DISCONNECT: OnceCell<mpsc::WeakUnboundedSender<RequestData>>
 ///
 /// This data should **not** be used for connection logic, only for observability and limiting purposes.
 /// All connection logic should instead use strongly typed state machines, not a bunch of Options.
-pub struct RequestMonitoring(Mutex<RequestMonitoringInner>);
+pub struct RequestMonitoring(
+    /// To allow easier use of the ctx object, we have interior mutability.
+    /// I would typically use a RefCell but that would break the `Send` requirements
+    /// so we need something with thread-safety. `TryLock` is a cheap alternative
+    /// that offers similar semantics to a `RefCell` but with synchronisation.
+    TryLock<RequestMonitoringInner>,
+);
 
 struct RequestMonitoringInner {
     pub peer_addr: IpAddr,
@@ -114,7 +121,7 @@ impl RequestMonitoring {
             disconnect_timestamp: None,
         };
 
-        Self(Mutex::new(inner))
+        Self(TryLock::new(inner))
     }
 
     #[cfg(test)]
