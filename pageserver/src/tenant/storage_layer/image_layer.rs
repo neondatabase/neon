@@ -32,9 +32,7 @@ use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
-use crate::tenant::storage_layer::{
-    LayerAccessStats, ValueReconstructResult, ValueReconstructState,
-};
+use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
@@ -137,7 +135,6 @@ pub struct ImageLayer {
     pub desc: PersistentLayerDesc,
     // This entry contains an image of all pages as of this LSN, should be the same as desc.lsn
     pub lsn: Lsn,
-    access_stats: LayerAccessStats,
     inner: OnceCell<ImageLayerInner>,
 }
 
@@ -255,7 +252,6 @@ impl ImageLayer {
     /// not loaded already.
     ///
     async fn load(&self, ctx: &RequestContext) -> Result<&ImageLayerInner> {
-        self.access_stats.record_access(ctx);
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
             .await
@@ -306,7 +302,6 @@ impl ImageLayer {
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
-            access_stats: Default::default(),
             inner: OnceCell::new(),
         })
     }
