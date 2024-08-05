@@ -1265,11 +1265,23 @@ async fn block_or_unblock_gc(
 
     let timeline = tenant.get_timeline(timeline_id, true)?;
 
-    let res = if block {
-        timeline.block_gc(&tenant).await.map(|_| ())
-    } else {
-        timeline.unblock_gc(&tenant).await
+    let fut = async {
+        if block {
+            timeline.block_gc(&tenant).await.map(|_| ())
+        } else {
+            timeline.unblock_gc(&tenant).await
+        }
     };
+
+    let span = tracing::info_span!(
+        "block_or_unblock_gc",
+        tenant_id = %tenant_shard_id.tenant_id,
+        shard_id = %tenant_shard_id.shard_slug(),
+        timeline_id = %timeline_id,
+        block = block,
+    );
+
+    let res = fut.instrument(span).await;
 
     res.map_err(|e| {
         if e.is::<NotInitialized>() || e.is::<WaitCompletionError>() {
