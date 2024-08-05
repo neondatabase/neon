@@ -5704,6 +5704,22 @@ impl Timeline {
         }
     }
 
+    /// Persistently blocks gc for `Manual` reason.
+    ///
+    /// Returns true if no such block existed before, false otherwise.
+    pub(crate) async fn block_gc(&self, tenant: &super::Tenant) -> anyhow::Result<bool> {
+        use crate::tenant::remote_timeline_client::index::GcBlockingReason;
+        assert_eq!(self.tenant_shard_id, tenant.tenant_shard_id);
+        tenant.gc_block.insert(self, GcBlockingReason::Manual).await
+    }
+
+    /// Persistently unblocks gc for `Manual` reason.
+    pub(crate) async fn unblock_gc(&self, tenant: &super::Tenant) -> anyhow::Result<()> {
+        use crate::tenant::remote_timeline_client::index::GcBlockingReason;
+        assert_eq!(self.tenant_shard_id, tenant.tenant_shard_id);
+        tenant.gc_block.remove(self, GcBlockingReason::Manual).await
+    }
+
     #[cfg(test)]
     pub(super) fn force_advance_lsn(self: &Arc<Timeline>, new_lsn: Lsn) {
         self.last_record_lsn.advance(new_lsn);

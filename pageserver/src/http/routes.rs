@@ -1226,6 +1226,60 @@ async fn evict_timeline_layer_handler(
     }
 }
 
+async fn timeline_gc_blocking_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    block_or_unblock_gc(request, true).await
+}
+
+async fn timeline_gc_unblocking_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    block_or_unblock_gc(request, false).await
+}
+
+/// Adding a block is `POST ../block_gc`, removing a block is `POST ../unblock_gc`.
+///
+/// Both are technically unsafe because they might fire off index uploads, thus they are POST.
+async fn block_or_unblock_gc(
+    request: Request<Body>,
+    block: bool,
+) -> Result<Response<Body>, ApiError> {
+    use crate::tenant::{
+        remote_timeline_client::WaitCompletionError, upload_queue::NotInitialized,
+    };
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let state = get_state(&request);
+
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+    let timeline = tenant.get_timeline(timeline_id, true)?;
+
+    let res = if block {
+        timeline.block_gc(&tenant).await.map(|_| ())
+    } else {
+        timeline.unblock_gc(&tenant).await
+    };
+
+    res.map_err(|e| {
+        if e.is::<NotInitialized>() || e.is::<WaitCompletionError>() {
+            ApiError::ShuttingDown
+        } else {
+            ApiError::InternalServerError(e.into())
+        }
+    })?;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Get tenant_size SVG graph along with the JSON data.
 fn synthetic_size_html_response(
     inputs: ModelInputs,
@@ -2903,6 +2957,14 @@ pub fn make_router(
         .delete(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, evict_timeline_layer_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timelnie/:timeline_id/block_gc",
+            |r| api_handler(r, timeline_gc_blocking_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timelnie/:timeline_id/unblock_gc",
+            |r| api_handler(r, timeline_gc_unblocking_handler),
         )
         .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
             api_handler(r, secondary_upload_handler)
