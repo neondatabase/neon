@@ -2943,8 +2943,6 @@ impl Timeline {
     }
 }
 
-type TraversalId = Arc<str>;
-
 impl Timeline {
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
