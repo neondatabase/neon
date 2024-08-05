@@ -1067,27 +1067,22 @@ impl Timeline {
             .throttle(ctx, key_count as usize)
             .await;
 
-        let res = match self.conf.get_vectored_impl {
-            GetVectoredImpl::Sequential => {
-                self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
-            }
-            GetVectoredImpl::Vectored => {
-                let vectored_res = self
-                    .get_vectored_impl(
-                        keyspace.clone(),
-                        lsn,
-                        &mut ValuesReconstructState::new(),
-                        ctx,
-                    )
+        let res = {
+            let vectored_res = self
+                .get_vectored_impl(
+                    keyspace.clone(),
+                    lsn,
+                    &mut ValuesReconstructState::new(),
+                    ctx,
+                )
+                .await;
+
+            if self.conf.validate_vectored_get {
+                self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
                     .await;
-
-                if self.conf.validate_vectored_get {
-                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                        .await;
-                }
-
-                vectored_res
             }
+
+            vectored_res
         };
 
         if let Some((metric, start)) = start {
