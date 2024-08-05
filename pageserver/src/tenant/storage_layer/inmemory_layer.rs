@@ -32,7 +32,7 @@ use std::fmt::Write;
 use std::ops::Range;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::RwLock;
 
 use super::{
     DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValueReconstructState,
@@ -479,22 +479,8 @@ impl InMemoryLayer {
         })
     }
 
-    // Write operations
 
-    /// Common subroutine of the public put_wal_record() and put_page_image() functions.
-    /// Adds the page version to the in-memory tree
-    pub async fn put_value(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        buf: &[u8],
-        ctx: &RequestContext,
-    ) -> Result<()> {
-        let mut inner = self.inner.write().await;
-        self.assert_writable();
-        self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
-    }
-
+    // Write path.
     pub(crate) async fn put_batch(
         &self,
         buf: Vec<u8>,
@@ -528,41 +514,6 @@ impl InMemoryLayer {
 
         let size = inner.file.len();
         inner.resource_units.maybe_publish_size(size);
-
-        Ok(())
-    }
-
-    async fn put_value_locked(
-        &self,
-        locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
-        key: Key,
-        lsn: Lsn,
-        buf: &[u8],
-        ctx: &RequestContext,
-    ) -> Result<()> {
-        trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-
-        let off = {
-            locked_inner
-                .file
-                .write_blob(
-                    buf,
-                    &RequestContextBuilder::extend(ctx)
-                        .page_content_kind(PageContentKind::InMemoryLayer)
-                        .build(),
-                )
-                .await?
-        };
-
-        let vec_map = locked_inner.index.entry(key).or_default();
-        let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
-        if old.is_some() {
-            // We already had an entry for this LSN. That's odd..
-            warn!("Key {} at {} already exists", key, lsn);
-        }
-
-        let size = locked_inner.file.len();
-        locked_inner.resource_units.maybe_publish_size(size);
 
         Ok(())
     }
