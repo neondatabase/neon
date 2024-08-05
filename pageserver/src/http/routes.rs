@@ -1275,7 +1275,7 @@ async fn block_or_unblock_gc(
         if e.is::<NotInitialized>() || e.is::<WaitCompletionError>() {
             ApiError::ShuttingDown
         } else {
-            ApiError::InternalServerError(e.into())
+            ApiError::InternalServerError(e)
         }
     })?;
 
