@@ -172,6 +172,7 @@ impl Timeline {
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
             pending_directory_entries: Vec::new(),
+            pending_bytes: 0,
             lsn,
         }
     }
@@ -1056,12 +1057,24 @@ pub struct DatadirModification<'a> {
     /// For special "directory" keys that store key-value maps, track the size of the map
     /// if it was updated in this modification.
     pending_directory_entries: Vec<(DirectoryKind, usize)>,
+
+    /// An **approximation** of how large our EphemeralFile write will be when committed.
+    pending_bytes: usize,
 }
 
 impl<'a> DatadirModification<'a> {
+    // When a DatadirModification is committed, we do a monolithic serialization of all its contents.  WAL records can
+    // contain multiple pages, so the pageserver's record-based batch size isn't sufficient to bound this allocation: we
+    // additionally specify a limit on how much payload a DatadirModification may contain before it should be committed.
+    pub(crate) const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+
     /// Get the current lsn
     pub(crate) fn get_lsn(&self) -> Lsn {
         self.lsn
+    }
+
+    pub(crate) fn approx_pending_bytes(&self) -> usize {
+        self.pending_bytes
     }
 
     /// Set the current lsn
@@ -1808,6 +1821,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         self.pending_updates = retained_pending_updates;
+        self.pending_bytes = 0;
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
@@ -1871,6 +1885,8 @@ impl<'a> DatadirModification<'a> {
             writer.update_directory_entries_count(kind, count as u64);
         }
 
+        self.pending_bytes = 0;
+
         Ok(())
     }
 
@@ -1921,6 +1937,10 @@ impl<'a> DatadirModification<'a> {
                 return;
             }
         }
+        self.pending_bytes += match &val {
+            Value::Image(inner) => inner.len(),
+            Value::WalRecord(_) => 100, // Rough approximation of typical serialized WalRecord size.
+        };
         values.push((self.lsn, val));
     }
 
