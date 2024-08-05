@@ -637,6 +637,12 @@ pub struct TenantInfo {
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
     pub generation: u32,
+
+    /// Opaque explanation if gc is being blocked.
+    ///
+    /// Only looked up for the individual tenant detail, not the listing. This is purely for
+    /// debugging, not included in openapi.
+    pub gc_blocking: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

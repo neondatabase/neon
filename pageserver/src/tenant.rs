@@ -308,7 +308,7 @@ pub struct Tenant {
     ///
     /// New gc iterations must start a new iteration by acquiring `GcBlock::start` before
     /// proceeding.
-    gc_block: gc_block::GcBlock,
+    pub(crate) gc_block: gc_block::GcBlock,
 
     l0_flush_global_state: L0FlushGlobalState,
 }
