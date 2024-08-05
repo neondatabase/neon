@@ -2045,7 +2045,8 @@ impl TenantManager {
                 None,
                 SpawnMode::Eager,
                 ctx,
-            )?;
+            )
+            .map_err(|_| Error::ShuttingDown)?;
 
             {
                 let mut g = tenant.ongoing_timeline_detach.lock().unwrap();
