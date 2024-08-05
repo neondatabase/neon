@@ -4092,7 +4092,7 @@ pub(crate) mod harness {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::keyspace::KeySpaceAccum;
@@ -4767,7 +4767,7 @@ mod tests {
         lsn: Lsn,
         repeat: usize,
         key_count: usize,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HashMap<Key, BTreeSet<Lsn>>> {
         let compact = true;
         bulk_insert_maybe_compact_gc(tenant, timeline, ctx, lsn, repeat, key_count, compact).await
     }
@@ -4780,7 +4780,9 @@ mod tests {
         repeat: usize,
         key_count: usize,
         compact: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HashMap<Key, BTreeSet<Lsn>>> {
+        let mut inserted: HashMap<Key, BTreeSet<Lsn>> = Default::default();
+
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let mut blknum = 0;
 
@@ -4801,6 +4803,7 @@ mod tests {
                         ctx,
                     )
                     .await?;
+                inserted.entry(test_key).or_default().insert(lsn);
                 writer.finish_write(lsn);
                 drop(writer);
 
@@ -4825,7 +4828,7 @@ mod tests {
             assert_eq!(res.layers_removed, 0, "this never removes anything");
         }
 
-        Ok(())
+        Ok(inserted)
     }
 
     //
@@ -4872,7 +4875,7 @@ mod tests {
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
+        let inserted = bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         let guard = tline.layers.read().await;
         guard.layer_map().dump(true, &ctx).await?;
@@ -4933,9 +4936,39 @@ mod tests {
                     &ctx,
                 )
                 .await;
-            tline
-                .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
-                .await;
+
+            let mut expected_lsns: HashMap<Key, Lsn> = Default::default();
+            let mut expect_missing = false;
+            let mut key = read.start().unwrap();
+            while key != read.end().unwrap() {
+                if let Some(lsns) = inserted.get(&key) {
+                    let expected_lsn = lsns.iter().rfind(|lsn| **lsn <= reads_lsn);
+                    match expected_lsn {
+                        Some(lsn) => {
+                            expected_lsns.insert(key, *lsn);
+                        }
+                        None => {
+                            expect_missing = true;
+                            break;
+                        }
+                    }
+                } else {
+                    expect_missing = true;
+                    break;
+                }
+
+                key = key.next();
+            }
+
+            if expect_missing {
+                assert!(matches!(vectored_res, Err(GetVectoredError::MissingKey(_))));
+            } else {
+                for (key, image) in vectored_res? {
+                    let expected_lsn = expected_lsns.get(&key).expect("determined above");
+                    let expected_image = test_img(&format!("{} at {}", key.field6, expected_lsn));
+                    assert_eq!(image?, expected_image);
+                }
+            }
         }
 
         Ok(())
@@ -4983,10 +5016,6 @@ mod tests {
                 &mut ValuesReconstructState::new(),
                 &ctx,
             )
-            .await;
-
-        child_timeline
-            .validate_get_vectored_impl(&vectored_res, aux_keyspace, read_lsn, &ctx)
             .await;
 
         let images = vectored_res?;
