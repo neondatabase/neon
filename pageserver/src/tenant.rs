@@ -7910,17 +7910,11 @@ mod tests {
         verify_result().await;
 
         let cancel = CancellationToken::new();
+        let mut dryrun_flags = EnumSet::new();
+        dryrun_flags.insert(CompactFlags::DryRun);
 
         tline
-            .compact_with_gc(
-                &cancel,
-                {
-                    let mut flags = EnumSet::new();
-                    flags.insert(CompactFlags::DryRun);
-                    flags
-                },
-                &ctx,
-            )
+            .compact_with_gc(&cancel, dryrun_flags, &ctx)
             .await
             .unwrap();
         // We expect layer map to be the same b/c the dry run flag, but we don't know whether there will be other background jobs
