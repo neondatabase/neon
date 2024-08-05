@@ -4727,6 +4727,12 @@ impl Timeline {
             return;
         }
 
+        if self.current_logical_size.current_size().is_exact() {
+            // root timelines are initialized with exact count, but never start the background
+            // calculation
+            return;
+        }
+
         if let Some(await_bg_cancel) = self
             .current_logical_size
             .cancel_wait_for_background_loop_concurrency_limit_semaphore
