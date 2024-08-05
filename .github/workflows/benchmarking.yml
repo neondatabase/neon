@@ -452,7 +452,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/test-tools:cfad3e1e4ca5865e09d807830a68c63a513904cbe79376e6d6cfd69c1a1b26fb
       options: --init
 
     steps:
