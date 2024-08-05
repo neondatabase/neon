@@ -260,7 +260,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(stream, mode.handshake_tls(tls), record_handshake_error);
+    let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
