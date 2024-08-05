@@ -563,7 +563,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
 
-    def timeline_unblock_gc(self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId):
+    def timeline_unblock_gc(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/unblock_gc",
         )
