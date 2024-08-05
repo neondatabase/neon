@@ -1433,6 +1433,7 @@ mod tests {
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
             generation: 1,
+            gc_blocking: None,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1455,6 +1456,7 @@ mod tests {
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
             generation: 1,
+            gc_blocking: None,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
