@@ -259,12 +259,11 @@ impl LayerManager {
                 new_layer.layer_desc().lsn_range
             );
 
-            // Transfer visibilty hint from old to new layer, since the new layer covers the same key space.  This is not guaranteed to
+            // Transfer visibility hint from old to new layer, since the new layer covers the same key space.  This is not guaranteed to
             // be accurate (as the new layer may cover a different subset of the key range), but is a sensible default, and prevents
             // always marking rewritten layers as visible.
             new_layer
                 .as_ref()
-                .access_stats()
                 .set_visibility(old_layer.access_stats().visibility());
 
             // Safety: we may never rewrite the same file in-place.  Callers are responsible
