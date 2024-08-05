@@ -892,12 +892,7 @@ impl RemoteTimelineClient {
             let upload_queue = guard.initialized_mut()?;
 
             if let index::GcBlockingReason::DetachAncestor = reason {
-                if !upload_queue
-                    .clean
-                    .0
-                    .lineage
-                    .is_detached_from_original_ancestor()
-                {
+                if !upload_queue.clean.0.lineage.is_detached_from_ancestor() {
                     drop(guard);
                     panic!("cannot complete timeline_ancestor_detach while not detached");
                 }
