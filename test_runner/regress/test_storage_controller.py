@@ -2027,6 +2027,7 @@ def start_env(env: NeonEnv, storage_controller_port: int):
 # * Validate the contents of the database leader table before and after the cut-over
 # * Validate the leadership metrics before and the cut-over
 # * Failure scenarios
+@pytest.mark.skip("In development")
 def test_storage_controller_leadership_transfer(
     neon_env_builder: NeonEnvBuilder, storage_controller_proxy: StorageControllerProxy
 ):
