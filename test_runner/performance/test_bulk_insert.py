@@ -1,6 +1,5 @@
 from contextlib import closing
 
-import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare, PgCompare
@@ -17,7 +16,6 @@ from fixtures.pg_version import PgVersion
 # 3. Disk space used
 # 4. Peak memory usage
 #
-@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/7124")
 def test_bulk_insert(neon_with_baseline: PgCompare):
     env = neon_with_baseline
 
