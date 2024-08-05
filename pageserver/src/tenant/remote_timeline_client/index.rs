@@ -770,8 +770,8 @@ mod tests {
                 "pg_version": 14
             },
             "gc_blocking": {
-                "started_at": "2024-07-19T09:00:00.123"
-                "reasons": ["DetachAncestor"],
+                "started_at": "2024-07-19T09:00:00.123",
+                "reasons": ["DetachAncestor"]
             }
         }"#;
 
