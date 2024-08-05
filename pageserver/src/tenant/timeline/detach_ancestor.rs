@@ -117,7 +117,9 @@ impl From<GetActiveTenantError> for Error {
         use GetActiveTenantError::*;
 
         match value {
-            Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => Error::ShuttingDown,
+            Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) | SwitchedTenant => {
+                Error::ShuttingDown
+            }
             WaitForActiveTimeout { .. } | NotFound(_) | Broken(_) | WillNotBecomeActive(_) => {
                 // NotFound seems out-of-place
                 Error::WaitToActivate(value)
