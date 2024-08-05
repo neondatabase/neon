@@ -319,7 +319,7 @@ impl Layer {
         use anyhow::ensure;
 
         let layer = self.0.get_or_maybe_download(true, Some(ctx)).await?;
-        self.0.access_stats.record_access(ctx);
+        self.record_access(ctx);
 
         if self.layer_desc().is_delta {
             ensure!(lsn_range.start >= self.layer_desc().lsn_range.start);
@@ -353,7 +353,7 @@ impl Layer {
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
 
-        self.0.access_stats.record_access(ctx);
+        self.record_access(ctx);
 
         layer
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
@@ -488,6 +488,21 @@ impl Layer {
                 if rx.changed().await.is_err() {
                     break;
                 }
+            }
+        }
+    }
+
+    fn record_access(&self, ctx: &RequestContext) {
+        if self.0.access_stats.record_access(ctx) {
+            // Visibility was modified to Visible
+            tracing::info!(
+                "Layer {} became visible as a result of access",
+                self.0.desc.key()
+            );
+            if let Some(tl) = self.0.timeline.upgrade() {
+                tl.metrics
+                    .visible_physical_size_gauge
+                    .add(self.0.desc.file_size)
             }
         }
     }
@@ -1889,7 +1904,7 @@ impl ResidentLayer {
                 // this is valid because the DownloadedLayer::kind is a OnceCell, not a
                 // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
                 // while it's being held.
-                owner.access_stats.record_access(ctx);
+                self.owner.record_access(ctx);
 
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await

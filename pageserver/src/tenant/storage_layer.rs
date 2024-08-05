@@ -554,19 +554,25 @@ impl LayerAccessStats {
         self.record_residence_event_at(SystemTime::now())
     }
 
-    pub(crate) fn record_access_at(&self, now: SystemTime) {
+    fn record_access_at(&self, now: SystemTime) -> bool {
         let (mut mask, mut value) = Self::to_low_res_timestamp(Self::ATIME_SHIFT, now);
 
         // A layer which is accessed must be visible.
         mask |= 0x1 << Self::VISIBILITY_SHIFT;
         value |= 0x1 << Self::VISIBILITY_SHIFT;
 
-        self.write_bits(mask, value);
+        let old_bits = self.write_bits(mask, value);
+        !matches!(
+            self.decode_visibility(old_bits),
+            LayerVisibilityHint::Visible
+        )
     }
 
-    pub(crate) fn record_access(&self, ctx: &RequestContext) {
+    /// Returns true if we modified the layer's visibility to set it to Visible implicitly
+    /// as a result of this access
+    pub(crate) fn record_access(&self, ctx: &RequestContext) -> bool {
         if ctx.access_stats_behavior() == AccessStatsBehavior::Skip {
-            return;
+            return false;
         }
 
         self.record_access_at(SystemTime::now())
