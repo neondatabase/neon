@@ -2016,6 +2016,15 @@ impl TenantManager {
                 ctx,
             )?;
 
+            {
+                let mut g = tenant.ongoing_timeline_detach.lock().unwrap();
+                assert!(
+                    g.is_none(),
+                    "there cannot be any new timeline detach ancestor on newly created tenant"
+                );
+                *g = Some((attempt.timeline_id, attempt.new_barrier()));
+            }
+
             slot_guard.upsert(TenantSlot::Attached(tenant.clone()))?;
             tenant
         } else {
