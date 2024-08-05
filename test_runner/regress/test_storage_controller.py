@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import threading
 import time
@@ -30,6 +31,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
+from fixtures.storage_controller_proxy import StorageControllerProxy
 from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
 from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
@@ -1978,3 +1980,76 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
         )
         == 0
     )
+
+
+# This is a copy of NeonEnv.start which injects the instance id and port
+# into the call to NeonStorageController.start
+def start_env(env: NeonEnv, storage_controller_port: int):
+    timeout_in_seconds = 30
+
+    # Storage controller starts first, so that pageserver /re-attach calls don't
+    # bounce through retries on startup
+    env.storage_controller.start(timeout_in_seconds, 1, storage_controller_port)
+
+    # Wait for storage controller readiness to prevent unnecessary post start-up
+    # reconcile.
+    env.storage_controller.wait_until_ready()
+
+    # Start up broker, pageserver and all safekeepers
+    futs = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=2 + len(env.pageservers) + len(env.safekeepers)
+    ) as executor:
+        futs.append(
+            executor.submit(lambda: env.broker.try_start() or None)
+        )  # The `or None` is for the linter
+
+        for pageserver in env.pageservers:
+            futs.append(
+                executor.submit(
+                    lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)
+                )
+            )
+
+        for safekeeper in env.safekeepers:
+            futs.append(
+                executor.submit(
+                    lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)
+                )
+            )
+
+    for f in futs:
+        f.result()
+
+
+# TODO:
+# * Create tenants and check that operations work as normal after the cut-over
+# * Validate the contents of the database leader table before and after the cut-over
+# * Validate the leadership metrics before and the cut-over
+# * Failure scenarios
+@pytest.mark.skip("In development")
+def test_storage_controller_leadership_transfer(
+    neon_env_builder: NeonEnvBuilder, storage_controller_proxy: StorageControllerProxy
+):
+    storage_controller_1_port = 6969
+    storage_controller_2_port = 7070
+
+    neon_env_builder.storage_controller_config = {
+        "database_url": "127.0.0.1:6868",
+        "start_as_candidate": True,
+    }
+
+    neon_env_builder.storage_controller_port_override = storage_controller_proxy.port()
+
+    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+
+    env = neon_env_builder.init_configs()
+    start_env(env, storage_controller_1_port)
+    time.sleep(10)
+
+    env.storage_controller.start(
+        timeout_in_seconds=30, instance_id=2, base_port=storage_controller_2_port
+    )
+
+    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_2_port}")
+    time.sleep(10)
