@@ -495,6 +495,9 @@ impl Layer {
             (Visible, Covered) => {
                 // Subtract this layer's contribution to the visible size metric
                 if let Some(tl) = self.0.timeline.upgrade() {
+                    debug_assert!(
+                        tl.metrics.visible_physical_size_gauge.get() >= self.0.desc.file_size
+                    );
                     tl.metrics
                         .visible_physical_size_gauge
                         .sub(self.0.desc.file_size)
@@ -715,6 +718,9 @@ impl Drop for LayerInner {
             }
 
             if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
+                debug_assert!(
+                    timeline.metrics.visible_physical_size_gauge.get() >= self.desc.file_size
+                );
                 timeline
                     .metrics
                     .visible_physical_size_gauge
