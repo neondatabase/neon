@@ -5,7 +5,6 @@ use crate::{
     context::{DownloadBehavior, RequestContext},
     task_mgr::TaskKind,
     tenant::{
-        mgr::GetActiveTenantError,
         remote_timeline_client::index::GcBlockingReason::DetachAncestor,
         storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer},
         Tenant,
@@ -416,8 +415,7 @@ async fn start_new_attempt(detached: &Timeline, tenant: &Tenant) -> Result<Attem
             crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
         )
         .await
-        // FIXME: better error
-        .map_err(Error::Unexpected)?;
+        .map_err(|e| Error::launder(e, Error::Prepare))?;
 
     Ok(attempt)
 }
@@ -927,8 +925,7 @@ pub(super) async fn complete(
             crate::tenant::remote_timeline_client::index::GcBlockingReason::DetachAncestor,
         )
         .await
-        // FIXME: better error
-        .map_err(Error::Unexpected)?;
+        .map_err(|e| Error::launder(e, Error::Complete))?;
 
     Ok(())
 }
