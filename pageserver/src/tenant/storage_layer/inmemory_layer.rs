@@ -42,16 +42,34 @@ use super::{
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct InMemoryLayerFileId(page_cache::FileId);
 
-fn materialize_key(prefix: &Key, blkno: u32) -> Key {
-    let mut key = prefix.clone();
-    key.field6 = blkno;
-    key
+#[derive(Ord, PartialOrd, Eq, PartialEq)]
+struct IndexPrefix {
+    field1: u8,
+    field2: u32,
+    field3: u32,
+    field4: u32,
+    field5: u8,
 }
 
-fn key_to_prefix(key: &Key) -> Key {
-    let mut prefix = key.clone();
-    prefix.field6 = 0;
-    prefix
+fn materialize_key(prefix: &IndexPrefix, blkno: u32) -> Key {
+    Key {
+        field1: prefix.field1,
+        field2: prefix.field2,
+        field3: prefix.field3,
+        field4: prefix.field4,
+        field5: prefix.field5,
+        field6: blkno,
+    }
+}
+
+fn key_to_prefix(key: &Key) -> IndexPrefix {
+    IndexPrefix {
+        field1: key.field1,
+        field2: key.field2,
+        field3: key.field3,
+        field4: key.field4,
+        field5: key.field5,
+    }
 }
 
 pub struct InMemoryLayer {
@@ -95,7 +113,7 @@ pub struct InMemoryLayerInner {
     /// All versions of all pages in the layer are kept here. Indexed
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
-    index: BTreeMap<Key, BTreeMap<u32, VecMap<Lsn, u64>>>,
+    index: BTreeMap<IndexPrefix, BTreeMap<u32, VecMap<Lsn, u64>>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
@@ -490,7 +508,7 @@ impl SerializedBatch {
         use std::io::Write;
 
         let mut offsets: Vec<(Key, Lsn, u64)> = Vec::new();
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(batch.len() * 8192));
         let mut max_lsn: Lsn = Lsn(0);
         let mut value_buf = smallvec::SmallVec::<[u8; 256]>::new();
         for (key, lsn, val) in batch {
@@ -588,11 +606,11 @@ impl InMemoryLayer {
     // Write path.
     pub async fn put_batch(
         &self,
-        serialized_batch: SerializedBatch,
+        serialized_batch: &SerializedBatch,
         ctx: &RequestContext,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
-        self.assert_writable();
+        //self.assert_writable();
 
         let base_off = {
             inner
@@ -606,17 +624,17 @@ impl InMemoryLayer {
                 .await?
         };
 
-        for (key, lsn, relative_off) in serialized_batch.offsets {
+        for (key, lsn, relative_off) in &serialized_batch.offsets {
             let prefix = key_to_prefix(&key);
-            let relation_idx = inner.index.entry(prefix).or_default();
+
+            let relation_idx = match inner.index.get_mut(&prefix) {
+                Some(i) => i,
+                None => inner.index.entry(prefix).or_default(),
+            };
 
             let off = base_off + relative_off;
             let vec_map = relation_idx.entry(key.field6).or_default();
-            let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
-            if old.is_some() {
-                // We already had an entry for this LSN. That's odd..
-                warn!("Key {} at {} already exists", key, lsn);
-            }
+            vec_map.append_fast(*lsn, off);
         }
 
         let size = inner.file.len();
@@ -702,11 +720,12 @@ impl InMemoryLayer {
         let end_lsn = *self.end_lsn.get().unwrap();
 
         let key_count = if let Some(key_range) = key_range {
-            inner
-                .index
-                .iter()
-                .filter(|(k, _)| key_range.contains(k))
-                .count()
+            panic!("Update for IndexPrefix");
+            // inner
+            //     .index
+            //     .iter()
+            //     .filter(|(k, _)| key_range.contains(k))
+            //     .count()
         } else {
             inner.index.len()
         };

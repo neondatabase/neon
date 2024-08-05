@@ -69,7 +69,7 @@ async fn ingest(
         pageserver::context::DownloadBehavior::Download,
     );
 
-    let batch_pages = 100;
+    let batch_pages = 10000;
     let mut batch_values = vec![];
 
     for i in 0..put_count {
@@ -97,15 +97,16 @@ async fn ingest(
         batch_values.push((key, lsn, value.clone()));
 
         if batch_values.len() >= batch_pages {
-            let batch = SerializedBatch::from_values(vec![(key, lsn, value.clone())]);
+            let write_batch = std::mem::take(&mut batch_values);
+            let batch = SerializedBatch::from_values(write_batch);
 
-            layer.put_batch(batch, &ctx).await?;
+            layer.put_batch(&batch, &ctx).await?;
         }
     }
     if !batch_values.is_empty() {
         let batch = SerializedBatch::from_values(vec![(key, lsn, value.clone())]);
 
-        layer.put_batch(batch, &ctx).await?;
+        layer.put_batch(&batch, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
 

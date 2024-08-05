@@ -6051,7 +6051,7 @@ impl<'a> TimelineWriter<'a> {
             .handle_open_layer_action(batch_max_lsn, action, ctx)
             .await?;
 
-        let res = layer.put_batch(serialized_batch, ctx).await;
+        let res = layer.put_batch(&serialized_batch, ctx).await;
 
         if res.is_ok() {
             // Update the current size only when the entire write was ok.

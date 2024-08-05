@@ -99,6 +99,10 @@ impl<K: Ord, V> VecMap<K, V> {
         Ok(delta_size)
     }
 
+    pub fn append_fast(&mut self, key: K, value: V) {
+        self.data.push((key, value))
+    }
+
     /// Update the maximum key value pair or add a new key value pair to the map.
     /// If `key` is not respective of the `self` ordering no updates or additions
     /// will occur and `InvalidKey` error will be returned.
