@@ -661,8 +661,8 @@ pub(crate) enum DetachingAndReparenting {
     /// Some of the reparentings failed. The timeline ancestor detach must **not** be marked as
     /// completed.
     ///
-    /// Nested `must_restart` is set to true when any restart requiring changes were made.
-    SomeReparentingFailed { must_restart: bool },
+    /// Nested `must_reset_tenant` is set to true when any restart requiring changes were made.
+    SomeReparentingFailed { must_reset_tenant: bool },
 
     /// Detaching and reparentings were completed in a previous attempt. Timeline ancestor detach
     /// must be marked as completed.
@@ -674,7 +674,7 @@ impl DetachingAndReparenting {
         use DetachingAndReparenting::*;
         match self {
             Reparented(_) => true,
-            SomeReparentingFailed { must_restart } => *must_restart,
+            SomeReparentingFailed { must_reset_tenant } => *must_reset_tenant,
             AlreadyDone(_) => false,
         }
     }
@@ -885,8 +885,9 @@ pub(super) async fn detach_and_reparent(
             candidates = reparenting_candidates,
             "failed to reparent all candidates; they can be retried after the tenant_reset",
         );
-        let must_restart = !reparented.is_empty() || was_detached;
-        Ok(DetachingAndReparenting::SomeReparentingFailed { must_restart })
+
+        let must_reset_tenant = !reparented.is_empty() || was_detached;
+        Ok(DetachingAndReparenting::SomeReparentingFailed { must_reset_tenant })
     }
 }
 
