@@ -129,6 +129,3 @@ jobs:
           docker buildx imagetools create -t neondatabase/${{ matrix.tool }}:${IMAGE_TAG} \
                                              neondatabase/${{ matrix.tool }}:${IMAGE_TAG}-x64 \
                                              neondatabase/${{ matrix.tool }}:${IMAGE_TAG}-arm64                                           
-                                          
-
-          
