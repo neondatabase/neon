@@ -36,7 +36,6 @@ use std::fmt;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
-use timeline::detach_ancestor;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -759,7 +758,6 @@ impl Tenant {
         shard_identity: ShardIdentity,
         init_order: Option<InitializationOrder>,
         mode: SpawnMode,
-        existing_detach_attempt: Option<&detach_ancestor::Attempt>,
         ctx: &RequestContext,
     ) -> Result<Arc<Tenant>, GlobalShutDown> {
         let wal_redo_manager =

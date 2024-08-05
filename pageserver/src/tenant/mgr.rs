@@ -637,7 +637,6 @@ pub async fn init_tenant_mgr(
                     shard_identity,
                     Some(init_order.clone()),
                     SpawnMode::Lazy,
-                    None,
                     &ctx,
                 )
                 .expect("global shutdown during init_tenant_mgr cannot happen"),
@@ -688,7 +687,6 @@ fn tenant_spawn(
     shard_identity: ShardIdentity,
     init_order: Option<InitializationOrder>,
     mode: SpawnMode,
-    existing_detach_attempt: Option<&detach_ancestor::Attempt>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, GlobalShutDown> {
     // All these conditions should have been satisfied by our caller: the tenant dir exists, is a well formed
@@ -709,7 +707,6 @@ fn tenant_spawn(
         shard_identity,
         init_order,
         mode,
-        existing_detach_attempt,
         ctx,
     )
 }
@@ -1157,7 +1154,6 @@ impl TenantManager {
                     shard_identity,
                     None,
                     spawn_mode,
-                    None,
                     ctx,
                 )
                 .map_err(|_: GlobalShutDown| {
@@ -1282,7 +1278,6 @@ impl TenantManager {
             shard_identity,
             None,
             SpawnMode::Eager,
-            None,
             ctx,
         )?;
 
@@ -2017,7 +2012,6 @@ impl TenantManager {
                 shard_identity,
                 None,
                 SpawnMode::Eager,
-                Some(&attempt),
                 ctx,
             )?;
 
