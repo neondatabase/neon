@@ -138,12 +138,12 @@ fn ingest_main(
 /// Genuine disk I/O is used, so expect results to differ depending on storage.  However, when running on
 /// a fast disk, CPU is the bottleneck at time of writing.
 fn criterion_benchmark(c: &mut Criterion) {
-    let repo_dir: Utf8PathBuf = env::current_dir().unwrap().try_into().unwrap();
-    let repo_dir = repo_dir.join("bench_data");
-    eprintln!("Data directory: {repo_dir}");
+    let temp_dir_parent: Utf8PathBuf = env::current_dir().unwrap().try_into().unwrap();
+    let temp_dir = camino_tempfile::tempdir_in(temp_dir_parent).unwrap();
+    eprintln!("Data directory: {}", temp_dir.path());
 
     let conf: &'static PageServerConf = Box::leak(Box::new(
-        pageserver::config::PageServerConf::dummy_conf(repo_dir),
+        pageserver::config::PageServerConf::dummy_conf(temp_dir.path().to_path_buf()),
     ));
     virtual_file::init(16384, IoEngineKind::TokioEpollUring);
     page_cache::init(conf.page_cache_size);
