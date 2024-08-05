@@ -747,6 +747,9 @@ struct ImageLayerWriterInner {
 
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
+
+    #[cfg_attr(feature = "testing", allow(unused))]
+    last_written_key: Key,
 }
 
 impl ImageLayerWriterInner {
@@ -804,6 +807,7 @@ impl ImageLayerWriterInner {
             uncompressed_bytes_eligible: 0,
             uncompressed_bytes_chosen: 0,
             num_keys: 0,
+            last_written_key: Key::MIN,
         };
 
         Ok(writer)
@@ -843,6 +847,11 @@ impl ImageLayerWriterInner {
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;
+
+        #[cfg(feature = "testing")]
+        {
+            self.last_written_key = key;
+        }
 
         Ok(())
     }
@@ -914,7 +923,13 @@ impl ImageLayerWriterInner {
             metadata.len(),
         );
 
-        // TODO: when end_key is specified, verify that the end key is in range
+        #[cfg(feature = "testing")]
+        if let Some(end_key) = end_key {
+            assert!(
+                self.last_written_key < end_key,
+                "written key violates end_key range"
+            );
+        }
 
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
