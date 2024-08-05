@@ -171,8 +171,8 @@ def test_debezium(debezium):
         ),
         show_intermediate_error=True,
     )
-    log.info("Update ts_ms: %s", ts_ms)
     ts_ms = time.time() * 1000
+    log.info("Update ts_ms: %s", ts_ms)
     cur.execute("update inventory.customers set first_name = 'Alexander' where id = 2")
     conn.commit()
     wait_until(
