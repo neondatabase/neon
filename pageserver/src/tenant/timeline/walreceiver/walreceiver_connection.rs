@@ -31,7 +31,7 @@ use crate::{
     task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
-    walrecord::DecodedWALRecord,
+    walrecord::{decode_wal_record, DecodedWALRecord},
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
@@ -312,7 +312,6 @@ pub(super) async fn handle_walreceiver_connection(
                 waldecoder.feed_bytes(data);
 
                 {
-                    let mut decoded = DecodedWALRecord::default();
                     let mut modification = timeline.begin_modification(startlsn);
                     let mut uncommitted_records = 0;
                     let mut filtered_records = 0;
@@ -324,9 +323,13 @@ pub(super) async fn handle_walreceiver_connection(
                             return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
                         }
 
+                        // Deserialize WAL record
+                        let mut decoded = DecodedWALRecord::default();
+                        decode_wal_record(recdata, &mut decoded, modification.tline.pg_version)?;
+
                         // Ingest the records without immediately committing them.
                         let ingested = walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                            .ingest_record(decoded, lsn, &mut modification, &ctx)
                             .await
                             .with_context(|| format!("could not ingest record at {lsn}"))?;
                         if !ingested {

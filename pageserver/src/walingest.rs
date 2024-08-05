@@ -86,10 +86,9 @@ impl WalIngest {
     ///
     pub async fn ingest_record(
         &mut self,
-        recdata: Bytes,
+        decoded: DecodedWALRecord,
         lsn: Lsn,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
         WAL_INGEST.records_received.inc();
@@ -97,7 +96,6 @@ impl WalIngest {
         let prev_len = modification.len();
 
         modification.set_lsn(lsn)?;
-        decode_wal_record(recdata, decoded, pg_version)?;
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -115,11 +113,11 @@ impl WalIngest {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages
                 // without registering them with the standard mechanism.
-                self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
+                self.ingest_heapam_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_NEON_ID => {
-                self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
+                self.ingest_neonrmgr_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             // Handle other special record types
@@ -307,7 +305,7 @@ impl WalIngest {
             }
             pg_constants::RM_RELMAP_ID => {
                 let xlrec = XlRelmapUpdate::decode(&mut buf);
-                self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
+                self.ingest_relmap_page(modification, &xlrec, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_XLOG_ID => {
@@ -452,7 +450,7 @@ impl WalIngest {
 
                 continue;
             }
-            self.ingest_decoded_block(modification, lsn, decoded, blk, ctx)
+            self.ingest_decoded_block(modification, lsn, &decoded, blk, ctx)
                 .await?;
         }
 
@@ -2344,7 +2342,6 @@ mod tests {
             .await
             .unwrap();
         let mut modification = tline.begin_modification(startpoint);
-        let mut decoded = DecodedWALRecord::default();
         println!("decoding {} bytes", bytes.len() - xlogoff);
 
         // Decode and ingest wal. We process the wal in chunks because
@@ -2352,8 +2349,10 @@ mod tests {
         for chunk in bytes[xlogoff..].chunks(50) {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
+                let mut decoded = DecodedWALRecord::default();
+                decode_wal_record(recdata, &mut decoded, modification.tline.pg_version).unwrap();
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .ingest_record(decoded, lsn, &mut modification, &ctx)
                     .await
                     .unwrap();
             }

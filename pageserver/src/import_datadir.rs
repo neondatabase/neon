@@ -19,6 +19,7 @@ use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
+use crate::walrecord::decode_wal_record;
 use crate::walrecord::DecodedWALRecord;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
@@ -310,11 +311,13 @@ async fn import_wal(
 
         let mut nrecords = 0;
         let mut modification = tline.begin_modification(last_lsn);
-        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                let mut decoded = DecodedWALRecord::default();
+                decode_wal_record(recdata, &mut decoded, tline.pg_version)?;
+
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
+                    .ingest_record(decoded, lsn, &mut modification, ctx)
                     .await?;
                 WAL_INGEST.records_committed.inc();
 
@@ -449,11 +452,12 @@ pub async fn import_wal_from_tar(
         waldecoder.feed_bytes(&bytes[offset..]);
 
         let mut modification = tline.begin_modification(last_lsn);
-        let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
+                let mut decoded = DecodedWALRecord::default();
+                decode_wal_record(recdata, &mut decoded, tline.pg_version)?;
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
+                    .ingest_record(decoded, lsn, &mut modification, ctx)
                     .await?;
                 modification.commit(ctx).await?;
                 last_lsn = lsn;
