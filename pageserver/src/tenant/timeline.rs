@@ -5524,44 +5524,6 @@ enum OpenLayerAction {
 }
 
 impl<'a> TimelineWriter<'a> {
-    /// Put a new page version that can be constructed from a WAL record
-    ///
-    /// This will implicitly extend the relation, if the page is beyond the
-    /// current end-of-file.
-    pub(crate) async fn put(
-        &mut self,
-        key: Key,
-        lsn: Lsn,
-        value: &Value,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Avoid doing allocations for "small" values.
-        // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
-        // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
-        let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
-        value.ser_into(&mut buf)?;
-        let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
-
-        let action = self.get_open_layer_action(lsn, buf_size);
-        let layer = self.handle_open_layer_action(lsn, action, ctx).await?;
-        let res = layer.put_value(key.to_compact(), lsn, &buf, ctx).await;
-
-        if res.is_ok() {
-            // Update the current size only when the entire write was ok.
-            // In case of failures, we may have had partial writes which
-            // render the size tracking out of sync. That's ok because
-            // the checkpoint distance should be significantly smaller
-            // than the S3 single shot upload limit of 5GiB.
-            let state = self.write_guard.as_mut().unwrap();
-
-            state.current_size += buf_size;
-            state.prev_lsn = Some(lsn);
-            state.max_lsn = std::cmp::max(state.max_lsn, Some(lsn));
-        }
-
-        res
-    }
-
     async fn handle_open_layer_action(
         &mut self,
         at: Lsn,
@@ -5667,8 +5629,6 @@ impl<'a> TimelineWriter<'a> {
     }
 
     /// Put a batch of keys at the specified Lsns.
-    ///
-    /// The batch is sorted by Lsn (enforced by usage of [`utils::vec_map::VecMap`].
     pub(crate) async fn put_batch(
         &mut self,
         batch: Vec<(CompactKey, Lsn, Value)>,
@@ -5731,6 +5691,18 @@ impl<'a> TimelineWriter<'a> {
         }
 
         res
+    }
+
+    #[cfg(test)]
+    /// Test helper, for tests that would like to poke individual values without composing a batch
+    pub(crate) async fn put(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        value: &Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.put_batch(vec![(key, lsn, value.clone())], ctx).await
     }
 
     pub(crate) async fn delete_batch(

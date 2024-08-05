@@ -82,6 +82,7 @@ impl EphemeralFile {
         self.rw.read_blk(blknum, ctx).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn write_blob(
         &mut self,
         srcbuf: &[u8],

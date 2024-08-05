@@ -1791,11 +1791,12 @@ impl<'a> DatadirModification<'a> {
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
+            let mut write_batch = Vec::new();
             for (lsn, value) in values {
                 if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
-                    writer.put(key, lsn, &value, ctx).await?;
+                    write_batch.push((key, lsn, value));
                 } else {
                     retained_pending_updates
                         .entry(key)
@@ -1803,6 +1804,7 @@ impl<'a> DatadirModification<'a> {
                         .push((lsn, value));
                 }
             }
+            writer.put_batch(write_batch, ctx).await?;
         }
 
         self.pending_updates = retained_pending_updates;
