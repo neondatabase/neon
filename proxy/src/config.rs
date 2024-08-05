@@ -31,11 +31,8 @@ pub struct ProxyConfig {
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
-    pub disable_ip_check_for_http: bool,
-    pub redis_rps_limit: Vec<RateBucketInfo>,
     pub region: String,
     pub handshake_timeout: Duration,
-    pub aws_region: String,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute_retry_config: RetryConfig,
@@ -55,7 +52,6 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub request_timeout: tokio::time::Duration,
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,

@@ -766,7 +766,6 @@ mod tests {
                 opt_in: false,
                 max_total_conns: 3,
             },
-            request_timeout: Duration::from_secs(1),
             cancel_set: CancelSet::new(0),
             client_conn_threshold: u64::MAX,
         }));
