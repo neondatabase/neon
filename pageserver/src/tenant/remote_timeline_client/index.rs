@@ -341,28 +341,6 @@ impl GcBlocking {
     }
 }
 
-impl GcBlocking {
-    pub(super) fn started_now_for_detach_ancestor() -> Self {
-        Self::started_now_for(GcBlockingReason::DetachAncestor)
-    }
-
-    /// Returns true if detach_ancestor is one of the reasons why the gc is blocked.
-    pub(crate) fn blocked_by_detach_ancestor(&self) -> bool {
-        self.blocked_by(GcBlockingReason::DetachAncestor)
-    }
-
-    /// Returns a version of self with the reason of detach_ancestor.
-    pub(super) fn with_detach_ancestor(&self) -> Self {
-        self.with_reason(GcBlockingReason::DetachAncestor)
-    }
-
-    /// Returns a version of self without the reason of detach_ancestor. Assumption is that if
-    /// there are no more reasons, we can unblock the gc.
-    pub(super) fn without_detach_ancestor(&self) -> Option<Self> {
-        self.without_reason(GcBlockingReason::DetachAncestor)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
