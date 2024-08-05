@@ -187,7 +187,7 @@ runs:
           fi
 
           for q in "${QUERIES[@]}"; do
-            ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/psql ${BENCHMARK_CONNSTR} -c "${q}"
+            psql ${BENCHMARK_CONNSTR} -c "${q}"
           done
         fi
 
