@@ -124,7 +124,7 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Create multi-arch tool image
+      - name: Create multi-arch ${{ matrix.tool }} image
         run: |
           docker buildx imagetools create -t neondatabase/${{ matrix.tool }}:${IMAGE_TAG} \
                                              neondatabase/${{ matrix.tool }}:${IMAGE_TAG}-x64 \
