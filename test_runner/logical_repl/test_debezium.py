@@ -119,20 +119,15 @@ def get_kafka_msg(consumer, ts_ms, before=None, after=None) -> None:
                   have the same values for the same keys
     """
     msg = consumer.poll()
-    if not msg:
-        raise ValueError("Empty message")
+    assert msg, "Empty message"
     for val in msg.values():
         r = json.loads(val[-1].value)
         log.info(r["payload"])
-        if ts_ms >= r["payload"]["ts_ms"]:
-            log.info("incorrect ts")
-            raise ValueError("Incorrect timestamp")
+        assert ts_ms < r["payload"]["ts_ms"], "Incorrect timestamp"
         for param, pname in ((before, "before"), (after, "after")):
             if param is not None:
                 for k, v in param.items():
-                    if r["payload"][pname][k] != v:
-                        log.info("%s mismatch", pname)
-                        raise ValueError(pname + " mismatches")
+                    assert r["payload"][pname][k] == v, f"{pname} mismatches"
 
 
 @pytest.mark.remote_cluster
@@ -157,6 +152,7 @@ def test_debezium(debezium):
             ts_ms,
             after={"first_name": "John", "last_name": "Dow", "email": "johndow@example.com"},
         ),
+        show_intermediate_error=True
     )
     ts_ms = time.time() * 1000
     log.info("Insert 2 ts_ms: %s", ts_ms)
@@ -173,11 +169,14 @@ def test_debezium(debezium):
             ts_ms,
             after={"first_name": "Alex", "last_name": "Row", "email": "alexrow@example.com"},
         ),
+        show_intermediate_error=True
     )
     log.info("Update ts_ms: %s", ts_ms)
     ts_ms = time.time() * 1000
     cur.execute("update inventory.customers set first_name = 'Alexander' where id = 2")
     conn.commit()
-    wait_until(100, 0.5, lambda: get_kafka_msg(consumer, ts_ms, after={"first_name": "Alexander"}))
+    wait_until(100, 0.5, lambda: get_kafka_msg(consumer, ts_ms, after={"first_name": "Alexander"},),
+               show_intermediate_error=True
+               )
     time.sleep(3)
     cur.execute("select 1")

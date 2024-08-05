@@ -389,7 +389,7 @@ WaitUntilRet = TypeVar("WaitUntilRet")
 
 
 def wait_until(
-    number_of_iterations: int, interval: float, func: Callable[[], WaitUntilRet]
+    number_of_iterations: int, interval: float, func: Callable[[], WaitUntilRet], show_intermediate_error=False
 ) -> WaitUntilRet:
     """
     Wait until 'func' returns successfully, without exception. Returns the
@@ -402,6 +402,8 @@ def wait_until(
         except Exception as e:
             log.info("waiting for %s iteration %s failed", func, i + 1)
             last_exception = e
+            if show_intermediate_error:
+                log.info(e)
             time.sleep(interval)
             continue
         return res
