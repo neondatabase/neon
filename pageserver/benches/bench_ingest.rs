@@ -128,6 +128,13 @@ fn ingest_main(
     });
 }
 
+/// Declare a series of benchmarks for the Pageserver's ingest write path.
+///
+/// This benchmark does not include WAL decode: it starts at InMemoryLayer::put_value, and ends either
+/// at freezing the ephemeral layer, or writing the ephemeral layer out to an L0 (depending on whether WriteDelta is set).
+///
+/// Genuine disk I/O is used, so expect results to differ depending on storage.  However, when running on
+/// a fast disk, CPU is the bottleneck at time of writing.
 fn criterion_benchmark(c: &mut Criterion) {
     let repo_dir: Utf8PathBuf = env::current_dir().unwrap().try_into().unwrap();
     let repo_dir = repo_dir.join("bench_data");
