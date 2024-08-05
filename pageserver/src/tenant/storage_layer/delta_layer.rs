@@ -382,6 +382,9 @@ struct DeltaLayerWriterInner {
     tree: DiskBtreeBuilder<BlockBuf, DELTA_KEY_SIZE>,
 
     blob_writer: BlobWriter<true>,
+
+    // Number of key-lsns in the layer.
+    num_keys: usize,
 }
 
 impl DeltaLayerWriterInner {
@@ -422,6 +425,7 @@ impl DeltaLayerWriterInner {
             lsn_range,
             tree: tree_builder,
             blob_writer,
+            num_keys: 0,
         })
     }
 
@@ -472,6 +476,9 @@ impl DeltaLayerWriterInner {
 
         let delta_key = DeltaKey::from_key_lsn(&key, lsn);
         let res = self.tree.append(&delta_key.0, blob_ref.0);
+
+        self.num_keys += 1;
+
         (val, res.map_err(|e| anyhow::anyhow!(e)))
     }
 
@@ -673,6 +680,17 @@ impl DeltaLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         self.inner.take().unwrap().finish(key_end, ctx).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn num_keys(&self) -> usize {
+        self.inner.as_ref().unwrap().num_keys
+    }
+
+    #[cfg(test)]
+    pub(crate) fn estimated_size(&self) -> u64 {
+        let inner = self.inner.as_ref().unwrap();
+        inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
     }
 }
 

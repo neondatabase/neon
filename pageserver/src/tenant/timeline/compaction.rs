@@ -1649,19 +1649,23 @@ impl Timeline {
         use std::collections::BTreeSet;
 
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
-        // with legacy compaction tasks in the future.
+        // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
+        // Note that we already acquired the compaction lock when the outer `compact` function gets called.
 
-        let _compaction_lock = tokio::select! {
-            guard = self.compaction_lock.lock() => guard,
-            // TODO: refactor to CompactionError to correctly pass cancelled error
-            _ = cancel.cancelled() => return Err(anyhow!("cancelled")),
+        let gc_lock = async {
+            tokio::select! {
+                guard = self.gc_lock.lock() => Ok(guard),
+                // TODO: refactor to CompactionError to correctly pass cancelled error
+                _ = cancel.cancelled() => Err(anyhow!("cancelled")),
+            }
         };
 
-        let _gc = tokio::select! {
-            guard = self.gc_lock.lock() => guard,
-            // TODO: refactor to CompactionError to correctly pass cancelled error
-            _ = cancel.cancelled() => return Err(anyhow!("cancelled")),
-        };
+        let gc_lock = crate::timed(
+            gc_lock,
+            "acquires gc lock",
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
 
         info!("running enhanced gc bottom-most compaction");
 
@@ -2068,9 +2072,11 @@ impl Timeline {
             let mut guard = self.layers.write().await;
             guard.finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
         };
-
         self.remote_client
             .schedule_compaction_update(&layer_selection, &compact_to)?;
+
+        drop(gc_lock);
+
         Ok(())
     }
 }

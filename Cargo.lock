@@ -5703,6 +5703,7 @@ dependencies = [
  "pageserver_client",
  "postgres_connection",
  "r2d2",
+ "rand 0.8.5",
  "reqwest 0.12.4",
  "routerify",
  "scopeguard",
