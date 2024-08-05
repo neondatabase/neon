@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import pytest
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, StorageScrubber
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
@@ -122,7 +122,12 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             "scheduling": "Stop",
         },
     )
-    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy Stop.*")
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Scheduling is disabled by policy Stop.*",
+            ".*Skipping reconcile for policy Stop.*",
+        ]
+    )
 
     # We use a fixed seed to make the test reproducible: we want a randomly
     # chosen order, but not to change the order every time we run the test.
@@ -234,7 +239,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
     # Having done a bunch of attach/detach cycles, we will have generated some index garbage: check
     # that the scrubber sees it and cleans it up.  We do this before the final attach+validate pass,
     # to also validate that the scrubber isn't breaking anything.
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=1)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] > 0
 
@@ -384,6 +389,9 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
     # Check that deletion works properly on a tenant that was live-migrated
     # (reproduce https://github.com/neondatabase/neon/issues/6802)
     pageserver_b.http_client().tenant_delete(tenant_id)
+
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
 
 
 def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
@@ -555,7 +563,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # Scrub the remote storage
     # ========================
     # This confirms that the scrubber isn't upset by the presence of the heatmap
-    StorageScrubber(neon_env_builder).scan_metadata()
+    env.storage_scrubber.scan_metadata()
 
     # Detach secondary and delete tenant
     # ===================================
@@ -583,6 +591,9 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         ),
     )
     workload.stop()
+
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
 
 
 def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):

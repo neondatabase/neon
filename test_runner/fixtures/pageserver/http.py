@@ -117,6 +117,9 @@ class LayerMapInfo:
     def image_layers(self) -> List[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Image"]
 
+    def delta_l0_layers(self) -> List[HistoricLayerInfo]:
+        return [x for x in self.historic_layers if x.kind == "Delta" and x.l0]
+
     def historic_by_name(self) -> Set[str]:
         return set(x.layer_file_name for x in self.historic_layers)
 
@@ -238,8 +241,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def tenant_attach(
         self,
         tenant_id: Union[TenantId, TenantShardId],
+        generation: int,
         config: None | Dict[str, Any] = None,
-        generation: Optional[int] = None,
     ):
         config = config or {}
 
@@ -659,6 +662,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_repartition=False,
         force_image_layer_creation=False,
         wait_until_uploaded=False,
+        compact: Optional[bool] = None,
+        **kwargs,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -669,10 +674,14 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
 
+        if compact is not None:
+            query["compact"] = "true" if compact else "false"
+
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
             params=query,
+            **kwargs,
         )
         log.info(f"Got checkpoint request response code: {res.status_code}")
         self.verbose_error(res)

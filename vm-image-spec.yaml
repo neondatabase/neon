@@ -236,6 +236,7 @@ files:
         query: |
           select sum(pg_database_size(datname)) as total from pg_database;
 
+      # DEPRECATED
       - metric_name: lfc_approximate_working_set_size
         type: gauge
         help: 'Approximate working set size in pages of 8192 bytes'
@@ -243,6 +244,20 @@ files:
         values: [approximate_working_set_size]
         query: |
           select neon.approximate_working_set_size(false) as approximate_working_set_size;
+
+      - metric_name: lfc_approximate_working_set_size_windows
+        type: gauge
+        help: 'Approximate working set size in pages of 8192 bytes'
+        key_labels: [duration]
+        values: [size]
+        # NOTE: This is the "public" / "human-readable" version. Here, we supply a small selection
+        # of durations in a pretty-printed form.
+        query: |
+          select
+            x as duration,
+            neon.approximate_working_set_size_seconds(extract('epoch' from x::interval)::int) as size
+          from
+            (values ('5m'),('15m'),('1h')) as t (x);
 
       - metric_name: current_lsn
         type: gauge
@@ -262,8 +277,12 @@ files:
         help: 'Bytes between received and replayed LSN'
         key_labels:
         values: [replication_delay_bytes]
+        # We use a GREATEST call here because this calculation can be negative.
+        # The calculation is not atomic, meaning after we've gotten the receive
+        # LSN, the replay LSN may have advanced past the receive LSN we
+        # are using for the calculation.
         query: |
-          SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()) AS replication_delay_bytes;
+          SELECT GREATEST(0, pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())) AS replication_delay_bytes;
 
       - metric_name: replication_delay_seconds
         type: gauge
@@ -377,13 +396,19 @@ files:
         query: |
           select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
 
-      - metric_name: lfc_approximate_working_set_size
+      - metric_name: lfc_approximate_working_set_size_windows
         type: gauge
         help: 'Approximate working set size in pages of 8192 bytes'
-        key_labels:
-        values: [approximate_working_set_size]
+        key_labels: [duration_seconds]
+        values: [size]
+        # NOTE: This is the "internal" / "machine-readable" version. This outputs the working set
+        # size looking back 1..60 minutes, labeled with the number of minutes.
         query: |
-          select neon.approximate_working_set_size(false) as approximate_working_set_size;
+          select
+            x::text as duration_seconds,
+            neon.approximate_working_set_size_seconds(x) as size
+          from
+            (select generate_series * 60 as x from generate_series(1, 60)) as t (x);
 build: |
   # Build cgroup-tools
   #

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
@@ -655,11 +656,8 @@ impl Reconciler {
                     // reconcile this location.  This includes locations with different configurations, as well
                     // as locations with unknown (None) observed state.
 
-                    // The general case is to increment the generation.  However, there are cases
-                    // where this is not necessary:
-                    // - if we are only updating the TenantConf part of the location
-                    // - if we are only changing the attachment mode (e.g. going to attachedmulti or attachedstale)
-                    //   and the location was already in the correct generation
+                    // Incrementing generation is the safe general case, but is inefficient for changes that only
+                    // modify some details (e.g. the tenant's config).
                     let increment_generation = match observed {
                         None => true,
                         Some(ObservedStateLocation { conf: None }) => true,
@@ -668,18 +666,11 @@ impl Reconciler {
                         }) => {
                             let generations_match = observed.generation == wanted_conf.generation;
 
-                            use LocationConfigMode::*;
-                            let mode_transition_requires_gen_inc =
-                                match (observed.mode, wanted_conf.mode) {
-                                    // Usually the short-lived attachment modes (multi and stale) are only used
-                                    // in the case of [`Self::live_migrate`], but it is simple to handle them correctly
-                                    // here too.  Locations are allowed to go Single->Stale and Multi->Single within the same generation.
-                                    (AttachedSingle, AttachedStale) => false,
-                                    (AttachedMulti, AttachedSingle) => false,
-                                    (lhs, rhs) => lhs != rhs,
-                                };
-
-                            !generations_match || mode_transition_requires_gen_inc
+                            // We may skip incrementing the generation if the location is already in the expected mode and
+                            // generation.  In principle it would also be safe to skip from certain other modes (e.g. AttachedStale),
+                            // but such states are handled inside `live_migrate`, and if we see that state here we're cleaning up
+                            // after a restart/crash, so fall back to the universally safe path of incrementing generation.
+                            !generations_match || (observed.mode != wanted_conf.mode)
                         }
                     };
 
@@ -748,6 +739,8 @@ impl Reconciler {
             }
             self.location_config(&node, conf, None, false).await?;
         }
+
+        failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
 
         Ok(())
     }

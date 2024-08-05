@@ -33,11 +33,14 @@ use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
-use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
+use crate::tenant::disk_btree::{
+    DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
+};
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+    BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    VectoredReadPlanner,
 };
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
@@ -49,10 +52,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::{ImageCompressionAlgorithm, LayerAccessKind};
+use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
@@ -261,7 +265,7 @@ impl DeltaLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
+        let inner = self.load(ctx).await?;
 
         inner.dump(ctx).await
     }
@@ -294,12 +298,8 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    async fn load(
-        &self,
-        access_kind: LayerAccessKind,
-        ctx: &RequestContext,
-    ) -> Result<&Arc<DeltaLayerInner>> {
-        self.access_stats.record_access(access_kind, ctx);
+    async fn load(&self, ctx: &RequestContext) -> Result<&Arc<DeltaLayerInner>> {
+        self.access_stats.record_access(ctx);
         // Quick exit if already loaded
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
@@ -307,12 +307,10 @@ impl DeltaLayer {
             .with_context(|| format!("Failed to load delta layer {}", self.path()))
     }
 
-    async fn load_inner(&self, ctx: &RequestContext) -> Result<Arc<DeltaLayerInner>> {
+    async fn load_inner(&self, ctx: &RequestContext) -> anyhow::Result<Arc<DeltaLayerInner>> {
         let path = self.path();
 
-        let loaded = DeltaLayerInner::load(&path, None, None, ctx)
-            .await
-            .and_then(|res| res)?;
+        let loaded = DeltaLayerInner::load(&path, None, None, ctx).await?;
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
@@ -352,7 +350,7 @@ impl DeltaLayer {
                 summary.lsn_range,
                 metadata.len(),
             ),
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
+            access_stats: Default::default(),
             inner: OnceCell::new(),
         })
     }
@@ -456,7 +454,12 @@ impl DeltaLayerWriterInner {
         will_init: bool,
         ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
-        assert!(self.lsn_range.start <= lsn);
+        assert!(
+            self.lsn_range.start <= lsn,
+            "lsn_start={}, lsn={}",
+            self.lsn_range.start,
+            lsn
+        );
         // We don't want to use compression in delta layer creation
         let compression = ImageCompressionAlgorithm::Disabled;
         let (val, res) = self
@@ -464,7 +467,7 @@ impl DeltaLayerWriterInner {
             .write_blob_maybe_compressed(val, ctx, compression)
             .await;
         let off = match res {
-            Ok(off) => off,
+            Ok((off, _)) => off,
             Err(e) => return (val, Err(anyhow::anyhow!(e))),
         };
 
@@ -747,37 +750,32 @@ impl DeltaLayer {
 }
 
 impl DeltaLayerInner {
-    #[cfg(test)]
     pub(crate) fn key_range(&self) -> &Range<Key> {
         &self.layer_key_range
     }
 
-    #[cfg(test)]
     pub(crate) fn lsn_range(&self) -> &Range<Lsn> {
         &self.layer_lsn_range
     }
 
-    /// Returns nested result following Result<Result<_, OpErr>, Critical>:
-    /// - inner has the success or transient failure
-    /// - outer has the permanent failure
     pub(super) async fn load(
         path: &Utf8Path,
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
-    ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path, ctx).await {
-            Ok(file) => file,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
-        };
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path, ctx)
+            .await
+            .context("open layer file")?;
+
         let file_id = page_cache::next_file_id();
 
         let block_reader = FileBlockReader::new(&file, file_id);
 
-        let summary_blk = match block_reader.read_blk(0, ctx).await {
-            Ok(blk) => blk,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
-        };
+        let summary_blk = block_reader
+            .read_blk(0, ctx)
+            .await
+            .context("read first block")?;
 
         // TODO: this should be an assertion instead; see ImageLayerInner::load
         let actual_summary =
@@ -799,7 +797,7 @@ impl DeltaLayerInner {
             }
         }
 
-        Ok(Ok(DeltaLayerInner {
+        Ok(DeltaLayerInner {
             file,
             file_id,
             index_start_blk: actual_summary.index_start_blk,
@@ -807,7 +805,7 @@ impl DeltaLayerInner {
             max_vectored_read_bytes,
             layer_key_range: actual_summary.key_range,
             layer_lsn_range: actual_summary.lsn_range,
-        }))
+        })
     }
 
     pub(super) async fn get_value_reconstruct_data(
@@ -1180,9 +1178,7 @@ impl DeltaLayerInner {
                     let delta_key = DeltaKey::from_slice(key);
                     let val_ref = ValueRef {
                         blob_ref: BlobRef(value),
-                        reader: BlockCursor::new(crate::tenant::block_io::BlockReaderRef::Adapter(
-                            Adapter(self),
-                        )),
+                        layer: self,
                     };
                     let pos = BlobRef(value).pos();
                     if let Some(last) = all_keys.last_mut() {
@@ -1426,7 +1422,7 @@ impl DeltaLayerInner {
         let keys = self.load_keys(ctx).await?;
 
         async fn dump_blob(val: &ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
-            let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
+            let buf = val.load_raw(ctx).await?;
             let val = Value::des(&buf)?;
             let desc = match val {
                 Value::Image(img) => {
@@ -1461,8 +1457,7 @@ impl DeltaLayerInner {
             use pageserver_api::key::CHECKPOINT_KEY;
             use postgres_ffi::CheckPoint;
             if key == CHECKPOINT_KEY {
-                let buf = val.reader.read_blob(val.blob_ref.pos(), ctx).await?;
-                let val = Value::des(&buf)?;
+                let val = val.load(ctx).await?;
                 match val {
                     Value::Image(img) => {
                         let checkpoint = CheckPoint::decode(&img)?;
@@ -1515,7 +1510,6 @@ impl DeltaLayerInner {
         offset
     }
 
-    #[cfg(test)]
     pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
@@ -1526,7 +1520,7 @@ impl DeltaLayerInner {
             index_iter: tree_reader.iter(&[0; DELTA_KEY_SIZE], ctx),
             key_values_batch: std::collections::VecDeque::new(),
             is_end: false,
-            planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner::new(
+            planner: StreamingVectoredReadPlanner::new(
                 1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
                 1024,        // The default value. Unit tests might use a different value
             ),
@@ -1547,16 +1541,23 @@ pub struct DeltaEntry<'a> {
 /// Reference to an on-disk value
 pub struct ValueRef<'a> {
     blob_ref: BlobRef,
-    reader: BlockCursor<'a>,
+    layer: &'a DeltaLayerInner,
 }
 
 impl<'a> ValueRef<'a> {
     /// Loads the value from disk
     pub async fn load(&self, ctx: &RequestContext) -> Result<Value> {
-        // theoretically we *could* record an access time for each, but it does not really matter
-        let buf = self.reader.read_blob(self.blob_ref.pos(), ctx).await?;
+        let buf = self.load_raw(ctx).await?;
         let val = Value::des(&buf)?;
         Ok(val)
+    }
+
+    async fn load_raw(&self, ctx: &RequestContext) -> Result<Vec<u8>> {
+        let reader = BlockCursor::new(crate::tenant::block_io::BlockReaderRef::Adapter(Adapter(
+            self.layer,
+        )));
+        let buf = reader.read_blob(self.blob_ref.pos(), ctx).await?;
+        Ok(buf)
     }
 }
 
@@ -1591,17 +1592,15 @@ impl<'a> pageserver_compaction::interface::CompactionDeltaEntry<'a, Key> for Del
     }
 }
 
-#[cfg(test)]
 pub struct DeltaLayerIterator<'a> {
     delta_layer: &'a DeltaLayerInner,
     ctx: &'a RequestContext,
-    planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner,
-    index_iter: crate::tenant::disk_btree::DiskBtreeIterator<'a>,
-    key_values_batch: std::collections::VecDeque<(Key, Lsn, Value)>,
+    planner: StreamingVectoredReadPlanner,
+    index_iter: DiskBtreeIterator<'a>,
+    key_values_batch: VecDeque<(Key, Lsn, Value)>,
     is_end: bool,
 }
 
-#[cfg(test)]
 impl<'a> DeltaLayerIterator<'a> {
     /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {
@@ -1668,6 +1667,7 @@ pub(crate) mod test {
     use rand::RngCore;
 
     use super::*;
+    use crate::repository::Value;
     use crate::tenant::harness::TIMELINE_ID;
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
     use crate::tenant::Tenant;
@@ -1677,6 +1677,7 @@ pub(crate) mod test {
         tenant::{disk_btree::tests::TestDisk, harness::TenantHarness},
         DEFAULT_PG_VERSION,
     };
+    use bytes::Bytes;
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -1929,7 +1930,7 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn test_delta_layer_vectored_read_end_to_end() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_delta_layer_oversized_vectored_read")?;
+        let harness = TenantHarness::create("test_delta_layer_oversized_vectored_read").await?;
         let (tenant, ctx) = harness.load().await;
 
         let timeline_id = TimelineId::generate();
@@ -2029,7 +2030,9 @@ pub(crate) mod test {
         use crate::walrecord::NeonWalRecord;
         use bytes::Bytes;
 
-        let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke").unwrap();
+        let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke")
+            .await
+            .unwrap();
         let (tenant, ctx) = h.load().await;
         let ctx = &ctx;
         let timeline = tenant
@@ -2245,6 +2248,15 @@ pub(crate) mod test {
         (k1, l1).cmp(&(k2, l2))
     }
 
+    pub(crate) fn sort_delta_value(
+        (k1, l1, v1): &(Key, Lsn, Value),
+        (k2, l2, v2): &(Key, Lsn, Value),
+    ) -> std::cmp::Ordering {
+        let order_1 = if v1.is_image() { 0 } else { 1 };
+        let order_2 = if v2.is_image() { 0 } else { 1 };
+        (k1, l1, order_1).cmp(&(k2, l2, order_2))
+    }
+
     pub(crate) async fn produce_delta_layer(
         tenant: &Tenant,
         tline: &Arc<Timeline>,
@@ -2253,7 +2265,7 @@ pub(crate) mod test {
     ) -> anyhow::Result<ResidentLayer> {
         deltas.sort_by(sort_delta);
         let (key_start, _, _) = deltas.first().unwrap();
-        let (key_max, _, _) = deltas.first().unwrap();
+        let (key_max, _, _) = deltas.last().unwrap();
         let lsn_min = deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
         let lsn_max = deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
         let lsn_end = Lsn(lsn_max.0 + 1);
@@ -2298,10 +2310,7 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn delta_layer_iterator() {
-        use crate::repository::Value;
-        use bytes::Bytes;
-
-        let harness = TenantHarness::create("delta_layer_iterator").unwrap();
+        let harness = TenantHarness::create("delta_layer_iterator").await.unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let tline = tenant

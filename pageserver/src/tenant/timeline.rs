@@ -1,8 +1,9 @@
 pub(crate) mod analysis;
-mod compaction;
+pub(crate) mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
+pub(crate) mod handle;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
@@ -17,6 +18,7 @@ use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
@@ -58,7 +60,7 @@ use std::{
     sync::atomic::AtomicU64,
 };
 use std::{
-    cmp::{max, min, Ordering},
+    cmp::{max, min},
     ops::ControlFlow,
 };
 use std::{
@@ -74,6 +76,7 @@ use crate::{
         metadata::TimelineMetadata,
         storage_layer::PersistentLayerDesc,
     },
+    walredo,
 };
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -137,10 +140,13 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
+use super::{config::TenantConf, upload_queue::NotInitialized};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
-use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
+use super::{
+    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
+    storage_layer::ReadableLayer,
+};
 use super::{
     secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
     GcError,
@@ -174,25 +180,6 @@ pub enum ImageLayerCreationMode {
 impl std::fmt::Display for ImageLayerCreationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
-    }
-}
-
-/// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Hole {
-    key_range: Range<Key>,
-    coverage_size: usize,
-}
-
-impl Ord for Hole {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.coverage_size.cmp(&self.coverage_size) // inverse order
-    }
-}
-
-impl PartialOrd for Hole {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -443,6 +430,8 @@ pub struct Timeline {
     pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
+
+    pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 }
 
 pub struct WalReceiverInfo {
@@ -460,7 +449,7 @@ pub(crate) struct GcInfo {
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<Lsn>,
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -476,39 +465,43 @@ impl GcInfo {
     pub(crate) fn min_cutoff(&self) -> Lsn {
         self.cutoffs.select_min()
     }
+
+    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn) {
+        self.retain_lsns.push((child_lsn, child_id));
+        self.retain_lsns.sort_by_key(|i| i.0);
+    }
+
+    pub(super) fn remove_child(&mut self, child_id: TimelineId) {
+        self.retain_lsns.retain(|i| i.1 != child_id);
+    }
 }
 
-/// The `GcInfo` component describing which Lsns need to be retained.
-#[derive(Debug)]
+/// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this
+/// is a single number (the oldest LSN which we must retain), but it internally distinguishes
+/// between time-based and space-based retention for observability and consumption metrics purposes.
+#[derive(Debug, Clone)]
 pub(crate) struct GcCutoffs {
-    /// Keep everything newer than this point.
-    ///
-    /// This is calculated by subtracting 'gc_horizon' setting from
-    /// last-record LSN
-    ///
-    /// FIXME: is this inclusive or exclusive?
-    pub(crate) horizon: Lsn,
+    /// Calculated from the [`TenantConf::gc_horizon`], this LSN indicates how much
+    /// history we must keep to retain a specified number of bytes of WAL.
+    pub(crate) space: Lsn,
 
-    /// In addition to 'retain_lsns' and 'horizon_cutoff', keep everything newer than this
-    /// point.
-    ///
-    /// This is calculated by finding a number such that a record is needed for PITR
-    /// if only if its LSN is larger than 'pitr_cutoff'.
-    pub(crate) pitr: Lsn,
+    /// Calculated from [`TenantConf::pitr_interval`], this LSN indicates how much
+    /// history we must keep to enable reading back at least the PITR interval duration.
+    pub(crate) time: Lsn,
 }
 
 impl Default for GcCutoffs {
     fn default() -> Self {
         Self {
-            horizon: Lsn::INVALID,
-            pitr: Lsn::INVALID,
+            space: Lsn::INVALID,
+            time: Lsn::INVALID,
         }
     }
 }
 
 impl GcCutoffs {
     fn select_min(&self) -> Lsn {
-        std::cmp::min(self.horizon, self.pitr)
+        std::cmp::min(self.space, self.time)
     }
 }
 
@@ -544,7 +537,6 @@ impl GetVectoredError {
     }
 }
 
-#[derive(Debug)]
 pub struct MissingKeyError {
     key: Key,
     shard: ShardNumber,
@@ -553,6 +545,12 @@ pub struct MissingKeyError {
     ancestor_lsn: Option<Lsn>,
     traversal_path: Vec<TraversalPathItem>,
     backtrace: Option<std::backtrace::Backtrace>,
+}
+
+impl std::fmt::Debug for MissingKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
 impl std::fmt::Display for MissingKeyError {
@@ -638,7 +636,13 @@ impl FlushLayerError {
     // When crossing from generic anyhow errors to this error type, we explicitly check
     // for timeline cancellation to avoid logging inoffensive shutdown errors as warn/err.
     fn from_anyhow(timeline: &Timeline, err: anyhow::Error) -> Self {
-        if timeline.cancel.is_cancelled() {
+        let cancelled = timeline.cancel.is_cancelled()
+            // The upload queue might have been shut down before the official cancellation of the timeline.
+            || err
+                .downcast_ref::<NotInitialized>()
+                .map(NotInitialized::is_stopping)
+                .unwrap_or_default();
+        if cancelled {
             Self::Cancelled
         } else {
             Self::Other(Arc::new(err))
@@ -867,7 +871,7 @@ impl Timeline {
         let gc_info = self.gc_info.read().unwrap();
         let history = self
             .get_last_record_lsn()
-            .checked_sub(gc_info.cutoffs.pitr)
+            .checked_sub(gc_info.cutoffs.time)
             .unwrap_or(Lsn(0))
             .0;
         (history, gc_info.within_ancestor_pitr)
@@ -1000,7 +1004,10 @@ impl Timeline {
             .for_get_kind(GetKind::Singular)
             .observe(elapsed.as_secs_f64());
 
-        if cfg!(feature = "testing") && res.is_err() {
+        if cfg!(feature = "testing")
+            && res.is_err()
+            && !matches!(res, Err(PageReconstructError::Cancelled))
+        {
             // it can only be walredo issue
             use std::fmt::Write;
 
@@ -1566,7 +1573,7 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         ensure!(
             lsn >= **latest_gc_cutoff_lsn,
-            "LSN {} is earlier than latest GC horizon {} (we might've already garbage collected needed data)",
+            "LSN {} is earlier than latest GC cutoff {} (we might've already garbage collected needed data)",
             lsn,
             **latest_gc_cutoff_lsn,
         );
@@ -1759,13 +1766,14 @@ impl Timeline {
         }
     }
 
-    /// Outermost timeline compaction operation; downloads needed layers.
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
     pub(crate) async fn compact(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1785,8 +1793,8 @@ impl Timeline {
         // compaction task goes over it's period (20s) which is quite often in production.
         let (_guard, _permit) = tokio::select! {
             tuple = prepare => { tuple },
-            _ = self.cancel.cancelled() => return Ok(()),
-            _ = cancel.cancelled() => return Ok(()),
+            _ = self.cancel.cancelled() => return Ok(false),
+            _ = cancel.cancelled() => return Ok(false),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1794,11 +1802,14 @@ impl Timeline {
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(());
+            return Ok(false);
         }
 
         match self.get_compaction_algorithm_settings().kind {
-            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
+            CompactionAlgorithm::Tiered => {
+                self.compact_tiered(cancel, ctx).await?;
+                Ok(false)
+            }
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
         }
     }
@@ -1915,6 +1926,9 @@ impl Timeline {
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
+        // Ensure Prevent new page service requests from starting.
+        self.handles.shutdown();
+
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         self.remote_client.stop();
@@ -1985,6 +1999,11 @@ impl Timeline {
 
     pub(crate) fn is_active(&self) -> bool {
         self.current_state() == TimelineState::Active
+    }
+
+    #[allow(unused)]
+    pub(crate) fn is_archived(&self) -> Option<bool> {
+        self.remote_client.is_archived()
     }
 
     pub(crate) fn is_stopping(&self) -> bool {
@@ -2312,6 +2331,11 @@ impl Timeline {
             )
         };
 
+        if let Some(ancestor) = &ancestor {
+            let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
+            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn());
+        }
+
         Arc::new_cyclic(|myself| {
             let metrics = TimelineMetrics::new(
                 &tenant_shard_id,
@@ -2430,6 +2454,8 @@ impl Timeline {
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
 
                 l0_flush_global_state: resources.l0_flush_global_state,
+
+                handles: Default::default(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -2482,7 +2508,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "layer flush task",
-            false,
             async move {
                 let _guard = guard;
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
@@ -2714,6 +2739,10 @@ impl Timeline {
         // Tenant::create_timeline will wait for these uploads to happen before returning, or
         // on retry.
 
+        // Now that we have the full layer map, we may calculate the visibility of layers within it (a global scan)
+        drop(guard); // drop write lock, update_layer_visibility will take a read lock.
+        self.update_layer_visibility().await;
+
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
             num_layers, disk_consistent_lsn, total_physical_size
@@ -2827,7 +2856,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "initial size calculation",
-            false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
                 let cancel = task_mgr::shutdown_token();
@@ -2996,7 +3024,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "ondemand logical size calculation",
-            false,
             async move {
                 let res = self_clone
                     .logical_size_calculation_task(lsn, cause, &ctx)
@@ -3163,7 +3190,7 @@ impl Timeline {
         let guard = self.layers.read().await;
 
         let resident = guard.likely_resident_layers().map(|layer| {
-            let last_activity_ts = layer.access_stats().latest_activity_or_now();
+            let last_activity_ts = layer.access_stats().latest_activity();
 
             HeatMapLayer::new(
                 layer.layer_desc().layer_name(),
@@ -3409,7 +3436,6 @@ impl Timeline {
         }
     }
 
-    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
@@ -3701,6 +3727,17 @@ impl Timeline {
 
     pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
         &self.shard_identity
+    }
+
+    #[inline(always)]
+    pub(crate) fn shard_timeline_id(&self) -> ShardTimelineId {
+        ShardTimelineId {
+            shard_index: ShardIndex {
+                shard_number: self.shard_identity.number,
+                shard_count: self.shard_identity.count,
+            },
+            timeline_id: self.timeline_id,
+        }
     }
 
     ///
@@ -4054,6 +4091,21 @@ impl Timeline {
             }
             // release lock on 'layers'
         };
+
+        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
+        // This makes us refuse ingest until the new layers have been persisted to the remote.
+        self.remote_client
+            .wait_completion()
+            .await
+            .map_err(|e| match e {
+                WaitCompletionError::UploadQueueShutDownOrStopped
+                | WaitCompletionError::NotInitialized(
+                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
+                ) => FlushLayerError::Cancelled,
+                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
+                    FlushLayerError::Other(anyhow!(e).into())
+                }
+            })?;
 
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
@@ -4647,27 +4699,6 @@ impl Timeline {
             }
         }
 
-        // The writer.finish() above already did the fsync of the inodes.
-        // We just need to fsync the directory in which these inodes are linked,
-        // which we know to be the timeline directory.
-        if !image_layers.is_empty() {
-            // We use fatal_err() below because the after writer.finish() returns with success,
-            // the in-memory state of the filesystem already has the layer file in its final place,
-            // and subsequent pageserver code could think it's durable while it really isn't.
-            let timeline_dir = VirtualFile::open(
-                &self
-                    .conf
-                    .timeline_path(&self.tenant_shard_id, &self.timeline_id),
-                ctx,
-            )
-            .await
-            .fatal_err("VirtualFile::open for timeline dir fsync");
-            timeline_dir
-                .sync_all()
-                .await
-                .fatal_err("VirtualFile::sync_all timeline dir");
-        }
-
         let mut guard = self.layers.write().await;
 
         // FIXME: we could add the images to be uploaded *before* returning from here, but right
@@ -4675,6 +4706,9 @@ impl Timeline {
         guard.track_new_image_layers(&image_layers, &self.metrics);
         drop_wlock(guard);
         timer.stop_and_record();
+
+        // Creating image layers may have caused some previously visible layers to be covered
+        self.update_layer_visibility().await;
 
         Ok(image_layers)
     }
@@ -4761,6 +4795,18 @@ impl Timeline {
     }
 }
 
+impl Drop for Timeline {
+    fn drop(&mut self) {
+        if let Some(ancestor) = &self.ancestor_timeline {
+            // This lock should never be poisoned, but in case it is we do a .map() instead of
+            // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
+            if let Ok(mut gc_info) = ancestor.gc_info.write() {
+                gc_info.remove_child(self.timeline_id)
+            }
+        }
+    }
+}
+
 /// Top-level failure to compact.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CompactionError {
@@ -4768,7 +4814,7 @@ pub(crate) enum CompactionError {
     ShuttingDown,
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl From<CollectKeySpaceError> for CompactionError {
@@ -4779,6 +4825,38 @@ impl From<CollectKeySpaceError> for CompactionError {
                 CompactionError::ShuttingDown
             }
             e => CompactionError::Other(e.into()),
+        }
+    }
+}
+
+impl From<super::upload_queue::NotInitialized> for CompactionError {
+    fn from(value: super::upload_queue::NotInitialized) -> Self {
+        match value {
+            super::upload_queue::NotInitialized::Uninitialized
+            | super::upload_queue::NotInitialized::Stopped => {
+                CompactionError::Other(anyhow::anyhow!(value))
+            }
+            super::upload_queue::NotInitialized::ShuttingDown => CompactionError::ShuttingDown,
+        }
+    }
+}
+
+impl CompactionError {
+    /// We cannot do compaction because we could not download a layer that is input to the compaction.
+    pub(crate) fn input_layer_download_failed(
+        e: super::storage_layer::layer::DownloadError,
+    ) -> Self {
+        match e {
+            super::storage_layer::layer::DownloadError::TimelineShutdown |
+            /* TODO DownloadCancelled correct here? */
+            super::storage_layer::layer::DownloadError::DownloadCancelled  => CompactionError::ShuttingDown,
+            super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads |
+            super::storage_layer::layer::DownloadError::DownloadRequired |
+            super::storage_layer::layer::DownloadError::NotFile(_) |
+            super::storage_layer::layer::DownloadError::DownloadFailed |
+            super::storage_layer::layer::DownloadError::PreStatFailed(_)=>CompactionError::Other(anyhow::anyhow!(e)),
+            #[cfg(test)]
+            super::storage_layer::layer::DownloadError::Failpoint(_) =>  CompactionError::Other(anyhow::anyhow!(e)),
         }
     }
 }
@@ -4856,7 +4934,7 @@ impl Timeline {
         new_deltas: &[ResidentLayer],
         new_images: &[ResidentLayer],
         layers_to_remove: &[Layer],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CompactionError> {
         let mut guard = self.layers.write().await;
 
         let mut duplicated_layers = HashSet::new();
@@ -4873,8 +4951,8 @@ impl Timeline {
                 // for compact_level0_phase1 creating an L0, which does not happen in practice
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
-            } else if LayerMap::is_l0(l.layer_desc()) {
-                bail!("compaction generates a L0 layer file as output, which will cause infinite compaction.");
+            } else if LayerMap::is_l0(&l.layer_desc().key_range) {
+                return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
                 insert_layers.push(l.clone());
             }
@@ -4906,7 +4984,7 @@ impl Timeline {
         self: &Arc<Self>,
         mut replace_layers: Vec<(Layer, ResidentLayer)>,
         mut drop_layers: Vec<Layer>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), super::upload_queue::NotInitialized> {
         let mut guard = self.layers.write().await;
 
         // Trim our lists in case our caller (compaction) raced with someone else (GC) removing layers: we want
@@ -4928,7 +5006,7 @@ impl Timeline {
     fn upload_new_image_layers(
         self: &Arc<Self>,
         new_images: impl IntoIterator<Item = ResidentLayer>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), super::upload_queue::NotInitialized> {
         for layer in new_images {
             self.remote_client.schedule_layer_file_upload(layer)?;
         }
@@ -4944,18 +5022,18 @@ impl Timeline {
     /// garbage collection.
     ///
     /// We calculate two cutoffs, one based on time and one based on WAL size.  `pitr`
-    /// controls the time cutoff (or ZERO to disable time-based retention), and `cutoff_horizon` controls
+    /// controls the time cutoff (or ZERO to disable time-based retention), and `space_cutoff` controls
     /// the space-based retention.
     ///
     /// This function doesn't simply to calculate time & space based retention: it treats time-based
     /// retention as authoritative if enabled, and falls back to space-based retention if calculating
     /// the LSN for a time point isn't possible.  Therefore the GcCutoffs::horizon in the response might
-    /// be different to the `cutoff_horizon` input.  Callers should treat the min() of the two cutoffs
+    /// be different to the `space_cutoff` input.  Callers should treat the min() of the two cutoffs
     /// in the response as the GC cutoff point for the timeline.
     #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn find_gc_cutoffs(
         &self,
-        cutoff_horizon: Lsn,
+        space_cutoff: Lsn,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
@@ -4972,8 +5050,8 @@ impl Timeline {
             // Unit tests which specify zero PITR interval expect to avoid doing any I/O for timestamp lookup
             if pitr == Duration::ZERO {
                 return Ok(GcCutoffs {
-                    pitr: self.get_last_record_lsn(),
-                    horizon: cutoff_horizon,
+                    time: self.get_last_record_lsn(),
+                    space: space_cutoff,
                 });
             }
         }
@@ -4981,8 +5059,7 @@ impl Timeline {
         // Calculate a time-based limit on how much to retain:
         // - if PITR interval is set, then this is our cutoff.
         // - if PITR interval is not set, then we do a lookup
-        //   based on DEFAULT_PITR_INTERVAL, so that size-based retention (horizon)
-        //   does not result in keeping history around permanently on idle databases.
+        //   based on DEFAULT_PITR_INTERVAL, so that size-based retention does not result in keeping history around permanently on idle databases.
         let time_cutoff = {
             let now = SystemTime::now();
             let time_range = if pitr == Duration::ZERO {
@@ -5023,31 +5100,31 @@ impl Timeline {
                 // PITR is not set. Retain the size-based limit, or the default time retention,
                 // whichever requires less data.
                 GcCutoffs {
-                    pitr: std::cmp::max(time_cutoff, cutoff_horizon),
-                    horizon: std::cmp::max(time_cutoff, cutoff_horizon),
+                    time: self.get_last_record_lsn(),
+                    space: std::cmp::max(time_cutoff, space_cutoff),
                 }
             }
             (Duration::ZERO, None) => {
                 // PITR is not set, and time lookup failed
                 GcCutoffs {
-                    pitr: self.get_last_record_lsn(),
-                    horizon: cutoff_horizon,
+                    time: self.get_last_record_lsn(),
+                    space: space_cutoff,
                 }
             }
             (_, None) => {
                 // PITR interval is set & we didn't look up a timestamp successfully.  Conservatively assume PITR
                 // cannot advance beyond what was already GC'd, and respect space-based retention
                 GcCutoffs {
-                    pitr: *self.get_latest_gc_cutoff_lsn(),
-                    horizon: cutoff_horizon,
+                    time: *self.get_latest_gc_cutoff_lsn(),
+                    space: space_cutoff,
                 }
             }
             (_, Some(time_cutoff)) => {
                 // PITR interval is set and we looked up timestamp successfully.  Ignore
                 // size based retention and make time cutoff authoritative
                 GcCutoffs {
-                    pitr: time_cutoff,
-                    horizon: time_cutoff,
+                    time: time_cutoff,
+                    space: time_cutoff,
                 }
             }
         })
@@ -5074,12 +5151,16 @@ impl Timeline {
             return Err(GcError::TimelineCancelled);
         }
 
-        let (horizon_cutoff, pitr_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
+        let (space_cutoff, time_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
-            let horizon_cutoff = min(gc_info.cutoffs.horizon, self.get_disk_consistent_lsn());
-            let pitr_cutoff = gc_info.cutoffs.pitr;
-            let retain_lsns = gc_info.retain_lsns.clone();
+            let space_cutoff = min(gc_info.cutoffs.space, self.get_disk_consistent_lsn());
+            let time_cutoff = gc_info.cutoffs.time;
+            let retain_lsns = gc_info
+                .retain_lsns
+                .iter()
+                .map(|(lsn, _child_id)| *lsn)
+                .collect();
 
             // Gets the maximum LSN that holds the valid lease.
             //
@@ -5088,14 +5169,14 @@ impl Timeline {
             let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
 
             (
-                horizon_cutoff,
-                pitr_cutoff,
+                space_cutoff,
+                time_cutoff,
                 retain_lsns,
                 max_lsn_with_valid_lease,
             )
         };
 
-        let mut new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
+        let mut new_gc_cutoff = Lsn::min(space_cutoff, time_cutoff);
         let standby_horizon = self.standby_horizon.load();
         // Hold GC for the standby, but as a safety guard do it only within some
         // reasonable lag.
@@ -5124,8 +5205,8 @@ impl Timeline {
 
         let res = self
             .gc_timeline(
-                horizon_cutoff,
-                pitr_cutoff,
+                space_cutoff,
+                time_cutoff,
                 retain_lsns,
                 max_lsn_with_valid_lease,
                 new_gc_cutoff,
@@ -5143,8 +5224,8 @@ impl Timeline {
 
     async fn gc_timeline(
         &self,
-        horizon_cutoff: Lsn,
-        pitr_cutoff: Lsn,
+        space_cutoff: Lsn,
+        time_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         max_lsn_with_valid_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
@@ -5205,22 +5286,22 @@ impl Timeline {
             result.layers_total += 1;
 
             // 1. Is it newer than GC horizon cutoff point?
-            if l.get_lsn_range().end > horizon_cutoff {
+            if l.get_lsn_range().end > space_cutoff {
                 debug!(
-                    "keeping {} because it's newer than horizon_cutoff {}",
+                    "keeping {} because it's newer than space_cutoff {}",
                     l.layer_name(),
-                    horizon_cutoff,
+                    space_cutoff,
                 );
                 result.layers_needed_by_cutoff += 1;
                 continue 'outer;
             }
 
             // 2. It is newer than PiTR cutoff point?
-            if l.get_lsn_range().end > pitr_cutoff {
+            if l.get_lsn_range().end > time_cutoff {
                 debug!(
-                    "keeping {} because it's newer than pitr_cutoff {}",
+                    "keeping {} because it's newer than time_cutoff {}",
                     l.layer_name(),
-                    pitr_cutoff,
+                    time_cutoff,
                 );
                 result.layers_needed_by_pitr += 1;
                 continue 'outer;
@@ -5393,20 +5474,22 @@ impl Timeline {
                 } else {
                     trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
                 };
-
-                let img = match self
+                let res = self
                     .walredo_mgr
                     .as_ref()
                     .context("timeline has no walredo manager")
                     .map_err(PageReconstructError::WalRedo)?
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
-                    .await
-                    .context("reconstruct a page image")
-                {
+                    .await;
+                let img = match res {
                     Ok(img) => img,
-                    Err(e) => return Err(PageReconstructError::WalRedo(e)),
+                    Err(walredo::Error::Cancelled) => return Err(PageReconstructError::Cancelled),
+                    Err(walredo::Error::Other(e)) => {
+                        return Err(PageReconstructError::WalRedo(
+                            e.context("reconstruct a page image"),
+                        ))
+                    }
                 };
-
                 Ok(img)
             }
         }
@@ -5441,7 +5524,6 @@ impl Timeline {
             Some(self.tenant_shard_id),
             Some(self.timeline_id),
             "download all remote layers task",
-            false,
             async move {
                 self_clone.download_all_remote_layers(request).await;
                 let mut status_guard = self_clone.download_all_remote_layers_task_info.write().unwrap();
@@ -5592,7 +5674,7 @@ impl Timeline {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-                let last_activity_ts = layer.access_stats().latest_activity_or_now();
+                let last_activity_ts = layer.access_stats().latest_activity();
 
                 EvictionCandidate {
                     layer: layer.into(),
@@ -6052,8 +6134,9 @@ mod tests {
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {
-        let harness =
-            TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
+        let harness = TenantHarness::create("two_layer_eviction_attempts_at_the_same_time")
+            .await
+            .unwrap();
 
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant

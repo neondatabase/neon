@@ -2,35 +2,36 @@
 
 //! Main entry point for the Page Server executable.
 
+use std::env;
 use std::env::{var, VarError};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, ops::ControlFlow, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use camino::Utf8Path;
 use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::config::PageserverIdentity;
 use pageserver::control_plane_client::ControlPlaneClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
-use pageserver::task_mgr::WALRECEIVER_RUNTIME;
+use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
 use pageserver::tenant::{secondary, TenantSharedResources};
+use pageserver::{CancellableTask, ConsumptionMetricsTasks, HttpEndpointListener};
 use remote_storage::GenericRemoteStorage;
 use tokio::signal::unix::SignalKind;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use metrics::set_build_info_metric;
 use pageserver::{
-    config::{defaults::*, PageServerConf},
-    context::{DownloadBehavior, RequestContext},
+    config::PageServerConf,
     deletion_queue::DeletionQueue,
     http, page_cache, page_service, task_mgr,
-    task_mgr::TaskKind,
-    task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
+    task_mgr::{BACKGROUND_RUNTIME, MGMT_REQUEST_RUNTIME},
     tenant::mgr,
     virtual_file,
 };
@@ -84,18 +85,13 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Error opening workdir '{workdir}'"))?;
 
     let cfg_file_path = workdir.join("pageserver.toml");
+    let identity_file_path = workdir.join("identity.toml");
 
     // Set CWD to workdir for non-daemon modes
     env::set_current_dir(&workdir)
         .with_context(|| format!("Failed to set application's current dir to '{workdir}'"))?;
 
-    let conf = match initialize_config(&cfg_file_path, arg_matches, &workdir)? {
-        ControlFlow::Continue(conf) => conf,
-        ControlFlow::Break(()) => {
-            info!("Pageserver config init successful");
-            return Ok(());
-        }
-    };
+    let conf = initialize_config(&identity_file_path, &cfg_file_path, &workdir)?;
 
     // Initialize logging.
     //
@@ -129,6 +125,7 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.get_impl, "starting with get page implementation");
     info!(?conf.get_vectored_impl, "starting with vectored get page implementation");
+    info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
@@ -150,70 +147,55 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn initialize_config(
+    identity_file_path: &Utf8Path,
     cfg_file_path: &Utf8Path,
-    arg_matches: clap::ArgMatches,
     workdir: &Utf8Path,
-) -> anyhow::Result<ControlFlow<(), &'static PageServerConf>> {
-    let init = arg_matches.get_flag("init");
-
-    let file_contents: Option<toml_edit::Document> = match std::fs::File::open(cfg_file_path) {
+) -> anyhow::Result<&'static PageServerConf> {
+    // The deployment orchestrator writes out an indentity file containing the node id
+    // for all pageservers. This file is the source of truth for the node id. In order
+    // to allow for rolling back pageserver releases, the node id is also included in
+    // the pageserver config that the deployment orchestrator writes to disk for the pageserver.
+    // A rolled back version of the pageserver will get the node id from the pageserver.toml
+    // config file.
+    let identity = match std::fs::File::open(identity_file_path) {
         Ok(mut f) => {
-            if init {
-                anyhow::bail!("config file already exists: {cfg_file_path}");
+            let md = f.metadata().context("stat config file")?;
+            if !md.is_file() {
+                anyhow::bail!("Pageserver found identity file but it is a dir entry: {identity_file_path}. Aborting start up ...");
             }
+
+            let mut s = String::new();
+            f.read_to_string(&mut s).context("read identity file")?;
+            toml_edit::de::from_str::<PageserverIdentity>(&s)?
+        }
+        Err(e) => {
+            anyhow::bail!("Pageserver could not read identity file: {identity_file_path}: {e}. Aborting start up ...");
+        }
+    };
+
+    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
+        Ok(mut f) => {
             let md = f.metadata().context("stat config file")?;
             if md.is_file() {
                 let mut s = String::new();
                 f.read_to_string(&mut s).context("read config file")?;
-                Some(s.parse().context("parse config file toml")?)
+                s.parse().context("parse config file toml")?
             } else {
                 anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
         }
     };
 
-    let mut effective_config = file_contents.unwrap_or_else(|| {
-        DEFAULT_CONFIG_FILE
-            .parse()
-            .expect("unit tests ensure this works")
-    });
-
-    // Patch with overrides from the command line
-    if let Some(values) = arg_matches.get_many::<String>("config-override") {
-        for option_line in values {
-            let doc = toml_edit::Document::from_str(option_line).with_context(|| {
-                format!("Option '{option_line}' could not be parsed as a toml document")
-            })?;
-
-            for (key, item) in doc.iter() {
-                effective_config.insert(key, item.clone());
-            }
-        }
-    }
-
-    debug!("Resulting toml: {effective_config}");
+    debug!("Using pageserver toml: {config}");
 
     // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(&effective_config, workdir)
+    let conf = PageServerConf::parse_and_validate(identity.id, &config, workdir)
         .context("Failed to parse pageserver configuration")?;
 
-    if init {
-        info!("Writing pageserver config to '{cfg_file_path}'");
-
-        std::fs::write(cfg_file_path, effective_config.to_string())
-            .with_context(|| format!("Failed to write pageserver config to '{cfg_file_path}'"))?;
-        info!("Config successfully written to '{cfg_file_path}'")
-    }
-
-    Ok(if init {
-        ControlFlow::Break(())
-    } else {
-        ControlFlow::Continue(Box::leak(Box::new(conf)))
-    })
+    Ok(Box::leak(Box::new(conf)))
 }
 
 struct WaitForPhaseResult<F: std::future::Future + Unpin> {
@@ -305,6 +287,7 @@ fn start_pageserver(
     // Create and lock PID file. This ensures that there cannot be more than one
     // pageserver process running at the same time.
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
+    info!("Claiming pid file at {lock_file_path:?}...");
     let lock_file =
         utils::pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
     info!("Claimed pid file at {lock_file_path:?}");
@@ -385,7 +368,7 @@ fn start_pageserver(
     let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
 
     // Set up remote storage client
-    let remote_storage = create_remote_storage_client(conf)?;
+    let remote_storage = BACKGROUND_RUNTIME.block_on(create_remote_storage_client(conf))?;
 
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
@@ -430,8 +413,10 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
+    let background_purges = mgr::BackgroundPurges::default();
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
+        background_purges.clone(),
         TenantSharedResources {
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
@@ -523,7 +508,7 @@ fn start_pageserver(
         }
     });
 
-    let secondary_controller = secondary::spawn_tasks(
+    let (secondary_controller, secondary_controller_tasks) = secondary::spawn_tasks(
         tenant_manager.clone(),
         remote_storage.clone(),
         background_jobs_barrier.clone(),
@@ -536,18 +521,19 @@ fn start_pageserver(
     // been configured.
     let disk_usage_eviction_state: Arc<disk_usage_eviction_task::State> = Arc::default();
 
-    launch_disk_usage_global_eviction_task(
+    let disk_usage_eviction_task = launch_disk_usage_global_eviction_task(
         conf,
         remote_storage.clone(),
         disk_usage_eviction_state.clone(),
         tenant_manager.clone(),
         background_jobs_barrier.clone(),
-    )?;
+    );
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.
-    {
-        let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
+    let http_endpoint_listener = {
+        let _rt_guard = MGMT_REQUEST_RUNTIME.enter(); // for hyper
+        let cancel = CancellationToken::new();
 
         let router_state = Arc::new(
             http::routes::State::new(
@@ -568,109 +554,49 @@ fn start_pageserver(
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
-            .with_graceful_shutdown(task_mgr::shutdown_watcher());
+            .with_graceful_shutdown({
+                let cancel = cancel.clone();
+                async move { cancel.clone().cancelled().await }
+            });
 
-        task_mgr::spawn(
-            MGMT_REQUEST_RUNTIME.handle(),
-            TaskKind::HttpEndpointListener,
-            None,
-            None,
+        let task = MGMT_REQUEST_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
             "http endpoint listener",
-            true,
-            async {
-                server.await?;
-                Ok(())
-            },
-        );
-    }
+            server,
+        ));
+        HttpEndpointListener(CancellableTask { task, cancel })
+    };
 
-    if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-        let metrics_ctx = RequestContext::todo_child(
-            TaskKind::MetricsCollection,
-            // This task itself shouldn't download anything.
-            // The actual size calculation does need downloads, and
-            // creates a child context with the right DownloadBehavior.
-            DownloadBehavior::Error,
-        );
+    let consumption_metrics_tasks = {
+        let cancel = shutdown_pageserver.child_token();
+        let task = crate::BACKGROUND_RUNTIME.spawn({
+            let tenant_manager = tenant_manager.clone();
+            let cancel = cancel.clone();
+            async move {
+                // first wait until background jobs are cleared to launch.
+                //
+                // this is because we only process active tenants and timelines, and the
+                // Timeline::get_current_logical_size will spawn the logical size calculation,
+                // which will not be rate-limited.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return; },
+                    _ = background_jobs_barrier.wait() => {}
+                };
 
-        let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
-
-        task_mgr::spawn(
-            crate::BACKGROUND_RUNTIME.handle(),
-            TaskKind::MetricsCollection,
-            None,
-            None,
-            "consumption metrics collection",
-            true,
-            {
-                let tenant_manager = tenant_manager.clone();
-                async move {
-                    // first wait until background jobs are cleared to launch.
-                    //
-                    // this is because we only process active tenants and timelines, and the
-                    // Timeline::get_current_logical_size will spawn the logical size calculation,
-                    // which will not be rate-limited.
-                    let cancel = task_mgr::shutdown_token();
-
-                    tokio::select! {
-                        _ = cancel.cancelled() => { return Ok(()); },
-                        _ = background_jobs_barrier.wait() => {}
-                    };
-
-                    pageserver::consumption_metrics::collect_metrics(
-                        tenant_manager,
-                        metric_collection_endpoint,
-                        &conf.metric_collection_bucket,
-                        conf.metric_collection_interval,
-                        conf.cached_metric_collection_interval,
-                        conf.synthetic_size_calculation_interval,
-                        conf.id,
-                        local_disk_storage,
-                        cancel,
-                        metrics_ctx,
-                    )
-                    .instrument(info_span!("metrics_collection"))
-                    .await?;
-                    Ok(())
-                }
-            },
-        );
-    }
+                pageserver::consumption_metrics::run(conf, tenant_manager, cancel).await;
+            }
+        });
+        ConsumptionMetricsTasks(CancellableTask { task, cancel })
+    };
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks
     // for each connection. We created the listener earlier already.
-    {
-        let libpq_ctx = RequestContext::todo_child(
-            TaskKind::LibpqEndpointListener,
-            // listener task shouldn't need to download anything. (We will
-            // create a separate sub-contexts for each connection, with their
-            // own download behavior. This context is used only to listen and
-            // accept connections.)
-            DownloadBehavior::Error,
-        );
-        task_mgr::spawn(
-            COMPUTE_REQUEST_RUNTIME.handle(),
-            TaskKind::LibpqEndpointListener,
-            None,
-            None,
-            "libpq endpoint listener",
-            true,
-            {
-                let tenant_manager = tenant_manager.clone();
-                async move {
-                    page_service::libpq_listener_main(
-                        tenant_manager,
-                        pg_auth,
-                        pageserver_listener,
-                        conf.pg_auth_type,
-                        libpq_ctx,
-                        task_mgr::shutdown_token(),
-                    )
-                    .await
-                }
-            },
-        );
-    }
+    let page_service = page_service::spawn(conf, tenant_manager.clone(), pg_auth, {
+        let _entered = COMPUTE_REQUEST_RUNTIME.enter(); // TcpListener::from_std requires it
+        pageserver_listener
+            .set_nonblocking(true)
+            .context("set listener to nonblocking")?;
+        tokio::net::TcpListener::from_std(pageserver_listener).context("create tokio listener")?
+    });
 
     let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
@@ -696,13 +622,24 @@ fn start_pageserver(
             // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
             // The plan is to change that over time.
             shutdown_pageserver.take();
-            pageserver::shutdown_pageserver(&tenant_manager, deletion_queue.clone(), 0).await;
+            pageserver::shutdown_pageserver(
+                http_endpoint_listener,
+                page_service,
+                consumption_metrics_tasks,
+                disk_usage_eviction_task,
+                &tenant_manager,
+                background_purges,
+                deletion_queue.clone(),
+                secondary_controller_tasks,
+                0,
+            )
+            .await;
             unreachable!()
         })
     }
 }
 
-fn create_remote_storage_client(
+async fn create_remote_storage_client(
     conf: &'static PageServerConf,
 ) -> anyhow::Result<GenericRemoteStorage> {
     let config = if let Some(config) = &conf.remote_storage_config {
@@ -712,7 +649,7 @@ fn create_remote_storage_client(
     };
 
     // Create the client
-    let mut remote_storage = GenericRemoteStorage::from_config(config)?;
+    let mut remote_storage = GenericRemoteStorage::from_config(config).await?;
 
     // If `test_remote_failures` is non-zero, wrap the client with a
     // wrapper that simulates failures.
@@ -736,26 +673,10 @@ fn cli() -> Command {
         .about("Materializes WAL stream to pages and serves them to the postgres")
         .version(version())
         .arg(
-            Arg::new("init")
-                .long("init")
-                .action(ArgAction::SetTrue)
-                .help("Initialize pageserver with all given config overrides"),
-        )
-        .arg(
             Arg::new("workdir")
                 .short('D')
                 .long("workdir")
                 .help("Working directory for the pageserver"),
-        )
-        // See `settings.md` for more details on the extra configuration patameters pageserver can process
-        .arg(
-            Arg::new("config-override")
-                .long("config-override")
-                .short('c')
-                .num_args(1)
-                .action(ArgAction::Append)
-                .help("Additional configuration overrides of the ones from the toml config file (or new ones to add there). \
-                Any option has to be a valid toml document, example: `-c=\"foo='hey'\"` `-c=\"foo={value=1}\"`"),
         )
         .arg(
             Arg::new("enabled-features")

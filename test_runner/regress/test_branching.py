@@ -18,7 +18,6 @@ from fixtures.pageserver.utils import wait_until_tenant_active
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
 from requests import RequestException
-from requests.exceptions import RetryError
 
 
 # Test branch creation
@@ -151,7 +150,7 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
     env.pageserver.allowed_errors.extend(
         [
             ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
-            ".*page_service_conn_main.*: query handler for 'basebackup .* is not active, state: Loading",
+            ".*page_service_conn_main.*: query handler for 'basebackup .* ERROR: Not found: Timeline",
         ]
     )
     ps_http = env.pageserver.http_client()
@@ -176,10 +175,12 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
 
         env.neon_cli.map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
 
-        with pytest.raises(RuntimeError, match="is not active, state: Loading"):
-            env.endpoints.create_start(initial_branch, tenant_id=env.initial_tenant)
+        with pytest.raises(RuntimeError, match="ERROR: Not found: Timeline"):
+            env.endpoints.create_start(
+                initial_branch, tenant_id=env.initial_tenant, basebackup_request_tries=2
+            )
+        ps_http.configure_failpoints(("before-upload-index-pausable", "off"))
     finally:
-        # FIXME: paused uploads bother shutdown
         env.pageserver.stop(immediate=True)
 
         t.join()
@@ -193,8 +194,11 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
     env = neon_env_builder.init_configs()
     env.start()
 
-    env.pageserver.allowed_errors.append(
-        ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*"
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: request was dropped before completing.*",
+            ".*request{method=POST path=/v1/tenant/.*/timeline request_id=.*}: .*Cannot branch off the timeline that's not present in pageserver.*",
+        ]
     )
     ps_http = env.pageserver.http_client()
 
@@ -216,7 +220,10 @@ def test_cannot_branch_from_non_uploaded_branch(neon_env_builder: NeonEnvBuilder
 
         branch_id = TimelineId.generate()
 
-        with pytest.raises(RetryError, match="too many 503 error responses"):
+        with pytest.raises(
+            PageserverApiException,
+            match="Cannot branch off the timeline that's not present in pageserver",
+        ):
             ps_http.timeline_create(
                 env.pg_version,
                 env.initial_tenant,
@@ -389,6 +396,11 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
         repeat_result = ps_http.timeline_create(
             env.pg_version, env.initial_tenant, success_timeline, timeout=60
         )
+        # remote_consistent_lsn_visible will be published only after we've
+        # confirmed the generation, which is not part of what we await during
+        # timeline creation (uploads). mask it out here to avoid flakyness.
+        del success_result["remote_consistent_lsn_visible"]
+        del repeat_result["remote_consistent_lsn_visible"]
         assert repeat_result == success_result
     finally:
         env.pageserver.stop(immediate=True)

@@ -117,7 +117,7 @@ def post_checks(env: NeonEnv, test_output_dir: Path, db_name: str, endpoint: End
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
 #
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(900)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
 def test_pg_regress(
     neon_env_builder: NeonEnvBuilder,
@@ -138,7 +138,6 @@ def test_pg_regress(
         neon_env_builder.num_pageservers = shard_count
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(
         initial_tenant_conf=TENANT_CONF,
         initial_tenant_shard_count=shard_count,
@@ -186,6 +185,7 @@ def test_pg_regress(
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #
+@pytest.mark.timeout(600)  # Contains many sub-tests, is slow in debug builds
 @pytest.mark.parametrize("shard_count", [None, 4])
 def test_isolation(
     neon_env_builder: NeonEnvBuilder,
@@ -201,7 +201,6 @@ def test_isolation(
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(
         initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
     )
@@ -264,7 +263,6 @@ def test_sql_regress(
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(
         initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
     )

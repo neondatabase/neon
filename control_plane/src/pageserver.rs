@@ -1,8 +1,10 @@
 //! Code to manage pageservers
 //!
-//! In the local test environment, the pageserver stores its data directly in
+//! In the local test environment, the data for each pageserver is stored in
 //!
-//!   .neon/
+//! ```text
+//!   .neon/pageserver_<pageserver_id>
+//! ```
 //!
 use std::collections::HashMap;
 
@@ -23,6 +25,7 @@ use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use utils::auth::{Claims, Scope};
+use utils::id::NodeId;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -70,6 +73,10 @@ impl PageServerNode {
                 .as_deref(),
             ),
         }
+    }
+
+    fn pageserver_make_identity_toml(&self, node_id: NodeId) -> toml_edit::Document {
+        toml_edit::Document::from_str(&format!("id={node_id}")).unwrap()
     }
 
     fn pageserver_init_make_toml(
@@ -120,10 +127,13 @@ impl PageServerNode {
         }
 
         // Apply the user-provided overrides
-        overrides.push(
-            toml_edit::ser::to_string_pretty(&conf)
-                .expect("we deserialized this from toml earlier"),
-        );
+        overrides.push({
+            let mut doc =
+                toml_edit::ser::to_document(&conf).expect("we deserialized this from toml earlier");
+            // `id` is written out to `identity.toml` instead of `pageserver.toml`
+            doc.remove("id").expect("it's part of the struct");
+            doc.to_string()
+        });
 
         // Turn `overrides` into a toml document.
         // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
@@ -184,6 +194,19 @@ impl PageServerNode {
             .write_all(config.to_string().as_bytes())
             .context("write pageserver toml")?;
         drop(config_file);
+
+        let identity_file_path = datadir.join("identity.toml");
+        let mut identity_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(identity_file_path)
+            .with_context(|| format!("open identity toml for write: {config_file_path:?}"))?;
+        let identity_toml = self.pageserver_make_identity_toml(node_id);
+        identity_file
+            .write_all(identity_toml.to_string().as_bytes())
+            .context("write identity toml")?;
+        drop(identity_toml);
+
         // TODO: invoke a TBD config-check command to validate that pageserver will start with the written config
 
         // Write metadata file, used by pageserver on startup to register itself with

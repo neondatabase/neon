@@ -12,7 +12,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     StorageControllerApiException,
-    StorageScrubber,
     last_flush_lsn_upload,
     tenant_get_shards,
     wait_for_last_flush_lsn,
@@ -48,9 +47,6 @@ def test_sharding_smoke(
     # Use S3-compatible remote storage so that we can scrub: this test validates
     # that the scrubber doesn't barf when it sees a sharded tenant.
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
-
-    neon_env_builder.preserve_database_files = True
 
     env = neon_env_builder.init_start(
         initial_tenant_shard_count=shard_count, initial_tenant_shard_stripe_size=stripe_size
@@ -128,8 +124,7 @@ def test_sharding_smoke(
 
     # Check the scrubber isn't confused by sharded content, then disable
     # it during teardown because we'll have deleted by then
-    StorageScrubber(neon_env_builder).scan_metadata()
-    neon_env_builder.scrub_on_exit = False
+    env.storage_scrubber.scan_metadata()
 
     env.storage_controller.pageserver_api().tenant_delete(tenant_id)
     assert_prefix_empty(
@@ -201,14 +196,15 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         # disable background compaction and GC. We invoke it manually when we want it to happen.
         "gc_period": "0s",
         "compaction_period": "0s",
-        # create image layers eagerly, so that GC can remove some layers
-        "image_creation_threshold": 1,
+        # Disable automatic creation of image layers, as we will create them explicitly when we want them
+        "image_creation_threshold": 9999,
         "image_layer_creation_check_threshold": 0,
     }
 
     neon_env_builder.storage_controller_config = {
         # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
-        "max_unavailable": "300s"
+        "max_offline": "30s",
+        "max_warming_up": "300s",
     }
 
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
@@ -227,7 +223,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
 
     # Do a full image layer generation before splitting, so that when we compact after splitting
     # we should only see sizes decrease (from post-split drops/rewrites), not increase (from image layer generation)
-    env.get_tenant_pageserver(tenant_id).http_client().timeline_compact(
+    env.get_tenant_pageserver(tenant_id).http_client().timeline_checkpoint(
         tenant_id, timeline_id, force_image_layer_creation=True, wait_until_uploaded=True
     )
 
@@ -373,9 +369,6 @@ def test_sharding_split_smoke(
     # Use S3-compatible remote storage so that we can scrub: this test validates
     # that the scrubber doesn't barf when it sees a sharded tenant.
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
-
-    neon_env_builder.preserve_database_files = True
 
     non_default_tenant_config = {"gc_horizon": 77 * 1024 * 1024}
 

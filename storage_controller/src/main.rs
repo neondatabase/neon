@@ -1,19 +1,22 @@
 use anyhow::{anyhow, Context};
-use camino::Utf8PathBuf;
 use clap::Parser;
 use diesel::Connection;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
+use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
-    Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    Config, Service, MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
+    RECONCILER_CONCURRENCY_DEFAULT,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
 
@@ -51,10 +54,6 @@ struct Cli {
     #[arg(long)]
     compute_hook_url: Option<String>,
 
-    /// Path to the .json file to store state (will be created if it doesn't exist)
-    #[arg(short, long)]
-    path: Option<Utf8PathBuf>,
-
     /// URL to connect to postgres, like postgresql://localhost:1234/storage_controller
     #[arg(long)]
     database_url: Option<String>,
@@ -65,7 +64,12 @@ struct Cli {
 
     /// Grace period before marking unresponsive pageserver offline
     #[arg(long)]
-    max_unavailable_interval: Option<humantime::Duration>,
+    max_offline_interval: Option<humantime::Duration>,
+
+    /// More tolerant grace period before marking unresponsive pagserver offline used
+    /// around pageserver restarts
+    #[arg(long)]
+    max_warming_up_interval: Option<humantime::Duration>,
 
     /// Size threshold for automatically splitting shards (disabled by default)
     #[arg(long)]
@@ -84,6 +88,10 @@ struct Cli {
     // TODO: make `cfg(feature = "testing")`
     #[arg(long)]
     neon_local_repo_dir: Option<PathBuf>,
+
+    /// Chaos testing
+    #[arg(long)]
+    chaos_interval: Option<humantime::Duration>,
 }
 
 enum StrictMode {
@@ -206,11 +214,10 @@ async fn async_main() -> anyhow::Result<()> {
 
     let args = Cli::parse();
     tracing::info!(
-        "version: {}, launch_timestamp: {}, build_tag {}, state at {}, listening on {}",
+        "version: {}, launch_timestamp: {}, build_tag {}, listening on {}",
         GIT_VERSION,
         launch_ts.to_string(),
         BUILD_TAG,
-        args.path.as_ref().unwrap_or(&Utf8PathBuf::from("<none>")),
         args.listen
     );
 
@@ -259,10 +266,14 @@ async fn async_main() -> anyhow::Result<()> {
         jwt_token: secrets.jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
-        max_unavailable_interval: args
-            .max_unavailable_interval
+        max_offline_interval: args
+            .max_offline_interval
             .map(humantime::Duration::into)
-            .unwrap_or(MAX_UNAVAILABLE_INTERVAL_DEFAULT),
+            .unwrap_or(MAX_OFFLINE_INTERVAL_DEFAULT),
+        max_warming_up_interval: args
+            .max_warming_up_interval
+            .map(humantime::Duration::into)
+            .unwrap_or(MAX_WARMING_UP_INTERVAL_DEFAULT),
         reconciler_concurrency: args
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
@@ -277,8 +288,7 @@ async fn async_main() -> anyhow::Result<()> {
         .await
         .context("Running database migrations")?;
 
-    let json_path = args.path;
-    let persistence = Arc::new(Persistence::new(secrets.database_url, json_path.clone()));
+    let persistence = Arc::new(Persistence::new(secrets.database_url));
 
     let service = Service::spawn(config, persistence.clone()).await?;
 
@@ -305,6 +315,22 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::info!("Serving on {0}", args.listen);
     let server_task = tokio::task::spawn(server);
 
+    let chaos_task = args.chaos_interval.map(|interval| {
+        let service = service.clone();
+        let cancel = CancellationToken::new();
+        let cancel_bg = cancel.clone();
+        (
+            tokio::task::spawn(
+                async move {
+                    let mut chaos_injector = ChaosInjector::new(service, interval.into());
+                    chaos_injector.run(cancel_bg).await
+                }
+                .instrument(tracing::info_span!("chaos_injector")),
+            ),
+            cancel,
+        )
+    });
+
     // Wait until we receive a signal
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let mut sigquit = tokio::signal::unix::signal(SignalKind::quit())?;
@@ -316,21 +342,28 @@ async fn async_main() -> anyhow::Result<()> {
     }
     tracing::info!("Terminating on signal");
 
-    if json_path.is_some() {
-        // Write out a JSON dump on shutdown: this is used in compat tests to avoid passing
-        // full postgres dumps around.
-        if let Err(e) = persistence.write_tenants_json().await {
-            tracing::error!("Failed to write JSON on shutdown: {e}")
+    // Stop HTTP server first, so that we don't have to service requests
+    // while shutting down Service.
+    server_shutdown.cancel();
+    match tokio::time::timeout(Duration::from_secs(5), server_task).await {
+        Ok(Ok(_)) => {
+            tracing::info!("Joined HTTP server task");
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Error joining HTTP server task: {e}")
+        }
+        Err(_) => {
+            tracing::warn!("Timed out joining HTTP server task");
+            // We will fall through and shut down the service anyway, any request handlers
+            // in flight will experience cancellation & their clients will see a torn connection.
         }
     }
 
-    // Stop HTTP server first, so that we don't have to service requests
-    // while shutting down Service
-    server_shutdown.cancel();
-    if let Err(e) = server_task.await {
-        tracing::error!("Error joining HTTP server task: {e}")
+    // If we were injecting chaos, stop that so that we're not calling into Service while it shuts down
+    if let Some((chaos_jh, chaos_cancel)) = chaos_task {
+        chaos_cancel.cancel();
+        chaos_jh.await.ok();
     }
-    tracing::info!("Joined HTTP server task");
 
     service.shutdown().await;
     tracing::info!("Service shutdown complete");

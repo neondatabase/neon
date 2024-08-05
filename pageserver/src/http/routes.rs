@@ -18,14 +18,17 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
 use pageserver_api::models::LocationConfig;
 use pageserver_api::models::LocationConfigListResponse;
+use pageserver_api::models::LocationConfigMode;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::LsnLeaseRequest;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
+use pageserver_api::models::TenantLocationConfigRequest;
 use pageserver_api::models::TenantLocationConfigResponse;
 use pageserver_api::models::TenantScanRemoteStorageResponse;
 use pageserver_api::models::TenantScanRemoteStorageShard;
@@ -33,12 +36,10 @@ use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
+use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
-use pageserver_api::models::{
-    DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantLocationConfigRequest,
-};
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
@@ -294,6 +295,11 @@ impl From<GetActiveTenantError> for ApiError {
             GetActiveTenantError::NotFound(gte) => gte.into(),
             GetActiveTenantError::WaitForActiveTimeout { .. } => {
                 ApiError::ResourceUnavailable(format!("{}", e).into())
+            }
+            GetActiveTenantError::SwitchedTenant => {
+                // in our HTTP handlers, this error doesn't happen
+                // TODO: separate error types
+                ApiError::ResourceUnavailable("switched tenant".into())
             }
         }
     }
@@ -658,6 +664,39 @@ async fn timeline_preserve_initdb_handler(
     .instrument(info_span!("timeline_preserve_initdb_archive",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug(),
+                %timeline_id))
+    .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn timeline_archival_config_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+
+    let request_data: TimelineArchivalConfigRequest = json_request(&mut request).await?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        tenant
+            .apply_timeline_archival_config(timeline_id, request_data.state)
+            .await
+            .context("applying archival config")
+            .map_err(ApiError::InternalServerError)?;
+        Ok::<_, ApiError>(())
+    }
+    .instrument(info_span!("timeline_archival_config",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug(),
+                state = ?request_data.state,
                 %timeline_id))
     .await?;
 
@@ -1616,7 +1655,9 @@ async fn timeline_compact_handler(
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
         if wait_until_uploaded {
-            timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
+            timeline.remote_client.wait_completion().await
+            // XXX map to correct ApiError for the cases where it's due to shutdown
+            .context("wait completion").map_err(ApiError::InternalServerError)?;
         }
         json_response(StatusCode::OK, ())
     }
@@ -1642,6 +1683,10 @@ async fn timeline_checkpoint_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
         flags |= CompactFlags::ForceImageLayerCreation;
     }
+
+    // By default, checkpoints come with a compaction, but this may be optionally disabled by tests that just want to flush + upload.
+    let compact = parse_query_param::<_, bool>(&request, "compact")?.unwrap_or(true);
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
@@ -1658,18 +1703,22 @@ async fn timeline_checkpoint_handler(
 
                 }
             })?;
-        timeline
-            .compact(&cancel, flags, &ctx)
-            .await
-            .map_err(|e|
-                match e {
-                    CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                    CompactionError::Other(e) => ApiError::InternalServerError(e)
-                }
-            )?;
+        if compact {
+            timeline
+                .compact(&cancel, flags, &ctx)
+                .await
+                .map_err(|e|
+                    match e {
+                        CompactionError::ShuttingDown => ApiError::ShuttingDown,
+                        CompactionError::Other(e) => ApiError::InternalServerError(e)
+                    }
+                )?;
+        }
 
         if wait_until_uploaded {
-            timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
+            timeline.remote_client.wait_completion().await
+            // XXX map to correct ApiError for the cases where it's due to shutdown
+            .context("wait completion").map_err(ApiError::InternalServerError)?;
         }
 
         json_response(StatusCode::OK, ())
@@ -2085,14 +2134,24 @@ async fn secondary_download_handler(
 
     let timeout = wait.unwrap_or(Duration::MAX);
 
-    let status = match tokio::time::timeout(
+    let result = tokio::time::timeout(
         timeout,
         state.secondary_controller.download_tenant(tenant_shard_id),
     )
-    .await
-    {
-        // Download job ran to completion.
-        Ok(Ok(())) => StatusCode::OK,
+    .await;
+
+    let progress = secondary_tenant.progress.lock().unwrap().clone();
+
+    let status = match result {
+        Ok(Ok(())) => {
+            if progress.layers_downloaded >= progress.layers_total {
+                // Download job ran to completion
+                StatusCode::OK
+            } else {
+                // Download dropped out without errors because it ran out of time budget
+                StatusCode::ACCEPTED
+            }
+        }
         // Edge case: downloads aren't usually fallible: things like a missing heatmap are considered
         // okay.  We could get an error here in the unlikely edge case that the tenant
         // was detached between our check above and executing the download job.
@@ -2101,8 +2160,6 @@ async fn secondary_download_handler(
         // yet.  The caller will get a response body indicating status.
         Err(_) => StatusCode::ACCEPTED,
     };
-
-    let progress = secondary_tenant.progress.lock().unwrap().clone();
 
     json_response(status, progress)
 }
@@ -2788,6 +2845,10 @@ pub fn make_router(
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
             |r| api_handler(r, timeline_preserve_initdb_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
+            |r| api_handler(r, timeline_archival_config_handler),
         )
         .get("/v1/tenant/:tenant_shard_id/timeline/:timeline_id", |r| {
             api_handler(r, timeline_detail_handler)

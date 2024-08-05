@@ -35,6 +35,10 @@ impl LayerManager {
         self.layer_fmgr.get_from_desc(desc)
     }
 
+    pub(crate) fn get_from_key(&self, desc: &PersistentLayerKey) -> Layer {
+        self.layer_fmgr.get_from_key(desc)
+    }
+
     /// Get an immutable reference to the layer map.
     ///
     /// We expect users only to be able to get an immutable layer map. If users want to make modifications,
@@ -255,6 +259,14 @@ impl LayerManager {
                 new_layer.layer_desc().lsn_range
             );
 
+            // Transfer visibilty hint from old to new layer, since the new layer covers the same key space.  This is not guaranteed to
+            // be accurate (as the new layer may cover a different subset of the key range), but is a sensible default, and prevents
+            // always marking rewritten layers as visible.
+            new_layer
+                .as_ref()
+                .access_stats()
+                .set_visibility(old_layer.access_stats().visibility());
+
             // Safety: we may never rewrite the same file in-place.  Callers are responsible
             // for ensuring that they only rewrite layers after something changes the path,
             // such as an increment in the generation number.
@@ -357,14 +369,18 @@ impl<T> Default for LayerFileManager<T> {
 }
 
 impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
-    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
+    fn get_from_key(&self, key: &PersistentLayerKey) -> T {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
-            .get(&desc.key())
-            .with_context(|| format!("get layer from desc: {}", desc.layer_name()))
+            .get(key)
+            .with_context(|| format!("get layer from key: {}", key))
             .expect("not found")
             .clone()
+    }
+
+    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
+        self.get_from_key(&desc.key())
     }
 
     fn contains_key(&self, key: &PersistentLayerKey) -> bool {

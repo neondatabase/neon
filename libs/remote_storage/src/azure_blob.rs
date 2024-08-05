@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
 use azure_core::request_options::{MaxResults, Metadata, Range};
-use azure_core::RetryOptions;
+use azure_core::{Continuable, RetryOptions};
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::blob::CopyStatus;
@@ -33,6 +33,7 @@ use tracing::debug;
 use utils::backoff;
 
 use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
+use crate::ListingObject;
 use crate::{
     config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError, Listing,
     ListingMode, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
@@ -40,6 +41,7 @@ use crate::{
 
 pub struct AzureBlobStorage {
     client: ContainerClient,
+    container_name: String,
     prefix_in_container: Option<String>,
     max_keys_per_list_response: Option<NonZeroU32>,
     concurrency_limiter: ConcurrencyLimiter,
@@ -85,6 +87,7 @@ impl AzureBlobStorage {
 
         Ok(AzureBlobStorage {
             client,
+            container_name: azure_config.container_name.to_owned(),
             prefix_in_container: azure_config.prefix_in_container.to_owned(),
             max_keys_per_list_response,
             concurrency_limiter: ConcurrencyLimiter::new(azure_config.concurrency_limit.get()),
@@ -238,6 +241,10 @@ impl AzureBlobStorage {
             _ = cancel.cancelled() => Err(Cancelled),
         }
     }
+
+    pub fn container_name(&self) -> &str {
+        &self.container_name
+    }
 }
 
 fn to_azure_metadata(metadata: StorageMetadata) -> Metadata {
@@ -261,30 +268,30 @@ fn to_download_error(error: azure_core::Error) -> DownloadError {
 }
 
 impl RemoteStorage for AzureBlobStorage {
-    async fn list(
+    fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<Listing, DownloadError> {
-        let _permit = self.permit(RequestKind::List, cancel).await?;
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
+        // get the passed prefix or if it is not set use prefix_in_bucket value
+        let list_prefix = prefix
+            .map(|p| self.relative_path_to_name(p))
+            .or_else(|| self.prefix_in_container.clone())
+            .map(|mut p| {
+                // required to end with a separator
+                // otherwise request will return only the entry of a prefix
+                if matches!(mode, ListingMode::WithDelimiter)
+                    && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
+                {
+                    p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
+                }
+                p
+            });
 
-        let op = async {
-            // get the passed prefix or if it is not set use prefix_in_bucket value
-            let list_prefix = prefix
-                .map(|p| self.relative_path_to_name(p))
-                .or_else(|| self.prefix_in_container.clone())
-                .map(|mut p| {
-                    // required to end with a separator
-                    // otherwise request will return only the entry of a prefix
-                    if matches!(mode, ListingMode::WithDelimiter)
-                        && !p.ends_with(REMOTE_STORAGE_PREFIX_SEPARATOR)
-                    {
-                        p.push(REMOTE_STORAGE_PREFIX_SEPARATOR);
-                    }
-                    p
-                });
+        async_stream::stream! {
+            let _permit = self.permit(RequestKind::List, cancel).await?;
 
             let mut builder = self.client.list_blobs();
 
@@ -300,21 +307,43 @@ impl RemoteStorage for AzureBlobStorage {
                 builder = builder.max_results(MaxResults::new(limit));
             }
 
-            let response = builder.into_stream();
-            let response = response.into_stream().map_err(to_download_error);
-            let response = tokio_stream::StreamExt::timeout(response, self.timeout);
-            let response = response.map(|res| match res {
-                Ok(res) => res,
-                Err(_elapsed) => Err(DownloadError::Timeout),
-            });
+            let mut next_marker = None;
 
-            let mut response = std::pin::pin!(response);
+            'outer: loop {
+                let mut builder = builder.clone();
+                if let Some(marker) = next_marker.clone() {
+                    builder = builder.marker(marker);
+                }
+                let response = builder.into_stream();
+                let response = response.into_stream().map_err(to_download_error);
+                let response = tokio_stream::StreamExt::timeout(response, self.timeout);
+                let response = response.map(|res| match res {
+                    Ok(res) => res,
+                    Err(_elapsed) => Err(DownloadError::Timeout),
+                });
 
-            let mut res = Listing::default();
+                let mut response = std::pin::pin!(response);
 
-            let mut max_keys = max_keys.map(|mk| mk.get());
-            while let Some(entry) = response.next().await {
-                let entry = entry?;
+                let mut max_keys = max_keys.map(|mk| mk.get());
+                let next_item = tokio::select! {
+                    op = response.next() => Ok(op),
+                    _ = cancel.cancelled() => Err(DownloadError::Cancelled),
+                }?;
+                let Some(entry) = next_item else {
+                    // The list is complete, so yield it.
+                    break;
+                };
+
+                let mut res = Listing::default();
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        // The error is potentially retryable, so we must rewind the loop after yielding.
+                        yield Err(e);
+                        continue;
+                    }
+                };
+                next_marker = entry.continuation();
                 let prefix_iter = entry
                     .blobs
                     .prefixes()
@@ -324,7 +353,12 @@ impl RemoteStorage for AzureBlobStorage {
                 let blob_iter = entry
                     .blobs
                     .blobs()
-                    .map(|k| self.name_to_relative_path(&k.name));
+                    .map(|k| ListingObject{
+                        key: self.name_to_relative_path(&k.name),
+                        last_modified: k.properties.last_modified.into(),
+                        size: k.properties.content_length,
+                    }
+                    );
 
                 for key in blob_iter {
                     res.keys.push(key);
@@ -333,19 +367,19 @@ impl RemoteStorage for AzureBlobStorage {
                         assert!(mk > 0);
                         mk -= 1;
                         if mk == 0 {
-                            return Ok(res); // limit reached
+                            yield Ok(res); // limit reached
+                            break 'outer;
                         }
                         max_keys = Some(mk);
                     }
                 }
+                yield Ok(res);
+
+                // We are done here
+                if next_marker.is_none() {
+                    break;
+                }
             }
-
-            Ok(res)
-        };
-
-        tokio::select! {
-            res = op => res,
-            _ = cancel.cancelled() => Err(DownloadError::Cancelled),
         }
     }
 

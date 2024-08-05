@@ -5,7 +5,6 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use remote_storage::RemotePath;
-use std::time::Instant;
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncWriteExt},
@@ -15,6 +14,7 @@ use utils::crashsafe::durable_rename;
 
 use crate::{
     metrics::{EvictionEvent, EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED},
+    rate_limit::rand_duration,
     timeline_manager::{Manager, StateSnapshot},
     wal_backup,
     wal_backup_partial::{self, PartialRemoteSegment},
@@ -50,7 +50,6 @@ impl Manager {
                 .flush_lsn
                 .segment_number(self.wal_seg_size)
                 == self.last_removed_segno + 1
-            && self.resident_since.elapsed() >= self.conf.eviction_min_resident
     }
 
     /// Evict the timeline to remote storage.
@@ -112,7 +111,8 @@ impl Manager {
             return;
         }
 
-        self.resident_since = Instant::now();
+        self.evict_not_before =
+            tokio::time::Instant::now() + rand_duration(&self.conf.eviction_min_resident);
 
         info!("successfully restored evicted timeline");
     }
@@ -199,10 +199,7 @@ async fn redownload_partial_segment(
     file.flush().await?;
 
     let final_path = local_segment_path(mgr, partial);
-    info!(
-        "downloaded {} bytes, renaming to {}",
-        final_path, final_path,
-    );
+    info!("downloaded {actual_len} bytes, renaming to {final_path}");
     if let Err(e) = durable_rename(&tmp_file, &final_path, !mgr.conf.no_sync).await {
         // Probably rename succeeded, but fsync of it failed. Remove
         // the file then to avoid using it.

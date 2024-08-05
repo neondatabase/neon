@@ -357,11 +357,15 @@ pub async fn task_backup(
         info!("metrics backup has shut down");
     }
     // Even if the remote storage is not configured, we still want to clear the metrics.
-    let storage = backup_config
-        .remote_storage_config
-        .as_ref()
-        .map(|config| GenericRemoteStorage::from_config(config).context("remote storage init"))
-        .transpose()?;
+    let storage = if let Some(config) = backup_config.remote_storage_config.as_ref() {
+        Some(
+            GenericRemoteStorage::from_config(config)
+                .await
+                .context("remote storage init")?,
+        )
+    } else {
+        None
+    };
     let mut ticker = tokio::time::interval(backup_config.interval);
     let mut prev = Utc::now();
     let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();

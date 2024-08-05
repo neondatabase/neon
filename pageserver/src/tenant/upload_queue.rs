@@ -130,7 +130,7 @@ pub(super) enum UploadQueueStopped {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum NotInitialized {
+pub enum NotInitialized {
     #[error("queue is in state Uninitialized")]
     Uninitialized,
     #[error("queue is in state Stopped")]

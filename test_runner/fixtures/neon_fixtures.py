@@ -31,6 +31,7 @@ import backoff
 import httpx
 import jwt
 import psycopg2
+import psycopg2.sql
 import pytest
 import requests
 import toml
@@ -448,6 +449,7 @@ class TokenScope(str, Enum):
     GENERATIONS_API = "generations_api"
     SAFEKEEPER_DATA = "safekeeperdata"
     TENANT = "tenant"
+    SCRUBBER = "scrubber"
 
 
 class NeonEnvBuilder:
@@ -522,7 +524,7 @@ class NeonEnvBuilder:
         self.preserve_database_files = preserve_database_files
         self.initial_tenant = initial_tenant or TenantId.generate()
         self.initial_timeline = initial_timeline or TimelineId.generate()
-        self.scrub_on_exit = False
+        self.enable_scrub_on_exit = True
         self.test_output_dir = test_output_dir
         self.test_overlay_dir = test_overlay_dir
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
@@ -540,21 +542,6 @@ class NeonEnvBuilder:
             log.debug(
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
             )
-
-        self.pageserver_get_vectored_impl: Optional[str] = None
-        if os.getenv("PAGESERVER_GET_VECTORED_IMPL", "") == "vectored":
-            self.pageserver_get_vectored_impl = "vectored"
-            log.debug('Overriding pageserver get_vectored_impl config to "vectored"')
-
-        self.pageserver_get_impl: Optional[str] = None
-        if os.getenv("PAGESERVER_GET_IMPL", "") == "vectored":
-            self.pageserver_get_impl = "vectored"
-            log.debug('Overriding pageserver get_impl config to "vectored"')
-
-        self.pageserver_validate_vectored_get: Optional[bool] = None
-        if (validate := os.getenv("PAGESERVER_VALIDATE_VEC_GET")) is not None:
-            self.pageserver_validate_vectored_get = bool(validate)
-            log.debug(f'Overriding pageserver validate_vectored_get config to "{validate}"')
 
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
@@ -727,8 +714,30 @@ class NeonEnvBuilder:
                 self.repo_dir / "local_fs_remote_storage",
             )
 
-        if (attachments_json := Path(repo_dir / "attachments.json")).exists():
-            shutil.copyfile(attachments_json, self.repo_dir / attachments_json.name)
+        # restore storage controller (the db is small, don't bother with overlayfs)
+        storcon_db_from_dir = repo_dir / "storage_controller_db"
+        storcon_db_to_dir = self.repo_dir / "storage_controller_db"
+        log.info(f"Copying storage_controller_db from {storcon_db_from_dir} to {storcon_db_to_dir}")
+        assert storcon_db_from_dir.is_dir()
+        assert not storcon_db_to_dir.exists()
+
+        def ignore_postgres_log(path: str, _names):
+            if Path(path) == storcon_db_from_dir:
+                return {"postgres.log"}
+            return set()
+
+        shutil.copytree(storcon_db_from_dir, storcon_db_to_dir, ignore=ignore_postgres_log)
+        assert not (storcon_db_to_dir / "postgres.log").exists()
+        # NB: neon_local rewrites postgresql.conf on each start based on neon_local config. No need to patch it.
+        # However, in this new NeonEnv, the pageservers listen on different ports, and the storage controller
+        # will currently reject re-attach requests from them because the NodeMetadata isn't identical.
+        # So, from_repo_dir patches up the the storcon database.
+        patch_script_path = self.repo_dir / "storage_controller_db.startup.sql"
+        assert not patch_script_path.exists()
+        patch_script = ""
+        for ps in self.env.pageservers:
+            patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
+        patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
         with (self.repo_dir / "config").open("r") as f:
@@ -829,6 +838,13 @@ class NeonEnvBuilder:
         )
         ident_state_dir.rmdir()  # should be empty since we moved `upper` out
 
+    def disable_scrub_on_exit(self):
+        """
+        Some tests intentionally leave the remote storage contents empty or corrupt,
+        so it doesn't make sense to do the usual scrub at the end of the test.
+        """
+        self.enable_scrub_on_exit = False
+
     def overlay_cleanup_teardown(self):
         """
         Unmount the overlayfs mounts created by `self.overlay_mount()`.
@@ -853,23 +869,6 @@ class NeonEnvBuilder:
 
         # assert all overlayfs mounts in our test directory are gone
         assert [] == list(overlayfs.iter_mounts_beneath(self.test_overlay_dir))
-
-    def enable_scrub_on_exit(self):
-        """
-        Call this if you would like the fixture to automatically run
-        storage_scrubber at the end of the test, as a bidirectional test
-        that the scrubber is working properly, and that the code within
-        the test didn't produce any invalid remote state.
-        """
-
-        if not isinstance(self.pageserver_remote_storage, S3Storage):
-            # The scrubber can't talk to e.g. LocalFS -- it needs
-            # an HTTP endpoint (mock is fine) to connect to.
-            raise RuntimeError(
-                "Cannot scrub with remote_storage={self.pageserver_remote_storage}, require an S3 endpoint"
-            )
-
-        self.scrub_on_exit = True
 
     def enable_pageserver_remote_storage(
         self,
@@ -972,9 +971,14 @@ class NeonEnvBuilder:
             )
             cleanup_error = None
 
-            if self.scrub_on_exit:
+            # If we are running with S3Storage (required by the scrubber), check that whatever the test
+            # did does not generate any corruption
+            if (
+                isinstance(self.env.pageserver_remote_storage, S3Storage)
+                and self.enable_scrub_on_exit
+            ):
                 try:
-                    StorageScrubber(self).scan_metadata()
+                    self.env.storage_scrubber.scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -1135,15 +1139,10 @@ class NeonEnv:
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
+                "image_compression": "zstd",
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
-            if config.pageserver_get_vectored_impl is not None:
-                ps_cfg["get_vectored_impl"] = config.pageserver_get_vectored_impl
-            if config.pageserver_get_impl is not None:
-                ps_cfg["get_impl"] = config.pageserver_get_impl
-            if config.pageserver_validate_vectored_get is not None:
-                ps_cfg["validate_vectored_get"] = config.pageserver_validate_vectored_get
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
                 tenant_config[
@@ -1200,6 +1199,9 @@ class NeonEnv:
                 Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
             )
             cfg["safekeepers"].append(sk_cfg)
+
+        # Scrubber instance for tests that use it, and for use during teardown checks
+        self.storage_scrubber = StorageScrubber(self, log_dir=config.test_output_dir)
 
         log.info(f"Config: {cfg}")
         self.neon_cli.init(
@@ -1393,7 +1395,7 @@ def _shared_simple_env(
         pg_distrib_dir=pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
-        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
@@ -1440,6 +1442,7 @@ def neon_env_builder(
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
+    record_property: Callable[[str, object], None],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1468,7 +1471,7 @@ def neon_env_builder(
         pg_version=pg_version,
         broker=default_broker,
         run_id=run_id,
-        preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
+        preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         test_name=request.node.name,
         test_output_dir=test_output_dir,
@@ -1477,6 +1480,9 @@ def neon_env_builder(
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
     ) as builder:
         yield builder
+        # Propogate `preserve_database_files` to make it possible to use in other fixtures,
+        # like `test_output_dir` fixture for attaching all database files to Allure report.
+        record_property("preserve_database_files", builder.preserve_database_files)
 
 
 @dataclass
@@ -1937,11 +1943,15 @@ class NeonCli(AbstractNeonCli):
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple=False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "start",
         ]
+        extra_env_vars = {}
+        if basebackup_request_tries is not None:
+            extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_TRIES"] = str(basebackup_request_tries)
         if remote_ext_config is not None:
             args.extend(["--remote-ext-config", remote_ext_config])
 
@@ -1954,7 +1964,7 @@ class NeonCli(AbstractNeonCli):
         if allow_multiple:
             args.extend(["--allow-multiple"])
 
-        res = self.raw_cli(args)
+        res = self.raw_cli(args, extra_env_vars)
         res.check_returncode()
         return res
 
@@ -2119,6 +2129,23 @@ class StorageControllerApiException(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+# See libs/pageserver_api/src/controller_api.rs
+# for the rust definitions of the enums below
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class PageserverAvailability(str, Enum):
+    ACTIVE = "Active"
+    UNAVAILABLE = "Unavailable"
+    OFFLINE = "Offline"
+
+
+class PageserverSchedulingPolicy(str, Enum):
+    ACTIVE = "Active"
+    DRAINING = "Draining"
+    FILLING = "Filling"
+    PAUSE = "Pause"
+    PAUSE_FOR_RESTART = "PauseForRestart"
 
 
 class NeonStorageController(MetricsGetter, LogUtils):
@@ -2504,26 +2531,54 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         log.info("storage controller passed consistency check")
 
+    def node_registered(self, node_id: int) -> bool:
+        """
+        Returns true if the storage controller can confirm
+        it knows of pageserver with 'node_id'
+        """
+        try:
+            self.node_status(node_id)
+        except StorageControllerApiException as e:
+            if e.status_code == 404:
+                return False
+            else:
+                raise e
+
+        return True
+
     def poll_node_status(
-        self, node_id: int, desired_scheduling_policy: str, max_attempts: int, backoff: int
+        self,
+        node_id: int,
+        desired_availability: Optional[PageserverAvailability],
+        desired_scheduling_policy: Optional[PageserverSchedulingPolicy],
+        max_attempts: int,
+        backoff: int,
     ):
         """
-        Poll the node status until it reaches 'desired_scheduling_policy' or 'max_attempts' have been exhausted
+        Poll the node status until it reaches 'desired_scheduling_policy' and 'desired_availability'
+        or 'max_attempts' have been exhausted
         """
-        log.info(f"Polling {node_id} for {desired_scheduling_policy} scheduling policy")
+        log.info(
+            f"Polling {node_id} for {desired_scheduling_policy} scheduling policy and {desired_availability} availability"
+        )
         while max_attempts > 0:
             try:
                 status = self.node_status(node_id)
                 policy = status["scheduling"]
-                if policy == desired_scheduling_policy:
+                availability = status["availability"]
+                if (desired_scheduling_policy is None or policy == desired_scheduling_policy) and (
+                    desired_availability is None or availability == desired_availability
+                ):
                     return
                 else:
                     max_attempts -= 1
-                    log.info(f"Status call returned {policy=} ({max_attempts} attempts left)")
+                    log.info(
+                        f"Status call returned {policy=} {availability=} ({max_attempts} attempts left)"
+                    )
 
                     if max_attempts == 0:
                         raise AssertionError(
-                            f"Status for {node_id=} did not reach {desired_scheduling_policy=}"
+                            f"Status for {node_id=} did not reach {desired_scheduling_policy=} {desired_availability=}"
                         )
 
                     time.sleep(backoff)
@@ -2535,6 +2590,62 @@ class NeonStorageController(MetricsGetter, LogUtils):
                     raise e
 
                 time.sleep(backoff)
+
+    def metadata_health_update(self, healthy: List[TenantShardId], unhealthy: List[TenantShardId]):
+        body: Dict[str, Any] = {
+            "healthy_tenant_shards": [str(t) for t in healthy],
+            "unhealthy_tenant_shards": [str(t) for t in unhealthy],
+        }
+
+        self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/update",
+            json=body,
+            headers=self.headers(TokenScope.SCRUBBER),
+        )
+
+    def metadata_health_list_unhealthy(self):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/unhealthy",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def metadata_health_list_outdated(self, duration: str):
+        body: Dict[str, Any] = {"not_scrubbed_for": duration}
+
+        response = self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/outdated",
+            json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def metadata_health_is_healthy(self, outdated_duration: str = "1h") -> bool:
+        """Metadata is healthy if there is no unhealthy or outdated health records."""
+
+        unhealthy = self.metadata_health_list_unhealthy()
+        outdated = self.metadata_health_list_outdated(outdated_duration)
+
+        healthy = (
+            len(unhealthy["unhealthy_tenant_shards"]) == 0 and len(outdated["health_records"]) == 0
+        )
+        if not healthy:
+            log.info(f"{unhealthy=}, {outdated=}")
+        return healthy
+
+    def step_down(self):
+        log.info("Asking storage controller to step down")
+        response = self.request(
+            "PUT",
+            f"{self.env.storage_controller_api}/control/v1/step_down",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+
+        response.raise_for_status()
+        return response.json()
 
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):
@@ -2667,6 +2778,14 @@ class NeonPageserver(PgProtocol, LogUtils):
             self.id, extra_env_vars=extra_env_vars, timeout_in_seconds=timeout_in_seconds
         )
         self.running = True
+
+        if self.env.storage_controller.running and self.env.storage_controller.node_registered(
+            self.id
+        ):
+            self.env.storage_controller.poll_node_status(
+                self.id, PageserverAvailability.ACTIVE, None, max_attempts=20, backoff=1
+            )
+
         return self
 
     def stop(self, immediate: bool = False) -> "NeonPageserver":
@@ -2786,8 +2905,8 @@ class NeonPageserver(PgProtocol, LogUtils):
             )
         return client.tenant_attach(
             tenant_id,
+            generation,
             config,
-            generation=generation,
         )
 
     def tenant_detach(self, tenant_id: TenantId):
@@ -3697,6 +3816,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: Optional[int] = None,
         safekeepers: Optional[List[int]] = None,
         allow_multiple: bool = False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "Endpoint":
         """
         Start the Postgres instance.
@@ -3718,6 +3838,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            basebackup_request_tries=basebackup_request_tries,
         )
         self._running.release(1)
 
@@ -3785,12 +3906,12 @@ class Endpoint(PgProtocol, LogUtils):
             self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
         )
 
-    def respec(self, **kwargs):
+    def respec(self, **kwargs: Any) -> None:
         """Update the endpoint.json file used by control_plane."""
         # Read config
         config_path = os.path.join(self.endpoint_path(), "endpoint.json")
         with open(config_path, "r") as f:
-            data_dict = json.load(f)
+            data_dict: dict[str, Any] = json.load(f)
 
         # Write it back updated
         with open(config_path, "w") as file:
@@ -3798,13 +3919,13 @@ class Endpoint(PgProtocol, LogUtils):
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Please note: Migrations only run if pg_skip_catalog_updates is false
-    def wait_for_migrations(self):
+    def wait_for_migrations(self, num_migrations: int = 10):
         with self.cursor() as cur:
 
             def check_migrations_done():
                 cur.execute("SELECT id FROM neon_migration.migration_id")
-                migration_id = cur.fetchall()[0][0]
-                assert migration_id != 0
+                migration_id: int = cur.fetchall()[0][0]
+                assert migration_id >= num_migrations
 
             wait_until(20, 0.5, check_migrations_done)
 
@@ -3864,6 +3985,7 @@ class Endpoint(PgProtocol, LogUtils):
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple=False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "Endpoint":
         """
         Create an endpoint, apply config, and start Postgres.
@@ -3884,6 +4006,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            basebackup_request_tries=basebackup_request_tries,
         )
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
@@ -3927,6 +4050,7 @@ class EndpointFactory:
         config_lines: Optional[List[str]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
+        basebackup_request_tries: Optional[int] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -3945,6 +4069,7 @@ class EndpointFactory:
             lsn=lsn,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
+            basebackup_request_tries=basebackup_request_tries,
         )
 
     def create(
@@ -4054,6 +4179,22 @@ class Safekeeper(LogUtils):
         self.id = id
         self.running = running
         self.logfile = Path(self.data_dir) / f"safekeeper-{id}.log"
+
+        if extra_opts is None:
+            # Testing defaults: enable everything, and set short timeouts so that background
+            # work will happen during short tests.
+            # **Note**: Any test that explicitly sets extra_opts will not get these defaults.
+            extra_opts = [
+                "--enable-offload",
+                "--delete-offloaded-wal",
+                "--partial-backup-timeout",
+                "10s",
+                "--control-file-save-interval",
+                "1s",
+                "--eviction-min-resident",
+                "10s",
+            ]
+
         self.extra_opts = extra_opts
 
     def start(
@@ -4225,9 +4366,9 @@ class Safekeeper(LogUtils):
 
 
 class StorageScrubber:
-    def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
+    def __init__(self, env: NeonEnv, log_dir: Path):
         self.env = env
-        self.log_dir = log_dir or env.test_output_dir
+        self.log_dir = log_dir
 
     def scrubber_cli(self, args: list[str], timeout) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
@@ -4244,11 +4385,14 @@ class StorageScrubber:
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
 
-        base_args = [str(self.env.neon_binpath / "storage_scrubber")]
+        base_args = [
+            str(self.env.neon_binpath / "storage_scrubber"),
+            f"--controller-api={self.env.storage_controller_api}",
+        ]
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(
-            self.env.test_output_dir,
+            self.log_dir,
             args,
             echo_stderr=True,
             echo_stdout=True,
@@ -4267,10 +4411,11 @@ class StorageScrubber:
         assert stdout is not None
         return stdout
 
-    def scan_metadata(self) -> Any:
-        stdout = self.scrubber_cli(
-            ["scan-metadata", "--node-kind", "pageserver", "--json"], timeout=30
-        )
+    def scan_metadata(self, post_to_storage_controller: bool = False) -> Any:
+        args = ["scan-metadata", "--node-kind", "pageserver", "--json"]
+        if post_to_storage_controller:
+            args.append("--post")
+        stdout = self.scrubber_cli(args, timeout=30)
 
         try:
             return json.loads(stdout)
@@ -4287,7 +4432,10 @@ class StorageScrubber:
         log.info(f"tenant-snapshot output: {stdout}")
 
     def pageserver_physical_gc(
-        self, min_age_secs: int, tenant_ids: Optional[list[TenantId]] = None
+        self,
+        min_age_secs: int,
+        tenant_ids: Optional[list[TenantId]] = None,
+        mode: Optional[str] = None,
     ):
         args = ["pageserver-physical-gc", "--min-age", f"{min_age_secs}s"]
 
@@ -4296,6 +4444,9 @@ class StorageScrubber:
 
         for tenant_id in tenant_ids:
             args.extend(["--tenant-id", str(tenant_id)])
+
+        if mode is not None:
+            args.extend(["--mode", mode])
 
         stdout = self.scrubber_cli(
             args,
@@ -4388,7 +4539,23 @@ def test_output_dir(
 
     yield test_dir
 
-    allure_attach_from_dir(test_dir)
+    # Allure artifacts creation might involve the creation of `.tar.zst` archives,
+    # which aren't going to be used if Allure results collection is not enabled
+    # (i.e. --alluredir is not set).
+    # Skip `allure_attach_from_dir` in this case
+    if not request.config.getoption("--alluredir"):
+        return
+
+    preserve_database_files = False
+    for k, v in request.node.user_properties:
+        # NB: the neon_env_builder fixture uses this fixture (test_output_dir).
+        # So, neon_env_builder's cleanup runs before here.
+        # The cleanup propagates NeonEnvBuilder.preserve_database_files into this user property.
+        if k == "preserve_database_files":
+            assert isinstance(v, bool)
+            preserve_database_files = v
+
+    allure_attach_from_dir(test_dir, preserve_database_files)
 
 
 class FileAndThreadLock:
