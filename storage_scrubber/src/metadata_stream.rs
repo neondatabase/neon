@@ -289,7 +289,7 @@ pub(crate) fn stream_listing_generic<'a>(
     let mut objects_stream = Box::pin(stream_objects_with_retries(
         remote_client,
         listing_mode,
-        &target,
+        target,
     ));
     try_stream! {
         while let Some(list) = objects_stream.next().await {
