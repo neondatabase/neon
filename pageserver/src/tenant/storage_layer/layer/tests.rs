@@ -50,13 +50,26 @@ async fn smoke_test() {
     // all layers created at pageserver are like `layer`, initialized with strong
     // Arc<DownloadedLayer>.
 
+    let controlfile_keyspace = KeySpace {
+        ranges: vec![CONTROLFILE_KEY..CONTROLFILE_KEY.next()],
+    };
+
     let img_before = {
-        let mut data = ValueReconstructState::default();
+        let mut data = ValuesReconstructState::default();
         layer
-            .get_value_reconstruct_data(CONTROLFILE_KEY, Lsn(0x10)..Lsn(0x11), &mut data, &ctx)
+            .get_values_reconstruct_data(
+                controlfile_keyspace.clone(),
+                Lsn(0x10)..Lsn(0x11),
+                &mut data,
+                &ctx,
+            )
             .await
             .unwrap();
-        data.img
+        data.keys
+            .remove(&CONTROLFILE_KEY)
+            .expect("must be present")
+            .expect("should not error")
+            .img
             .take()
             .expect("tenant harness writes the control file")
     };
@@ -74,13 +87,24 @@ async fn smoke_test() {
 
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
-        let mut data = ValueReconstructState::default();
+        let mut data = ValuesReconstructState::default();
         layer
-            .get_value_reconstruct_data(CONTROLFILE_KEY, Lsn(0x10)..Lsn(0x11), &mut data, &ctx)
+            .get_values_reconstruct_data(
+                controlfile_keyspace.clone(),
+                Lsn(0x10)..Lsn(0x11),
+                &mut data,
+                &ctx,
+            )
             .instrument(download_span.clone())
             .await
             .unwrap();
-        data.img.take().unwrap()
+        data.keys
+            .remove(&CONTROLFILE_KEY)
+            .expect("must be present")
+            .expect("should not error")
+            .img
+            .take()
+            .expect("tenant harness writes the control file")
     };
 
     assert_eq!(img_before, img_after);
