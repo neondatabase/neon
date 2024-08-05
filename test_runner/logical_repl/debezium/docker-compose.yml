@@ -1,8 +1,6 @@
 services:
   zookeeper:
     image: quay.io/debezium/zookeeper:2.7
-#    ports:
-#      - 2181:2181
   kafka:
     image: quay.io/debezium/kafka:2.7
     environment:
