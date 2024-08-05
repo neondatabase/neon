@@ -899,10 +899,8 @@ impl RemoteTimelineClient {
                         warn!(?reason, op="remove", "unexpected: two racing processes to enable and disable a gc blocking reason (remove)");
                     }
 
-                    upload_queue.dirty.gc_blocking = current
-                        // FIXME: this expect will fire when !wanted(x)
-                        .expect("has to be Some because of wanted()")
-                        .without_reason(reason);
+                    upload_queue.dirty.gc_blocking =
+                        current.as_ref().and_then(|x| x.without_reason(reason));
                     assert!(wanted(upload_queue.dirty.gc_blocking.as_ref()));
                     // FIXME: bogus ?
                     self.schedule_index_upload(upload_queue)?;
