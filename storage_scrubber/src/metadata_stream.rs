@@ -286,12 +286,12 @@ pub(crate) fn stream_listing_generic<'a>(
     } else {
         ListingMode::WithDelimiter
     };
-    let mut objects_stream = Box::pin(stream_objects_with_retries(
-        remote_client,
-        listing_mode,
-        target,
-    ));
     try_stream! {
+        let mut objects_stream = std::pin::pin!(stream_objects_with_retries(
+            remote_client,
+            listing_mode,
+            target,
+        ));
         while let Some(list) = objects_stream.next().await {
             let list = list?;
             if target.delimiter.is_empty() {
