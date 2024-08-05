@@ -55,7 +55,7 @@ use utils::id::{TenantId, TimelineId};
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
 use super::timeline::detach_ancestor::PreparedTimelineDetach;
-use super::TenantSharedResources;
+use super::{GlobalShutDown, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
 /// - `Attached`: has a full Tenant object, is elegible to service
@@ -665,17 +665,20 @@ pub async fn init_tenant_mgr(
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
         let shard_identity = location_conf.shard;
         let slot = match location_conf.mode {
-            LocationMode::Attached(attached_conf) => TenantSlot::Attached(tenant_spawn(
-                conf,
-                tenant_shard_id,
-                &tenant_dir_path,
-                resources.clone(),
-                AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
-                shard_identity,
-                Some(init_order.clone()),
-                SpawnMode::Lazy,
-                &ctx,
-            )),
+            LocationMode::Attached(attached_conf) => TenantSlot::Attached(
+                tenant_spawn(
+                    conf,
+                    tenant_shard_id,
+                    &tenant_dir_path,
+                    resources.clone(),
+                    AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
+                    shard_identity,
+                    Some(init_order.clone()),
+                    SpawnMode::Lazy,
+                    &ctx,
+                )
+                .expect("global shutdown during init_tenant_mgr cannot happen"),
+            ),
             LocationMode::Secondary(secondary_conf) => {
                 info!(
                     tenant_id = %tenant_shard_id.tenant_id,
@@ -723,7 +726,7 @@ fn tenant_spawn(
     init_order: Option<InitializationOrder>,
     mode: SpawnMode,
     ctx: &RequestContext,
-) -> Arc<Tenant> {
+) -> Result<Arc<Tenant>, GlobalShutDown> {
     // All these conditions should have been satisfied by our caller: the tenant dir exists, is a well formed
     // path, and contains a configuration file.  Assertions that do synchronous I/O are limited to debug mode
     // to avoid impacting prod runtime performance.
@@ -1190,7 +1193,10 @@ impl TenantManager {
                     None,
                     spawn_mode,
                     ctx,
-                );
+                )
+                .map_err(|_: GlobalShutDown| {
+                    UpsertLocationError::Unavailable(TenantMapError::ShuttingDown)
+                })?;
 
                 TenantSlot::Attached(tenant)
             }
@@ -1311,7 +1317,7 @@ impl TenantManager {
             None,
             SpawnMode::Eager,
             ctx,
-        );
+        )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
 
@@ -2045,7 +2051,7 @@ impl TenantManager {
             None,
             SpawnMode::Eager,
             ctx,
-        );
+        )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
 

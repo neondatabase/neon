@@ -63,10 +63,19 @@ pub(super) async fn delete_local_timeline_directory(
     tenant_shard_id: TenantShardId,
     timeline: &Timeline,
 ) -> anyhow::Result<()> {
-    let guards = async { tokio::join!(timeline.gc_lock.lock(), timeline.compaction_lock.lock()) };
-    let guards = crate::timed(
-        guards,
-        "acquire gc and compaction locks",
+    // Always ensure the lock order is compaction -> gc.
+    let compaction_lock = timeline.compaction_lock.lock();
+    let compaction_lock = crate::timed(
+        compaction_lock,
+        "acquires compaction lock",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+
+    let gc_lock = timeline.gc_lock.lock();
+    let gc_lock = crate::timed(
+        gc_lock,
+        "acquires gc lock",
         std::time::Duration::from_secs(5),
     )
     .await;
@@ -107,7 +116,8 @@ pub(super) async fn delete_local_timeline_directory(
         .context("fsync_pre_mark_remove")?;
 
     info!("finished deleting layer files, releasing locks");
-    drop(guards);
+    drop(gc_lock);
+    drop(compaction_lock);
 
     fail::fail_point!("timeline-delete-after-rm", |_| {
         Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
@@ -206,11 +216,10 @@ impl DeleteTimelineFlow {
     // NB: If this fails half-way through, and is retried, the retry will go through
     // all the same steps again. Make sure the code here is idempotent, and don't
     // error out if some of the shutdown tasks have already been completed!
-    #[instrument(skip_all, fields(%inplace))]
+    #[instrument(skip_all)]
     pub async fn run(
         tenant: &Arc<Tenant>,
         timeline_id: TimelineId,
-        inplace: bool,
     ) -> Result<(), DeleteTimelineError> {
         super::debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -235,11 +244,7 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        if inplace {
-            Self::background(guard, tenant.conf, tenant, &timeline).await?
-        } else {
-            Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline);
-        }
+        Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline);
 
         Ok(())
     }

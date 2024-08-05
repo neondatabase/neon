@@ -17,6 +17,11 @@ use storage_scrubber::{
 use clap::{Parser, Subcommand};
 use utils::id::TenantId;
 
+use utils::{project_build_tag, project_git_version};
+
+project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
@@ -100,6 +105,8 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
 
     let bucket_config = BucketConfig::from_env()?;
 

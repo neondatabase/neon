@@ -170,11 +170,6 @@ struct Args {
     /// still needed for existing replication connection.
     #[arg(long)]
     walsenders_keep_horizon: bool,
-    /// Enable partial backup. If disabled, safekeeper will not upload partial
-    /// segments to remote storage.
-    /// TODO: now partial backup is always enabled, remove this flag.
-    #[arg(long)]
-    partial_backup_enabled: bool,
     /// Controls how long backup will wait until uploading the partial segment.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_PARTIAL_BACKUP_TIMEOUT, verbatim_doc_comment)]
     partial_backup_timeout: Duration,
@@ -347,7 +342,6 @@ async fn main() -> anyhow::Result<()> {
         sk_auth_token,
         current_thread_runtime: args.current_thread_runtime,
         walsenders_keep_horizon: args.walsenders_keep_horizon,
-        partial_backup_enabled: true,
         partial_backup_timeout: args.partial_backup_timeout,
         disable_periodic_broker_push: args.disable_periodic_broker_push,
         enable_offload: args.enable_offload,

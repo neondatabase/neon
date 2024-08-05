@@ -126,7 +126,7 @@ parquet = { version = "51.0.0", default-features = false, features = ["zstd"] }
 parquet_derive = "51.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
-procfs = "0.14"
+procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
