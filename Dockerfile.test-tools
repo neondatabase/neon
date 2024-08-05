@@ -1,4 +1,5 @@
-# based on build-tools but adds postgresql-client and postgresql packages
+# based on build-tools but adds additional components only needed for testing but not for build
+# for example: postgresql package
 ARG BUILD_TOOLS_BASE_IMAGE
 
 FROM ${BUILD_TOOLS_BASE_IMAGE}
@@ -10,7 +11,7 @@ USER root
 # needed in some tests because neon artifacts cannot be used 
 # in combination with staticaclly built openssl
 # due to https://github.com/neondatabase/neon/issues/8275
-ENV PG_VERSION=16
+ARG PG_VERSION=16
 RUN set -e \
     && curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
     && echo 'deb http://apt.postgresql.org/pub/repos/apt bullseye-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
