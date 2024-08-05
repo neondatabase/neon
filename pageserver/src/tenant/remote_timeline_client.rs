@@ -1378,6 +1378,18 @@ impl RemoteTimelineClient {
                 .dirty
                 .layer_metadata
                 .drain()
+                .filter(|(_file_name, meta)| {
+                    // Filter out layers that belonged to an ancestor shard.  Since we are deleting the whole timeline from
+                    // all shards anyway, we _could_ delete these, but
+                    // - it creates a potential race if other shards are still
+                    //   using the layers while this shard deletes them.
+                    // - it means that if we rolled back the shard split, the ancestor shards would be in a state where
+                    //   these timelines are present but corrupt (their index exists but some layers don't)
+                    //
+                    // These layers will eventually be cleaned up by the scrubber when it does physical GC.
+                    meta.shard.shard_number == self.tenant_shard_id.shard_number
+                        && meta.shard.shard_count == self.tenant_shard_id.shard_count
+                })
                 .map(|(file_name, meta)| {
                     remote_layer_path(
                         &self.tenant_shard_id.tenant_id,
