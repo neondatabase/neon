@@ -2720,6 +2720,7 @@ impl Tenant {
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
+            gc_block: Default::default(),
             l0_flush_global_state,
         }
     }

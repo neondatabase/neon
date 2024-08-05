@@ -104,6 +104,7 @@ impl IndexPart {
             deleted_at: None,
             archived_at: None,
             lineage: Default::default(),
+            gc_blocking: None,
             last_aux_file_policy: None,
         }
     }
