@@ -13,6 +13,7 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
 )
+from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
@@ -265,8 +266,83 @@ def test_scrubber_physical_gc_ancestors(
     # attach it, to drop any local state, then check it's still readable.
     workload.stop()
     drop_local_state(env, tenant_id)
-
     workload.validate()
+
+
+def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder):
+    """
+    When we delete a timeline after a shard split, the child shards do not directly delete the
+    layers in the ancestor shards.  They rely on the scrubber to clean up.
+    """
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_tenant(
+        tenant_id,
+        timeline_id,
+        shard_count=None,
+        conf={
+            # Small layers and low compaction thresholds, so that when we split we can expect some to
+            # be dropped by child shards
+            "checkpoint_distance": f"{1024 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{1024 * 1024}",
+            "image_creation_threshold": "2",
+            "image_layer_creation_check_threshold": "0",
+            # Disable background compaction, we will do it explicitly
+            "compaction_period": "0s",
+            # No PITR, so that as soon as child shards generate an image layer, it covers ancestor deltas
+            # and makes them GC'able
+            "pitr_interval": "0s",
+        },
+    )
+
+    # Make sure the original shard has some layers
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(100)
+
+    new_shard_count = 4
+    shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
+
+    # Create a second timeline so that when we delete the first one, child shards still have some content in S3.
+    #
+    # This is a limitation of the scrubber: if a shard isn't in S3 (because it has no timelines), then the scrubber
+    # doesn't know about it, and won't perceive its ancestors as ancestors.
+    other_timeline_id = TimelineId.generate()
+    env.storage_controller.pageserver_api().timeline_create(
+        PgVersion.NOT_SET, tenant_id, other_timeline_id
+    )
+
+    # Write after split so that child shards have some indices in S3
+    workload.write_rows(100, upload=False)
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
+        ps.http_client().timeline_checkpoint(
+            shard, timeline_id, compact=False, wait_until_uploaded=True
+        )
+
+    # The timeline still exists in child shards and they reference its layers, so scrubbing
+    # now shouldn't delete anything.
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=0, mode="full")
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] == 0
+    assert gc_summary["ancestor_layers_deleted"] == 0
+
+    # Delete the timeline
+    env.storage_controller.pageserver_api().timeline_delete(tenant_id, timeline_id)
+
+    # Subsequently doing physical GC should clean up the ancestor layers
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=0, mode="full")
+    assert gc_summary["remote_storage_errors"] == 0
+    assert gc_summary["indices_deleted"] == 0
+    assert gc_summary["ancestor_layers_deleted"] > 0
 
 
 def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
@@ -440,9 +516,11 @@ def test_scrubber_scan_pageserver_metadata(
     assert len(index.layer_metadata) > 0
     it = iter(index.layer_metadata.items())
 
-    scan_summary = env.storage_scrubber.scan_metadata()
+    scan_summary = env.storage_scrubber.scan_metadata(post_to_storage_controller=True)
     assert not scan_summary["with_warnings"]
     assert not scan_summary["with_errors"]
+
+    assert env.storage_controller.metadata_health_is_healthy()
 
     # Delete a layer file that is listed in the index.
     layer, metadata = next(it)
@@ -453,7 +531,17 @@ def test_scrubber_scan_pageserver_metadata(
     )
     log.info(f"delete response: {delete_response}")
 
-    # Check scan summary. Expect it to be a L0 layer so only emit warnings.
+    # Check scan summary without posting to storage controller. Expect it to be a L0 layer so only emit warnings.
     scan_summary = env.storage_scrubber.scan_metadata()
     log.info(f"{pprint.pformat(scan_summary)}")
     assert len(scan_summary["with_warnings"]) > 0
+
+    assert env.storage_controller.metadata_health_is_healthy()
+
+    # Now post to storage controller, expect seeing one unhealthy health record
+    scan_summary = env.storage_scrubber.scan_metadata(post_to_storage_controller=True)
+    log.info(f"{pprint.pformat(scan_summary)}")
+    assert len(scan_summary["with_warnings"]) > 0
+
+    unhealthy = env.storage_controller.metadata_health_list_unhealthy()["unhealthy_tenant_shards"]
+    assert len(unhealthy) == 1 and unhealthy[0] == str(tenant_shard_id)

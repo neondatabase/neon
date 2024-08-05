@@ -41,6 +41,20 @@ pub struct PersistentLayerKey {
     pub is_delta: bool,
 }
 
+impl std::fmt::Display for PersistentLayerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}..{} {}..{} is_delta={}",
+            self.key_range.start,
+            self.key_range.end,
+            self.lsn_range.start,
+            self.lsn_range.end,
+            self.is_delta
+        )
+    }
+}
+
 impl PersistentLayerDesc {
     pub fn key(&self) -> PersistentLayerKey {
         PersistentLayerKey {
