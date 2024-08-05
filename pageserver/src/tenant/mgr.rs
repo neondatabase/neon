@@ -1986,7 +1986,7 @@ impl TenantManager {
         let mut slot_guard = slot_guard.into_inner();
 
         let tenant = if resp.reset_tenant_required() {
-            attempt.before_shutdown();
+            attempt.before_reset_tenant();
 
             let (_guard, progress) = utils::completion::channel();
             match tenant.shutdown(progress, ShutdownMode::Hard).await {
