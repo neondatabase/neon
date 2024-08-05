@@ -84,8 +84,8 @@ use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
         AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
-        LayerAccessStatsReset, LayerName, ResidentLayer, ValueReconstructResult,
-        ValueReconstructState, ValuesReconstructState,
+        LayerAccessStatsReset, LayerName, ResidentLayer, ValueReconstructState,
+        ValuesReconstructState,
     },
 };
 use crate::{
@@ -540,7 +540,6 @@ pub struct MissingKeyError {
     cont_lsn: Lsn,
     request_lsn: Lsn,
     ancestor_lsn: Option<Lsn>,
-    traversal_path: Vec<TraversalPathItem>,
     backtrace: Option<std::backtrace::Backtrace>,
 }
 
@@ -559,18 +558,6 @@ impl std::fmt::Display for MissingKeyError {
         )?;
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
             write!(f, ", ancestor {}", ancestor_lsn)?;
-        }
-
-        if !self.traversal_path.is_empty() {
-            writeln!(f)?;
-        }
-
-        for (r, c, l) in &self.traversal_path {
-            writeln!(
-                f,
-                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r, c, l,
-            )?;
         }
 
         if let Some(ref backtrace) = self.backtrace {
@@ -947,7 +934,6 @@ impl Timeline {
                 cont_lsn: Lsn(0),
                 request_lsn: lsn,
                 ancestor_lsn: None,
-                traversal_path: Vec::new(),
                 backtrace: None,
             })),
         }
@@ -3053,7 +3039,6 @@ impl Timeline {
                 cont_lsn,
                 request_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
-                traversal_path: vec![],
                 backtrace: None,
             }));
         }
@@ -5401,8 +5386,6 @@ impl Timeline {
         self.extra_test_dense_keyspace.store(Arc::new(keyspace));
     }
 }
-
-type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 
 /// Tracking writes ingestion does to a particular in-memory layer.
 ///

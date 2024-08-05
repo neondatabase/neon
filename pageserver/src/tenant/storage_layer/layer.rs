@@ -478,7 +478,7 @@ impl Layer {
 ///
 /// However when we want something evicted, we cannot evict it right away as there might be current
 /// reads happening on it. For example: it has been searched from [`LayerMap::search`] but not yet
-/// read with [`Layer::get_value_reconstruct_data`].
+/// read with [`Layer::get_values_reconstruct_data`].
 ///
 /// [`LayerMap::search`]: crate::tenant::layer_map::LayerMap::search
 #[derive(Debug)]
