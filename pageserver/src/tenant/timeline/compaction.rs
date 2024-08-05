@@ -116,26 +116,24 @@ impl KeyHistoryRetention {
 }
 
 #[derive(Debug, Serialize, Default)]
+struct CompactionStatisticsNumSize {
+    num: u64,
+    size: u64,
+}
+
+#[derive(Debug, Serialize, Default)]
 pub struct CompactionStatistics {
-    num_delta_layer_visited: usize,
-    size_delta_layer_visited: usize,
-    num_image_layer_visited: usize,
-    size_image_layer_visited: usize,
-    num_delta_layer_produced: usize,
-    size_delta_layer_produced: usize,
+    delta_layer_visited: CompactionStatisticsNumSize,
+    image_layer_visited: CompactionStatisticsNumSize,
+    delta_layer_produced: CompactionStatisticsNumSize,
+    image_layer_produced: CompactionStatisticsNumSize,
     num_delta_layer_discarded: usize,
-    num_image_layer_produced: usize,
-    size_image_layer_produced: usize,
     num_image_layer_discarded: usize,
     num_unique_keys_visited: usize,
-    num_wal_keys_visited: usize,
-    num_image_keys_visited: usize,
-    size_wal_visited: usize,
-    size_image_visited: usize,
-    num_wal_keys_produced: usize,
-    num_image_keys_produced: usize,
-    size_wal_produced: usize,
-    size_image_produced: usize,
+    wal_keys_visited: CompactionStatisticsNumSize,
+    image_keys_visited: CompactionStatisticsNumSize,
+    wal_produced: CompactionStatisticsNumSize,
+    image_produced: CompactionStatisticsNumSize,
 }
 
 impl CompactionStatistics {
@@ -149,25 +147,26 @@ impl CompactionStatistics {
     fn estimated_size_of_key() -> usize {
         KEY_SIZE // TODO: distinguish image layer and delta layer (count LSN in delta layer)
     }
-    fn visit_delta_layer(&mut self, size: usize) {
-        self.num_delta_layer_visited += 1;
-        self.size_delta_layer_visited += size;
+    fn visit_delta_layer(&mut self, size: u64) {
+        self.delta_layer_visited.num += 1;
+        self.delta_layer_visited.size += size;
     }
-    fn visit_image_layer(&mut self, size: usize) {
-        self.num_image_keys_visited += 1;
-        self.size_image_layer_visited += size;
+    fn visit_image_layer(&mut self, size: u64) {
+        self.image_layer_visited.num += 1;
+        self.image_layer_visited.size += size;
     }
     fn on_unique_key_visited(&mut self) {
         self.num_unique_keys_visited += 1;
     }
     fn visit_wal_key(&mut self, val: &Value) {
-        self.num_wal_keys_visited += 1;
-        self.size_wal_visited += Self::estimated_size_of_value(val) + Self::estimated_size_of_key();
+        self.wal_keys_visited.num += 1;
+        self.wal_keys_visited.size +=
+            Self::estimated_size_of_value(val) as u64 + Self::estimated_size_of_key() as u64;
     }
     fn visit_image_key(&mut self, val: &Value) {
-        self.num_image_keys_visited += 1;
-        self.size_image_visited +=
-            Self::estimated_size_of_value(val) + Self::estimated_size_of_key();
+        self.image_keys_visited.num += 1;
+        self.image_keys_visited.size +=
+            Self::estimated_size_of_value(val) as u64 + Self::estimated_size_of_key() as u64;
     }
     fn produce_key(&mut self, val: &Value) {
         match val {
@@ -176,25 +175,27 @@ impl CompactionStatistics {
         }
     }
     fn produce_wal_key(&mut self, val: &Value) {
-        self.num_wal_keys_produced += 1;
-        self.size_wal_produced +=
-            Self::estimated_size_of_value(val) + Self::estimated_size_of_key();
+        self.wal_produced.num += 1;
+        self.wal_produced.size +=
+            Self::estimated_size_of_value(val) as u64 + Self::estimated_size_of_key() as u64;
     }
     fn produce_image_key(&mut self, val: &Bytes) {
-        self.num_image_keys_produced += 1;
-        self.size_image_produced += val.len() + Self::estimated_size_of_key();
+        self.image_produced.num += 1;
+        self.image_produced.size += val.len() as u64 + Self::estimated_size_of_key() as u64;
     }
     fn discard_delta_layer(&mut self) {
         self.num_delta_layer_discarded += 1;
     }
-    fn discard_image_layer(&mut self) {}
-    fn produce_delta_layer(&mut self, size: usize) {
-        self.num_delta_layer_produced += 1;
-        self.size_delta_layer_produced += size;
+    fn discard_image_layer(&mut self) {
+        self.num_image_layer_discarded += 1;
     }
-    fn produce_image_layer(&mut self, size: usize) {
-        self.num_image_layer_produced += 1;
-        self.size_image_layer_produced += size;
+    fn produce_delta_layer(&mut self, size: u64) {
+        self.delta_layer_produced.num += 1;
+        self.delta_layer_produced.size += size;
+    }
+    fn produce_image_layer(&mut self, size: u64) {
+        self.image_layer_produced.num += 1;
+        self.image_layer_produced.size += size;
     }
 }
 
@@ -1838,9 +1839,9 @@ impl Timeline {
                 let key_range = desc.get_key_range();
                 delta_split_points.insert(key_range.start);
                 delta_split_points.insert(key_range.end);
-                stat.visit_delta_layer(desc.file_size() as usize);
+                stat.visit_delta_layer(desc.file_size());
             } else {
-                stat.visit_image_layer(desc.file_size() as usize);
+                stat.visit_image_layer(desc.file_size());
             }
         }
         let mut delta_layers = Vec::new();
@@ -1961,7 +1962,7 @@ impl Timeline {
             for (key, lsn, val) in deltas {
                 delta_layer_writer.put_value(key, lsn, val, ctx).await?;
             }
-            stats.produce_delta_layer(delta_layer_writer.size() as usize);
+            stats.produce_delta_layer(delta_layer_writer.size());
             if dry_run {
                 return Ok(None);
             }
@@ -2159,7 +2160,7 @@ impl Timeline {
             stat.discard_image_layer();
             None
         } else if let Some(writer) = image_layer_writer {
-            stat.produce_image_layer(writer.size() as usize);
+            stat.produce_image_layer(writer.size());
             if !dry_run {
                 Some(writer.finish(self, ctx).await?)
             } else {
