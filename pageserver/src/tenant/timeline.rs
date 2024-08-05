@@ -917,59 +917,47 @@ impl Timeline {
 
         self.timeline_get_throttle.throttle(ctx, 1).await;
 
-        match self.conf.get_impl {
-            GetImpl::Legacy => {
-                let reconstruct_state = ValueReconstructState {
-                    records: Vec::new(),
-                    img: None,
-                };
+        let keyspace = KeySpace {
+            ranges: vec![key..key.next()],
+        };
 
-                self.get_impl(key, lsn, reconstruct_state, ctx).await
-            }
-            GetImpl::Vectored => {
-                let keyspace = KeySpace {
-                    ranges: vec![key..key.next()],
-                };
+        // Initialise the reconstruct state for the key with the cache
+        // entry returned above.
+        let mut reconstruct_state = ValuesReconstructState::new();
 
-                // Initialise the reconstruct state for the key with the cache
-                // entry returned above.
-                let mut reconstruct_state = ValuesReconstructState::new();
+        let vectored_res = self
+            .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
+            .await;
 
-                let vectored_res = self
-                    .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
-                    .await;
+        if self.conf.validate_vectored_get {
+            self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
+                .await;
+        }
 
-                if self.conf.validate_vectored_get {
-                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                        .await;
-                }
-
-                let key_value = vectored_res?.pop_first();
-                match key_value {
-                    Some((got_key, value)) => {
-                        if got_key != key {
-                            error!(
-                                "Expected {}, but singular vectored get returned {}",
-                                key, got_key
-                            );
-                            Err(PageReconstructError::Other(anyhow!(
-                                "Singular vectored get returned wrong key"
-                            )))
-                        } else {
-                            value
-                        }
-                    }
-                    None => Err(PageReconstructError::MissingKey(MissingKeyError {
-                        key,
-                        shard: self.shard_identity.get_shard_number(&key),
-                        cont_lsn: Lsn(0),
-                        request_lsn: lsn,
-                        ancestor_lsn: None,
-                        traversal_path: Vec::new(),
-                        backtrace: None,
-                    })),
+        let key_value = vectored_res?.pop_first();
+        match key_value {
+            Some((got_key, value)) => {
+                if got_key != key {
+                    error!(
+                        "Expected {}, but singular vectored get returned {}",
+                        key, got_key
+                    );
+                    Err(PageReconstructError::Other(anyhow!(
+                        "Singular vectored get returned wrong key"
+                    )))
+                } else {
+                    value
                 }
             }
+            None => Err(PageReconstructError::MissingKey(MissingKeyError {
+                key,
+                shard: self.shard_identity.get_shard_number(&key),
+                cont_lsn: Lsn(0),
+                request_lsn: lsn,
+                ancestor_lsn: None,
+                traversal_path: Vec::new(),
+                backtrace: None,
+            })),
         }
     }
 
