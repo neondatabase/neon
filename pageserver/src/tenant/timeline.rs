@@ -22,8 +22,8 @@ use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
-        AUX_FILES_KEY, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
-        NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE,
+        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+        NON_INHERITED_SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
@@ -1158,65 +1158,6 @@ impl Timeline {
         vectored_res
     }
 
-    /// Not subject to [`Self::timeline_get_throttle`].
-    pub(super) async fn get_vectored_sequential_impl(
-        &self,
-        keyspace: KeySpace,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let mut values = BTreeMap::new();
-
-        for range in keyspace.ranges {
-            let mut key = range.start;
-            while key != range.end {
-                let block = self
-                    .get_impl(key, lsn, ValueReconstructState::default(), ctx)
-                    .await;
-
-                use PageReconstructError::*;
-                match block {
-                    Err(Cancelled) => return Err(GetVectoredError::Cancelled),
-                    Err(MissingKey(_))
-                        if NON_INHERITED_RANGE.contains(&key)
-                            || NON_INHERITED_SPARSE_RANGE.contains(&key) =>
-                    {
-                        // Ignore missing key error for aux key range. TODO: currently, we assume non_inherited_range == aux_key_range.
-                        // When we add more types of keys into the page server, we should revisit this part of code and throw errors
-                        // accordingly.
-                        key = key.next();
-                    }
-                    Err(MissingKey(err)) => {
-                        return Err(GetVectoredError::MissingKey(err));
-                    }
-                    Err(Other(err))
-                        if err
-                            .to_string()
-                            .contains("downloading evicted layer file failed") =>
-                    {
-                        return Err(GetVectoredError::Other(err))
-                    }
-                    Err(Other(err))
-                        if err
-                            .chain()
-                            .any(|cause| cause.to_string().contains("layer loading failed")) =>
-                    {
-                        // The intent here is to achieve error parity with the vectored read path.
-                        // When vectored read fails to load a layer it fails the whole read, hence
-                        // we mimic this behaviour here to keep the validation happy.
-                        return Err(GetVectoredError::Other(err));
-                    }
-                    _ => {
-                        values.insert(key, block);
-                        key = key.next();
-                    }
-                }
-            }
-        }
-
-        Ok(values)
-    }
-
     pub(super) async fn get_vectored_impl(
         &self,
         keyspace: KeySpace,
@@ -1285,113 +1226,6 @@ impl Timeline {
         }
 
         Ok(results)
-    }
-
-    /// Not subject to [`Self::timeline_get_throttle`].
-    pub(super) async fn validate_get_vectored_impl(
-        &self,
-        vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
-        keyspace: KeySpace,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) {
-        if keyspace.overlaps(&Key::metadata_key_range()) {
-            // skip validation for metadata key range
-            return;
-        }
-
-        let sequential_res = self
-            .get_vectored_sequential_impl(keyspace.clone(), lsn, ctx)
-            .await;
-
-        fn errors_match(lhs: &GetVectoredError, rhs: &GetVectoredError) -> bool {
-            use GetVectoredError::*;
-            match (lhs, rhs) {
-                (Oversized(l), Oversized(r)) => l == r,
-                (InvalidLsn(l), InvalidLsn(r)) => l == r,
-                (MissingKey(l), MissingKey(r)) => l.key == r.key,
-                (GetReadyAncestorError(_), GetReadyAncestorError(_)) => true,
-                (Other(_), Other(_)) => true,
-                _ => false,
-            }
-        }
-
-        match (&sequential_res, vectored_res) {
-            (Err(GetVectoredError::Cancelled), _) => {},
-            (_, Err(GetVectoredError::Cancelled)) => {},
-            (Err(seq_err), Ok(_)) => {
-                panic!(concat!("Sequential get failed with {}, but vectored get did not",
-                               " - keyspace={:?} lsn={}"),
-                       seq_err, keyspace, lsn) },
-            (Ok(_), Err(GetVectoredError::GetReadyAncestorError(GetReadyAncestorError::AncestorLsnTimeout(_)))) => {
-                // Sequential get runs after vectored get, so it is possible for the later
-                // to time out while waiting for its ancestor's Lsn to become ready and for the
-                // former to succeed (it essentially has a doubled wait time).
-            },
-            (Ok(_), Err(vec_err)) => {
-                panic!(concat!("Vectored get failed with {}, but sequential get did not",
-                               " - keyspace={:?} lsn={}"),
-                       vec_err, keyspace, lsn) },
-            (Err(seq_err), Err(vec_err)) => {
-                assert!(errors_match(seq_err, vec_err),
-                        "Mismatched errors: {seq_err} != {vec_err} - keyspace={keyspace:?} lsn={lsn}")},
-            (Ok(seq_values), Ok(vec_values)) => {
-                seq_values.iter().zip(vec_values.iter()).for_each(|((seq_key, seq_res), (vec_key, vec_res))| {
-                    assert_eq!(seq_key, vec_key);
-                    match (seq_res, vec_res) {
-                        (Ok(seq_blob), Ok(vec_blob)) => {
-                            Self::validate_key_equivalence(seq_key, &keyspace, lsn, seq_blob, vec_blob);
-                        },
-                        (Err(err), Ok(_)) => {
-                            panic!(
-                                concat!("Sequential get failed with {} for key {}, but vectored get did not",
-                                        " - keyspace={:?} lsn={}"),
-                                err, seq_key, keyspace, lsn) },
-                        (Ok(_), Err(err)) => {
-                            panic!(
-                                concat!("Vectored get failed with {} for key {}, but sequential get did not",
-                                        " - keyspace={:?} lsn={}"),
-                                err, seq_key, keyspace, lsn) },
-                        (Err(_), Err(_)) => {}
-                    }
-                })
-            }
-        }
-    }
-
-    fn validate_key_equivalence(
-        key: &Key,
-        keyspace: &KeySpace,
-        lsn: Lsn,
-        seq: &Bytes,
-        vec: &Bytes,
-    ) {
-        if *key == AUX_FILES_KEY {
-            // The value reconstruct of AUX_FILES_KEY from records is not deterministic
-            // since it uses a hash map under the hood. Hence, deserialise both results
-            // before comparing.
-            let seq_aux_dir_res = AuxFilesDirectory::des(seq);
-            let vec_aux_dir_res = AuxFilesDirectory::des(vec);
-            match (&seq_aux_dir_res, &vec_aux_dir_res) {
-                (Ok(seq_aux_dir), Ok(vec_aux_dir)) => {
-                    assert_eq!(
-                        seq_aux_dir, vec_aux_dir,
-                        "Mismatch for key {} - keyspace={:?} lsn={}",
-                        key, keyspace, lsn
-                    );
-                }
-                (Err(_), Err(_)) => {}
-                _ => {
-                    panic!("Mismatch for {key}: {seq_aux_dir_res:?} != {vec_aux_dir_res:?}");
-                }
-            }
-        } else {
-            // All other keys should reconstruct deterministically, so we simply compare the blobs.
-            assert_eq!(
-                seq, vec,
-                "Image mismatch for key {key} - keyspace={keyspace:?} lsn={lsn}"
-            );
-        }
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
