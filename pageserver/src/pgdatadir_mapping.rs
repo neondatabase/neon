@@ -1778,7 +1778,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub(crate) async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
