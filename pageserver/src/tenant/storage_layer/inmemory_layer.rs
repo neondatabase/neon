@@ -416,6 +416,74 @@ impl InMemoryLayer {
     }
 }
 
+pub(crate) struct SerializedBatch {
+    /// Blobs serialized in EphemeralFile's native format, ready for passing to [`EphemeralFile::write_raw`].
+    pub(crate) raw: Vec<u8>,
+
+    /// Index of values in [`Self::raw`], using offsets relative to the start of the buffer.
+    pub(crate) offsets: Vec<(Key, Lsn, u64)>,
+
+    /// The highest LSN of any value in the batch
+    pub(crate) max_lsn: Lsn,
+}
+
+impl SerializedBatch {
+    /// Write a blob length in the internal format of the EphemeralFile
+    pub(crate) fn write_blob_length(len: usize, cursor: &mut std::io::Cursor<Vec<u8>>) {
+        use std::io::Write;
+
+        if len < 0x80 {
+            // short one-byte length header
+            let len_buf = [len as u8];
+
+            cursor
+                .write_all(&len_buf)
+                .expect("Writing to Vec is infallible");
+        } else {
+            let mut len_buf = u32::to_be_bytes(len as u32);
+            len_buf[0] |= 0x80;
+            cursor
+                .write_all(&len_buf)
+                .expect("Writing to Vec is infallible");
+        }
+    }
+
+    pub(crate) fn from_values(batch: Vec<(Key, Lsn, Value)>) -> Self {
+        use std::io::Write;
+
+        let mut offsets: Vec<(Key, Lsn, u64)> = Vec::new();
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut max_lsn: Lsn = Lsn(0);
+        let mut value_buf = smallvec::SmallVec::<[u8; 256]>::new();
+        for (key, lsn, val) in batch {
+            let relative_off = cursor.position();
+
+            value_buf.clear();
+            val.ser_into(&mut value_buf)
+                .expect("Value serialization is infallible");
+            Self::write_blob_length(value_buf.len(), &mut cursor);
+
+            cursor
+                .write_all(&value_buf)
+                .expect("Writing to Vec is infallible");
+
+            // We can't write straight into the buffer, because the InMemoryLayer file format requires
+            // the size to come before the value.  However... we could probably calculate the size before
+            // actually serializing the value
+            //val.ser_into(&mut cursor)?;
+
+            offsets.push((key, lsn, relative_off));
+            max_lsn = std::cmp::max(max_lsn, lsn);
+        }
+
+        Self {
+            raw: cursor.into_inner(),
+            offsets,
+            max_lsn,
+        }
+    }
+}
+
 fn inmem_layer_display(mut f: impl Write, start_lsn: Lsn, end_lsn: Lsn) -> std::fmt::Result {
     write!(f, "inmem-{:016X}-{:016X}", start_lsn.0, end_lsn.0)
 }
@@ -483,8 +551,7 @@ impl InMemoryLayer {
     // Write path.
     pub(crate) async fn put_batch(
         &self,
-        buf: Vec<u8>,
-        values: Vec<(Key, Lsn, u64)>,
+        serialized_batch: SerializedBatch,
         ctx: &RequestContext,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
@@ -494,7 +561,7 @@ impl InMemoryLayer {
             inner
                 .file
                 .write_raw(
-                    &buf,
+                    &serialized_batch.raw,
                     &RequestContextBuilder::extend(ctx)
                         .page_content_kind(PageContentKind::InMemoryLayer)
                         .build(),
@@ -502,7 +569,7 @@ impl InMemoryLayer {
                 .await?
         };
 
-        for (key, lsn, relative_off) in values {
+        for (key, lsn, relative_off) in serialized_batch.offsets {
             let off = base_off + relative_off;
             let vec_map = inner.index.entry(key).or_default();
             let old = vec_map.append_or_update_last(lsn, off).unwrap().0;

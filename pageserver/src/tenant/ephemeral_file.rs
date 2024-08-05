@@ -80,6 +80,7 @@ impl EphemeralFile {
     }
 
     #[cfg(test)]
+    // This is a test helper: outside of tests, we are always written do via a pre-serialized batch.
     pub(crate) async fn write_blob(
         &mut self,
         srcbuf: &[u8],
@@ -87,17 +88,15 @@ impl EphemeralFile {
     ) -> Result<u64, io::Error> {
         let pos = self.rw.bytes_written();
 
-        // Write the length field
-        if srcbuf.len() < 0x80 {
-            // short one-byte length header
-            let len_buf = [srcbuf.len() as u8];
+        let mut len_bytes = std::io::Cursor::new(Vec::new());
+        crate::tenant::storage_layer::inmemory_layer::SerializedBatch::write_blob_length(
+            srcbuf.len(),
+            &mut len_bytes,
+        );
+        let len_bytes = len_bytes.into_inner();
 
-            self.rw.write_all_borrowed(&len_buf, ctx).await?;
-        } else {
-            let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
-            len_buf[0] |= 0x80;
-            self.rw.write_all_borrowed(&len_buf, ctx).await?;
-        }
+        // Write the length field
+        self.rw.write_all_borrowed(&len_bytes, ctx).await?;
 
         // Write the payload
         self.rw.write_all_borrowed(srcbuf, ctx).await?;
