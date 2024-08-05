@@ -748,7 +748,7 @@ struct ImageLayerWriterInner {
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
-    #[cfg_attr(feature = "testing", allow(unused))]
+    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
     last_written_key: Key,
 }
 
