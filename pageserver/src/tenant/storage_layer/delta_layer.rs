@@ -36,7 +36,7 @@ use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, Fi
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::Layer;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
@@ -806,95 +806,6 @@ impl DeltaLayerInner {
             layer_key_range: actual_summary.key_range,
             layer_lsn_range: actual_summary.lsn_range,
         })
-    }
-
-    pub(super) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        let mut need_image = true;
-        // Scan the page versions backwards, starting from `lsn`.
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            self.index_start_blk,
-            self.index_root_blk,
-            &block_reader,
-        );
-        let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
-
-        let mut offsets: Vec<(Lsn, u64)> = Vec::new();
-
-        tree_reader
-            .visit(
-                &search_key.0,
-                VisitDirection::Backwards,
-                |key, value| {
-                    let blob_ref = BlobRef(value);
-                    if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
-                        return false;
-                    }
-                    let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                    if entry_lsn < lsn_range.start {
-                        return false;
-                    }
-                    offsets.push((entry_lsn, blob_ref.pos()));
-
-                    !blob_ref.will_init()
-                },
-                &RequestContextBuilder::extend(ctx)
-                    .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
-                    .build(),
-            )
-            .await?;
-
-        let ctx = &RequestContextBuilder::extend(ctx)
-            .page_content_kind(PageContentKind::DeltaLayerValue)
-            .build();
-
-        // Ok, 'offsets' now contains the offsets of all the entries we need to read
-        let cursor = block_reader.block_cursor();
-        let mut buf = Vec::new();
-        for (entry_lsn, pos) in offsets {
-            cursor
-                .read_blob_into_buf(pos, &mut buf, ctx)
-                .await
-                .with_context(|| {
-                    format!("Failed to read blob from virtual file {}", self.file.path)
-                })?;
-            let val = Value::des(&buf).with_context(|| {
-                format!(
-                    "Failed to deserialize file blob from virtual file {}",
-                    self.file.path
-                )
-            })?;
-            match val {
-                Value::Image(img) => {
-                    reconstruct_state.img = Some((entry_lsn, img));
-                    need_image = false;
-                    break;
-                }
-                Value::WalRecord(rec) => {
-                    let will_init = rec.will_init();
-                    reconstruct_state.records.push((entry_lsn, rec));
-                    if will_init {
-                        // This WAL record initializes the page, so no need to go further back
-                        need_image = false;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // If an older page image is needed to reconstruct the page, let the
-        // caller know.
-        if need_image {
-            Ok(ValueReconstructResult::Continue)
-        } else {
-            Ok(ValueReconstructResult::Complete)
-        }
     }
 
     // Look up the keys in the provided keyspace and update

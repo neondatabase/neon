@@ -854,7 +854,7 @@ async fn eviction_cancellation_on_drop() {
 fn layer_size() {
     assert_eq!(size_of::<LayerAccessStats>(), 8);
     assert_eq!(size_of::<PersistentLayerDesc>(), 104);
-    assert_eq!(size_of::<LayerInner>(), 312);
+    assert_eq!(size_of::<LayerInner>(), 296);
     // it also has the utf8 path
 }
 
