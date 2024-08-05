@@ -58,6 +58,9 @@ impl SplitImageLayerWriter {
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        // The current estimation is an upper bound of the space that the key/image could take
+        // because we did not consider compression in this estimation. The resulting image layer
+        // could be smaller than the target size.
         let addition_size_estimation = KEY_SIZE as u64 + img.len() as u64;
         if self.inner.num_keys() >= 1
             && self.inner.estimated_size() + addition_size_estimation >= self.target_layer_size
