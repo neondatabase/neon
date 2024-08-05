@@ -72,20 +72,22 @@ async fn ingest(
     for i in 0..put_count {
         lsn += put_size as u64;
 
+        // Generate lots of keys within a single relation, which simulates the typical bulk ingest case: people
+        // usually care the most about write performance when they're blasting a huge batch of data into a huge table.
         match key_layout {
             KeyLayout::Sequential => {
                 // Use sequential order to illustrate the experience a user is likely to have
                 // when ingesting bulk data.
-                key.field3 = i as u32;
+                key.field6 = i as u32;
             }
             KeyLayout::Random => {
                 // Use random-order keys to avoid giving a false advantage to data structures that are
                 // faster when inserting on the end.
-                key.field3 = murmurhash32(i as u32);
+                key.field6 = murmurhash32(i as u32);
             }
             KeyLayout::RandomReuse(mask) => {
                 // Use low bits only, to limit cardinality
-                key.field3 = murmurhash32(i as u32) & mask;
+                key.field6 = murmurhash32(i as u32) & mask;
             }
         }
 
