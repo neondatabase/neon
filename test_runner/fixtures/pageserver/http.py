@@ -556,6 +556,20 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, dict)
         return res_json
 
+    def timeline_block_gc(self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/block_gc",
+        )
+        log.info(f"Got GC request response code: {res.status_code}")
+        self.verbose_error(res)
+
+    def timeline_unblock_gc(self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/unblock_gc",
+        )
+        log.info(f"Got GC request response code: {res.status_code}")
+        self.verbose_error(res)
+
     def timeline_compact(
         self,
         tenant_id: Union[TenantId, TenantShardId],
