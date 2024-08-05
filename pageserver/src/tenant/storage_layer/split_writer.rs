@@ -1,12 +1,12 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use bytes::Bytes;
 use pageserver_api::key::{Key, KEY_SIZE};
 use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
 
-use crate::{config::PageServerConf, context::RequestContext, tenant::Timeline};
+use crate::{config::PageServerConf, context::RequestContext, repository::Value, tenant::Timeline};
 
-use super::{ImageLayerWriter, ResidentLayer};
+use super::{DeltaLayerWriter, ImageLayerWriter, ResidentLayer};
 
 /// An image writer that takes images and produces multiple image layers. The interface does not
 /// guarantee atomicity (i.e., if the image layer generation fails, there might be leftover files
@@ -97,6 +97,106 @@ impl SplitImageLayerWriter {
         } = self;
         generated_layers.push(inner.finish_with_end_key(tline, end_key, ctx).await?);
         Ok(generated_layers)
+    }
+
+    /// When split writer fails, the caller should call this function and handle partially generated layers.
+    pub(crate) async fn take(self) -> anyhow::Result<(Vec<ResidentLayer>, ImageLayerWriter)> {
+        Ok((self.generated_layers, self.inner))
+    }
+}
+
+/// A delta writer that takes key-lsn-values and produces multiple delta layers. The interface does not
+/// guarantee atomicity (i.e., if the delta layer generation fails, there might be leftover files
+/// to be cleaned up).
+#[must_use]
+pub struct SplitDeltaLayerWriter {
+    inner: DeltaLayerWriter,
+    target_layer_size: u64,
+    generated_layers: Vec<ResidentLayer>,
+    conf: &'static PageServerConf,
+    timeline_id: TimelineId,
+    tenant_shard_id: TenantShardId,
+    lsn_range: Range<Lsn>,
+}
+
+impl SplitDeltaLayerWriter {
+    pub async fn new(
+        conf: &'static PageServerConf,
+        timeline_id: TimelineId,
+        tenant_shard_id: TenantShardId,
+        start_key: Key,
+        lsn_range: Range<Lsn>,
+        target_layer_size: u64,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            target_layer_size,
+            inner: DeltaLayerWriter::new(
+                conf,
+                timeline_id,
+                tenant_shard_id,
+                start_key,
+                lsn_range.clone(),
+                ctx,
+            )
+            .await?,
+            generated_layers: Vec::new(),
+            conf,
+            timeline_id,
+            tenant_shard_id,
+            lsn_range,
+        })
+    }
+
+    pub async fn put_value(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        val: Value,
+        tline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        // The current estimation is an upper bound of the space that the key/image could take
+        // because we did not consider compression in this estimation. The resulting image layer
+        // could be smaller than the target size.
+        let addition_size_estimation = KEY_SIZE as u64 + 8 /* LSN u64 size */ + 80 /* value size estimation */;
+        if self.inner.num_keys() >= 1
+            && self.inner.estimated_size() + addition_size_estimation >= self.target_layer_size
+        {
+            let next_delta_writer = DeltaLayerWriter::new(
+                self.conf,
+                self.timeline_id,
+                self.tenant_shard_id,
+                key,
+                self.lsn_range.clone(),
+                ctx,
+            )
+            .await?;
+            let prev_delta_writer = std::mem::replace(&mut self.inner, next_delta_writer);
+            self.generated_layers
+                .push(prev_delta_writer.finish(key, tline, ctx).await?);
+        }
+        self.inner.put_value(key, lsn, val, ctx).await
+    }
+
+    pub(crate) async fn finish(
+        self,
+        tline: &Arc<Timeline>,
+        ctx: &RequestContext,
+        end_key: Key,
+    ) -> anyhow::Result<Vec<ResidentLayer>> {
+        let Self {
+            mut generated_layers,
+            inner,
+            ..
+        } = self;
+        generated_layers.push(inner.finish(end_key, tline, ctx).await?);
+        Ok(generated_layers)
+    }
+
+    /// When split writer fails, the caller should call this function and handle partially generated layers.
+    pub(crate) async fn take(self) -> anyhow::Result<(Vec<ResidentLayer>, DeltaLayerWriter)> {
+        Ok((self.generated_layers, self.inner))
     }
 }
 
