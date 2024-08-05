@@ -433,8 +433,12 @@ impl Layer {
         self.0.info(reset)
     }
 
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        &self.0.access_stats
+    pub(crate) fn latest_activity(&self) -> SystemTime {
+        self.0.access_stats.latest_activity()
+    }
+
+    pub(crate) fn visibility(&self) -> LayerVisibilityHint {
+        self.0.access_stats.visibility()
     }
 
     pub(crate) fn local_path(&self) -> &Utf8Path {
@@ -489,7 +493,7 @@ impl Layer {
     }
 
     pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) {
-        let old_visibility = self.access_stats().set_visibility(visibility.clone());
+        let old_visibility = self.0.access_stats.set_visibility(visibility.clone());
         use LayerVisibilityHint::*;
         match (old_visibility, visibility) {
             (Visible, Covered) => {

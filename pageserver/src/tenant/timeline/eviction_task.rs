@@ -225,7 +225,7 @@ impl Timeline {
                     continue;
                 }
 
-                let last_activity_ts = layer.access_stats().latest_activity();
+                let last_activity_ts = layer.latest_activity();
 
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
