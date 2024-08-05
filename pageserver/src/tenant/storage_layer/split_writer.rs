@@ -157,9 +157,8 @@ impl SplitDeltaLayerWriter {
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        // The current estimation is an upper bound of the space that the key/image could take
-        // because we did not consider compression in this estimation. The resulting image layer
-        // could be smaller than the target size.
+        // The current estimation is key size plus LSN size plus value size estimation. This is not an accurate
+        // number, and therefore the final layer size could be a little bit larger or smaller than the target.
         let addition_size_estimation = KEY_SIZE as u64 + 8 /* LSN u64 size */ + 80 /* value size estimation */;
         if self.inner.num_keys() >= 1
             && self.inner.estimated_size() + addition_size_estimation >= self.target_layer_size
