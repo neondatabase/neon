@@ -59,18 +59,18 @@ impl GcBlock {
     /// keep the gc blocking reason.
     pub(crate) async fn insert(
         &self,
-        _timeline: &super::Timeline,
-        _reason: GcBlockingReason,
+        timeline: &super::Timeline,
+        reason: GcBlockingReason,
     ) -> anyhow::Result<bool> {
         let (added, uploaded) = {
             let mut g = self.reasons.lock().unwrap();
-            let set = g.entry(_timeline.timeline_id).or_default();
-            let added = set.insert(_reason);
+            let set = g.entry(timeline.timeline_id).or_default();
+            let added = set.insert(reason);
 
             // LOCK ORDER: intentionally hold the lock, see self.reasons.
-            let uploaded = _timeline
+            let uploaded = timeline
                 .remote_client
-                .schedule_insert_gc_block_reason(_reason)?;
+                .schedule_insert_gc_block_reason(reason)?;
 
             (added, uploaded)
         };
@@ -86,8 +86,8 @@ impl GcBlock {
     /// Remove blocking gc for this one timeline and the given reason.
     pub(crate) async fn remove(
         &self,
-        _timeline: &super::Timeline,
-        _reason: GcBlockingReason,
+        timeline: &super::Timeline,
+        reason: GcBlockingReason,
     ) -> anyhow::Result<()> {
         use std::collections::hash_map::Entry;
 
@@ -95,10 +95,10 @@ impl GcBlock {
 
         let (remaining_blocks, uploaded) = {
             let mut g = self.reasons.lock().unwrap();
-            match g.entry(_timeline.timeline_id) {
+            match g.entry(timeline.timeline_id) {
                 Entry::Occupied(mut oe) => {
                     let set = oe.get_mut();
-                    set.remove(_reason);
+                    set.remove(reason);
                     if set.is_empty() {
                         oe.remove();
                     }
@@ -112,9 +112,9 @@ impl GcBlock {
             let remaining_blocks = g.len();
 
             // LOCK ORDER: intentionally hold the lock while scheduling; see self.reasons
-            let uploaded = _timeline
+            let uploaded = timeline
                 .remote_client
-                .schedule_remove_gc_block_reason(_reason)?;
+                .schedule_remove_gc_block_reason(reason)?;
 
             (remaining_blocks, uploaded)
         };
@@ -123,7 +123,7 @@ impl GcBlock {
         // no need to synchronize with gc iteration again
 
         if remaining_blocks > 0 {
-            tracing::info!(remaining_blocks, removed=?_reason, "gc blocking removed, but gc remains blocked");
+            tracing::info!(remaining_blocks, removed=?reason, "gc blocking removed, but gc remains blocked");
         } else {
             tracing::info!("gc is now unblocked for the tenant");
         }
