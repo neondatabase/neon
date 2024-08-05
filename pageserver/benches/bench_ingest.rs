@@ -10,7 +10,7 @@ use pageserver::{
     page_cache,
     repository::Value,
     task_mgr::TaskKind,
-    tenant::storage_layer::InMemoryLayer,
+    tenant::storage_layer::{InMemoryLayer, SerializedBatch},
     virtual_file::{self, api::IoEngineKind},
 };
 use pageserver_api::{key::Key, shard::TenantShardId};
@@ -63,11 +63,14 @@ async fn ingest(
 
     let layer = InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, &ctx).await?;
 
-    let data = Value::Image(Bytes::from(vec![0u8; put_size])).ser()?;
+    let value = Value::Image(Bytes::from(vec![0u8; put_size]));
     let ctx = RequestContext::new(
         pageserver::task_mgr::TaskKind::WalReceiverConnectionHandler,
         pageserver::context::DownloadBehavior::Download,
     );
+
+    let batch_pages = 100;
+    let mut batch_values = vec![];
 
     for i in 0..put_count {
         lsn += put_size as u64;
@@ -91,7 +94,18 @@ async fn ingest(
             }
         }
 
-        layer.put_value(key, lsn, &data, &ctx).await?;
+        batch_values.push((key, lsn, value.clone()));
+
+        if batch_values.len() >= batch_pages {
+            let batch = SerializedBatch::from_values(vec![(key, lsn, value.clone())]);
+
+            layer.put_batch(batch, &ctx).await?;
+        }
+    }
+    if !batch_values.is_empty() {
+        let batch = SerializedBatch::from_values(vec![(key, lsn, value.clone())]);
+
+        layer.put_batch(batch, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
 

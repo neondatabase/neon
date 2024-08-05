@@ -29,6 +29,7 @@ use utils::lsn::Lsn;
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter, ValueRef};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
+pub use inmemory_layer::SerializedBatch;
 pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use layer_name::{DeltaLayerName, ImageLayerName, LayerName};
 

@@ -454,7 +454,7 @@ impl InMemoryLayer {
     }
 }
 
-pub(crate) struct SerializedBatch {
+pub struct SerializedBatch {
     /// Blobs serialized in EphemeralFile's native format, ready for passing to [`EphemeralFile::write_raw`].
     pub(crate) raw: Vec<u8>,
 
@@ -486,7 +486,7 @@ impl SerializedBatch {
         }
     }
 
-    pub(crate) fn from_values(batch: Vec<(Key, Lsn, Value)>) -> Self {
+    pub fn from_values(batch: Vec<(Key, Lsn, Value)>) -> Self {
         use std::io::Write;
 
         let mut offsets: Vec<(Key, Lsn, u64)> = Vec::new();
@@ -585,9 +585,8 @@ impl InMemoryLayer {
         })
     }
 
-
     // Write path.
-    pub(crate) async fn put_batch(
+    pub async fn put_batch(
         &self,
         serialized_batch: SerializedBatch,
         ctx: &RequestContext,
