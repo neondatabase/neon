@@ -163,7 +163,7 @@ pub(crate) struct Attempt {
 }
 
 impl Attempt {
-    pub(crate) fn before_shutdown(&mut self) {
+    pub(crate) fn before_reset_tenant(&mut self) {
         let taken = self.gate_entered.take();
         assert!(taken.is_some());
     }
