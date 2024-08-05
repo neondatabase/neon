@@ -2959,11 +2959,11 @@ pub fn make_router(
             |r| api_handler(r, evict_timeline_layer_handler),
         )
         .post(
-            "/v1/tenant/:tenant_shard_id/timelnie/:timeline_id/block_gc",
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/block_gc",
             |r| api_handler(r, timeline_gc_blocking_handler),
         )
         .post(
-            "/v1/tenant/:tenant_shard_id/timelnie/:timeline_id/unblock_gc",
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/unblock_gc",
             |r| api_handler(r, timeline_gc_unblocking_handler),
         )
         .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
