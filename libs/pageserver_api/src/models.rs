@@ -642,6 +642,7 @@ pub struct TenantInfo {
     ///
     /// Only looked up for the individual tenant detail, not the listing. This is purely for
     /// debugging, not included in openapi.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gc_blocking: Option<String>,
 }
 
