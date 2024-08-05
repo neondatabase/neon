@@ -262,6 +262,7 @@ pub(crate) struct GcBlocking {
 }
 
 #[derive(Debug, enumset::EnumSetType, serde::Serialize, serde::Deserialize)]
+#[enumset(serialize_repr = "list")]
 pub(crate) enum GcBlockingReason {
     Manual,
     DetachAncestor,
