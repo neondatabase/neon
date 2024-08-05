@@ -68,7 +68,7 @@ class DebeziumAPI:
         """
         Deletes the specified connector
         """
-        return self.__request("DELETE", "/" + connector)
+        return self.__request("DELETE", f"/{connector}")
 
 
 @pytest.fixture(scope="function")
