@@ -1796,7 +1796,7 @@ impl<'a> DatadirModification<'a> {
                 if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
-                    write_batch.push((key, lsn, value));
+                    write_batch.push((key.to_compact(), lsn, value));
                 } else {
                     retained_pending_updates
                         .entry(key)

@@ -44,11 +44,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
-    bin_ser::BeSer,
     fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
 };
 
+use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -62,7 +62,6 @@ use std::{
     collections::btree_map::Entry,
     ops::{Deref, Range},
 };
-use std::{io::Write, pin::pin};
 
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -136,7 +135,10 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::{config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized};
+use super::{
+    config::TenantConf, storage_layer::inmemory_layer, storage_layer::LayerVisibilityHint,
+    upload_queue::NotInitialized,
+};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{
@@ -5638,44 +5640,16 @@ impl<'a> TimelineWriter<'a> {
             return Ok(());
         }
 
-        let mut values: Vec<(CompactKey, Lsn, u64)> = Vec::new();
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
-        let mut batch_max_lsn: Lsn = Lsn(0);
-        let mut value_buf = smallvec::SmallVec::<[u8; 256]>::new();
-        for (key, lsn, val) in batch {
-            let relative_off = cursor.position();
-
-            value_buf.clear();
-            val.ser_into(&mut value_buf)?;
-            if value_buf.len() < 0x80 {
-                // short one-byte length header
-                let len_buf = [value_buf.len() as u8];
-
-                cursor.write_all(&len_buf)?;
-            } else {
-                let mut len_buf = u32::to_be_bytes(value_buf.len() as u32);
-                len_buf[0] |= 0x80;
-                cursor.write_all(&len_buf)?;
-            }
-            cursor.write_all(&value_buf)?;
-
-            // We can't write straight into the buffer, because the InMemoryLayer file format requires
-            // the size to come before the value.  However... we could probably calculate the size before
-            // actually serializing the value
-            //val.ser_into(&mut cursor)?;
-
-            values.push((key, lsn, relative_off));
-            batch_max_lsn = std::cmp::max(batch_max_lsn, lsn);
-        }
-
-        let buf = cursor.into_inner();
-        let buf_size: u64 = buf.len() as u64;
+        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch);
+        let batch_max_lsn = serialized_batch.max_lsn;
+        let buf_size: u64 = serialized_batch.raw.len() as u64;
 
         let action = self.get_open_layer_action(batch_max_lsn, buf_size);
         let layer = self
             .handle_open_layer_action(batch_max_lsn, action, ctx)
             .await?;
-        let res = layer.put_batch(buf, values, ctx).await;
+
+        let res = layer.put_batch(serialized_batch, ctx).await;
 
         if res.is_ok() {
             // Update the current size only when the entire write was ok.
@@ -5702,7 +5676,8 @@ impl<'a> TimelineWriter<'a> {
         value: &Value,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.put_batch(vec![(key, lsn, value.clone())], ctx).await
+        self.put_batch(vec![(key.to_compact(), lsn, value.clone())], ctx)
+            .await
     }
 
     pub(crate) async fn delete_batch(
