@@ -238,7 +238,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut writer = SplitImageLayerWriter::new(
+        let mut image_writer = SplitImageLayerWriter::new(
             tenant.conf,
             tline.timeline_id,
             tenant.tenant_shard_id,
@@ -250,11 +250,42 @@ mod tests {
         .await
         .unwrap();
 
-        writer
+        let mut delta_writer = SplitDeltaLayerWriter::new(
+            tenant.conf,
+            tline.timeline_id,
+            tenant.tenant_shard_id,
+            get_key(0),
+            Lsn(0x18)..Lsn(0x20),
+            4 * 1024 * 1024,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        image_writer
             .put_image(get_key(0), get_img(0), &tline, &ctx)
             .await
             .unwrap();
-        let layers = writer.finish(&tline, &ctx, get_key(10)).await.unwrap();
+        let layers = image_writer
+            .finish(&tline, &ctx, get_key(10))
+            .await
+            .unwrap();
+        assert_eq!(layers.len(), 1);
+
+        delta_writer
+            .put_value(
+                get_key(0),
+                Lsn(0x18),
+                Value::Image(get_img(0)),
+                &tline,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let layers = delta_writer
+            .finish(&tline, &ctx, get_key(10))
+            .await
+            .unwrap();
         assert_eq!(layers.len(), 1);
     }
 
@@ -270,7 +301,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut writer = SplitImageLayerWriter::new(
+        let mut image_writer = SplitImageLayerWriter::new(
             tenant.conf,
             tline.timeline_id,
             tenant.tenant_shard_id,
@@ -281,26 +312,58 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut delta_writer = SplitDeltaLayerWriter::new(
+            tenant.conf,
+            tline.timeline_id,
+            tenant.tenant_shard_id,
+            get_key(0),
+            Lsn(0x18)..Lsn(0x20),
+            4 * 1024 * 1024,
+            &ctx,
+        )
+        .await
+        .unwrap();
         const N: usize = 2000;
         for i in 0..N {
             let i = i as u32;
-            writer
+            image_writer
                 .put_image(get_key(i), get_large_img(), &tline, &ctx)
                 .await
                 .unwrap();
+            delta_writer
+                .put_value(
+                    get_key(i),
+                    Lsn(0x20),
+                    Value::Image(get_large_img()),
+                    &tline,
+                    &ctx,
+                )
+                .await
+                .unwrap();
         }
-        let layers = writer
+        let image_layers = image_writer
             .finish(&tline, &ctx, get_key(N as u32))
             .await
             .unwrap();
-        assert_eq!(layers.len(), N / 512 + 1);
-        for idx in 0..layers.len() {
-            assert_ne!(layers[idx].layer_desc().key_range.start, Key::MIN);
-            assert_ne!(layers[idx].layer_desc().key_range.end, Key::MAX);
+        let delta_layers = delta_writer
+            .finish(&tline, &ctx, get_key(N as u32))
+            .await
+            .unwrap();
+        assert_eq!(image_layers.len(), N / 512 + 1);
+        assert_eq!(delta_layers.len(), N / 512 + 1);
+        for idx in 0..image_layers.len() {
+            assert_ne!(image_layers[idx].layer_desc().key_range.start, Key::MIN);
+            assert_ne!(image_layers[idx].layer_desc().key_range.end, Key::MAX);
+            assert_ne!(delta_layers[idx].layer_desc().key_range.start, Key::MIN);
+            assert_ne!(delta_layers[idx].layer_desc().key_range.end, Key::MAX);
             if idx > 0 {
                 assert_eq!(
-                    layers[idx - 1].layer_desc().key_range.end,
-                    layers[idx].layer_desc().key_range.start
+                    image_layers[idx - 1].layer_desc().key_range.end,
+                    image_layers[idx].layer_desc().key_range.start
+                );
+                assert_eq!(
+                    delta_layers[idx - 1].layer_desc().key_range.end,
+                    delta_layers[idx].layer_desc().key_range.start
                 );
             }
         }
@@ -318,7 +381,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut writer = SplitImageLayerWriter::new(
+        let mut image_writer = SplitImageLayerWriter::new(
             tenant.conf,
             tline.timeline_id,
             tenant.tenant_shard_id,
@@ -330,15 +393,56 @@ mod tests {
         .await
         .unwrap();
 
-        writer
+        let mut delta_writer = SplitDeltaLayerWriter::new(
+            tenant.conf,
+            tline.timeline_id,
+            tenant.tenant_shard_id,
+            get_key(0),
+            Lsn(0x18)..Lsn(0x20),
+            4 * 1024,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        image_writer
             .put_image(get_key(0), get_img(0), &tline, &ctx)
             .await
             .unwrap();
-        writer
+        image_writer
             .put_image(get_key(1), get_large_img(), &tline, &ctx)
             .await
             .unwrap();
-        let layers = writer.finish(&tline, &ctx, get_key(10)).await.unwrap();
+        let layers = image_writer
+            .finish(&tline, &ctx, get_key(10))
+            .await
+            .unwrap();
+        assert_eq!(layers.len(), 2);
+
+        delta_writer
+            .put_value(
+                get_key(0),
+                Lsn(0x18),
+                Value::Image(get_img(0)),
+                &tline,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        delta_writer
+            .put_value(
+                get_key(1),
+                Lsn(0x1A),
+                Value::Image(get_large_img()),
+                &tline,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let layers = delta_writer
+            .finish(&tline, &ctx, get_key(10))
+            .await
+            .unwrap();
         assert_eq!(layers.len(), 2);
     }
 }
