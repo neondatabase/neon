@@ -1930,7 +1930,6 @@ impl TenantManager {
         mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, anyhow::Error> {
-        use crate::tenant::timeline::detach_ancestor::Error;
         // FIXME: this is unnecessary, slotguard already has these semantics
         struct RevertOnDropSlot(Option<SlotGuard>);
 
@@ -2047,7 +2046,7 @@ impl TenantManager {
                         Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => {
                             Error::ShuttingDown
                         }
-                        other => Error::Unexpected(other.into()),
+                        other => Error::Complete(other.into()),
                     }
                 })?;
 
@@ -2057,13 +2056,12 @@ impl TenantManager {
 
             let timeline = tenant
                 .get_timeline(attempt.timeline_id, true)
-                .map_err(|_| Error::DetachedNotFoundAfterRestart)?;
+                .map_err(Error::NotFound)?;
 
             timeline
                 .complete_detaching_timeline_ancestor(&tenant, attempt, ctx)
                 .await
                 .map(|()| reparented)
-                .map_err(|e| e.into())
         } else {
             // at least the latest versions have now been downloaded and refreshed; be ready to
             // retry another time.
