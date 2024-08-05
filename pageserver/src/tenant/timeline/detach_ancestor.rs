@@ -5,20 +5,18 @@ use crate::{
     context::{DownloadBehavior, RequestContext},
     task_mgr::TaskKind,
     tenant::{
-        mgr::GetActiveTenantError,
+        remote_timeline_client::index::GcBlockingReason::DetachAncestor,
         storage_layer::{AsLayerDesc as _, DeltaLayerWriter, Layer, ResidentLayer},
         Tenant,
     },
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
 use anyhow::Context;
-use pageserver_api::models::detach_ancestor::{self, AncestorDetached};
+use pageserver_api::models::detach_ancestor::AncestorDetached;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use utils::{
-    completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn, sync::gate,
-};
+use utils::{completion, generation::Generation, http::error::ApiError, id::TimelineId, lsn::Lsn};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
