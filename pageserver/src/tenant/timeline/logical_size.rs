@@ -122,6 +122,10 @@ impl CurrentLogicalSize {
             Self::Exact(_) => Accuracy::Exact,
         }
     }
+
+    pub(crate) fn is_exact(&self) -> bool {
+        matches!(self, Self::Exact(_))
+    }
 }
 
 impl LogicalSize {
