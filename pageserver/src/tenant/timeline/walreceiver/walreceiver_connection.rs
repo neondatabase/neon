@@ -327,6 +327,20 @@ pub(super) async fn handle_walreceiver_connection(
                         let mut decoded = DecodedWALRecord::default();
                         decode_wal_record(recdata, &mut decoded, modification.tline.pg_version)?;
 
+                        if decoded.is_dbase_create_copy(timeline.pg_version)
+                            && uncommitted_records > 0
+                        {
+                            // Special case: legacy PG database creations operate by reading pages from a 'template' database:
+                            // these are the only kinds of WAL record that require reading data blocks while ingesting.  Ensure
+                            // all earlier writes of data blocks are visible by committing any modification in flight.
+                            WAL_INGEST
+                                .records_committed
+                                .inc_by(uncommitted_records - filtered_records);
+                            modification.commit(&ctx).await?;
+                            uncommitted_records = 0;
+                            filtered_records = 0;
+                        }
+
                         // Ingest the records without immediately committing them.
                         let ingested = walingest
                             .ingest_record(decoded, lsn, &mut modification, &ctx)
