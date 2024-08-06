@@ -2920,7 +2920,7 @@ impl Timeline {
         let guard = self.layers.read().await;
 
         let resident = guard.likely_resident_layers().map(|layer| {
-            let last_activity_ts = layer.access_stats().latest_activity();
+            let last_activity_ts = layer.latest_activity();
 
             HeatMapLayer::new(
                 layer.layer_desc().layer_name(),
@@ -5182,7 +5182,7 @@ impl Timeline {
                 let file_size = layer.layer_desc().file_size;
                 max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-                let last_activity_ts = layer.access_stats().latest_activity();
+                let last_activity_ts = layer.latest_activity();
 
                 EvictionCandidate {
                     layer: layer.into(),
