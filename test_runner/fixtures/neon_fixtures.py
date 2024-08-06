@@ -3796,8 +3796,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
         )
-        path = Path("endpoints") / self.endpoint_id / "pgdata"
-        self.pgdata_dir = os.path.join(self.env.repo_dir, path)
+        self.pgdata_dir = self.pg_data_dir_path()
         self.logfile = self.endpoint_path() / "compute.log"
 
         config_lines = config_lines or []
@@ -3806,11 +3805,15 @@ class Endpoint(PgProtocol, LogUtils):
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
 
-        cache_dir = self.env.repo_dir / "endpoints" / self.endpoint_id / "file_cache"
-        cache_dir.mkdir(parents=True)
+        # Delete file cache if it exists (and we're recreating the endpoint)
+        if (lfc_path := Path(self.lfc_path())).exists():
+            lfc_path.unlink()
+        else:
+            lfc_path.parent.mkdir(parents=True)
+
         config_lines = [
             "shared_buffers='1MB'",
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
+            f"neon.file_cache_path='{self.lfc_path()}'",
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ] + config_lines
@@ -3874,6 +3877,10 @@ class Endpoint(PgProtocol, LogUtils):
     def config_file_path(self) -> str:
         """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
         return os.path.join(self.endpoint_path(), "postgresql.conf")
+
+    def lfc_path(self) -> str:
+        """Path to the lfc dir"""
+        return os.path.join(self.endpoint_path() / "file_cache", "file.cache")
 
     def config(self, lines: List[str]) -> "Endpoint":
         """
