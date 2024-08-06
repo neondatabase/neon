@@ -7,6 +7,7 @@ use clap::{ArgAction, Parser};
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
+use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use remote_storage::RemoteStorageConfig;
 use sd_notify::NotifyState;
 use tokio::runtime::Handle;
@@ -204,6 +205,7 @@ fn opt_pathbuf_parser(s: &str) -> Result<Utf8PathBuf, String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let launch_ts = Box::leak(Box::new(LaunchTimestamp::generate()));
     // We want to allow multiple occurences of the same arg (taking the last) so
     // that neon_local could generate command with defaults + overrides without
     // getting 'argument cannot be used multiple times' error. This seems to be
@@ -356,14 +358,14 @@ async fn main() -> anyhow::Result<()> {
         Some(GIT_VERSION.into()),
         &[("node_id", &conf.my_id.to_string())],
     );
-    start_safekeeper(conf).await
+    start_safekeeper(launch_ts, conf).await
 }
 
 /// Result of joining any of main tasks: upper error means task failed to
 /// complete, e.g. panicked, inner is error produced by task itself.
 type JoinTaskRes = Result<anyhow::Result<()>, JoinError>;
 
-async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
+async fn start_safekeeper(launch_ts: &'static LaunchTimestamp, conf: SafeKeeperConf) -> Result<()> {
     // Prevent running multiple safekeepers on the same directory
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
     let lock_file =
@@ -491,6 +493,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     tasks_handles.push(Box::pin(broker_task_handle));
 
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
+    set_launch_timestamp_metric(launch_ts);
 
     // TODO: update tokio-stream, convert to real async Stream with
     // SignalStream, map it to obtain missing signal name, combine streams into
