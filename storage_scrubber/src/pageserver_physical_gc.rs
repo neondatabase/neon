@@ -389,10 +389,13 @@ async fn gc_ancestor(
                 // Post-deletion tenant location: don't try and GC it.
                 continue;
             }
-            BlobDataParseResult::Incorrect(reasons) => {
+            BlobDataParseResult::Incorrect {
+                errors,
+                s3_layers: _, // TODO(yuchen): could still check references to these s3 layers?
+            } => {
                 // Our primary purpose isn't to report on bad data, but log this rather than skipping silently
                 tracing::warn!(
-                    "Skipping ancestor GC for timeline {ttid}, bad metadata: {reasons:?}"
+                    "Skipping ancestor GC for timeline {ttid}, bad metadata: {errors:?}"
                 );
                 continue;
             }
@@ -518,9 +521,12 @@ pub async fn pageserver_physical_gc(
                 // Post-deletion tenant location: don't try and GC it.
                 return Ok(summary);
             }
-            BlobDataParseResult::Incorrect(reasons) => {
+            BlobDataParseResult::Incorrect {
+                errors,
+                s3_layers: _,
+            } => {
                 // Our primary purpose isn't to report on bad data, but log this rather than skipping silently
-                tracing::warn!("Skipping timeline {ttid}, bad metadata: {reasons:?}");
+                tracing::warn!("Skipping timeline {ttid}, bad metadata: {errors:?}");
                 return Ok(summary);
             }
         };

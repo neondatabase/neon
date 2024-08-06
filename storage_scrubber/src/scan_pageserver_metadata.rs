@@ -290,13 +290,21 @@ pub async fn scan_metadata(
             }
         }
 
-        if let BlobDataParseResult::Parsed {
-            index_part: _index_part,
-            index_part_generation: _index_part_generation,
-            s3_layers,
-        } = &data.blob_data
-        {
-            tenant_objects.push(ttid, s3_layers.clone());
+        match &data.blob_data {
+            BlobDataParseResult::Parsed {
+                index_part: _index_part,
+                index_part_generation: _index_part_generation,
+                s3_layers,
+            } => {
+                tenant_objects.push(ttid, s3_layers.clone());
+            }
+            BlobDataParseResult::Relic => (),
+            BlobDataParseResult::Incorrect {
+                errors: _,
+                s3_layers,
+            } => {
+                tenant_objects.push(ttid, s3_layers.clone());
+            }
         }
         tenant_timeline_results.push((ttid, data));
     }
