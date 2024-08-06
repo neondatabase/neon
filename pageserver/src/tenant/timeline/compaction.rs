@@ -113,6 +113,7 @@ impl KeyHistoryRetention {
     ///
     /// If `image_writer` is none, the images will be placed into the delta layers.
     /// The delta writer will contain all images and deltas (below and above the horizon) except the bottom-most images.
+    #[allow(clippy::too_many_arguments)]
     async fn pipe_to(
         self,
         key: Key,
@@ -1879,10 +1880,25 @@ impl Timeline {
             }
             let mut selected_layers = Vec::new();
             drop(gc_info);
+            // Pick all the layers intersect or below the gc_cutoff, get the largest LSN in the selected layers.
+            let Some(max_layer_lsn) = layers
+                .iter_historic_layers()
+                .filter(|desc| desc.get_lsn_range().start <= gc_cutoff)
+                .map(|desc| desc.get_lsn_range().end)
+                .max()
+            else {
+                info!("no layers to compact with gc");
+                return Ok(());
+            };
+            // Then, pick all the layers that are below the max_layer_lsn.
             for desc in layers.iter_historic_layers() {
-                if desc.get_lsn_range().start <= gc_cutoff {
+                if desc.get_lsn_range().end <= max_layer_lsn {
                     selected_layers.push(guard.get_from_desc(&desc));
                 }
+            }
+            if selected_layers.is_empty() {
+                info!("no layers to compact with gc");
+                return Ok(());
             }
             retain_lsns_below_horizon.sort();
             (selected_layers, gc_cutoff, retain_lsns_below_horizon)
@@ -1921,9 +1937,12 @@ impl Timeline {
             downloaded_layers.push(resident_layer);
             let desc = layer.layer_desc();
             if desc.is_delta() {
-                let lsn_range = &desc.lsn_range;
-                lsn_split_point.insert(lsn_range.start);
-                lsn_split_point.insert(lsn_range.end);
+                // ignore single-key layer files
+                if desc.key_range.start.next() != desc.key_range.end {
+                    let lsn_range = &desc.lsn_range;
+                    lsn_split_point.insert(lsn_range.start);
+                    lsn_split_point.insert(lsn_range.end);
+                }
                 stat.visit_delta_layer(desc.file_size());
             } else {
                 stat.visit_image_layer(desc.file_size());
@@ -1931,7 +1950,8 @@ impl Timeline {
         }
         for layer in &layer_selection {
             let desc = layer.layer_desc();
-            if desc.is_delta() {
+            let key_range = &desc.key_range;
+            if desc.is_delta() && key_range.start.next() != key_range.end {
                 let lsn_range = desc.lsn_range.clone();
                 let intersects = lsn_split_point.range(lsn_range).collect_vec();
                 if intersects.len() > 1 {
