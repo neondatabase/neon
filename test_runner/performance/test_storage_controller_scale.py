@@ -217,7 +217,11 @@ def test_storage_controller_many_tenants(
                 # A reconciler operation: migrate a shard.
                 shard_number = rng.randint(0, shard_count - 1)
                 tenant_shard_id = TenantShardId(tenant_id, shard_number, shard_count)
-                dest_ps_id = rng.choice([ps.id for ps in env.pageservers])
+
+                # Migrate it to its secondary location
+                desc = env.storage_controller.tenant_describe(tenant_id)
+                dest_ps_id = desc["shards"][shard_number]["node_secondary"][0]
+
                 f = executor.submit(
                     env.storage_controller.tenant_shard_migrate, tenant_shard_id, dest_ps_id
                 )
@@ -231,7 +235,11 @@ def test_storage_controller_many_tenants(
         for f in futs:
             f.result()
 
-    # Consistency check is safe here: all the previous operations waited for reconcile before completing
+    # Some of the operations above (notably migrations) might leave the controller in a state where it has
+    # some work to do, for example optimizing shard placement after we do a random migration. Wait for the system
+    # to reach a quiescent state before doing following checks.
+    env.storage_controller.reconcile_until_idle()
+
     env.storage_controller.consistency_check()
     check_memory()
 

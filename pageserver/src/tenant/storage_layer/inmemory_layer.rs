@@ -10,11 +10,10 @@ use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
 use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
-use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
 use crate::{l0_flush, page_cache, walrecord};
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
@@ -35,8 +34,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use super::{
-    DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValueReconstructState,
-    ValuesReconstructState,
+    DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -55,9 +53,6 @@ pub struct InMemoryLayer {
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.
     pub(crate) end_lsn: OnceLock<Lsn>,
-
-    /// Used for traversal path. Cached representation of the in-memory layer before frozen.
-    local_path_str: Arc<str>,
 
     /// Used for traversal path. Cached representation of the in-memory layer after frozen.
     frozen_local_path_str: OnceLock<Arc<str>>,
@@ -249,12 +244,6 @@ impl InMemoryLayer {
         self.start_lsn..self.end_lsn_or_max()
     }
 
-    pub(crate) fn local_path_str(&self) -> &Arc<str> {
-        self.frozen_local_path_str
-            .get()
-            .unwrap_or(&self.local_path_str)
-    }
-
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
@@ -302,60 +291,6 @@ impl InMemoryLayer {
         }
 
         Ok(())
-    }
-
-    /// Look up given value in the layer.
-    pub(crate) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        ensure!(lsn_range.start >= self.start_lsn);
-        let mut need_image = true;
-
-        let ctx = RequestContextBuilder::extend(ctx)
-            .page_content_kind(PageContentKind::InMemoryLayer)
-            .build();
-
-        let inner = self.inner.read().await;
-
-        let reader = inner.file.block_cursor();
-
-        // Scan the page versions backwards, starting from `lsn`.
-        if let Some(vec_map) = inner.index.get(&key) {
-            let slice = vec_map.slice_range(lsn_range);
-            for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos, &ctx).await?;
-                let value = Value::des(&buf)?;
-                match value {
-                    Value::Image(img) => {
-                        reconstruct_state.img = Some((*entry_lsn, img));
-                        return Ok(ValueReconstructResult::Complete);
-                    }
-                    Value::WalRecord(rec) => {
-                        let will_init = rec.will_init();
-                        reconstruct_state.records.push((*entry_lsn, rec));
-                        if will_init {
-                            // This WAL record initializes the page, so no need to go further back
-                            need_image = false;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // release lock on 'inner'
-
-        // If an older page image is needed to reconstruct the page, let the
-        // caller know.
-        if need_image {
-            Ok(ValueReconstructResult::Continue)
-        } else {
-            Ok(ValueReconstructResult::Complete)
-        }
     }
 
     // Look up the keys in the provided keyspace and update
@@ -459,11 +394,6 @@ impl InMemoryLayer {
 
         Ok(InMemoryLayer {
             file_id: key,
-            local_path_str: {
-                let mut buf = String::new();
-                inmem_layer_log_display(&mut buf, timeline_id, start_lsn, Lsn::MAX).unwrap();
-                buf.into()
-            },
             frozen_local_path_str: OnceLock::new(),
             conf,
             timeline_id,
