@@ -690,12 +690,10 @@ impl DeltaLayerWriter {
         self.inner.take().unwrap().finish(key_end, ctx).await
     }
 
-    #[cfg(test)]
     pub(crate) fn num_keys(&self) -> usize {
         self.inner.as_ref().unwrap().num_keys
     }
 
-    #[cfg(test)]
     pub(crate) fn estimated_size(&self) -> u64 {
         let inner = self.inner.as_ref().unwrap();
         inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
