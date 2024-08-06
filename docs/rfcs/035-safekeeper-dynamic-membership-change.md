@@ -285,8 +285,8 @@ table! {
         timeline_id -> Varchar,
         tenant_id -> Varchar,
         generation -> Int4,
-        sk_set -> Jsonb, // list of safekeeper ids
-        new_sk_set -> Nullable<Jsonb>, // list of safekeeper ids, null if not join conf
+        sk_set -> Array<Int4>, // list of safekeeper ids
+        new_sk_set -> Nullable<Array<Int4>>, // list of safekeeper ids, null if not joint conf
         cplane_notified_generation -> Int4,
     }
 }
@@ -299,7 +299,7 @@ Node management is similar to pageserver:
 2) GET `/control/v1/safekeepers` lists safekeepers.
 3) GET `/control/v1/safekeepers/:node_id` gets safekeeper.
 4) PUT `/control/v1/safekepers/:node_id/status` changes status to e.g.
-   `unavailable` or `decomissioned`. Initially it is simpler not to schedule any
+   `offline` or `decomissioned`. Initially it is simpler not to schedule any
     migrations here.
 
 Safekeeper deploy scripts should register safekeeper at storage_contorller as
@@ -358,7 +358,7 @@ looking at logs/metrics).
 Migration is executed as described above. One subtlety is that (local) deletion on
 source safekeeper might fail, which is not a problem if we are going to
 decomission the node but leaves garbage otherwise. I'd propose in the first version
-1) Don't attempt deletion at all if node status is `unavailable`.
+1) Don't attempt deletion at all if node status is `offline`.
 2) If it failed, just issue warning.
 And add PUT `/control/v1/safekeepers/:node_id/scrub` endpoint which would find and 
 remove garbage timelines for manual use. It will 1) list all timelines on the 
@@ -470,7 +470,7 @@ Very rough implementation order:
 Currently, `pull_timeline` doesn't work correctly with evicted timelines because
 copy would point to original partial file. To fix let's just do s3 copy of the
 file. It is a bit stupid as generally unnecessary work, but it makes sense to
-implement proper migration before doing smarter timeline archival.
+implement proper migration before doing smarter timeline archival. [Issue](https://github.com/neondatabase/neon/issues/8542)
 
 ## Possible optimizations
 
