@@ -271,7 +271,7 @@ impl OpenLayerManager {
         froze
     }
 
-    /// Add image layers to the layer map, called from [`Timeline::create_image_layers`].
+    /// Add image layers to the layer map, called from [`super::Timeline::create_image_layers`].
     pub(crate) fn track_new_image_layers(
         &mut self,
         image_layers: &[ResidentLayer],
