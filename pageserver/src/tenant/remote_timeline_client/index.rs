@@ -88,10 +88,11 @@ impl IndexPart {
     /// - 6: last_aux_file_policy is added.
     /// - 7: metadata_bytes is no longer written, but still read
     /// - 8: added `archived_at`
-    const LATEST_VERSION: usize = 8;
+    /// - 9: +gc_blocking
+    const LATEST_VERSION: usize = 9;
 
     // Versions we may see when reading from a bucket.
-    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8];
+    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
