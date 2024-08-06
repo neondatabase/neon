@@ -30,7 +30,7 @@ use std::fmt::Write;
 use std::ops::Range;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::RwLock;
 
 use super::{DeltaLayerWriter, ResidentLayer, ValueReconstructSituation, ValuesReconstructState};
 
@@ -348,6 +348,73 @@ impl InMemoryLayer {
     }
 }
 
+pub(crate) struct SerializedBatch {
+    /// Blobs serialized in EphemeralFile's native format, ready for passing to [`EphemeralFile::write_raw`].
+    pub(crate) raw: Vec<u8>,
+
+    /// Index of values in [`Self::raw`], using offsets relative to the start of the buffer.
+    pub(crate) offsets: Vec<(Key, Lsn, u64)>,
+
+    /// The highest LSN of any value in the batch
+    pub(crate) max_lsn: Lsn,
+}
+
+impl SerializedBatch {
+    /// Write a blob length in the internal format of the EphemeralFile
+    pub(crate) fn write_blob_length(len: usize, cursor: &mut std::io::Cursor<Vec<u8>>) {
+        use std::io::Write;
+
+        if len < 0x80 {
+            // short one-byte length header
+            let len_buf = [len as u8];
+
+            cursor
+                .write_all(&len_buf)
+                .expect("Writing to Vec is infallible");
+        } else {
+            let mut len_buf = u32::to_be_bytes(len as u32);
+            len_buf[0] |= 0x80;
+            cursor
+                .write_all(&len_buf)
+                .expect("Writing to Vec is infallible");
+        }
+    }
+
+    pub(crate) fn from_values(batch: Vec<(Key, Lsn, Value)>) -> Self {
+        // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
+        // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
+        //
+        // TODO: this would be a good use case for BytesMut so that we can work efficiently without having
+        // to pre-calculate total size, but `bincode` requires something that
+        // implements std::io::Write.
+        let buffer_size = batch
+            .iter()
+            .map(|i| i.2.serialized_size().unwrap() as usize)
+            .sum::<usize>()
+            + 4 * batch.len();
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
+
+        let mut offsets: Vec<(Key, Lsn, u64)> = Vec::with_capacity(batch.len());
+        let mut max_lsn: Lsn = Lsn(0);
+        for (key, lsn, val) in batch {
+            let relative_off = cursor.position();
+
+            Self::write_blob_length(val.serialized_size().unwrap() as usize, &mut cursor);
+            val.ser_into(&mut cursor)
+                .expect("Writing into in-memory buffer is infallible");
+
+            offsets.push((key, lsn, relative_off));
+            max_lsn = std::cmp::max(max_lsn, lsn);
+        }
+
+        Self {
+            raw: cursor.into_inner(),
+            offsets,
+            max_lsn,
+        }
+    }
+}
+
 fn inmem_layer_display(mut f: impl Write, start_lsn: Lsn, end_lsn: Lsn) -> std::fmt::Result {
     write!(f, "inmem-{:016X}-{:016X}", start_lsn.0, end_lsn.0)
 }
@@ -406,38 +473,20 @@ impl InMemoryLayer {
         })
     }
 
-    // Write operations
-
-    /// Common subroutine of the public put_wal_record() and put_page_image() functions.
-    /// Adds the page version to the in-memory tree
-
-    pub(crate) async fn put_value(
+    // Write path.
+    pub(crate) async fn put_batch(
         &self,
-        key: Key,
-        lsn: Lsn,
-        buf: &[u8],
+        serialized_batch: SerializedBatch,
         ctx: &RequestContext,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
-        self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
-    }
 
-    async fn put_value_locked(
-        &self,
-        locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
-        key: Key,
-        lsn: Lsn,
-        buf: &[u8],
-        ctx: &RequestContext,
-    ) -> Result<()> {
-        trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-
-        let off = {
-            locked_inner
+        let base_off = {
+            inner
                 .file
-                .write_blob(
-                    buf,
+                .write_raw(
+                    &serialized_batch.raw,
                     &RequestContextBuilder::extend(ctx)
                         .page_content_kind(PageContentKind::InMemoryLayer)
                         .build(),
@@ -445,15 +494,18 @@ impl InMemoryLayer {
                 .await?
         };
 
-        let vec_map = locked_inner.index.entry(key).or_default();
-        let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
-        if old.is_some() {
-            // We already had an entry for this LSN. That's odd..
-            warn!("Key {} at {} already exists", key, lsn);
+        for (key, lsn, relative_off) in serialized_batch.offsets {
+            let off = base_off + relative_off;
+            let vec_map = inner.index.entry(key).or_default();
+            let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
+            if old.is_some() {
+                // We already had an entry for this LSN. That's odd..
+                warn!("Key {} at {} already exists", key, lsn);
+            }
         }
 
-        let size = locked_inner.file.len();
-        locked_inner.resource_units.maybe_publish_size(size);
+        let size = inner.file.len();
+        inner.resource_units.maybe_publish_size(size);
 
         Ok(())
     }
@@ -476,8 +528,6 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub async fn freeze(&self, end_lsn: Lsn) {
-        let inner = self.inner.write().await;
-
         assert!(
             self.start_lsn < end_lsn,
             "{} >= {}",
@@ -495,9 +545,13 @@ impl InMemoryLayer {
             })
             .expect("frozen_local_path_str set only once");
 
-        for vec_map in inner.index.values() {
-            for (lsn, _pos) in vec_map.as_slice() {
-                assert!(*lsn < end_lsn);
+        #[cfg(debug_assertions)]
+        {
+            let inner = self.inner.write().await;
+            for vec_map in inner.index.values() {
+                for (lsn, _pos) in vec_map.as_slice() {
+                    assert!(*lsn < end_lsn);
+                }
             }
         }
     }
