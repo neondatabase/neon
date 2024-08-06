@@ -50,13 +50,9 @@ impl LayerManager {
     /// Called from `load_layer_map`. Initialize the layer manager with:
     /// 1. all on-disk layers
     /// 2. next open layer (with disk disk_consistent_lsn LSN)
-    pub(crate) fn initialize_local_layers(
-        &mut self,
-        on_disk_layers: Vec<Layer>,
-        next_open_layer_at: Lsn,
-    ) {
+    pub(crate) fn initialize_local_layers(&mut self, layers: Vec<Layer>, next_open_layer_at: Lsn) {
         let mut updates = self.layer_map.batch_update();
-        for layer in on_disk_layers {
+        for layer in layers {
             Self::insert_historic_layer(layer, &mut updates, &mut self.layer_fmgr);
         }
         updates.flush();
