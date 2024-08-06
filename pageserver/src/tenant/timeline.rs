@@ -704,6 +704,7 @@ pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     EnhancedGcBottomMostCompaction,
+    DryRun,
 }
 
 impl std::fmt::Debug for Timeline {
