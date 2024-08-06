@@ -1709,7 +1709,8 @@ impl Timeline {
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), Some(self.timeline_id)).await;
 
         {
-            // Allow any remaining in-memory layers to do cleanup.
+            // Allow any remaining in-memory layers to do cleanup -- until that, they hold the gate
+            // open.
             let mut write_guard = self.write_lock.lock().await;
             self.layers.write().await.shutdown(&mut write_guard);
         }
