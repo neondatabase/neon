@@ -1464,33 +1464,41 @@ impl Timeline {
             self.last_freeze_at.load(),
             open_layer.get_opened_at(),
         ) {
-            let at_lsn = match open_layer.info() {
+            match open_layer.info() {
                 InMemoryLayerInfo::Frozen { lsn_start, lsn_end } => {
                     // We may reach this point if the layer was already frozen by not yet flushed: flushing
                     // happens asynchronously in the background.
                     tracing::debug!(
                         "Not freezing open layer, it's already frozen ({lsn_start}..{lsn_end})"
                     );
-                    None
                 }
                 InMemoryLayerInfo::Open { .. } => {
                     // Upgrade to a write lock and freeze the layer
                     drop(layers_guard);
                     let mut layers_guard = self.layers.write().await;
-                    let froze = layers_guard
+                    let res = layers_guard
                         .try_freeze_in_memory_layer(
                             current_lsn,
                             &self.last_freeze_at,
                             &mut write_guard,
                         )
                         .await;
-                    Some(current_lsn).filter(|_| froze)
-                }
-            };
-            if let Some(lsn) = at_lsn {
-                let res: Result<u64, _> = self.flush_frozen_layers(lsn);
-                if let Err(e) = res {
-                    tracing::info!("failed to flush frozen layer after background freeze: {e:#}");
+
+                    // it is possible the LayerManager shutdown happened between us releasing the
+                    // read lock and re-acquiring the write lock; in such case, silently do
+                    // nothing.
+
+                    let res = match res {
+                        Ok(true) => self.flush_frozen_layers(current_lsn).map(|_req| ()),
+                        Ok(false) => Ok(()),
+                        Err(e) => Err(e.into()),
+                    };
+
+                    if let Err(e) = res {
+                        tracing::info!(
+                            "failed to flush frozen layer after background freeze: {e:#}"
+                        );
+                    }
                 }
             }
         }
