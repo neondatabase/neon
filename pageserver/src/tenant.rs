@@ -7013,10 +7013,14 @@ mod tests {
                     lsn_range: Lsn(0x30)..Lsn(0x31),
                     is_delta: false
                 },
-                // The delta layer that is cut in the middle
+                // The delta layer covers the full range
                 PersistentLayerKey {
-                    key_range: get_key(3)..get_key(4),
-                    lsn_range: Lsn(0x30)..Lsn(0x41),
+                    key_range: {
+                        let mut key = Key::MAX;
+                        key.field6 -= 1;
+                        Key::MIN..key
+                    },
+                    lsn_range: Lsn(0x30)..Lsn(0x48),
                     is_delta: true
                 },
                 // The delta3 layer that should not be picked for the compaction

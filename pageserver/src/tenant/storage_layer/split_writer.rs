@@ -156,6 +156,9 @@ impl SplitImageLayerWriter {
             inner,
             ..
         } = self;
+        if inner.num_keys() == 0 {
+            return Ok(generated_layers);
+        }
         let layer_key = PersistentLayerKey {
             key_range: self.start_key..end_key,
             lsn_range: PersistentLayerDesc::image_layer_lsn_range(self.lsn),
@@ -331,6 +334,9 @@ impl SplitDeltaLayerWriter {
             inner,
             ..
         } = self;
+        if inner.num_keys() == 0 {
+            return Ok(generated_layers);
+        }
         let layer_key = PersistentLayerKey {
             key_range: self.start_key..end_key,
             lsn_range: self.lsn_range.clone(),
