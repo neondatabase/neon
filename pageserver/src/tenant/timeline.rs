@@ -137,7 +137,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::{config::TenantConf, upload_queue::NotInitialized};
+use super::{config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{
@@ -2919,14 +2919,22 @@ impl Timeline {
 
         let guard = self.layers.read().await;
 
-        let resident = guard.likely_resident_layers().map(|layer| {
-            let last_activity_ts = layer.latest_activity();
-
-            HeatMapLayer::new(
-                layer.layer_desc().layer_name(),
-                layer.metadata(),
-                last_activity_ts,
-            )
+        let resident = guard.likely_resident_layers().filter_map(|layer| {
+            match layer.visibility() {
+                LayerVisibilityHint::Visible => {
+                    // Layer is visible to one or more read LSNs: elegible for inclusion in layer map
+                    let last_activity_ts = layer.latest_activity();
+                    Some(HeatMapLayer::new(
+                        layer.layer_desc().layer_name(),
+                        layer.metadata(),
+                        last_activity_ts,
+                    ))
+                }
+                LayerVisibilityHint::Covered => {
+                    // Layer is resident but unlikely to be read: not elegible for inclusion in heatmap.
+                    None
+                }
+            }
         });
 
         let layers = resident.collect();

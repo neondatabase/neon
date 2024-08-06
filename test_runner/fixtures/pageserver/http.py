@@ -61,6 +61,7 @@ class HistoricLayerInfo:
     remote: bool
     # None for image layers, true if pageserver thinks this is an L0 delta layer
     l0: Optional[bool]
+    visible: bool
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
@@ -79,6 +80,7 @@ class HistoricLayerInfo:
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
             l0=l0_ness,
+            visible=d["access_stats"]["visible"],
         )
 
 
