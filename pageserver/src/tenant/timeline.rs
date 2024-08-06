@@ -5619,14 +5619,13 @@ impl<'a> TimelineWriter<'a> {
         Ok(())
     }
 
-    async fn roll_layer(&mut self, freeze_at: Lsn) -> anyhow::Result<()> {
+    async fn roll_layer(&mut self, freeze_at: Lsn) -> Result<(), FlushLayerError> {
         let current_size = self.write_guard.as_ref().unwrap().current_size;
 
         // self.write_guard will be taken by the freezing
         self.tl
             .freeze_inmem_layer_at(freeze_at, &mut self.write_guard)
-            .await
-            .context("roll layer after batch")?;
+            .await?;
 
         assert!(self.write_guard.is_none());
 
