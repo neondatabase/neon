@@ -1104,14 +1104,16 @@ impl Timeline {
                         || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
-                        new_layers.push(
-                            writer
-                                .take()
-                                .unwrap()
-                                .finish(prev_key.unwrap().next(), self, ctx)
-                                .await
-                                .map_err(CompactionError::Other)?,
-                        );
+                        let (desc, path) = writer
+                            .take()
+                            .unwrap()
+                            .finish(prev_key.unwrap().next(), ctx)
+                            .await
+                            .map_err(CompactionError::Other)?;
+                        let new_delta = Layer::finish_creating(self.conf, self, desc, &path)
+                            .map_err(CompactionError::Other)?;
+
+                        new_layers.push(new_delta);
                         writer = None;
 
                         if contains_hole {
@@ -1174,12 +1176,13 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(
-                writer
-                    .finish(prev_key.unwrap().next(), self, ctx)
-                    .await
-                    .map_err(CompactionError::Other)?,
-            );
+            let (desc, path) = writer
+                .finish(prev_key.unwrap().next(), ctx)
+                .await
+                .map_err(CompactionError::Other)?;
+            let new_delta = Layer::finish_creating(self.conf, self, desc, &path)
+                .map_err(CompactionError::Other)?;
+            new_layers.push(new_delta);
         }
 
         // Sync layers
@@ -1966,13 +1969,16 @@ impl Timeline {
             for (key, lsn, val) in deltas {
                 delta_layer_writer.put_value(key, lsn, val, ctx).await?;
             }
+
             stats.produce_delta_layer(delta_layer_writer.size());
             if dry_run {
                 return Ok(None);
             }
-            let delta_layer = delta_layer_writer
-                .finish(delta_key.key_range.end, tline, ctx)
+
+            let (desc, path) = delta_layer_writer
+                .finish(delta_key.key_range.end, ctx)
                 .await?;
+            let delta_layer = Layer::finish_creating(tline.conf, tline, desc, &path)?;
             Ok(Some(FlushDeltaResult::CreateResidentLayer(delta_layer)))
         }
 
@@ -2413,9 +2419,9 @@ impl CompactionJobExecutor for TimelineAdaptor {
             ))
         });
 
-        let new_delta_layer = writer
-            .finish(prev.unwrap().0.next(), &self.timeline, ctx)
-            .await?;
+        let (desc, path) = writer.finish(prev.unwrap().0.next(), ctx).await?;
+        let new_delta_layer =
+            Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
 
         self.new_deltas.push(new_delta_layer);
         Ok(())

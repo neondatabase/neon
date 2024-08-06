@@ -11,9 +11,10 @@ use crate::repository::{Key, Value};
 use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::timeline::GetVectoredError;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::PageReconstructError;
 use crate::{l0_flush, page_cache, walrecord};
 use anyhow::{anyhow, Result};
+use camino::Utf8PathBuf;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
@@ -32,7 +33,9 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use super::{DeltaLayerWriter, ResidentLayer, ValueReconstructSituation, ValuesReconstructState};
+use super::{
+    DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct InMemoryLayerFileId(page_cache::FileId);
@@ -410,8 +413,7 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-
-    pub(crate) async fn put_value(
+    pub async fn put_value(
         &self,
         key: Key,
         lsn: Lsn,
@@ -476,8 +478,6 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub async fn freeze(&self, end_lsn: Lsn) {
-        let inner = self.inner.write().await;
-
         assert!(
             self.start_lsn < end_lsn,
             "{} >= {}",
@@ -495,9 +495,13 @@ impl InMemoryLayer {
             })
             .expect("frozen_local_path_str set only once");
 
-        for vec_map in inner.index.values() {
-            for (lsn, _pos) in vec_map.as_slice() {
-                assert!(*lsn < end_lsn);
+        #[cfg(debug_assertions)]
+        {
+            let inner = self.inner.write().await;
+            for vec_map in inner.index.values() {
+                for (lsn, _pos) in vec_map.as_slice() {
+                    assert!(*lsn < end_lsn);
+                }
             }
         }
     }
@@ -507,12 +511,12 @@ impl InMemoryLayer {
     /// if there are no matching keys.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub(crate) async fn write_to_disk(
+    pub async fn write_to_disk(
         &self,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         key_range: Option<Range<Key>>,
-    ) -> Result<Option<ResidentLayer>> {
+        l0_flush_global_state: &l0_flush::Inner,
+    ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -524,9 +528,8 @@ impl InMemoryLayer {
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().await;
 
-        let l0_flush_global_state = timeline.l0_flush_global_state.inner().clone();
         use l0_flush::Inner;
-        let _concurrency_permit = match &*l0_flush_global_state {
+        let _concurrency_permit = match l0_flush_global_state {
             Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
         };
@@ -556,7 +559,7 @@ impl InMemoryLayer {
         )
         .await?;
 
-        match &*l0_flush_global_state {
+        match l0_flush_global_state {
             l0_flush::Inner::PageCached => {
                 let ctx = RequestContextBuilder::extend(ctx)
                     .page_content_kind(PageContentKind::InMemoryLayer)
@@ -621,7 +624,7 @@ impl InMemoryLayer {
         }
 
         // MAX is used here because we identify L0 layers by full key range
-        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, ctx).await?;
+        let (desc, path) = delta_layer_writer.finish(Key::MAX, ctx).await?;
 
         // Hold the permit until all the IO is done, including the fsync in `delta_layer_writer.finish()``.
         //
@@ -633,6 +636,6 @@ impl InMemoryLayer {
         // we dirtied when writing to the filesystem have been flushed and marked !dirty.
         drop(_concurrency_permit);
 
-        Ok(Some(delta_layer))
+        Ok(Some((desc, path)))
     }
 }

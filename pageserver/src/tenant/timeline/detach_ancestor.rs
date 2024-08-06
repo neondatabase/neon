@@ -488,9 +488,11 @@ async fn copy_lsn_prefix(
         // reuse the key instead of adding more holes between layers by using the real
         // highest key in the layer.
         let reused_highest_key = layer.layer_desc().key_range.end;
-        let copied = writer
-            .finish(reused_highest_key, target_timeline, ctx)
+        let (desc, path) = writer
+            .finish(reused_highest_key, ctx)
             .await
+            .map_err(CopyDeltaPrefix)?;
+        let copied = Layer::finish_creating(target_timeline.conf, target_timeline, desc, &path)
             .map_err(CopyDeltaPrefix)?;
 
         tracing::debug!(%layer, %copied, "new layer produced");
