@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context};
 use async_stream::{stream, try_stream};
 use aws_sdk_s3::{types::ObjectIdentifier, Client};
 use futures::StreamExt;
-use remote_storage::{GenericRemoteStorage, ListingMode};
+use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePath};
 use tokio_stream::Stream;
 
 use crate::{
@@ -272,6 +272,36 @@ pub(crate) fn stream_listing<'a>(
             match fetch_response.next_continuation_token {
                 Some(new_token) => continuation_token = Some(new_token),
                 None => break,
+            }
+        }
+    }
+}
+
+pub(crate) fn stream_listing_generic<'a>(
+    remote_client: &'a GenericRemoteStorage,
+    target: &'a S3Target,
+) -> impl Stream<Item = anyhow::Result<(RemotePath, Option<ListingObject>)>> + 'a {
+    let listing_mode = if target.delimiter.is_empty() {
+        ListingMode::NoDelimiter
+    } else {
+        ListingMode::WithDelimiter
+    };
+    try_stream! {
+        let mut objects_stream = std::pin::pin!(stream_objects_with_retries(
+            remote_client,
+            listing_mode,
+            target,
+        ));
+        while let Some(list) = objects_stream.next().await {
+            let list = list?;
+            if target.delimiter.is_empty() {
+                for key in list.keys {
+                    yield (key.key.clone(), Some(key));
+                }
+            } else {
+                for key in list.prefixes {
+                    yield (key, None);
+                }
             }
         }
     }
