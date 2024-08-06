@@ -1943,11 +1943,15 @@ class NeonCli(AbstractNeonCli):
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple=False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "start",
         ]
+        extra_env_vars = {}
+        if basebackup_request_tries is not None:
+            extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_TRIES"] = str(basebackup_request_tries)
         if remote_ext_config is not None:
             args.extend(["--remote-ext-config", remote_ext_config])
 
@@ -1960,7 +1964,7 @@ class NeonCli(AbstractNeonCli):
         if allow_multiple:
             args.extend(["--allow-multiple"])
 
-        res = self.raw_cli(args)
+        res = self.raw_cli(args, extra_env_vars)
         res.check_returncode()
         return res
 
@@ -3812,6 +3816,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: Optional[int] = None,
         safekeepers: Optional[List[int]] = None,
         allow_multiple: bool = False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "Endpoint":
         """
         Start the Postgres instance.
@@ -3833,6 +3838,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            basebackup_request_tries=basebackup_request_tries,
         )
         self._running.release(1)
 
@@ -3979,6 +3985,7 @@ class Endpoint(PgProtocol, LogUtils):
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple=False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "Endpoint":
         """
         Create an endpoint, apply config, and start Postgres.
@@ -3999,6 +4006,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            basebackup_request_tries=basebackup_request_tries,
         )
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
@@ -4042,6 +4050,7 @@ class EndpointFactory:
         config_lines: Optional[List[str]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
+        basebackup_request_tries: Optional[int] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4060,6 +4069,7 @@ class EndpointFactory:
             lsn=lsn,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
+            basebackup_request_tries=basebackup_request_tries,
         )
 
     def create(

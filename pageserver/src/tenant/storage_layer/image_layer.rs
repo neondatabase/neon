@@ -742,11 +742,21 @@ struct ImageLayerWriterInner {
     // where we have chosen their compressed form
     uncompressed_bytes_chosen: u64,
 
+    // Number of keys in the layer.
+    num_keys: usize,
+
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
+
+    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
+    last_written_key: Key,
 }
 
 impl ImageLayerWriterInner {
+    fn size(&self) -> u64 {
+        self.tree.borrow_writer().size() + self.blob_writer.size()
+    }
+
     ///
     /// Start building a new image layer.
     ///
@@ -800,6 +810,8 @@ impl ImageLayerWriterInner {
             uncompressed_bytes: 0,
             uncompressed_bytes_eligible: 0,
             uncompressed_bytes_chosen: 0,
+            num_keys: 0,
+            last_written_key: Key::MIN,
         };
 
         Ok(writer)
@@ -820,6 +832,7 @@ impl ImageLayerWriterInner {
         let compression = self.conf.image_compression;
         let uncompressed_len = img.len() as u64;
         self.uncompressed_bytes += uncompressed_len;
+        self.num_keys += 1;
         let (_img, res) = self
             .blob_writer
             .write_blob_maybe_compressed(img, ctx, compression)
@@ -839,6 +852,11 @@ impl ImageLayerWriterInner {
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;
 
+        #[cfg(feature = "testing")]
+        {
+            self.last_written_key = key;
+        }
+
         Ok(())
     }
 
@@ -849,6 +867,7 @@ impl ImageLayerWriterInner {
         self,
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
+        end_key: Option<Key>,
     ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
@@ -899,10 +918,22 @@ impl ImageLayerWriterInner {
         let desc = PersistentLayerDesc::new_img(
             self.tenant_shard_id,
             self.timeline_id,
-            self.key_range.clone(),
+            if let Some(end_key) = end_key {
+                self.key_range.start..end_key
+            } else {
+                self.key_range.clone()
+            },
             self.lsn,
             metadata.len(),
         );
+
+        #[cfg(feature = "testing")]
+        if let Some(end_key) = end_key {
+            assert!(
+                self.last_written_key < end_key,
+                "written key violates end_key range"
+            );
+        }
 
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
@@ -980,6 +1011,18 @@ impl ImageLayerWriter {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
+    #[cfg(test)]
+    /// Estimated size of the image layer.
+    pub(crate) fn estimated_size(&self) -> u64 {
+        let inner = self.inner.as_ref().unwrap();
+        inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
+    }
+
+    #[cfg(test)]
+    pub(crate) fn num_keys(&self) -> usize {
+        self.inner.as_ref().unwrap().num_keys
+    }
+
     ///
     /// Finish writing the image layer.
     ///
@@ -988,7 +1031,26 @@ impl ImageLayerWriter {
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<super::ResidentLayer> {
-        self.inner.take().unwrap().finish(timeline, ctx).await
+        self.inner.take().unwrap().finish(timeline, ctx, None).await
+    }
+
+    #[cfg(test)]
+    /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
+    pub(super) async fn finish_with_end_key(
+        mut self,
+        timeline: &Arc<Timeline>,
+        end_key: Key,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<super::ResidentLayer> {
+        self.inner
+            .take()
+            .unwrap()
+            .finish(timeline, ctx, Some(end_key))
+            .await
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.inner.as_ref().unwrap().size()
     }
 }
 
