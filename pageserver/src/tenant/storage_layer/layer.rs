@@ -316,7 +316,7 @@ impl Layer {
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
 
-        self.0.access_stats.record_access(ctx);
+        self.record_access(ctx);
 
         layer
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
@@ -396,8 +396,12 @@ impl Layer {
         self.0.info(reset)
     }
 
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        &self.0.access_stats
+    pub(crate) fn latest_activity(&self) -> SystemTime {
+        self.0.access_stats.latest_activity()
+    }
+
+    pub(crate) fn visibility(&self) -> LayerVisibilityHint {
+        self.0.access_stats.visibility()
     }
 
     pub(crate) fn local_path(&self) -> &Utf8Path {
@@ -447,13 +451,31 @@ impl Layer {
         }
     }
 
+    fn record_access(&self, ctx: &RequestContext) {
+        if self.0.access_stats.record_access(ctx) {
+            // Visibility was modified to Visible
+            tracing::info!(
+                "Layer {} became visible as a result of access",
+                self.0.desc.key()
+            );
+            if let Some(tl) = self.0.timeline.upgrade() {
+                tl.metrics
+                    .visible_physical_size_gauge
+                    .add(self.0.desc.file_size)
+            }
+        }
+    }
+
     pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) {
-        let old_visibility = self.access_stats().set_visibility(visibility.clone());
+        let old_visibility = self.0.access_stats.set_visibility(visibility.clone());
         use LayerVisibilityHint::*;
         match (old_visibility, visibility) {
             (Visible, Covered) => {
                 // Subtract this layer's contribution to the visible size metric
                 if let Some(tl) = self.0.timeline.upgrade() {
+                    debug_assert!(
+                        tl.metrics.visible_physical_size_gauge.get() >= self.0.desc.file_size
+                    );
                     tl.metrics
                         .visible_physical_size_gauge
                         .sub(self.0.desc.file_size)
@@ -671,6 +693,9 @@ impl Drop for LayerInner {
             }
 
             if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
+                debug_assert!(
+                    timeline.metrics.visible_physical_size_gauge.get() >= self.desc.file_size
+                );
                 timeline
                     .metrics
                     .visible_physical_size_gauge
@@ -1810,7 +1835,7 @@ impl ResidentLayer {
                 // this is valid because the DownloadedLayer::kind is a OnceCell, not a
                 // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
                 // while it's being held.
-                owner.access_stats.record_access(ctx);
+                self.owner.record_access(ctx);
 
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await

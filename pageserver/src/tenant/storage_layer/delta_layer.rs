@@ -71,9 +71,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{
-    AsLayerDesc, LayerAccessStats, LayerName, PersistentLayerDesc, ValuesReconstructState,
-};
+use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -198,7 +196,6 @@ impl DeltaKey {
 pub struct DeltaLayer {
     path: Utf8PathBuf,
     pub desc: PersistentLayerDesc,
-    access_stats: LayerAccessStats,
     inner: OnceCell<Arc<DeltaLayerInner>>,
 }
 
@@ -297,7 +294,6 @@ impl DeltaLayer {
     /// not loaded already.
     ///
     async fn load(&self, ctx: &RequestContext) -> Result<&Arc<DeltaLayerInner>> {
-        self.access_stats.record_access(ctx);
         // Quick exit if already loaded
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
@@ -348,7 +344,6 @@ impl DeltaLayer {
                 summary.lsn_range,
                 metadata.len(),
             ),
-            access_stats: Default::default(),
             inner: OnceCell::new(),
         })
     }
