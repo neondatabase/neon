@@ -753,6 +753,10 @@ struct ImageLayerWriterInner {
 }
 
 impl ImageLayerWriterInner {
+    fn size(&self) -> u64 {
+        self.tree.borrow_writer().size() + self.blob_writer.size()
+    }
+
     ///
     /// Start building a new image layer.
     ///
@@ -1043,6 +1047,10 @@ impl ImageLayerWriter {
             .unwrap()
             .finish(timeline, ctx, Some(end_key))
             .await
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.inner.as_ref().unwrap().size()
     }
 }
 
