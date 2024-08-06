@@ -143,7 +143,10 @@ use self::walreceiver::{WalReceiver, WalReceiverConf};
 use super::{config::TenantConf, upload_queue::NotInitialized};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
-use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
+use super::{
+    remote_timeline_client::RemoteTimelineClient, remote_timeline_client::WaitCompletionError,
+    storage_layer::ReadableLayer,
+};
 use super::{
     secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
     GcError,
@@ -4090,6 +4093,21 @@ impl Timeline {
             // release lock on 'layers'
         };
 
+        // Backpressure mechanism: wait with continuation of the flush loop until we have uploaded all layer files.
+        // This makes us refuse ingest until the new layers have been persisted to the remote.
+        self.remote_client
+            .wait_completion()
+            .await
+            .map_err(|e| match e {
+                WaitCompletionError::UploadQueueShutDownOrStopped
+                | WaitCompletionError::NotInitialized(
+                    NotInitialized::ShuttingDown | NotInitialized::Stopped,
+                ) => FlushLayerError::Cancelled,
+                WaitCompletionError::NotInitialized(NotInitialized::Uninitialized) => {
+                    FlushLayerError::Other(anyhow!(e).into())
+                }
+            })?;
+
         // FIXME: between create_delta_layer and the scheduling of the upload in `update_metadata_file`,
         // a compaction can delete the file and then it won't be available for uploads any more.
         // We still schedule the upload, resulting in an error, but ideally we'd somehow avoid this
@@ -4707,6 +4725,12 @@ impl Timeline {
 
         if self.remote_client.is_deleting() {
             // The timeline was created in a deletion-resume state, we don't expect logical size to be populated
+            return;
+        }
+
+        if self.current_logical_size.current_size().is_exact() {
+            // root timelines are initialized with exact count, but never start the background
+            // calculation
             return;
         }
 
