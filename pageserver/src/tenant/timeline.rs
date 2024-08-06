@@ -704,6 +704,7 @@ pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     EnhancedGcBottomMostCompaction,
+    DryRun,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -4726,6 +4727,12 @@ impl Timeline {
 
         if self.remote_client.is_deleting() {
             // The timeline was created in a deletion-resume state, we don't expect logical size to be populated
+            return;
+        }
+
+        if self.current_logical_size.current_size().is_exact() {
+            // root timelines are initialized with exact count, but never start the background
+            // calculation
             return;
         }
 
