@@ -800,6 +800,123 @@ impl RemoteTimelineClient {
             .context("wait completion")
     }
 
+    /// Adds a gc blocking reason for this timeline if one does not exist already.
+    ///
+    /// A retryable step of timeline detach ancestor.
+    ///
+    /// Returns a future which waits until the completion of the upload.
+    pub(crate) fn schedule_insert_gc_block_reason(
+        self: &Arc<Self>,
+        reason: index::GcBlockingReason,
+    ) -> Result<impl std::future::Future<Output = Result<(), WaitCompletionError>>, NotInitialized>
+    {
+        let maybe_barrier = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
+
+            if let index::GcBlockingReason::DetachAncestor = reason {
+                if upload_queue.dirty.metadata.ancestor_timeline().is_none() {
+                    drop(guard);
+                    panic!("cannot start detach ancestor if there is nothing to detach from");
+                }
+            }
+
+            let wanted = |x: Option<&index::GcBlocking>| x.is_some_and(|x| x.blocked_by(reason));
+
+            let current = upload_queue.dirty.gc_blocking.as_ref();
+            let uploaded = upload_queue.clean.0.gc_blocking.as_ref();
+
+            match (current, uploaded) {
+                (x, y) if wanted(x) && wanted(y) => None,
+                (x, y) if wanted(x) && !wanted(y) => Some(self.schedule_barrier0(upload_queue)),
+                // Usual case: !wanted(x) && !wanted(y)
+                //
+                // Unusual: !wanted(x) && wanted(y) which means we have two processes waiting to
+                // turn on and off some reason.
+                (x, y) => {
+                    if !wanted(x) && wanted(y) {
+                        // this could be avoided by having external in-memory synchronization, like
+                        // timeline detach ancestor
+                        warn!(?reason, op="insert", "unexpected: two racing processes to enable and disable a gc blocking reason");
+                    }
+
+                    // at this point, the metadata must always show that there is a parent
+                    upload_queue.dirty.gc_blocking = current
+                        .map(|x| x.with_reason(reason))
+                        .or_else(|| Some(index::GcBlocking::started_now_for(reason)));
+                    self.schedule_index_upload(upload_queue)?;
+                    Some(self.schedule_barrier0(upload_queue))
+                }
+            }
+        };
+
+        Ok(async move {
+            if let Some(barrier) = maybe_barrier {
+                Self::wait_completion0(barrier).await?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Removes a gc blocking reason for this timeline if one exists.
+    ///
+    /// A retryable step of timeline detach ancestor.
+    ///
+    /// Returns a future which waits until the completion of the upload.
+    pub(crate) fn schedule_remove_gc_block_reason(
+        self: &Arc<Self>,
+        reason: index::GcBlockingReason,
+    ) -> Result<impl std::future::Future<Output = Result<(), WaitCompletionError>>, NotInitialized>
+    {
+        let maybe_barrier = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
+
+            if let index::GcBlockingReason::DetachAncestor = reason {
+                if !upload_queue
+                    .clean
+                    .0
+                    .lineage
+                    .is_detached_from_original_ancestor()
+                {
+                    drop(guard);
+                    panic!("cannot complete timeline_ancestor_detach while not detached");
+                }
+            }
+
+            let wanted = |x: Option<&index::GcBlocking>| {
+                x.is_none() || x.is_some_and(|b| !b.blocked_by(reason))
+            };
+
+            let current = upload_queue.dirty.gc_blocking.as_ref();
+            let uploaded = upload_queue.clean.0.gc_blocking.as_ref();
+
+            match (current, uploaded) {
+                (x, y) if wanted(x) && wanted(y) => None,
+                (x, y) if wanted(x) && !wanted(y) => Some(self.schedule_barrier0(upload_queue)),
+                (x, y) => {
+                    if !wanted(x) && wanted(y) {
+                        warn!(?reason, op="remove", "unexpected: two racing processes to enable and disable a gc blocking reason (remove)");
+                    }
+
+                    upload_queue.dirty.gc_blocking =
+                        current.as_ref().and_then(|x| x.without_reason(reason));
+                    assert!(wanted(upload_queue.dirty.gc_blocking.as_ref()));
+                    // FIXME: bogus ?
+                    self.schedule_index_upload(upload_queue)?;
+                    Some(self.schedule_barrier0(upload_queue))
+                }
+            }
+        };
+
+        Ok(async move {
+            if let Some(barrier) = maybe_barrier {
+                Self::wait_completion0(barrier).await?;
+            }
+            Ok(())
+        })
+    }
+
     /// Launch an upload operation in the background; the file is added to be included in next
     /// `index_part.json` upload.
     pub(crate) fn schedule_layer_file_upload(

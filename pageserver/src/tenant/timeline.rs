@@ -22,8 +22,8 @@ use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
-        AUX_FILES_KEY, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
-        NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE,
+        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+        NON_INHERITED_SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
@@ -59,10 +59,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::atomic::AtomicU64,
 };
-use std::{
-    cmp::{max, min},
-    ops::ControlFlow,
-};
+use std::{cmp::min, ops::ControlFlow};
 use std::{
     collections::btree_map::Entry,
     ops::{Deref, Range},
@@ -87,8 +84,8 @@ use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
         AsLayerDesc, DeltaLayerWriter, EvictionError, ImageLayerWriter, InMemoryLayer, Layer,
-        LayerAccessStatsReset, LayerName, ResidentLayer, ValueReconstructResult,
-        ValueReconstructState, ValuesReconstructState,
+        LayerAccessStatsReset, LayerName, ResidentLayer, ValueReconstructState,
+        ValuesReconstructState,
     },
 };
 use crate::{
@@ -543,7 +540,6 @@ pub struct MissingKeyError {
     cont_lsn: Lsn,
     request_lsn: Lsn,
     ancestor_lsn: Option<Lsn>,
-    traversal_path: Vec<TraversalPathItem>,
     backtrace: Option<std::backtrace::Backtrace>,
 }
 
@@ -562,18 +558,6 @@ impl std::fmt::Display for MissingKeyError {
         )?;
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
             write!(f, ", ancestor {}", ancestor_lsn)?;
-        }
-
-        if !self.traversal_path.is_empty() {
-            writeln!(f)?;
-        }
-
-        for (r, c, l) in &self.traversal_path {
-            writeln!(
-                f,
-                "layer traversal: result {:?}, cont_lsn {}, layer: {}",
-                r, c, l,
-            )?;
         }
 
         if let Some(ref backtrace) = self.backtrace {
@@ -704,6 +688,7 @@ pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     EnhancedGcBottomMostCompaction,
+    DryRun,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -917,117 +902,42 @@ impl Timeline {
 
         self.timeline_get_throttle.throttle(ctx, 1).await;
 
-        match self.conf.get_impl {
-            GetImpl::Legacy => {
-                let reconstruct_state = ValueReconstructState {
-                    records: Vec::new(),
-                    img: None,
-                };
+        let keyspace = KeySpace {
+            ranges: vec![key..key.next()],
+        };
 
-                self.get_impl(key, lsn, reconstruct_state, ctx).await
-            }
-            GetImpl::Vectored => {
-                let keyspace = KeySpace {
-                    ranges: vec![key..key.next()],
-                };
+        // Initialise the reconstruct state for the key with the cache
+        // entry returned above.
+        let mut reconstruct_state = ValuesReconstructState::new();
 
-                // Initialise the reconstruct state for the key with the cache
-                // entry returned above.
-                let mut reconstruct_state = ValuesReconstructState::new();
+        let vectored_res = self
+            .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
+            .await;
 
-                let vectored_res = self
-                    .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
-                    .await;
-
-                if self.conf.validate_vectored_get {
-                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                        .await;
-                }
-
-                let key_value = vectored_res?.pop_first();
-                match key_value {
-                    Some((got_key, value)) => {
-                        if got_key != key {
-                            error!(
-                                "Expected {}, but singular vectored get returned {}",
-                                key, got_key
-                            );
-                            Err(PageReconstructError::Other(anyhow!(
-                                "Singular vectored get returned wrong key"
-                            )))
-                        } else {
-                            value
-                        }
-                    }
-                    None => Err(PageReconstructError::MissingKey(MissingKeyError {
-                        key,
-                        shard: self.shard_identity.get_shard_number(&key),
-                        cont_lsn: Lsn(0),
-                        request_lsn: lsn,
-                        ancestor_lsn: None,
-                        traversal_path: Vec::new(),
-                        backtrace: None,
-                    })),
+        let key_value = vectored_res?.pop_first();
+        match key_value {
+            Some((got_key, value)) => {
+                if got_key != key {
+                    error!(
+                        "Expected {}, but singular vectored get returned {}",
+                        key, got_key
+                    );
+                    Err(PageReconstructError::Other(anyhow!(
+                        "Singular vectored get returned wrong key"
+                    )))
+                } else {
+                    value
                 }
             }
+            None => Err(PageReconstructError::MissingKey(MissingKeyError {
+                key,
+                shard: self.shard_identity.get_shard_number(&key),
+                cont_lsn: Lsn(0),
+                request_lsn: lsn,
+                ancestor_lsn: None,
+                backtrace: None,
+            })),
         }
-    }
-
-    /// Not subject to [`Self::timeline_get_throttle`].
-    async fn get_impl(
-        &self,
-        key: Key,
-        lsn: Lsn,
-        mut reconstruct_state: ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<Bytes, PageReconstructError> {
-        // XXX: structured stats collection for layer eviction here.
-        trace!(
-            "get page request for {}@{} from task kind {:?}",
-            key,
-            lsn,
-            ctx.task_kind()
-        );
-
-        let timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
-            .for_get_kind(GetKind::Singular)
-            .start_timer();
-        let path = self
-            .get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
-            .await?;
-        timer.stop_and_record();
-
-        let start = Instant::now();
-        let res = self.reconstruct_value(key, lsn, reconstruct_state).await;
-        let elapsed = start.elapsed();
-        crate::metrics::RECONSTRUCT_TIME
-            .for_get_kind(GetKind::Singular)
-            .observe(elapsed.as_secs_f64());
-
-        if cfg!(feature = "testing")
-            && res.is_err()
-            && !matches!(res, Err(PageReconstructError::Cancelled))
-        {
-            // it can only be walredo issue
-            use std::fmt::Write;
-
-            let mut msg = String::new();
-
-            path.into_iter().for_each(|(res, cont_lsn, layer)| {
-                writeln!(
-                    msg,
-                    "- layer traversal: result {res:?}, cont_lsn {cont_lsn}, layer: {}",
-                    layer,
-                )
-                .expect("string grows")
-            });
-
-            // this is to rule out or provide evidence that we could in some cases read a duplicate
-            // walrecord
-            tracing::info!("walredo failed, path:\n{msg}");
-        }
-
-        res
     }
 
     pub(crate) const MAX_GET_VECTORED_KEYS: u64 = 32;
@@ -1079,28 +989,14 @@ impl Timeline {
             .throttle(ctx, key_count as usize)
             .await;
 
-        let res = match self.conf.get_vectored_impl {
-            GetVectoredImpl::Sequential => {
-                self.get_vectored_sequential_impl(keyspace, lsn, ctx).await
-            }
-            GetVectoredImpl::Vectored => {
-                let vectored_res = self
-                    .get_vectored_impl(
-                        keyspace.clone(),
-                        lsn,
-                        &mut ValuesReconstructState::new(),
-                        ctx,
-                    )
-                    .await;
-
-                if self.conf.validate_vectored_get {
-                    self.validate_get_vectored_impl(&vectored_res, keyspace, lsn, ctx)
-                        .await;
-                }
-
-                vectored_res
-            }
-        };
+        let res = self
+            .get_vectored_impl(
+                keyspace.clone(),
+                lsn,
+                &mut ValuesReconstructState::new(),
+                ctx,
+            )
+            .await;
 
         if let Some((metric, start)) = start {
             let elapsed = start.elapsed();
@@ -1189,65 +1085,6 @@ impl Timeline {
         vectored_res
     }
 
-    /// Not subject to [`Self::timeline_get_throttle`].
-    pub(super) async fn get_vectored_sequential_impl(
-        &self,
-        keyspace: KeySpace,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError> {
-        let mut values = BTreeMap::new();
-
-        for range in keyspace.ranges {
-            let mut key = range.start;
-            while key != range.end {
-                let block = self
-                    .get_impl(key, lsn, ValueReconstructState::default(), ctx)
-                    .await;
-
-                use PageReconstructError::*;
-                match block {
-                    Err(Cancelled) => return Err(GetVectoredError::Cancelled),
-                    Err(MissingKey(_))
-                        if NON_INHERITED_RANGE.contains(&key)
-                            || NON_INHERITED_SPARSE_RANGE.contains(&key) =>
-                    {
-                        // Ignore missing key error for aux key range. TODO: currently, we assume non_inherited_range == aux_key_range.
-                        // When we add more types of keys into the page server, we should revisit this part of code and throw errors
-                        // accordingly.
-                        key = key.next();
-                    }
-                    Err(MissingKey(err)) => {
-                        return Err(GetVectoredError::MissingKey(err));
-                    }
-                    Err(Other(err))
-                        if err
-                            .to_string()
-                            .contains("downloading evicted layer file failed") =>
-                    {
-                        return Err(GetVectoredError::Other(err))
-                    }
-                    Err(Other(err))
-                        if err
-                            .chain()
-                            .any(|cause| cause.to_string().contains("layer loading failed")) =>
-                    {
-                        // The intent here is to achieve error parity with the vectored read path.
-                        // When vectored read fails to load a layer it fails the whole read, hence
-                        // we mimic this behaviour here to keep the validation happy.
-                        return Err(GetVectoredError::Other(err));
-                    }
-                    _ => {
-                        values.insert(key, block);
-                        key = key.next();
-                    }
-                }
-            }
-        }
-
-        Ok(values)
-    }
-
     pub(super) async fn get_vectored_impl(
         &self,
         keyspace: KeySpace,
@@ -1316,113 +1153,6 @@ impl Timeline {
         }
 
         Ok(results)
-    }
-
-    /// Not subject to [`Self::timeline_get_throttle`].
-    pub(super) async fn validate_get_vectored_impl(
-        &self,
-        vectored_res: &Result<BTreeMap<Key, Result<Bytes, PageReconstructError>>, GetVectoredError>,
-        keyspace: KeySpace,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) {
-        if keyspace.overlaps(&Key::metadata_key_range()) {
-            // skip validation for metadata key range
-            return;
-        }
-
-        let sequential_res = self
-            .get_vectored_sequential_impl(keyspace.clone(), lsn, ctx)
-            .await;
-
-        fn errors_match(lhs: &GetVectoredError, rhs: &GetVectoredError) -> bool {
-            use GetVectoredError::*;
-            match (lhs, rhs) {
-                (Oversized(l), Oversized(r)) => l == r,
-                (InvalidLsn(l), InvalidLsn(r)) => l == r,
-                (MissingKey(l), MissingKey(r)) => l.key == r.key,
-                (GetReadyAncestorError(_), GetReadyAncestorError(_)) => true,
-                (Other(_), Other(_)) => true,
-                _ => false,
-            }
-        }
-
-        match (&sequential_res, vectored_res) {
-            (Err(GetVectoredError::Cancelled), _) => {},
-            (_, Err(GetVectoredError::Cancelled)) => {},
-            (Err(seq_err), Ok(_)) => {
-                panic!(concat!("Sequential get failed with {}, but vectored get did not",
-                               " - keyspace={:?} lsn={}"),
-                       seq_err, keyspace, lsn) },
-            (Ok(_), Err(GetVectoredError::GetReadyAncestorError(GetReadyAncestorError::AncestorLsnTimeout(_)))) => {
-                // Sequential get runs after vectored get, so it is possible for the later
-                // to time out while waiting for its ancestor's Lsn to become ready and for the
-                // former to succeed (it essentially has a doubled wait time).
-            },
-            (Ok(_), Err(vec_err)) => {
-                panic!(concat!("Vectored get failed with {}, but sequential get did not",
-                               " - keyspace={:?} lsn={}"),
-                       vec_err, keyspace, lsn) },
-            (Err(seq_err), Err(vec_err)) => {
-                assert!(errors_match(seq_err, vec_err),
-                        "Mismatched errors: {seq_err} != {vec_err} - keyspace={keyspace:?} lsn={lsn}")},
-            (Ok(seq_values), Ok(vec_values)) => {
-                seq_values.iter().zip(vec_values.iter()).for_each(|((seq_key, seq_res), (vec_key, vec_res))| {
-                    assert_eq!(seq_key, vec_key);
-                    match (seq_res, vec_res) {
-                        (Ok(seq_blob), Ok(vec_blob)) => {
-                            Self::validate_key_equivalence(seq_key, &keyspace, lsn, seq_blob, vec_blob);
-                        },
-                        (Err(err), Ok(_)) => {
-                            panic!(
-                                concat!("Sequential get failed with {} for key {}, but vectored get did not",
-                                        " - keyspace={:?} lsn={}"),
-                                err, seq_key, keyspace, lsn) },
-                        (Ok(_), Err(err)) => {
-                            panic!(
-                                concat!("Vectored get failed with {} for key {}, but sequential get did not",
-                                        " - keyspace={:?} lsn={}"),
-                                err, seq_key, keyspace, lsn) },
-                        (Err(_), Err(_)) => {}
-                    }
-                })
-            }
-        }
-    }
-
-    fn validate_key_equivalence(
-        key: &Key,
-        keyspace: &KeySpace,
-        lsn: Lsn,
-        seq: &Bytes,
-        vec: &Bytes,
-    ) {
-        if *key == AUX_FILES_KEY {
-            // The value reconstruct of AUX_FILES_KEY from records is not deterministic
-            // since it uses a hash map under the hood. Hence, deserialise both results
-            // before comparing.
-            let seq_aux_dir_res = AuxFilesDirectory::des(seq);
-            let vec_aux_dir_res = AuxFilesDirectory::des(vec);
-            match (&seq_aux_dir_res, &vec_aux_dir_res) {
-                (Ok(seq_aux_dir), Ok(vec_aux_dir)) => {
-                    assert_eq!(
-                        seq_aux_dir, vec_aux_dir,
-                        "Mismatch for key {} - keyspace={:?} lsn={}",
-                        key, keyspace, lsn
-                    );
-                }
-                (Err(_), Err(_)) => {}
-                _ => {
-                    panic!("Mismatch for {key}: {seq_aux_dir_res:?} != {vec_aux_dir_res:?}");
-                }
-            }
-        } else {
-            // All other keys should reconstruct deterministically, so we simply compare the blobs.
-            assert_eq!(
-                seq, vec,
-                "Image mismatch for key {key} - keyspace={keyspace:?} lsn={lsn}"
-            );
-        }
     }
 
     /// Get last or prev record separately. Same as get_last_record_rlsn().last/prev.
@@ -3214,228 +2944,7 @@ impl Timeline {
     }
 }
 
-type TraversalId = Arc<str>;
-
-trait TraversalLayerExt {
-    fn traversal_id(&self) -> TraversalId;
-}
-
-impl TraversalLayerExt for Layer {
-    fn traversal_id(&self) -> TraversalId {
-        Arc::clone(self.debug_str())
-    }
-}
-
-impl TraversalLayerExt for Arc<InMemoryLayer> {
-    fn traversal_id(&self) -> TraversalId {
-        Arc::clone(self.local_path_str())
-    }
-}
-
 impl Timeline {
-    ///
-    /// Get a handle to a Layer for reading.
-    ///
-    /// The returned Layer might be from an ancestor timeline, if the
-    /// segment hasn't been updated on this timeline yet.
-    ///
-    /// This function takes the current timeline's locked LayerMap as an argument,
-    /// so callers can avoid potential race conditions.
-    ///
-    /// # Cancel-Safety
-    ///
-    /// This method is cancellation-safe.
-    async fn get_reconstruct_data(
-        &self,
-        key: Key,
-        request_lsn: Lsn,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<Vec<TraversalPathItem>, PageReconstructError> {
-        // Start from the current timeline.
-        let mut timeline_owned;
-        let mut timeline = self;
-
-        let mut read_count = scopeguard::guard(0, |cnt| {
-            crate::metrics::READ_NUM_LAYERS_VISITED.observe(cnt as f64)
-        });
-
-        // For debugging purposes, collect the path of layers that we traversed
-        // through. It's included in the error message if we fail to find the key.
-        let mut traversal_path = Vec::<TraversalPathItem>::new();
-
-        let cached_lsn = if let Some((cached_lsn, _)) = &reconstruct_state.img {
-            *cached_lsn
-        } else {
-            Lsn(0)
-        };
-
-        // 'prev_lsn' tracks the last LSN that we were at in our search. It's used
-        // to check that each iteration make some progress, to break infinite
-        // looping if something goes wrong.
-        let mut prev_lsn = None;
-
-        let mut result = ValueReconstructResult::Continue;
-        let mut cont_lsn = Lsn(request_lsn.0 + 1);
-
-        'outer: loop {
-            if self.cancel.is_cancelled() {
-                return Err(PageReconstructError::Cancelled);
-            }
-
-            // The function should have updated 'state'
-            //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
-            match result {
-                ValueReconstructResult::Complete => return Ok(traversal_path),
-                ValueReconstructResult::Continue => {
-                    // If we reached an earlier cached page image, we're done.
-                    if cont_lsn == cached_lsn + 1 {
-                        return Ok(traversal_path);
-                    }
-                    if let Some(prev) = prev_lsn {
-                        if prev <= cont_lsn {
-                            // Didn't make any progress in last iteration. Error out to avoid
-                            // getting stuck in the loop.
-                            return Err(PageReconstructError::MissingKey(MissingKeyError {
-                                key,
-                                shard: self.shard_identity.get_shard_number(&key),
-                                cont_lsn: Lsn(cont_lsn.0 - 1),
-                                request_lsn,
-                                ancestor_lsn: Some(timeline.ancestor_lsn),
-                                traversal_path,
-                                backtrace: None,
-                            }));
-                        }
-                    }
-                    prev_lsn = Some(cont_lsn);
-                }
-                ValueReconstructResult::Missing => {
-                    return Err(PageReconstructError::MissingKey(MissingKeyError {
-                        key,
-                        shard: self.shard_identity.get_shard_number(&key),
-                        cont_lsn,
-                        request_lsn,
-                        ancestor_lsn: None,
-                        traversal_path,
-                        backtrace: if cfg!(test) {
-                            Some(std::backtrace::Backtrace::force_capture())
-                        } else {
-                            None
-                        },
-                    }));
-                }
-            }
-
-            // Recurse into ancestor if needed
-            if let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() {
-                if key.is_inherited_key() && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
-                    trace!(
-                        "going into ancestor {}, cont_lsn is {}",
-                        timeline.ancestor_lsn,
-                        cont_lsn
-                    );
-
-                    timeline_owned = timeline
-                        .get_ready_ancestor_timeline(ancestor_timeline, ctx)
-                        .await?;
-                    timeline = &*timeline_owned;
-                    prev_lsn = None;
-                    continue 'outer;
-                }
-            }
-
-            let guard = timeline.layers.read().await;
-            let layers = guard.layer_map();
-
-            // Check the open and frozen in-memory layers first, in order from newest
-            // to oldest.
-            if let Some(open_layer) = &layers.open_layer {
-                let start_lsn = open_layer.get_lsn_range().start;
-                if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.layer_name().display());
-                    // Get all the data needed to reconstruct the page version from this layer.
-                    // But if we have an older cached page image, no need to go past that.
-                    let lsn_floor = max(cached_lsn + 1, start_lsn);
-
-                    let open_layer = open_layer.clone();
-                    drop(guard);
-
-                    result = match open_layer
-                        .get_value_reconstruct_data(
-                            key,
-                            lsn_floor..cont_lsn,
-                            reconstruct_state,
-                            ctx,
-                        )
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => return Err(PageReconstructError::from(e)),
-                    };
-                    cont_lsn = lsn_floor;
-                    *read_count += 1;
-                    traversal_path.push((result, cont_lsn, open_layer.traversal_id()));
-                    continue 'outer;
-                }
-            }
-            for frozen_layer in layers.frozen_layers.iter().rev() {
-                let start_lsn = frozen_layer.get_lsn_range().start;
-                if cont_lsn > start_lsn {
-                    //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.layer_name().display());
-                    let lsn_floor = max(cached_lsn + 1, start_lsn);
-
-                    let frozen_layer = frozen_layer.clone();
-                    drop(guard);
-
-                    result = match frozen_layer
-                        .get_value_reconstruct_data(
-                            key,
-                            lsn_floor..cont_lsn,
-                            reconstruct_state,
-                            ctx,
-                        )
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => return Err(PageReconstructError::from(e)),
-                    };
-                    cont_lsn = lsn_floor;
-                    *read_count += 1;
-                    traversal_path.push((result, cont_lsn, frozen_layer.traversal_id()));
-                    continue 'outer;
-                }
-            }
-
-            if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
-                let layer = guard.get_from_desc(&layer);
-                drop(guard);
-                // Get all the data needed to reconstruct the page version from this layer.
-                // But if we have an older cached page image, no need to go past that.
-                let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                result = match layer
-                    .get_value_reconstruct_data(key, lsn_floor..cont_lsn, reconstruct_state, ctx)
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(e) => return Err(PageReconstructError::from(e)),
-                };
-                cont_lsn = lsn_floor;
-                *read_count += 1;
-                traversal_path.push((result, cont_lsn, layer.traversal_id()));
-                continue 'outer;
-            } else if timeline.ancestor_timeline.is_some() {
-                // Nothing on this timeline. Traverse to parent
-                result = ValueReconstructResult::Continue;
-                cont_lsn = Lsn(timeline.ancestor_lsn.0 + 1);
-                continue 'outer;
-            } else {
-                // Nothing found
-                result = ValueReconstructResult::Missing;
-                continue 'outer;
-            }
-        }
-    }
-
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///
@@ -3529,7 +3038,6 @@ impl Timeline {
                 cont_lsn,
                 request_lsn,
                 ancestor_lsn: Some(timeline.ancestor_lsn),
-                traversal_path: vec![],
                 backtrace: None,
             }));
         }
@@ -4122,17 +3630,11 @@ impl Timeline {
 
     /// Return true if the value changed
     ///
-    /// This function must only be used from the layer flush task, and may not be called concurrently.
+    /// This function must only be used from the layer flush task.
     fn set_disk_consistent_lsn(&self, new_value: Lsn) -> bool {
-        // We do a simple load/store cycle: that's why this function isn't safe for concurrent use.
-        let old_value = self.disk_consistent_lsn.load();
-        if new_value != old_value {
-            assert!(new_value >= old_value);
-            self.disk_consistent_lsn.store(new_value);
-            true
-        } else {
-            false
-        }
+        let old_value = self.disk_consistent_lsn.fetch_max(new_value);
+        assert!(new_value >= old_value, "disk_consistent_lsn must be growing monotonously at runtime; current {old_value}, offered {new_value}");
+        new_value != old_value
     }
 
     /// Update metadata file
@@ -4724,6 +4226,12 @@ impl Timeline {
 
         if self.remote_client.is_deleting() {
             // The timeline was created in a deletion-resume state, we don't expect logical size to be populated
+            return;
+        }
+
+        if self.current_logical_size.current_size().is_exact() {
+            // root timelines are initialized with exact count, but never start the background
+            // calculation
             return;
         }
 
@@ -5697,6 +5205,22 @@ impl Timeline {
         }
     }
 
+    /// Persistently blocks gc for `Manual` reason.
+    ///
+    /// Returns true if no such block existed before, false otherwise.
+    pub(crate) async fn block_gc(&self, tenant: &super::Tenant) -> anyhow::Result<bool> {
+        use crate::tenant::remote_timeline_client::index::GcBlockingReason;
+        assert_eq!(self.tenant_shard_id, tenant.tenant_shard_id);
+        tenant.gc_block.insert(self, GcBlockingReason::Manual).await
+    }
+
+    /// Persistently unblocks gc for `Manual` reason.
+    pub(crate) async fn unblock_gc(&self, tenant: &super::Tenant) -> anyhow::Result<()> {
+        use crate::tenant::remote_timeline_client::index::GcBlockingReason;
+        assert_eq!(self.tenant_shard_id, tenant.tenant_shard_id);
+        tenant.gc_block.remove(self, GcBlockingReason::Manual).await
+    }
+
     #[cfg(test)]
     pub(super) fn force_advance_lsn(self: &Arc<Timeline>, new_lsn: Lsn) {
         self.last_record_lsn.advance(new_lsn);
@@ -5877,8 +5401,6 @@ impl Timeline {
         self.extra_test_dense_keyspace.store(Arc::new(keyspace));
     }
 }
-
-type TraversalPathItem = (ValueReconstructResult, Lsn, TraversalId);
 
 /// Tracking writes ingestion does to a particular in-memory layer.
 ///

@@ -435,21 +435,6 @@ impl ReadableLayer {
     }
 }
 
-/// Return value from [`Layer::get_value_reconstruct_data`]
-#[derive(Clone, Copy, Debug)]
-pub enum ValueReconstructResult {
-    /// Got all the data needed to reconstruct the requested page
-    Complete,
-    /// This layer didn't contain all the required data, the caller should look up
-    /// the predecessor layer at the returned LSN and collect more data from there.
-    Continue,
-
-    /// This layer didn't contain data needed to reconstruct the page version at
-    /// the returned LSN. This is usually considered an error, but might be OK
-    /// in some circumstances.
-    Missing,
-}
-
 /// Layers contain a hint indicating whether they are likely to be used for reads.  This is a hint rather
 /// than an authoritative value, so that we do not have to update it synchronously when changing the visibility
 /// of layers (for example when creating a branch that makes some previously covered layers visible).  It should
