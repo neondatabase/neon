@@ -4675,9 +4675,9 @@ mod tests {
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map
             .layer_map()
-            .get_level0_deltas()
-            .into_iter()
-            .map(|desc| layer_map.get_from_desc(&desc))
+            .level0_deltas()
+            .iter()
+            .map(|desc| layer_map.get_from_desc(desc))
             .collect::<Vec<_>>();
 
         assert!(!level0_deltas.is_empty());
@@ -5918,23 +5918,11 @@ mod tests {
             tline.freeze_and_flush().await?; // force create a delta layer
         }
 
-        let before_num_l0_delta_files = tline
-            .layers
-            .read()
-            .await
-            .layer_map()
-            .get_level0_deltas()
-            .len();
+        let before_num_l0_delta_files = tline.layers.read().await.layer_map().level0_deltas().len();
 
         tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
 
-        let after_num_l0_delta_files = tline
-            .layers
-            .read()
-            .await
-            .layer_map()
-            .get_level0_deltas()
-            .len();
+        let after_num_l0_delta_files = tline.layers.read().await.layer_map().level0_deltas().len();
 
         assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
 

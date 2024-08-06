@@ -634,11 +634,7 @@ impl Timeline {
         stats.read_lock_held_spawn_blocking_startup_micros =
             stats.read_lock_acquisition_micros.till_now(); // set by caller
         let layers = guard.layer_map();
-        let level0_deltas = layers.get_level0_deltas();
-        let mut level0_deltas = level0_deltas
-            .into_iter()
-            .map(|x| guard.get_from_desc(&x))
-            .collect_vec();
+        let level0_deltas = layers.level0_deltas();
         stats.level0_deltas_count = Some(level0_deltas.len());
 
         // Only compact if enough layers have accumulated.
@@ -650,6 +646,11 @@ impl Timeline {
             );
             return Ok(CompactLevel0Phase1Result::default());
         }
+
+        let mut level0_deltas = level0_deltas
+            .iter()
+            .map(|x| guard.get_from_desc(x))
+            .collect::<Vec<_>>();
 
         // Gather the files to compact in this iteration.
         //
@@ -1409,8 +1410,7 @@ impl Timeline {
             let guard = self.layers.read().await;
             let layers = guard.layer_map();
 
-            let l0_deltas = layers.get_level0_deltas();
-            drop(guard);
+            let l0_deltas = layers.level0_deltas();
 
             // As an optimization, if we find that there are too few L0 layers,
             // bail out early. We know that the compaction algorithm would do
