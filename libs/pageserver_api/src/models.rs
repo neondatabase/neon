@@ -947,6 +947,8 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
+    use std::path::PathBuf;
+
     #[derive(
         Copy,
         Clone,
@@ -964,6 +966,53 @@ pub mod virtual_file {
         StdFs,
         #[cfg(target_os = "linux")]
         TokioEpollUring,
+    }
+
+    /// Direct IO modes for a pageserver.
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+    pub enum DirectIoMode {
+        /// Direct IO disabled (uses usual buffered IO).
+        #[default]
+        Disabled,
+        /// Direct IO disabled (performs checks and perf simulations).
+        Evaluate {
+            /// Alignment check level
+            alignment_check: DirectIoAlignmentCheckLevel,
+            /// Latency padded for performance simulation.
+            latency_padding: DirectIoLatencyPadding,
+        },
+        /// Direct IO enabled.
+        Enabled {
+            /// Actions to perform on alignment error.
+            on_alignment_error: DirectIoOnAlignmentErrorAction,
+        },
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum DirectIoAlignmentCheckLevel {
+        #[default]
+        Error,
+        Log,
+        None,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum DirectIoOnAlignmentErrorAction {
+        Error,
+        #[default]
+        FallbackToBuffered,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(tag = "type", rename_all = "kebab-case")]
+    pub enum DirectIoLatencyPadding {
+        /// Pad virtual file operations with IO to a fake file.
+        FakeFileRW { path: PathBuf },
+        #[default]
+        None,
     }
 }
 
