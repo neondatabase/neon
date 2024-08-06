@@ -74,8 +74,22 @@ pub(crate) struct KeyHistoryRetention {
 }
 
 impl KeyHistoryRetention {
-    // `discard_key` will only be called when the writer reaches its target (instead of for every key), so it's fine to grab a lock inside.
-    async fn discard_key(key: &PersistentLayerKey, tline: &Arc<Timeline>) -> bool {
+    /// Hack: skip delta layer if we need to produce a layer of a same key-lsn.
+    ///
+    /// This can happen if we have removed some deltas in "the middle" of some existing layer's key-lsn-range.
+    /// For example, consider the case where a single delta with range [0x10,0x50) exists.
+    /// And we have branches at LSN 0x10, 0x20, 0x30.
+    /// Then we delete branch @ 0x20.
+    /// Bottom-most compaction may now delete the delta [0x20,0x30).
+    /// And that wouldnt' change the shape of the layer.
+    ///
+    /// Note that bottom-most-gc-compaction never _adds_ new data in that case, only removes.
+    ///
+    /// `discard_key` will only be called when the writer reaches its target (instead of for every key), so it's fine to grab a lock inside.
+    async fn discard_key(key: &PersistentLayerKey, tline: &Arc<Timeline>, dry_run: bool) -> bool {
+        if dry_run {
+            return true;
+        }
         let guard = tline.layers.read().await;
         if guard.contains_key(key) {
             let layer_generation = guard.get_from_key(key).metadata().generation;
@@ -106,12 +120,13 @@ impl KeyHistoryRetention {
         delta_writer: &mut SplitDeltaLayerWriter,
         mut image_writer: Option<&mut SplitImageLayerWriter>,
         stat: &mut CompactionStatistics,
+        dry_run: bool,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
         let discard = |key: &PersistentLayerKey| {
             let key = key.clone();
-            async move { Self::discard_key(&key, tline).await }
+            async move { Self::discard_key(&key, tline, dry_run).await }
         };
         for (cutoff_lsn, KeyLogAtLsn(logs)) in self.below_horizon {
             if first_batch {
@@ -2013,7 +2028,6 @@ impl Timeline {
         // the key and LSN range are determined. However, to keep things simple here, we still
         // create this writer, and discard the writer in the end.
 
-        // let mut delta_layers = Vec::new();
         while let Some((key, lsn, val)) = merge_iter.next().await? {
             if cancel.is_cancelled() {
                 return Err(anyhow!("cancelled")); // TODO: refactor to CompactionError and pass cancel error
@@ -2048,6 +2062,7 @@ impl Timeline {
                         &mut delta_layer_writer,
                         image_layer_writer.as_mut(),
                         &mut stat,
+                        dry_run,
                         ctx,
                     )
                     .await?;
@@ -2078,13 +2093,14 @@ impl Timeline {
                 &mut delta_layer_writer,
                 image_layer_writer.as_mut(),
                 &mut stat,
+                dry_run,
                 ctx,
             )
             .await?;
 
         let discard = |key: &PersistentLayerKey| {
             let key = key.clone();
-            async move { KeyHistoryRetention::discard_key(&key, self).await }
+            async move { KeyHistoryRetention::discard_key(&key, self, dry_run).await }
         };
 
         let produced_image_layers = if let Some(writer) = image_layer_writer {
