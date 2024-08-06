@@ -8,7 +8,6 @@ mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
 
-#[cfg(test)]
 pub mod split_writer;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
