@@ -315,6 +315,22 @@ pub(super) async fn handle_walreceiver_connection(
                     let mut modification = timeline.begin_modification(startlsn);
                     let mut uncommitted_records = 0;
                     let mut filtered_records = 0;
+
+                    async fn commit(
+                        modification: &mut DatadirModification<'_>,
+                        uncommitted: &mut u64,
+                        filtered: &mut u64,
+                        ctx: &RequestContext,
+                    ) -> anyhow::Result<()> {
+                        WAL_INGEST
+                            .records_committed
+                            .inc_by(*uncommitted - *filtered);
+                        modification.commit(ctx).await?;
+                        *uncommitted = 0;
+                        *filtered = 0;
+                        Ok(())
+                    }
+
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
@@ -333,12 +349,13 @@ pub(super) async fn handle_walreceiver_connection(
                             // Special case: legacy PG database creations operate by reading pages from a 'template' database:
                             // these are the only kinds of WAL record that require reading data blocks while ingesting.  Ensure
                             // all earlier writes of data blocks are visible by committing any modification in flight.
-                            WAL_INGEST
-                                .records_committed
-                                .inc_by(uncommitted_records - filtered_records);
-                            modification.commit(&ctx).await?;
-                            uncommitted_records = 0;
-                            filtered_records = 0;
+                            commit(
+                                &mut modification,
+                                &mut uncommitted_records,
+                                &mut filtered_records,
+                                &ctx,
+                            )
+                            .await?;
                         }
 
                         // Ingest the records without immediately committing them.
@@ -366,21 +383,25 @@ pub(super) async fn handle_walreceiver_connection(
                             || modification.approx_pending_bytes()
                                 > DatadirModification::MAX_PENDING_BYTES
                         {
-                            WAL_INGEST
-                                .records_committed
-                                .inc_by(uncommitted_records - filtered_records);
-                            modification.commit(&ctx).await?;
-                            uncommitted_records = 0;
-                            filtered_records = 0;
+                            commit(
+                                &mut modification,
+                                &mut uncommitted_records,
+                                &mut filtered_records,
+                                &ctx,
+                            )
+                            .await?;
                         }
                     }
 
                     // Commit the remaining records.
                     if uncommitted_records > 0 {
-                        WAL_INGEST
-                            .records_committed
-                            .inc_by(uncommitted_records - filtered_records);
-                        modification.commit(&ctx).await?;
+                        commit(
+                            &mut modification,
+                            &mut uncommitted_records,
+                            &mut filtered_records,
+                            &ctx,
+                        )
+                        .await?;
                     }
                 }
 
