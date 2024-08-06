@@ -3806,6 +3806,15 @@ class Endpoint(PgProtocol, LogUtils):
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
 
+        cache_dir = self.env.repo_dir / "endpoints" / self.endpoint_id / "file_cache"
+        cache_dir.mkdir(parents=True)
+        config_lines = [
+            "shared_buffers='1MB'",
+            f"neon.file_cache_path='{cache_dir}/file.cache'",
+            "neon.max_file_cache_size='128MB'",
+            "neon.file_cache_size_limit='64MB'",
+        ] + config_lines
+
         self.config(config_lines)
 
         return self
