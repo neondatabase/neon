@@ -487,5 +487,9 @@ Aurora does this but similarly I don't think this is needed.
 
 ## Misc
 
-We should use Compute <-> safekeeper protocol change to include another long
-yearned modifications: send data in network order to make arm work.
+We should use Compute <-> safekeeper protocol change to include other (long
+yearned) modifications:
+- send data in network order to make arm work.
+- remove term_start_lsn from AppendRequest
+- add horizon to TermHistory
+- add to ProposerGreeting number of connection from this wp to sk
