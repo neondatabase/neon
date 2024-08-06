@@ -22,7 +22,7 @@ There are two kinds of read-only replicas in Neon:
 - replicas that follow the primary, and
 - "static" replicas that are pinned at a particular LSN.
 
-A static replica is useful e.g. for performing time-travel query and
+A static replica is useful e.g. for performing time-travel queries and
 running one-off slow queries without affecting the primary. A replica
 that follows the primary can be used e.g. to scale out read-only
 workloads.
@@ -43,7 +43,7 @@ replication is a different feature.
 Neon also has the capability to launch "static" read-only nodes which
 do not follow the primary, but are pinned to a particular LSN. They
 can be used for long-running one-off queries, or for Point-in-time
-query. They work similarly to read replicas that follow the primary,
+queries. They work similarly to read replicas that follow the primary,
 but some things are simpler: there are no concerns about cache
 invalidation when the data changes on the primary, or worrying about
 transactions that are in-progress on the primary.
@@ -73,7 +73,7 @@ We choose to apply the WAL records for pages that are already in the
 buffer cache, and skip records for other pages. Somewhat arbitrarily,
 we also apply records affecting catalog relations, fetching the old
 page version from the pageserver if necessary first. See
-neon_redo_read_buffer_filter() function.
+`neon_redo_read_buffer_filter()` function.
 
 The replica wouldn't necessarily need to see all the WAL records, only
 the records that apply to cached pages. For simplicity, we do stream
@@ -121,10 +121,10 @@ started accepting queries at replica startup, even if it didn't have
 the transaction information. That could lead to incorrect query
 results and data corruption later. However, as we fixed that, we
 introduced a new problem compared to what we had before: previously
-the replica would always start up, but after fixing that bug, it migh
-tnot. In a superficious way, the old behavior was better (but could
-lead to serious issues later!). That made fixing that bug was very
-hard, because as we fixed it, we made things (superficially) worse for
+the replica would always start up, but after fixing that bug, it might
+not. In a superficial way, the old behavior was better (but could lead
+to serious issues later!). That made fixing that bug was very hard,
+because as we fixed it, we made things (superficially) worse for
 others.
 
 See https://github.com/neondatabase/neon/pull/7288 which fixed the
@@ -135,10 +135,10 @@ writing, there are still cases where a replica might not immediately
 start up, causing the control plane operation to fail.
 
 One long-term fix for this is to switch to using so-called CSN
-snapshots in read replica. That would make it unnecessarily to have
-the full in-progress transaction list in the replica at startup
-time. See https://commitfest.postgresql.org/48/4912/ for a
-work-in-progress patch to upstream to implement that.
+snapshots in read replica. That would make it unnecessary to have the
+full in-progress transaction list in the replica at startup time. See
+https://commitfest.postgresql.org/48/4912/ for a work-in-progress
+patch to upstream to implement that.
 
 ### Recovery conflicts and Hot standby feedback
 
@@ -146,10 +146,11 @@ It's possible that a tuple version is vacuumed away in the primary,
 even though it is still needed by a running transactions in the
 replica. This is called a "recovery conflict", and PostgreSQL provides
 various options for dealing with it. By default, the WAL replay will
-wait up to 30 s for the conflicting query finish. After that, it will
-kill the running query, so that the WAL replay can proceed.
+wait up to 30 s for the conflicting query to finish. After that, it
+will kill the running query, so that the WAL replay can proceed.
 
-Another way to avoid the situation is to enable `hot_standby_feedback`
+Another way to avoid the situation is to enable the
+[`hot_standby_feedback`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-HOT-STANDBY-FEEDBACK)
 option. When it is enabled, the primary will refrain from vacuuming
 tuples that are still needed in the primary. That means potentially
 bloating the primary, which violates the usual rule that read replicas
@@ -189,9 +190,7 @@ in the primary until the WAL has been streamed to a replica or flushed
 to disk there. Those modes don't make senses in Neon, because the
 safekeepers handle durability.
 
-synchronous_commit=remote_apply mode would make sense. In that mode,
+`synchronous_commit=remote_apply` mode would make sense. In that mode,
 the commit is not acknowledged to the client until it has been
 replayed in the replica. That ensures that after commit, you can see
 the commit in the replica too (aka. read-your-write consistency).
-
-
