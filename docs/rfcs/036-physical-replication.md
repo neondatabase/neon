@@ -56,6 +56,41 @@ transactions that are in-progress on the primary.
 - The primary and replicas all connect to the same pageservers
 
 
+# Context
+
+Some useful things to know about hot standby and replicas in
+PostgreSQL.
+
+## PostgreSQL startup sequence
+
+"Running" and "start up" terms are little imprecise. PostgreSQL
+replica startup goes through several stages:
+
+1. First, the process is started up, and various initialization steps
+   are performed, like initializing shared memory. If you try to
+   connect to the server in this stage, you get an error: ERROR: the
+   database system is starting up. This stage happens very quickly, no
+
+2. Then the server reads the checpoint record from the WAL and starts
+   the WAL replay starting from the checkpoint. This works differently
+   in Neon: we start the WAL replay at the basebackup LSN, not from a
+   checkpoint! If you connect to the server in this state, you get an
+   error: ERROR: the database system is not yet accepting
+   connections. We proceed to the next stage, when the WAL replay sees
+   a running-xacts record. Or in Neon, the "CLOG scanning" mechanism
+   can allow us to move directly to next stage, with all the caveats
+   listed in this RFC.
+
+3. When the running-xacts information is established, the server
+   starts to accept connections normally.
+
+From PostgreSQL's point of view, the server is already running in
+stage 2, even though it's not accepting connections yet. Our
+`compute_ctl` does not consider it as running until stage 3. If the
+transition from stage 2 to 3 doesn't happen fast enough, the control
+plane will mark the start operation as failed.
+
+
 ## Decisions, Issues
 
 ### Cache invalidation in replica
@@ -100,16 +135,17 @@ overhead to the primary (see hot standby feedback though).
 ### In-progress transactions
 
 In PostgreSQL, when a hot standby server starts up, it cannot
-immediately open up for queries. It first needs to establish a
-complete list of in-progress transactions, including subtransactions,
-that are running at the primary, at the current replay LSN. Normally
-that happens quickly, when the replica sees a "running-xacts" or
-shutdown checkpoint WAL record, because the primary writes a
-running-xacts record at every checkpoint, and in PostgreSQL the
-replica always starts the WAL replay from a checkpoint REDO point. If
-there are a lot of subtransactions in progress, however, the standby
-might need to wait for old transactions to complete before it can open
-up for queries.
+immediately open up for queries (see [PostgreSQL startup
+sequence]). It first needs to establish a complete list of in-progress
+transactions, including subtransactions, that are running at the
+primary, at the current replay LSN. Normally that happens quickly,
+when the replica sees a "running-xacts" WAL record, because the
+primary writes a running-xacts WAL record at every checkpoint, and in
+PostgreSQL the replica always starts the WAL replay from a checkpoint
+REDO point. (A shutdown checkpoint WAL record also implies that all
+the non-prepared transactions have ended.) If there are a lot of
+subtransactions in progress, however, the standby might need to wait
+for old transactions to complete before it can open up for queries.
 
 In Neon that problem is worse: a replica can start at any LSN, so
 there's no guarantee that it will see a running-xacts record any time
@@ -140,6 +176,14 @@ full in-progress transaction list in the replica at startup time. See
 https://commitfest.postgresql.org/48/4912/ for a work-in-progress
 patch to upstream to implement that.
 
+Another thing we could do is to teach the control plane about that
+distinction between "starting up" and "running but haven't received
+running-xacts information yet", so that we could keep the replica
+waiting longer in that stage, and also give any client connections the
+same `ERROR: the database system is not yet accepting connections`
+error that you get in standalone PostgreSQL in that state.
+
+
 ### Recovery conflicts and Hot standby feedback
 
 It's possible that a tuple version is vacuumed away in the primary,
@@ -161,6 +205,21 @@ Neon supports `hot_standby_feedback` by passing the feedback messages
 from the replica to the safekeepers, and from safekeepers to the
 primary.
 
+### Relationship of settings between primary and replica
+
+In order to enter hot standby mode, some configuration options need to
+be set to the same or larger values in the standby, compared to the
+primary.  See [explanation in the PostgreSQL
+docs](https://www.postgresql.org/docs/current/hot-standby.html#HOT-STANDBY-ADMIN)
+
+In Neon, we have this problem too. To prevent customers from hitting
+it, the control plane automatically adjusts the settings of a replica,
+so that they match or exceed the primary's settings (see
+https://github.com/neondatabase/cloud/issues/14903). However, you
+can still hit the issue if the primary is restarted with larger
+settings, while the replica is running.
+
+
 ### Interaction with Pageserver GC
 
 The read replica can lag behind the primary. If there are recovery
@@ -174,10 +233,18 @@ have already garbage collected away the old page versions. That will
 cause read errors in the compute, and can mean that the replica cannot
 make progress with the replication anymore.
 
-This is an unsolved problem at the moment. A "lease" mechanism is in
-the works, where the replica could hold a lease on the old LSN,
-preventing the pageserver from advancing the GC horizon past that
-point.
+There is a mechanism for replica to pass information about its replay
+LSN to the pageserver, so that the pageserver refrains from GC'ing
+data that is still needed by the standby. It's called
+'standby_horizon' in the pageserver code, see
+https://github.com/neondatabase/neon/pull/7368. A separate "lease"
+mechanism also is in the works, where the replica could hold a lease
+on the old LSN, preventing the pageserver from advancing the GC
+horizon past that point. The difference is that the standby_horizon
+mechanism relies on a feedback message from replica to safekeeper,
+while the least API is exposed directly from the pageserver. A static
+read-only node is not connected to safekeepers, so it cannot use the
+standby_horizon mechanism.
 
 
 ### Synchronous replication
