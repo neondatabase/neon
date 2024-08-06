@@ -4,6 +4,7 @@ use bytes::Bytes;
 use pageserver_api::key::{Key, KEY_SIZE};
 use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
 
+use crate::tenant::storage_layer::Layer;
 use crate::{config::PageServerConf, context::RequestContext, repository::Value, tenant::Timeline};
 
 use super::{DeltaLayerWriter, ImageLayerWriter, ResidentLayer};
@@ -173,8 +174,9 @@ impl SplitDeltaLayerWriter {
             )
             .await?;
             let prev_delta_writer = std::mem::replace(&mut self.inner, next_delta_writer);
-            self.generated_layers
-                .push(prev_delta_writer.finish(key, tline, ctx).await?);
+            let (desc, path) = prev_delta_writer.finish(key, ctx).await?;
+            let delta_layer = Layer::finish_creating(self.conf, tline, desc, &path)?;
+            self.generated_layers.push(delta_layer);
         }
         self.inner.put_value(key, lsn, val, ctx).await
     }
@@ -190,7 +192,10 @@ impl SplitDeltaLayerWriter {
             inner,
             ..
         } = self;
-        generated_layers.push(inner.finish(end_key, tline, ctx).await?);
+
+        let (desc, path) = inner.finish(end_key, ctx).await?;
+        let delta_layer = Layer::finish_creating(self.conf, tline, desc, &path)?;
+        generated_layers.push(delta_layer);
         Ok(generated_layers)
     }
 
