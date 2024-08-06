@@ -387,28 +387,23 @@ impl SerializedBatch {
     }
 
     pub(crate) fn from_values(batch: Vec<(CompactKey, Lsn, Value)>) -> Self {
-        use std::io::Write;
+        // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
+        // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
+        let buffer_size = batch
+            .iter()
+            .map(|i| i.2.serialized_size().unwrap() as usize)
+            .sum::<usize>()
+            + 4 * batch.len();
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
 
-        let mut offsets: Vec<(CompactKey, Lsn, u64)> = Vec::new();
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut offsets: Vec<(CompactKey, Lsn, u64)> = Vec::with_capacity(batch.len());
         let mut max_lsn: Lsn = Lsn(0);
-        let mut value_buf = smallvec::SmallVec::<[u8; 256]>::new();
         for (key, lsn, val) in batch {
             let relative_off = cursor.position();
 
-            value_buf.clear();
-            val.ser_into(&mut value_buf)
-                .expect("Value serialization is infallible");
-            Self::write_blob_length(value_buf.len(), &mut cursor);
-
-            cursor
-                .write_all(&value_buf)
-                .expect("Writing to Vec is infallible");
-
-            // We can't write straight into the buffer, because the InMemoryLayer file format requires
-            // the size to come before the value.  However... we could probably calculate the size before
-            // actually serializing the value
-            //val.ser_into(&mut cursor)?;
+            Self::write_blob_length(val.serialized_size().unwrap() as usize, &mut cursor);
+            val.ser_into(&mut cursor)
+                .expect("Writing into in-memory buffer is infallible");
 
             offsets.push((key, lsn, relative_off));
             max_lsn = std::cmp::max(max_lsn, lsn);
