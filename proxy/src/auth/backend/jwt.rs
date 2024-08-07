@@ -3,8 +3,6 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
-use hmac::digest::generic_array::GenericArray;
-// use jose_jwa::S;
 use jose_jwk::crypto::KeyInfo;
 use tokio::time::Instant;
 
@@ -235,9 +233,6 @@ impl JWKCache {
             jose_jwk::Key::Rsa(key) => {
                 verify_rsa_signature(header_payload.as_bytes(), &sig, key, &jwk.prm.alg)?;
             }
-            jose_jwk::Key::Okp(key) => {
-                verify_okp_signature(header_payload.as_bytes(), &sig, key)?;
-            }
             key => bail!("unsupported key type {key:?}"),
         };
 
@@ -259,54 +254,7 @@ fn verify_ec_signature(data: &[u8], sig: &[u8], key: &jose_jwk::Ec) -> anyhow::R
             let sig = Signature::from_slice(sig)?;
             key.verify(data, &sig)?;
         }
-        jose_jwk::EcCurves::P384 => {
-            let pk =
-                p384::PublicKey::try_from(key).map_err(|_| anyhow::anyhow!("invalid P384 key"))?;
-            let key = p384::ecdsa::VerifyingKey::from(&pk);
-            let sig = Signature::from_slice(sig)?;
-            key.verify(data, &sig)?;
-        }
-        jose_jwk::EcCurves::P521 => {
-            ensure!(key.x.len() == 66 && key.y.len() == 66);
-            let x = GenericArray::from_slice(&key.x);
-            let y = GenericArray::from_slice(&key.y);
-
-            let encoded = p521::EncodedPoint::from_affine_coordinates(x, y, false);
-            let key = p521::ecdsa::VerifyingKey::from_encoded_point(&encoded)?;
-            let sig = Signature::from_slice(sig)?;
-            key.verify(data, &sig)?;
-        }
-        jose_jwk::EcCurves::P256K => {
-            ensure!(key.x.len() == 32 && key.y.len() == 32);
-            let x = GenericArray::from_slice(&key.x);
-            let y = GenericArray::from_slice(&key.y);
-
-            let encoded = k256::EncodedPoint::from_affine_coordinates(x, y, false);
-            let key = k256::ecdsa::VerifyingKey::from_encoded_point(&encoded)?;
-            let sig = Signature::from_slice(sig)?;
-            key.verify(data, &sig)?;
-        }
         key => bail!("unsupported ec key type {key:?}"),
-    }
-
-    Ok(())
-}
-
-fn verify_okp_signature(data: &[u8], sig: &[u8], key: &jose_jwk::Okp) -> anyhow::Result<()> {
-    use ed25519_dalek::Signature;
-    use signature::Verifier;
-
-    match key.crv {
-        jose_jwk::OkpCurves::Ed25519 => {
-            let x = <&[u8; 32]>::try_from(&**key.x)?;
-            let key = ed25519_dalek::VerifyingKey::from_bytes(x)?;
-            let sig = Signature::from_slice(sig)?;
-            key.verify(data, &sig)?;
-        }
-        // jose_jwk::OkpCurves::Ed448 => todo!(),
-        // jose_jwk::OkpCurves::X25519 => todo!(),
-        // jose_jwk::OkpCurves::X448 => todo!(),
-        key => bail!("unsupported octet key pair curve type {key:?}"),
     }
 
     Ok(())
@@ -319,40 +267,15 @@ fn verify_rsa_signature(
     alg: &Option<jose_jwa::Algorithm>,
 ) -> anyhow::Result<()> {
     use jose_jwa::{Algorithm, Signing};
-    use rsa::{Pkcs1v15Sign, Pss, RsaPublicKey};
+    use rsa::{Pkcs1v15Sign, RsaPublicKey};
     use sha2::Digest;
 
     let key = RsaPublicKey::try_from(key).map_err(|_| anyhow::anyhow!("invalid RSA key"))?;
 
     match alg {
-        Some(Algorithm::Signing(Signing::Ps256)) => {
-            let hashed = sha2::Sha256::digest(data);
-            let scheme = Pss::new::<sha2::Sha256>();
-            key.verify(scheme, &hashed, sig)?;
-        }
-        Some(Algorithm::Signing(Signing::Ps384)) => {
-            let hashed = sha2::Sha384::digest(data);
-            let scheme = Pss::new::<sha2::Sha384>();
-            key.verify(scheme, &hashed, sig)?;
-        }
-        Some(Algorithm::Signing(Signing::Ps512)) => {
-            let hashed = sha2::Sha512::digest(data);
-            let scheme = Pss::new::<sha2::Sha512>();
-            key.verify(scheme, &hashed, sig)?;
-        }
         Some(Algorithm::Signing(Signing::Rs256)) => {
             let hashed = sha2::Sha256::digest(data);
             let scheme = Pkcs1v15Sign::new::<sha2::Sha256>();
-            key.verify(scheme, &hashed, sig)?;
-        }
-        Some(Algorithm::Signing(Signing::Rs384)) => {
-            let hashed = sha2::Sha384::digest(data);
-            let scheme = Pkcs1v15Sign::new::<sha2::Sha384>();
-            key.verify(scheme, &hashed, sig)?;
-        }
-        Some(Algorithm::Signing(Signing::Rs512)) => {
-            let hashed = sha2::Sha512::digest(data);
-            let scheme = Pkcs1v15Sign::new::<sha2::Sha512>();
             key.verify(scheme, &hashed, sig)?;
         }
         _ => bail!("invalid RSA signing algorithm"),
