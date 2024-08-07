@@ -35,8 +35,8 @@ use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
-use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
+use crate::tenant::timeline::{Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::DeltaLayer;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
@@ -752,93 +752,62 @@ impl Timeline {
             .read_lock_held_spawn_blocking_startup_micros
             .till_now();
 
-        // TODO: replace with streaming k-merge
-        let all_keys = {
-            let mut all_keys = Vec::new();
-            for l in deltas_to_compact.iter() {
-                all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
-            }
-            // The current stdlib sorting implementation is designed in a way where it is
-            // particularly fast where the slice is made up of sorted sub-ranges.
-            all_keys.sort_by_key(|DeltaEntry { key, lsn, .. }| (*key, *lsn));
-            all_keys
-        };
+        // Determine N largest holes where N is number of compacted layers.
+        let max_holes = deltas_to_compact.len();
+        let last_record_lsn = self.get_last_record_lsn();
+        let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
+        let min_hole_coverage_size = 3; // TODO: something more flexible?
+
+        // min-heap (reserve space for one more element added before eviction)
+        let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
+        let mut prev: Option<Key> = None;
+
+        let mut all_keys = Vec::new();
+
+        for l in deltas_to_compact.iter() {
+            all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
+        }
+
+        // FIXME: should spawn_blocking the rest of this function
+
+        // The current stdlib sorting implementation is designed in a way where it is
+        // particularly fast where the slice is made up of sorted sub-ranges.
+        all_keys.sort_by_key(|DeltaEntry { key, lsn, .. }| (*key, *lsn));
 
         stats.read_lock_held_key_sort_micros = stats.read_lock_held_prerequisites_micros.till_now();
 
-        // Determine N largest holes where N is number of compacted layers. The vec is sorted by key range start.
-        //
-        // A hole is a key range for which this compaction doesn't have any WAL records.
-        // Our goal in this compaction iteration is to avoid creating L1s that, in terms of their key range,
-        // cover the hole, but actually don't contain any WAL records for that key range.
-        // The reason is that the mere stack of L1s (`count_deltas`) triggers image layer creation (`create_image_layers`).
-        // That image layer creation would be useless for a hole range covered by L1s that don't contain any WAL records.
-        //
-        // The algorithm chooses holes as follows.
-        // - Slide a 2-window over the keys in key orde to get the hole range (=distance between two keys).
-        // - Filter: min threshold on range length
-        // - Rank: by coverage size (=number of image layers required to reconstruct each key in the range for which we have any data)
-        //
-        // For more details, intuition, and some ASCII art see https://github.com/neondatabase/neon/pull/3597#discussion_r1112704451
-        #[derive(PartialEq, Eq)]
-        struct Hole {
-            key_range: Range<Key>,
-            coverage_size: usize,
-        }
-        let holes: Vec<Hole> = {
-            use std::cmp::Ordering;
-            impl Ord for Hole {
-                fn cmp(&self, other: &Self) -> Ordering {
-                    self.coverage_size.cmp(&other.coverage_size).reverse()
-                }
-            }
-            impl PartialOrd for Hole {
-                fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                    Some(self.cmp(other))
-                }
-            }
-            let max_holes = deltas_to_compact.len();
-            let last_record_lsn = self.get_last_record_lsn();
-            let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
-            let min_hole_coverage_size = 3; // TODO: something more flexible?
-                                            // min-heap (reserve space for one more element added before eviction)
-            let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
-            let mut prev: Option<Key> = None;
-
-            for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
-                if let Some(prev_key) = prev {
-                    // just first fast filter, do not create hole entries for metadata keys. The last hole in the
-                    // compaction is the gap between data key and metadata keys.
-                    if next_key.to_i128() - prev_key.to_i128() >= min_hole_range
-                        && !Key::is_metadata_key(&prev_key)
-                    {
-                        let key_range = prev_key..next_key;
-                        // Measuring hole by just subtraction of i128 representation of key range boundaries
-                        // has not so much sense, because largest holes will corresponds field1/field2 changes.
-                        // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
-                        // That is why it is better to measure size of hole as number of covering image layers.
-                        let coverage_size =
-                            layers.image_coverage(&key_range, last_record_lsn).len();
-                        if coverage_size >= min_hole_coverage_size {
-                            heap.push(Hole {
-                                key_range,
-                                coverage_size,
-                            });
-                            if heap.len() > max_holes {
-                                heap.pop(); // remove smallest hole
-                            }
+        for &DeltaEntry { key: next_key, .. } in all_keys.iter() {
+            if let Some(prev_key) = prev {
+                // just first fast filter, do not create hole entries for metadata keys. The last hole in the
+                // compaction is the gap between data key and metadata keys.
+                if next_key.to_i128() - prev_key.to_i128() >= min_hole_range
+                    && !Key::is_metadata_key(&prev_key)
+                {
+                    let key_range = prev_key..next_key;
+                    // Measuring hole by just subtraction of i128 representation of key range boundaries
+                    // has not so much sense, because largest holes will corresponds field1/field2 changes.
+                    // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
+                    // That is why it is better to measure size of hole as number of covering image layers.
+                    let coverage_size = layers.image_coverage(&key_range, last_record_lsn).len();
+                    if coverage_size >= min_hole_coverage_size {
+                        heap.push(Hole {
+                            key_range,
+                            coverage_size,
+                        });
+                        if heap.len() > max_holes {
+                            heap.pop(); // remove smallest hole
                         }
                     }
                 }
-                prev = Some(next_key.next());
             }
-            let mut holes = heap.into_vec();
-            holes.sort_unstable_by_key(|hole| hole.key_range.start);
-            holes
-        };
+            prev = Some(next_key.next());
+        }
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
         drop_rlock(guard);
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
+        let mut holes = heap.into_vec();
+        holes.sort_unstable_by_key(|hole| hole.key_range.start);
+        let mut next_hole = 0; // index of next hole in holes vector
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
@@ -913,7 +882,6 @@ impl Timeline {
         let mut key_values_total_size = 0u64;
         let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
-        let mut next_hole = 0; // index of next hole in holes vector
 
         for &DeltaEntry {
             key, lsn, ref val, ..
