@@ -17,7 +17,7 @@ jobs:
         # the following hard-coded connection string which contains a password is just used for testing the workflow
         # and project will be immediately deleted after the workflow is running
         # so please don't worry about the "security issue" for now
-        - BENCHMARK_CONNSTR: "postgresql://neondb_owner:4czu1xJeBkdN@ep-noisy-frost-w2k417od.us-east-2.aws.neon.build/neondb?sslmode=require"
+        - BENCHMARK_CONNSTR: "postgresql://neondb_owner@ep-noisy-frost-w2k417od.us-east-2.aws.neon.build/neondb?sslmode=require"
     env:
       BENCHMARK_CONNSTR: ${{ matrix.BENCHMARK_CONNSTR }}
       LD_LIBRARY_PATH: /tmp/neon/pg_install/v16/lib
