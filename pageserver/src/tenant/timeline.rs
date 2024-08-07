@@ -59,7 +59,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::atomic::AtomicU64,
 };
-use std::{cmp::min, Ordering, ops::ControlFlow};
+use std::{cmp::min, cmp::Ordering, ops::ControlFlow};
 use std::{
     collections::btree_map::Entry,
     ops::{Deref, Range},
