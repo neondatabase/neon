@@ -279,6 +279,7 @@ def test_snap_files(
     test_duration_min = 60
     test_interval_min = 5
     pgbench_duration = f"-T{test_duration_min * 60 * 2}"
+    num_replication_slots = 8
 
     env = benchmark_project_pub.pgbench_env
     connstr = benchmark_project_pub.connstr
@@ -287,33 +288,37 @@ def test_snap_files(
     conn = psycopg2.connect(connstr)
     conn.autocommit = True
     with conn.cursor() as cur:
+        for i in range(num_replication_slots)
         cur.execute(
-            """
+            f"""
 DO $$
 BEGIN
-    IF NOT EXISTS (
+    IF EXISTS (
         SELECT 1
         FROM pg_replication_slots
-        WHERE slot_name = 'slotter'
+        WHERE slot_name = 'slotter{i}'
     ) THEN
-        PERFORM pg_create_logical_replication_slot('slotter', 'test_decoding');
+        PERFORM pg_drop_replication_slot('slotter{i}', 'test_decoding');
     END IF;
 END $$;
 """
         )
+        cur.execute(f"SELECT pg_create_logical_replication_slot('slotter{i}', 'test-decoding')")
     conn.close()
 
     workload = pg_bin.run_nonblocking(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env=env)
     try:
         start = time.time()
+        prev_measurement = time.time()
         while time.time() - start < test_duration_min * 60:
             with psycopg2.connect(connstr) as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """
+                    for i in range(num_replication_slots):
+                        cur.execute(
+                            f"""
                         SELECT data FROM
                         pg_logical_slot_get_changes(
-                            'slotter',
+                            'slotter{i}',
                             NULL,
                             NULL,
                             'include-xids',
@@ -321,34 +326,16 @@ END $$;
                             'skip-empty-xacts',
                             '1')
                         """
-                    )
+                        )
 
             check_pgbench_still_running(workload)
-            workload.terminate()
 
-            benchmark_project_pub.restart()
-
-            workload = pg_bin.run_nonblocking(
-                ["pgbench", "-c10", pgbench_duration, "-Mprepared"],
-                env=env,
-            )
-
-            time.sleep(test_interval_min * 60)
-
-            with psycopg2.connect(connstr) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        select
-                        count(*)
-                        from
-                        (select pg_export_snapshot() from generate_series(1, 100000) g)
-                        s
-                        """
-                    )
+            time.sleep(5)
 
             # Measure storage
-            storage = benchmark_project_pub.get_synthetic_storage_size()
-            zenbenchmark.record("storage", storage, "B", MetricReport.LOWER_IS_BETTER)
+            if time.time() - prev_measurement > test_interval_min * 60:
+                storage = benchmark_project_pub.get_synthetic_storage_size()
+                zenbenchmark.record("storage", storage, "B", MetricReport.LOWER_IS_BETTER)
+                prev_measurement = time.time()
     finally:
         workload.terminate()
