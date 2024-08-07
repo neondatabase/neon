@@ -1,7 +1,7 @@
 use std::{borrow::Cow, fmt::Debug, fmt::Display};
 
 use tokio_util::sync::CancellationToken;
-use utils::id::NodeId;
+use utils::{id::NodeId, shard::TenantShardId};
 
 pub(crate) const MAX_RECONCILES_PER_OPERATION: usize = 32;
 
@@ -23,6 +23,8 @@ pub(crate) enum Operation {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OperationError {
+    #[error("Tenant shared removed during operation: {0}")]
+    TenantShardRemoved(TenantShardId),
     #[error("Node state changed during operation: {0}")]
     NodeStateChanged(Cow<'static, str>),
     #[error("Operation finalize error: {0}")]

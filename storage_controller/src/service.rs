@@ -14,6 +14,7 @@ use crate::{
         Drain, Fill, Operation, OperationError, OperationHandler, MAX_RECONCILES_PER_OPERATION,
     },
     compute_hook::NotifyError,
+    drain_utils::{self, TenantShardDrain, TenantShardIterator},
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     metrics::LeadershipStatusGroup,
     persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
@@ -406,6 +407,9 @@ impl From<OperationError> for ApiError {
         match value {
             OperationError::NodeStateChanged(err) | OperationError::FinalizeError(err) => {
                 ApiError::InternalServerError(anyhow::anyhow!(err))
+            }
+            err @ OperationError::TenantShardRemoved(_) => {
+                ApiError::InternalServerError(anyhow::anyhow!(err.to_string()))
             }
             OperationError::Cancelled => ApiError::Conflict("Operation was cancelled".into()),
         }
@@ -5722,11 +5726,29 @@ impl Service {
         node_id: NodeId,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
-        let mut last_inspected_shard: Option<TenantShardId> = None;
-        let mut inspected_all_shards = false;
         let mut waiters = Vec::new();
 
-        while !inspected_all_shards {
+        let mut tid_iter = TenantShardIterator::new({
+            let service = self.clone();
+            move |last_inspected_shard: Option<TenantShardId>| {
+                let locked = &service.inner.read().unwrap();
+                let tenants = &locked.tenants;
+                let entry = match last_inspected_shard {
+                    Some(skip_past) => {
+                        // Skip to the last seen tenant shard id
+                        let mut cursor = tenants.iter().skip_while(|(tid, _)| **tid != skip_past);
+
+                        // Skip past the last seen
+                        cursor.nth(1)
+                    }
+                    None => tenants.first_key_value(),
+                };
+
+                entry.map(|(tid, _)| tid).copied()
+            }
+        });
+
+        while !tid_iter.finished() {
             if cancel.is_cancelled() {
                 match self
                     .node_configure(node_id, None, Some(NodeSchedulingPolicy::Active))
@@ -5745,71 +5767,42 @@ impl Service {
                 }
             }
 
-            {
-                let mut locked = self.inner.write().unwrap();
-                let (nodes, tenants, scheduler) = locked.parts_mut();
+            drain_utils::validate_node_state(&node_id, self.inner.read().unwrap().nodes.clone())?;
 
-                let node = nodes.get(&node_id).ok_or(OperationError::NodeStateChanged(
-                    format!("node {node_id} was removed").into(),
-                ))?;
-
-                let current_policy = node.get_scheduling();
-                if !matches!(current_policy, NodeSchedulingPolicy::Draining) {
-                    // TODO(vlad): maybe cancel pending reconciles before erroring out. need to think
-                    // about it
-                    return Err(OperationError::NodeStateChanged(
-                        format!("node {node_id} changed state to {current_policy:?}").into(),
-                    ));
-                }
-
-                let mut cursor = tenants.iter_mut().skip_while({
-                    let skip_past = last_inspected_shard;
-                    move |(tid, _)| match skip_past {
-                        Some(last) => **tid != last,
-                        None => false,
+            while waiters.len() < MAX_RECONCILES_PER_OPERATION {
+                let tid = match tid_iter.next() {
+                    Some(tid) => tid,
+                    None => {
+                        break;
                     }
-                });
+                };
 
-                while waiters.len() < MAX_RECONCILES_PER_OPERATION {
-                    let (tid, tenant_shard) = match cursor.next() {
-                        Some(some) => some,
-                        None => {
-                            inspected_all_shards = true;
-                            break;
-                        }
-                    };
+                let tid_drain = TenantShardDrain {
+                    drained_node: node_id,
+                    tenant_shard_id: tid
+                };
 
-                    // If the shard is not attached to the node being drained, skip it.
-                    if *tenant_shard.intent.get_attached() != Some(node_id) {
-                        last_inspected_shard = Some(*tid);
+                {
+                    let locked = self.inner.read().unwrap();
+                    let eligible =
+                        tid_drain.tenant_shard_eligible_for_drain(&locked.tenants)?;
+                    if !eligible {
                         continue;
                     }
+                }
 
-                    match tenant_shard.reschedule_to_secondary(None, scheduler) {
-                        Err(e) => {
-                            tracing::warn!(
-                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                "Scheduling error when draining pageserver {} : {e}", node_id
-                            );
-                        }
-                        Ok(()) => {
-                            let scheduled_to = tenant_shard.intent.get_attached();
-                            tracing::info!(
-                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                "Rescheduled shard while draining node {}: {} -> {:?}",
-                                node_id,
-                                node_id,
-                                scheduled_to
-                            );
+                {
+                    let mut locked = self.inner.write().unwrap();
+                    let (nodes, tenants, scheduler) = locked.parts_mut();
+                    // TODO: TenantShardRemoved should continue
+                    let rescheduled = tid_drain.reschedule_to_secondary(tenants, scheduler)?;
 
-                            let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
-                            if let Some(some) = waiter {
-                                waiters.push(some);
-                            }
+                    if let Some(tenant_shard) = rescheduled {
+                        let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
+                        if let Some(some) = waiter {
+                            waiters.push(some);
                         }
                     }
-
-                    last_inspected_shard = Some(*tid);
                 }
             }
 
