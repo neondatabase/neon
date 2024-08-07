@@ -30,6 +30,7 @@ use tokio::time::Instant;
 pub use pageserver_api::models::virtual_file as api;
 pub(crate) mod io_engine;
 pub use io_engine::feature_test as io_engine_feature_test;
+pub use io_engine::io_engine_for_bench;
 pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;

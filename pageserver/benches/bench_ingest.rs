@@ -11,7 +11,7 @@ use pageserver::{
     repository::Value,
     task_mgr::TaskKind,
     tenant::storage_layer::InMemoryLayer,
-    virtual_file::{self, api::IoEngineKind},
+    virtual_file,
 };
 use pageserver_api::{key::Key, shard::TenantShardId};
 use utils::{
@@ -149,7 +149,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     let conf: &'static PageServerConf = Box::leak(Box::new(
         pageserver::config::PageServerConf::dummy_conf(temp_dir.path().to_path_buf()),
     ));
-    virtual_file::init(16384, IoEngineKind::TokioEpollUring);
+    virtual_file::init(16384, virtual_file::io_engine_for_bench());
     page_cache::init(conf.page_cache_size);
 
     {
