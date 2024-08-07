@@ -4034,6 +4034,17 @@ class Endpoint(PgProtocol, LogUtils):
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(os.path.join(self.pgdata_dir, "pg_wal")) / 1024 / 1024
 
+    def clear_shared_buffers(self, cursor: Optional[Any] = None):
+        """
+        Best-effort way to clear postgres buffers. Pinned buffers will not be 'cleared.'
+
+        Might also clear LFC.
+        """
+        if cursor is not None:
+            cursor.execute("select clear_buffer_cache()")
+        else:
+            self.safe_psql("select clear_buffer_cache()")
+
 
 class EndpointFactory:
     """An object representing multiple compute endpoints."""
