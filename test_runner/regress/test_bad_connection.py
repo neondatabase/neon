@@ -14,7 +14,9 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     # env.pageserver.allowed_errors.append(".*simulated connection error.*") # this is never hit
 
     # the real reason (Simulated Connection Error) is on the next line, and we cannot filter this out.
-    env.pageserver.allowed_errors.append(".*ERROR error in page_service connection task: Postgres query error")
+    env.pageserver.allowed_errors.append(
+        ".*ERROR error in page_service connection task: Postgres query error"
+    )
 
     # Enable failpoint before starting everything else up so that we exercise the retry
     # on fetching basebackup
