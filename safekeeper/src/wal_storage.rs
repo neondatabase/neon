@@ -37,6 +37,8 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 
 #[async_trait::async_trait]
 pub trait Storage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn;
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn;
 
@@ -327,6 +329,10 @@ impl PhysicalStorage {
 
 #[async_trait::async_trait]
 impl Storage for PhysicalStorage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn {
+        self.write_lsn
+    }
     /// flush_lsn returns LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn
