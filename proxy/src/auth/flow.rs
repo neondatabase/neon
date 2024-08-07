@@ -27,7 +27,7 @@ pub trait AuthMethod {
 pub struct Begin;
 
 /// Use [SCRAM](crate::scram)-based auth in [`AuthFlow`].
-pub struct Scram<'a>(pub &'a scram::ServerSecret, pub &'a mut RequestMonitoring);
+pub struct Scram<'a>(pub &'a scram::ServerSecret, pub &'a RequestMonitoring);
 
 impl AuthMethod for Scram<'_> {
     #[inline(always)]
@@ -155,7 +155,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         let Scram(secret, ctx) = self.state;
 
         // pause the timer while we communicate with the client
-        let _paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
+        let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
 
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
@@ -168,10 +168,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         }
 
         match sasl.method {
-            SCRAM_SHA_256 => ctx.auth_method = Some(crate::context::AuthMethod::ScramSha256),
-            SCRAM_SHA_256_PLUS => {
-                ctx.auth_method = Some(crate::context::AuthMethod::ScramSha256Plus)
-            }
+            SCRAM_SHA_256 => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256),
+            SCRAM_SHA_256_PLUS => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256Plus),
             _ => {}
         }
         info!("client chooses {}", sasl.method);
