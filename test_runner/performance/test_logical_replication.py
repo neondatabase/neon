@@ -288,22 +288,23 @@ def test_snap_files(
     conn = psycopg2.connect(connstr)
     conn.autocommit = True
     with conn.cursor() as cur:
-        for i in range(num_replication_slots)
-        cur.execute(
-            f"""
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM pg_replication_slots
-        WHERE slot_name = 'slotter{i}'
-    ) THEN
-        PERFORM pg_drop_replication_slot('slotter{i}', 'test_decoding');
-    END IF;
-END $$;
-"""
-        )
-        cur.execute(f"SELECT pg_create_logical_replication_slot('slotter{i}', 'test-decoding')")
+        for i in range(num_replication_slots):
+            cur.execute(
+                f"""
+                DO $$
+                    BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_replication_slots
+                        WHERE slot_name = 'slotter{i}'
+                    ) THEN
+                        PERFORM pg_drop_replication_slot('slotter{i}');
+                    END IF;
+                END $$;
+                """
+            )
+            log.info(f'dropping slot {i}')
+            cur.execute(f"SELECT pg_create_logical_replication_slot('slotter{i}', 'test_decoding')")
     conn.close()
 
     workload = pg_bin.run_nonblocking(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env=env)
