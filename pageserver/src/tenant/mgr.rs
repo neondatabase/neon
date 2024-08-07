@@ -13,7 +13,7 @@ use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1966,7 +1966,8 @@ impl TenantManager {
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
+        // FIXME: this is unnecessary, slotguard already has these semantics
         struct RevertOnDropSlot(Option<SlotGuard>);
 
         impl Drop for RevertOnDropSlot {

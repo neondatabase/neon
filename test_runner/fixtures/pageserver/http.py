@@ -857,7 +857,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         batch_size: int | None = None,
         **kwargs,
-    ) -> List[TimelineId]:
+    ) -> Set[TimelineId]:
         params = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
@@ -868,7 +868,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         json = res.json()
-        return list(map(TimelineId, json["reparented_timelines"]))
+        return set(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
