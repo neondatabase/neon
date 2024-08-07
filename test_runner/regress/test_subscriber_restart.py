@@ -37,7 +37,7 @@ def test_subscriber_restart(neon_simple_env: NeonEnv):
             scur.execute("CREATE TABLE t (pk integer primary key, sk integer)")
             # scur.execute("CREATE INDEX on t(sk)") # slowdown applying WAL at replica
             pub_conn = f"host=localhost port={pub.pg_port} dbname=postgres user=cloud_admin"
-            query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub"
+            query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_conn}' PUBLICATION pub with (synchronous_commit=on)"
             scur.execute(query)
             time.sleep(2)  # let initial table sync complete
 
