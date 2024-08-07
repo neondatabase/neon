@@ -348,7 +348,7 @@ impl AuxFilePolicy {
 
     /// If a tenant writes aux files without setting `switch_aux_policy`, this value will be used.
     pub fn default_tenant_config() -> Self {
-        Self::V1
+        Self::V2
     }
 }
 
