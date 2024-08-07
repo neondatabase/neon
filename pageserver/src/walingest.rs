@@ -235,6 +235,7 @@ impl WalIngest {
                         &parsed_xact,
                         info == pg_constants::XLOG_XACT_COMMIT,
                         decoded.origin_id,
+                        lsn,
                         ctx,
                     )
                     .await?;
@@ -248,6 +249,7 @@ impl WalIngest {
                         &parsed_xact,
                         info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
                         decoded.origin_id,
+                        lsn,
                         ctx,
                     )
                     .await?;
@@ -1225,6 +1227,7 @@ impl WalIngest {
         parsed: &XlXactParsedRecord,
         is_commit: bool,
         origin_id: u16,
+        lsn: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Record update of CLOG pages
@@ -1292,8 +1295,8 @@ impl WalIngest {
         }
         if origin_id != 0 {
             info!(
-                "Commit origin_id={}, origin_lsn={}",
-                origin_id, parsed.origin_lsn
+                "Commit at {} origin_id={}, origin_lsn={}",
+                lsn, origin_id, parsed.origin_lsn
             );
             modification
                 .set_replorigin(origin_id, parsed.origin_lsn)
