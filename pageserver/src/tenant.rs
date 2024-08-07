@@ -5935,7 +5935,7 @@ mod tests {
         // the default aux file policy to switch is v1 if not set by the admins
         assert_eq!(
             harness.tenant_conf.switch_aux_file_policy,
-            AuxFilePolicy::V1
+            AuxFilePolicy::default_tenant_config()
         );
         let (tenant, ctx) = harness.load().await;
 
