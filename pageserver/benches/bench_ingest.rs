@@ -61,7 +61,11 @@ async fn ingest(
 
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
-    let layer = InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, &ctx).await?;
+    let gate = utils::sync::gate::Gate::default();
+    let entered = gate.enter().unwrap();
+
+    let layer =
+        InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, entered, &ctx).await?;
 
     let data = Value::Image(Bytes::from(vec![0u8; put_size])).ser()?;
     let ctx = RequestContext::new(
