@@ -110,10 +110,6 @@ jose-jwk = { version = "0.1.2", features = ["p256", "p384", "rsa"] }
 signature = "2"
 ecdsa = "0.16"
 p256 = "0.13"
-p384 = "0.13"
-p521 = "0.13"
-k256 = "0.13"
-ed25519-dalek = "2"
 rsa = "0.9"
 
 workspace_hack.workspace = true
