@@ -300,6 +300,9 @@ pub struct PageServerConf {
     /// This flag is temporary and will be removed after gradual rollout.
     /// See <https://github.com/neondatabase/neon/issues/8184>.
     pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
+
+    /// Direct IO settings
+    pub virtual_file_direct_io: virtual_file::DirectIoMode,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -408,6 +411,8 @@ struct PageServerConfigBuilder {
     l0_flush: BuilderValue<L0FlushConfig>,
 
     compact_level0_phase1_value_access: BuilderValue<CompactL0Phase1ValueAccess>,
+
+    virtual_file_direct_io: BuilderValue<virtual_file::DirectIoMode>,
 }
 
 impl PageServerConfigBuilder {
@@ -498,6 +503,7 @@ impl PageServerConfigBuilder {
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: Set(L0FlushConfig::default()),
             compact_level0_phase1_value_access: Set(CompactL0Phase1ValueAccess::default()),
+            virtual_file_direct_io: Set(virtual_file::DirectIoMode::default()),
         }
     }
 }
@@ -685,6 +691,10 @@ impl PageServerConfigBuilder {
         self.compact_level0_phase1_value_access = BuilderValue::Set(value);
     }
 
+    pub fn virtual_file_direct_io(&mut self, value: virtual_file::DirectIoMode) {
+        self.virtual_file_direct_io = BuilderValue::Set(value);
+    }
+
     pub fn build(self, id: NodeId) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
@@ -743,6 +753,7 @@ impl PageServerConfigBuilder {
                 ephemeral_bytes_per_memory_kb,
                 l0_flush,
                 compact_level0_phase1_value_access,
+                virtual_file_direct_io,
             }
             CUSTOM LOGIC
             {
@@ -1018,6 +1029,9 @@ impl PageServerConf {
                 "compact_level0_phase1_value_access" => {
                     builder.compact_level0_phase1_value_access(utils::toml_edit_ext::deserialize_item(item).context("compact_level0_phase1_value_access")?)
                 }
+                "virtual_file_direct_io" => {
+                    builder.virtual_file_direct_io(utils::toml_edit_ext::deserialize_item(item).context("virtual_file_direct_io")?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -1103,6 +1117,7 @@ impl PageServerConf {
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             l0_flush: L0FlushConfig::default(),
             compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+            virtual_file_direct_io: virtual_file::DirectIoMode::default(),
         }
     }
 }
@@ -1345,6 +1360,7 @@ background_task_maximum_delay = '334 s'
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1420,6 +1436,7 @@ background_task_maximum_delay = '334 s'
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
             },
             "Should be able to parse all basic config values correctly"
         );

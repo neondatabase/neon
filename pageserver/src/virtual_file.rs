@@ -34,6 +34,7 @@ pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
 use self::owned_buffers_io::write::OwnedAsyncWriter;
+pub(crate) use api::DirectIoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
