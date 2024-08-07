@@ -165,7 +165,7 @@ def test_ancestor_detach_branched_from(
     )
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-    assert all_reparented == []
+    assert all_reparented == set()
 
     if restart_after:
         env.pageserver.stop()
@@ -534,7 +534,7 @@ def test_compaction_induced_by_detaches_in_history(
 
     for _, timeline_id in skip_main:
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-        assert reparented == [], "we have no earlier branches at any level"
+        assert reparented == set(), "we have no earlier branches at any level"
 
     post_detach_l0s = list(filter(lambda x: x.l0, delta_layers(branch_timeline_id)))
     assert len(post_detach_l0s) == 5, "should had inherited 4 L0s, have 5 in total"
@@ -774,7 +774,7 @@ def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
         else:
             break
 
-    assert reparented == [], "too many retries (None) or unexpected reparentings"
+    assert reparented == set(), "too many retries (None) or unexpected reparentings"
 
     for shard_info in shards:
         node_id = int(shard_info["node_id"])

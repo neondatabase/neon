@@ -3286,10 +3286,6 @@ impl Timeline {
         Ok(ancestor.clone())
     }
 
-    pub(crate) fn get_ancestor_timeline(&self) -> Option<Arc<Timeline>> {
-        self.ancestor_timeline.clone()
-    }
-
     pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
         &self.shard_identity
     }
@@ -4366,7 +4362,7 @@ impl Timeline {
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
         detach_ancestor::complete(self, tenant, prepared, ctx).await
     }
 
