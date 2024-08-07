@@ -27,6 +27,8 @@ pub const SK_FORMAT_VERSION: u32 = 9;
 pub const CONTROL_FILE_NAME: &str = "safekeeper.control";
 // needed to atomically update the state using `rename`
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
+// temporary file for writing tweaked control file before streaming snapshot
+const CONTROL_FILE_NAME_TEMP: &str = "safekeeper.control.temp";
 pub const CHECKSUM_SIZE: usize = size_of::<u32>();
 
 /// Storage should keep actual state inside of it. It should implement Deref
@@ -153,6 +155,55 @@ impl FileStorage {
                 )
             })?;
         Ok(state)
+    }
+
+    /// Write a temporary control file and return a read only fd for it.
+    /// Note: this method does not safely persist the data on disk
+    pub(crate) async fn write_temp(
+        state: &TimelinePersistentState,
+        timeline_dir: Utf8PathBuf,
+    ) -> Result<tokio::fs::File> {
+        let control_temp_path = timeline_dir.join(CONTROL_FILE_NAME_TEMP);
+        let mut control_temp = File::create(&control_temp_path).await.with_context(|| {
+            format!(
+                "failed to create temporary control file at: {}",
+                control_temp_path
+            )
+        })?;
+
+        control_temp
+            .write_all(&state.write_to_buf()?)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to write temporary control file at: {}",
+                    control_temp_path
+                )
+            })?;
+
+        drop(control_temp);
+        let control_temp = File::open(&control_temp_path).await.with_context(|| {
+            format!(
+                "failed to open temporary control file at: {}",
+                control_temp_path
+            )
+        })?;
+
+        Ok(control_temp)
+    }
+
+    /// Remove the control temp file if one exists
+    pub(crate) fn remove_temp(timeline_dir: Utf8PathBuf) -> Result<()> {
+        let control_temp_path = timeline_dir.join(CONTROL_FILE_NAME_TEMP);
+        if let Err(err) = std::fs::remove_file(&control_temp_path) {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                return Ok(());
+            }
+
+            return Err(err.into());
+        }
+
+        Ok(())
     }
 }
 
