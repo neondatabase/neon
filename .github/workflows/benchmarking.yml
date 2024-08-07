@@ -461,9 +461,6 @@ jobs:
     container:
       image: ${{ matrix.IMAGE }}
       options: --init
-      credentials:
-          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
     steps:
     - uses: actions/checkout@v4
