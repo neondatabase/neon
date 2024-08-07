@@ -109,8 +109,7 @@ impl Key {
     pub fn to_i128(&self) -> i128 {
         assert!(
             self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222,
-            "invalid key: {}",
-            self
+            "invalid key: {self}",
         );
         (((self.field1 & 0x7F) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
