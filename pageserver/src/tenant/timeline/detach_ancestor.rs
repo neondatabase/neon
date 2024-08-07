@@ -74,6 +74,11 @@ impl From<crate::tenant::upload_queue::NotInitialized> for Error {
         Error::ShuttingDown
     }
 }
+impl From<super::layer_manager::Shutdown> for Error {
+    fn from(_: super::layer_manager::Shutdown) -> Self {
+        Error::ShuttingDown
+    }
+}
 
 impl From<FlushLayerError> for Error {
     fn from(value: FlushLayerError) -> Self {
@@ -277,7 +282,7 @@ pub(super) async fn prepare(
 
         // between retries, these can change if compaction or gc ran in between. this will mean
         // we have to redo work.
-        partition_work(ancestor_lsn, &layers)
+        partition_work(ancestor_lsn, &layers)?
     };
 
     // TODO: layers are already sorted by something: use that to determine how much of remote
@@ -383,14 +388,14 @@ pub(super) async fn prepare(
 
 fn partition_work(
     ancestor_lsn: Lsn,
-    source_layermap: &LayerManager,
-) -> (usize, Vec<Layer>, Vec<Layer>) {
+    source: &LayerManager,
+) -> Result<(usize, Vec<Layer>, Vec<Layer>), Error> {
     let mut straddling_branchpoint = vec![];
     let mut rest_of_historic = vec![];
 
     let mut later_by_lsn = 0;
 
-    for desc in source_layermap.layer_map().iter_historic_layers() {
+    for desc in source.layer_map()?.iter_historic_layers() {
         // off by one chances here:
         // - start is inclusive
         // - end is exclusive
@@ -409,10 +414,10 @@ fn partition_work(
             &mut rest_of_historic
         };
 
-        target.push(source_layermap.get_from_desc(&desc));
+        target.push(source.get_from_desc(&desc));
     }
 
-    (later_by_lsn, straddling_branchpoint, rest_of_historic)
+    Ok((later_by_lsn, straddling_branchpoint, rest_of_historic))
 }
 
 async fn upload_rewritten_layer(
