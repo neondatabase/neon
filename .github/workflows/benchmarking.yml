@@ -440,7 +440,11 @@ jobs:
       matrix:
         include:
           - PLATFORM: "neonvm-captest-pgvector"
+            RUNNER: [ self-hosted, us-east-2, x64 ]
+            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - PLATFORM: "azure-captest-pgvector"
+            RUNNER: [ self-hosted, eastus2, azure ]
+            IMAGE: neondatabase/build-tools:pinned
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
@@ -453,10 +457,13 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
-    runs-on: [ self-hosted, us-east-2, x64 ]
+    runs-on: ${{ matrix.RUNNER }}
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ matrix.IMAGE }}
       options: --init
+      credentials:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
     steps:
     - uses: actions/checkout@v4
