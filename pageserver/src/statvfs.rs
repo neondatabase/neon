@@ -135,12 +135,28 @@ pub mod mock {
             {
                 continue;
             }
-            total += entry
-                .metadata()
-                .with_context(|| format!("get metadata of {:?}", entry.path()))?
-                .len();
+            let m = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) if is_not_found(&e) => {
+                    // some temp file which got removed right as we are walking
+                    continue;
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e)
+                        .context(format!("get metadata of {:?}", entry.path())))
+                }
+            };
+            total += m.len();
         }
         Ok(total)
+    }
+
+    fn is_not_found(e: &walkdir::Error) -> bool {
+        let Some(io_error) = e.io_error() else {
+            return false;
+        };
+        let kind = io_error.kind();
+        matches!(kind, std::io::ErrorKind::NotFound)
     }
 
     pub struct Statvfs {
