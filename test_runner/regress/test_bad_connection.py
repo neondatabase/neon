@@ -10,7 +10,6 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 @pytest.mark.timeout(600)
 def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
-    # FIXME currently all errors are logged uniformly
     env.pageserver.allowed_errors.append(".*simulated connection error.*") # this is never hit
 
     # the real reason (Simulated Connection Error) is on the next line, and we cannot filter this out.
