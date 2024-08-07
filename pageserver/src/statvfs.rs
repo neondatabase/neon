@@ -56,7 +56,6 @@ impl Statvfs {
 }
 
 pub mod mock {
-    use anyhow::Context;
     use camino::Utf8Path;
     use regex::Regex;
     use tracing::log::info;
