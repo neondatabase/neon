@@ -5719,13 +5719,43 @@ impl Service {
         self.gate.close().await;
     }
 
+    async fn secondary_lag(
+        &self,
+        secondary: &NodeId,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<u64, mgmt_api::Error> {
+        let nodes = self.inner.read().unwrap().nodes.clone();
+        let node = nodes.get(secondary).ok_or(mgmt_api::Error::ApiError(
+            StatusCode::NOT_FOUND,
+            format!("Node with id {} not found", secondary),
+        ))?;
+
+        match node
+            .with_client_retries(
+                |client| async move { client.tenant_secondary_status(tenant_shard_id).await },
+                &self.config.jwt_token,
+                1,
+                3,
+                Duration::from_millis(250),
+                &self.cancel,
+            )
+            .await
+        {
+            Some(Ok(status)) => Ok(status.bytes_total - status.bytes_downloaded),
+            Some(Err(e)) => Err(e),
+            None => Err(mgmt_api::Error::Cancelled),
+        }
+    }
+
     /// Drain a node by moving the shards attached to it as primaries.
     /// This is a long running operation and it should run as a separate Tokio task.
     pub(crate) async fn drain_node(
-        &self,
+        self: &Arc<Self>,
         node_id: NodeId,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
+        const MAX_SECONDARY_LAG_BYTES: u64 = 256 * 1024 * 1024;
+
         let mut waiters = Vec::new();
 
         let mut tid_iter = TenantShardIterator::new({
@@ -5779,14 +5809,39 @@ impl Service {
 
                 let tid_drain = TenantShardDrain {
                     drained_node: node_id,
-                    tenant_shard_id: tid
+                    tenant_shard_id: tid,
                 };
 
-                {
+                let dest_node_id = {
                     let locked = self.inner.read().unwrap();
-                    let eligible =
-                        tid_drain.tenant_shard_eligible_for_drain(&locked.tenants)?;
-                    if !eligible {
+
+                    match tid_drain
+                        .tenant_shard_eligible_for_drain(&locked.tenants, &locked.scheduler)?
+                    {
+                        Some(node_id) => node_id,
+                        None => {
+                            continue;
+                        }
+                    }
+                };
+
+                match self.secondary_lag(&dest_node_id, tid).await {
+                    Ok(lag) if lag <= MAX_SECONDARY_LAG_BYTES => {
+                        // The secondary is reasonably up to date.
+                        // Migrate to it
+                    }
+                    Ok(lag) => {
+                        tracing::info!(
+                            tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                            "Secondary on node {dest_node_id} is lagging by {lag}. Skipping reconcile."
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                            "Failed to get secondary lag from node {dest_node_id}. Skipping reconcile: {err}"
+                        );
                         continue;
                     }
                 }
@@ -5795,7 +5850,12 @@ impl Service {
                     let mut locked = self.inner.write().unwrap();
                     let (nodes, tenants, scheduler) = locked.parts_mut();
                     // TODO: TenantShardRemoved should continue
-                    let rescheduled = tid_drain.reschedule_to_secondary(tenants, scheduler)?;
+                    let rescheduled = tid_drain.reschedule_to_secondary(
+                        dest_node_id,
+                        tenants,
+                        scheduler,
+                        nodes,
+                    )?;
 
                     if let Some(tenant_shard) = rescheduled {
                         let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);

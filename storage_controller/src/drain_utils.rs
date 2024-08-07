@@ -7,9 +7,7 @@ use pageserver_api::controller_api::NodeSchedulingPolicy;
 use utils::{id::NodeId, shard::TenantShardId};
 
 use crate::{
-    background_node_operations::OperationError,
-    node::Node,
-    scheduler::Scheduler,
+    background_node_operations::OperationError, node::Node, scheduler::Scheduler,
     tenant_shard::TenantShard,
 };
 
@@ -64,22 +62,16 @@ pub(crate) fn validate_node_state(
     node_id: &NodeId,
     nodes: Arc<HashMap<NodeId, Node>>,
 ) -> Result<(), OperationError> {
-    let node = nodes
-        .get(node_id)
-        .ok_or(OperationError::NodeStateChanged(
-            format!("node {} was removed", node_id).into(),
-        ))?;
+    let node = nodes.get(node_id).ok_or(OperationError::NodeStateChanged(
+        format!("node {} was removed", node_id).into(),
+    ))?;
 
     let current_policy = node.get_scheduling();
     if !matches!(current_policy, NodeSchedulingPolicy::Draining) {
         // TODO(vlad): maybe cancel pending reconciles before erroring out. need to think
         // about it
         return Err(OperationError::NodeStateChanged(
-            format!(
-                "node {} changed state to {:?}",
-                node_id, current_policy
-            )
-            .into(),
+            format!("node {} changed state to {:?}", node_id, current_policy).into(),
         ));
     }
 
@@ -98,24 +90,58 @@ impl TenantShardDrain {
     pub(crate) fn tenant_shard_eligible_for_drain(
         &self,
         tenants: &BTreeMap<TenantShardId, TenantShard>,
-    ) -> Result<bool, OperationError> {
+        scheduler: &Scheduler,
+    ) -> Result<Option<NodeId>, OperationError> {
         let tenant_shard = tenants
             .get(&self.tenant_shard_id)
             .ok_or(OperationError::TenantShardRemoved(self.tenant_shard_id))?;
-        Ok(*tenant_shard.intent.get_attached() == Some(self.drained_node))
+
+        if *tenant_shard.intent.get_attached() != Some(self.drained_node) {
+            return Ok(None);
+        }
+
+        match scheduler.node_preferred(tenant_shard.intent.get_secondary()) {
+            Some(node) => Ok(Some(node)),
+            None => {
+                tracing::warn!(
+                    tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(),
+                    "No eligible secondary while draining {}", self.drained_node
+                );
+
+                Ok(None)
+            }
+        }
     }
 
     /// Attempt to reschedule the tenant shard under question to one of its secondary locations
     pub(crate) fn reschedule_to_secondary<'a>(
         &self,
+        destination: NodeId,
         tenants: &'a mut BTreeMap<TenantShardId, TenantShard>,
         scheduler: &mut Scheduler,
+        nodes: &Arc<HashMap<NodeId, Node>>,
     ) -> Result<Option<&'a mut TenantShard>, OperationError> {
         let tenant_shard = tenants
             .get_mut(&self.tenant_shard_id)
             .ok_or(OperationError::TenantShardRemoved(self.tenant_shard_id))?;
 
-        match tenant_shard.reschedule_to_secondary(None, scheduler) {
+        if !nodes.contains_key(&destination) {
+            return Err(OperationError::NodeStateChanged(
+                format!("node {} was removed", destination).into(),
+            ));
+        }
+
+        if !tenant_shard.intent.get_secondary().contains(&destination) {
+            return Err(OperationError::NodeStateChanged(
+                format!(
+                    "node {} not a secondary for {}",
+                    destination, self.tenant_shard_id
+                )
+                .into(),
+            ));
+        }
+
+        match tenant_shard.reschedule_to_secondary(Some(destination), scheduler) {
             Err(e) => {
                 tracing::warn!(
                     tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(),
