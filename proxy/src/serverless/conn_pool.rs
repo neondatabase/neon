@@ -377,7 +377,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
     pub fn get(
         self: &Arc<Self>,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
     ) -> Result<Option<Client<C>>, HttpConnError> {
         let mut client: Option<ClientInner<C>> = None;
@@ -409,9 +409,9 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                     cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
                     "pool: reusing connection '{conn_info}'"
                 );
-                client.session.send(ctx.session_id)?;
+                client.session.send(ctx.session_id())?;
                 ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
-                ctx.latency_timer.success();
+                ctx.success();
                 return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
             }
         }
@@ -465,19 +465,19 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
 pub fn poll_client<C: ClientInnerExt>(
     global_pool: Arc<GlobalConnPool<C>>,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     conn_info: ConnInfo,
     client: C,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client<C> {
-    let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol);
-    let mut session_id = ctx.session_id;
+    let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
+    let mut session_id = ctx.session_id();
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
     let span = info_span!(parent: None, "connection", %conn_id);
-    let cold_start_info = ctx.cold_start_info;
+    let cold_start_info = ctx.cold_start_info();
     span.in_scope(|| {
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
     });
@@ -766,7 +766,6 @@ mod tests {
                 opt_in: false,
                 max_total_conns: 3,
             },
-            request_timeout: Duration::from_secs(1),
             cancel_set: CancelSet::new(0),
             client_conn_threshold: u64::MAX,
         }));
