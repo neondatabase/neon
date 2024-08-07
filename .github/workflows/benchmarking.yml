@@ -321,9 +321,13 @@ jobs:
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
+  prepare_AWS_RDS_databases:
+    uses: ./.github/workflows/_benchmarking_preparation.yml
+    secrets: inherit
+  
   pgbench-compare:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
-    needs: [ generate-matrices ]
+    needs: [ generate-matrices, prepare_AWS_RDS_databases ]
     permissions:
       contents: write
       statuses: write
@@ -595,7 +599,7 @@ jobs:
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, pgbench-compare ]
+    needs: [ generate-matrices, pgbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
@@ -684,7 +688,7 @@ jobs:
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, clickbench-compare ]
+    needs: [ generate-matrices, clickbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
@@ -771,7 +775,7 @@ jobs:
 
   user-examples-compare:
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, tpch-compare ]
+    needs: [ generate-matrices, tpch-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
