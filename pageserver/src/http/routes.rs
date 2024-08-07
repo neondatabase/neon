@@ -296,11 +296,6 @@ impl From<GetActiveTenantError> for ApiError {
             GetActiveTenantError::WaitForActiveTimeout { .. } => {
                 ApiError::ResourceUnavailable(format!("{}", e).into())
             }
-            GetActiveTenantError::SwitchedTenant => {
-                // in our HTTP handlers, this error doesn't happen
-                // TODO: separate error types
-                ApiError::ResourceUnavailable("switched tenant".into())
-            }
         }
     }
 }
