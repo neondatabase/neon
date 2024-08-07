@@ -407,9 +407,12 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                         error_run_count += 1;
                         let wait_duration = Duration::from_secs_f64(wait_duration);
 
-                        error!(
-                        "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
-                    );
+                        if matches!(e, crate::tenant::GcError::TimelineCancelled) {
+                            info!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
+                        } else {
+                            error!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
+                        }
+
                         wait_duration
                     }
                 }
