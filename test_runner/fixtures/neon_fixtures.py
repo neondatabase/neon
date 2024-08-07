@@ -978,7 +978,10 @@ class NeonEnvBuilder:
                 and self.enable_scrub_on_exit
             ):
                 try:
-                    self.env.storage_scrubber.scan_metadata()
+                    healthy, _ = self.env.storage_scrubber.scan_metadata()
+                    if not healthy:
+                        e = Exception("Remote storage metadata corrupted")
+                        cleanup_error = e
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -4411,14 +4414,19 @@ class StorageScrubber:
         assert stdout is not None
         return stdout
 
-    def scan_metadata(self, post_to_storage_controller: bool = False) -> Any:
+    def scan_metadata(self, post_to_storage_controller: bool = False) -> Tuple[bool, Any]:
+        """
+        Returns the health status and the metadata summary.
+        """
         args = ["scan-metadata", "--node-kind", "pageserver", "--json"]
         if post_to_storage_controller:
             args.append("--post")
         stdout = self.scrubber_cli(args, timeout=30)
 
         try:
-            return json.loads(stdout)
+            summary = json.loads(stdout)
+            healthy = not summary["with_errors"] and not summary["with_warnings"]
+            return healthy, summary
         except:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
             log.error(stdout)

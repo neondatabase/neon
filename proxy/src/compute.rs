@@ -288,12 +288,12 @@ impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub async fn connect(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         allow_self_signed_compute: bool,
         aux: MetricsAuxInfo,
         timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {
-        let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
         drop(pause);
 
@@ -316,14 +316,14 @@ impl ConnCfg {
         )?;
 
         // connect_raw() will not use TLS if sslmode is "disable"
-        let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (client, connection) = self.0.connect_raw(stream, tls).await?;
         drop(pause);
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 
         info!(
-            cold_start_info = ctx.cold_start_info.as_str(),
+            cold_start_info = ctx.cold_start_info().as_str(),
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
             self.0.get_ssl_mode()
         );
@@ -342,7 +342,7 @@ impl ConnCfg {
             params,
             cancel_closure,
             aux,
-            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol),
+            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
         };
 
         Ok(connection)
