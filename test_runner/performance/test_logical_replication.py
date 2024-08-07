@@ -303,7 +303,6 @@ def test_snap_files(
                 END $$;
                 """
             )
-            log.info(f'dropping slot {i}')
             cur.execute(f"SELECT pg_create_logical_replication_slot('slotter{i}', 'test_decoding')")
     conn.close()
 
