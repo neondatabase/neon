@@ -807,7 +807,7 @@ NeonProcessUtility(
 			if (!RegressTestMode)
 			{
 				ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					errmsg("CREATE TABLESPACE statements are not supported by Neon.")));
 			}
    			break;
