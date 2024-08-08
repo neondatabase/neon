@@ -369,9 +369,6 @@ impl ImageLayerInner {
         self.lsn
     }
 
-    /// Returns nested result following Result<Result<_, OpErr>, Critical>:
-    /// - inner has the success or transient failure
-    /// - outer has the permanent failure
     pub(super) async fn load(
         path: &Utf8Path,
         lsn: Lsn,
