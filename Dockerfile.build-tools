@@ -58,7 +58,7 @@ RUN set -e \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
-ENV PROTOC_VERSION 25.1
+ENV PROTOC_VERSION=25.1
 RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
     && unzip -q protoc.zip -d protoc \
     && mv protoc/bin/protoc /usr/local/bin/protoc \
