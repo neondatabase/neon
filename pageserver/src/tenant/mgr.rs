@@ -234,6 +234,12 @@ impl BackgroundPurges {
     /// Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
     /// Thus the [`BackgroundPurges`] type to keep track of these tasks.
     pub fn spawn(&self, tmp_path: Utf8PathBuf) {
+        // because on shutdown we close and wait, we are misusing TaskTracker a bit.
+        //
+        // so first acquire a token, then check if the tracker has been closed. the tracker might get closed
+        // right after, but at least the shutdown will wait for what we are spawning next.
+        let token = self.0.token();
+
         if self.0.is_closed() {
             warn!(
                 %tmp_path,
@@ -245,6 +251,7 @@ impl BackgroundPurges {
         let span = info_span!(parent: None, "background_purge", %tmp_path);
 
         let task = move || {
+            let _token = token;
             let _entered = span.entered();
             if let Err(error) = std::fs::remove_dir_all(tmp_path.as_path()) {
                 // should we fatal_io_error here?
@@ -252,7 +259,7 @@ impl BackgroundPurges {
             }
         };
 
-        self.0.spawn_blocking_on(task, BACKGROUND_RUNTIME.handle());
+        BACKGROUND_RUNTIME.spawn_blocking(task);
     }
 
     /// When this future completes, all background purges have completed.
