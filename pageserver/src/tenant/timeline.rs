@@ -5550,6 +5550,9 @@ impl<'a> TimelineWriter<'a> {
         value: &Value,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        if !key.is_i128_representable() {
+            bail!("the request contains data not supported by pageserver");
+        }
         // Avoid doing allocations for "small" values.
         // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
         // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
