@@ -535,7 +535,7 @@ impl WalIngest {
             // The page may be uninitialized. If so, we can't set the LSN because
             // that would corrupt the page.
             //
-            if !page_is_new(&image) {
+            if !blk.opaque && !page_is_new(&image) {
                 page_set_lsn(&mut image, lsn)
             }
             assert_eq!(image.len(), BLCKSZ as usize);
