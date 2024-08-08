@@ -96,6 +96,7 @@ jobs:
       with:
         aws-region: us-east-2
         role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}  
+        role-duration-seconds: 21600 # 6 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -174,6 +175,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -355,6 +357,7 @@ jobs:
       with:
         aws-region: us-east-2
         role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 21600 # 6 hours
         
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -560,6 +563,11 @@ jobs:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
+    - name: Configure AWS credentials # necessary on Azure runners to read/write from/to S3
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
     - name: Create Allure report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
