@@ -91,6 +91,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Configure AWS credentials # necessary on Azure runners
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}  
+
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -343,7 +349,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    
+
+    - name: Configure AWS credentials # necessary on Azure runners
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
+        
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
