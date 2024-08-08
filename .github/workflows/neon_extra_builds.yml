@@ -149,8 +149,6 @@ jobs:
 
     env:
       BUILD_TYPE: release
-      # remove the cachepot wrapper and build without crate caches
-      RUSTC_WRAPPER: ""
       # build with incremental compilation produce partial results
       # so do not attempt to cache this build, also disable the incremental compilation
       CARGO_INCREMENTAL: 0

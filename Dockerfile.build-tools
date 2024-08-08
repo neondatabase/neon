@@ -208,7 +208,6 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
     rustup component add llvm-tools-preview rustfmt clippy && \
-    cargo install --git https://github.com/paritytech/cachepot && \
     cargo install rustfilt            --version ${RUSTFILT_VERSION} && \
     cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} && \
     cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \
@@ -216,7 +215,6 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
-ENV RUSTC_WRAPPER=cachepot
 
 # Show versions
 RUN whoami \
