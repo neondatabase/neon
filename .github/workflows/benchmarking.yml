@@ -56,6 +56,9 @@ concurrency:
 jobs:
   bench:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    permissions:
+      contents: read
+      id-token: write # Required for OIDC authentication in azure runners
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +91,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Configure AWS credentials # necessary on Azure runners
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
+    - run: aws sts get-caller-identity
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -311,6 +320,9 @@ jobs:
   pgbench-compare:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     needs: [ generate-matrices ]
+    permissions:
+      contents: read
+      id-token: write # Required for OIDC authentication in azure runners
 
     strategy:
       fail-fast: false
@@ -336,7 +348,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-
+    
+    - name: Configure AWS credentials # necessary on Azure runners
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
+    - run: aws sts get-caller-identity
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -444,6 +462,9 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   pgbench-pgvector:
+    permissions:
+      contents: read
+      id-token: write # Required for OIDC authentication in azure runners
     strategy:
       fail-fast: false
       matrix:
