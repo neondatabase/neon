@@ -808,7 +808,7 @@ NeonProcessUtility(
 			{
 				ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("CREATE TABLESPACE statements are not supported by Neon.")));
+					errmsg("CREATE TABLESPACE is not supported on Neon")));
 			}
    			break;
 		default:
