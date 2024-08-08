@@ -45,7 +45,7 @@ use pageserver_api::{
     },
     models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use tracing::{instrument, Instrument};
 
 use crate::pageserver_client::PageserverClient;
@@ -6436,8 +6436,8 @@ impl Service {
 
                 // TODO: jwt token
                 let client = PeerClient::new(
-                    leader.hostname.to_owned(),
-                    leader.port,
+                    Url::parse(format!("http://{}:{}", leader.hostname, leader.port).as_str())
+                        .expect("Failed to build leader URL"),
                     self.config.jwt_token.clone(),
                 );
                 let state = client.step_down(&self.cancel).await;
