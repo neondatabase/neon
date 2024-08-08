@@ -251,6 +251,7 @@ jobs:
       run: |
         region_id_default=${{ env.DEFAULT_REGION_ID }}
         runner_default='["self-hosted", "us-east-2", "x64"]'
+        runner_azure='["self-hosted", "eastus2", "azure"]'
         image_default="369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned"
         matrix='{
           "pg_version" : [
@@ -270,9 +271,9 @@ jobs:
           "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": "[\"self-hosted\", \"eastus2\", \"azure\"]", "image": "neondatabase/build-tools:pinned" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": "[\"self-hosted\", \"eastus2\", \"azure\"]", "image": "neondatabase/build-tools:pinned" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": "[\"self-hosted\", \"eastus2\", \"azure\"]", "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]
         }'
 
