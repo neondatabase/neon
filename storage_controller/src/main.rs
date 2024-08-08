@@ -92,6 +92,11 @@ struct Cli {
     /// Chaos testing
     #[arg(long)]
     chaos_interval: Option<humantime::Duration>,
+
+    // Maximum acceptable lag for the secondary location while draining
+    // a pageserver
+    #[arg(long)]
+    max_secondary_lag_bytes: Option<u64>,
 }
 
 enum StrictMode {
@@ -279,6 +284,7 @@ async fn async_main() -> anyhow::Result<()> {
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
+        max_secondary_lag_bytes: args.max_secondary_lag_bytes,
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations

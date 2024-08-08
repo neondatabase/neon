@@ -326,6 +326,12 @@ pub struct Config {
 
     // TODO: make this cfg(feature  = "testing")
     pub neon_local_repo_dir: Option<PathBuf>,
+
+    // Maximum acceptable download lag for the secondary location
+    // while draining a node. If the secondary location is lagging
+    // by more than the configured amount, then the secondary is not
+    // upgraded to primary.
+    pub max_secondary_lag_bytes: Option<u64>,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -5754,7 +5760,11 @@ impl Service {
         node_id: NodeId,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
-        const MAX_SECONDARY_LAG_BYTES: u64 = 256 * 1024 * 1024;
+        const MAX_SECONDARY_LAG_BYTES_DEFAULT: u64 = 256 * 1024 * 1024;
+        let max_secondary_lag_bytes = self
+            .config
+            .max_secondary_lag_bytes
+            .unwrap_or(MAX_SECONDARY_LAG_BYTES_DEFAULT);
 
         let mut waiters = Vec::new();
 
@@ -5826,7 +5836,7 @@ impl Service {
                 };
 
                 match self.secondary_lag(&dest_node_id, tid).await {
-                    Ok(lag) if lag <= MAX_SECONDARY_LAG_BYTES => {
+                    Ok(lag) if lag <= max_secondary_lag_bytes => {
                         // The secondary is reasonably up to date.
                         // Migrate to it
                     }
