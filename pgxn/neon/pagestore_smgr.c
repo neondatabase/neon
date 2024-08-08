@@ -2109,7 +2109,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 	 */
 	if (max_cluster_size > 0 &&
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
-		!IsAutoVacuumWorkerProcess())
+		!AmAutoVacuumWorkerProcess())
 	{
 		uint64		current_size = GetNeonCurrentClusterSize();
 
@@ -2190,7 +2190,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 
 	if (max_cluster_size > 0 &&
 		reln->smgr_relpersistence == RELPERSISTENCE_PERMANENT &&
-		!IsAutoVacuumWorkerProcess())
+		!AmAutoVacuumWorkerProcess())
 	{
 		uint64		current_size = GetNeonCurrentClusterSize();
 
@@ -2288,11 +2288,17 @@ neon_close(SMgrRelation reln, ForkNumber forknum)
 }
 
 
+
 /*
  *	neon_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
+
 bool
+#if PG_MAJORVERSION_NUM >= 17
+neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, int nblocks)
+#else
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+#endif
 {
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
 	BufferTag	tag;
@@ -2305,7 +2311,12 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
+#if PG_MAJORVERSION_NUM >= 17
+            // TODO Do we want to improve this and implement multi-block prefetch?
+			return mdprefetch(reln, forknum, blocknum, 1);
+#else
 			return mdprefetch(reln, forknum, blocknum);
+#endif
 
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
@@ -2530,7 +2541,11 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
+			#if PG_MAJORVERSION_NUM >= 17
+			mdreadv(reln, forkNum, blkno, buffer, 1);
+			#else
 			mdread(reln, forkNum, blkno, buffer);
+			#endif
 			return;
 
 		default:
@@ -2553,6 +2568,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		char		mdbuf[BLCKSZ];
 		char		mdbuf_masked[BLCKSZ];
 
+		# TODO add v17 support
 		mdread(reln, forkNum, blkno, mdbuf);
 
 		memcpy(pageserver_masked, buffer, BLCKSZ);
@@ -2620,6 +2636,18 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 #endif
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+void
+neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+		void **buffers, BlockNumber nblocks)
+{
+	for (int i = 0; i < nblocks; i++)
+	{
+		neon_read(reln, forknum, blocknum, buffers[i]);
+	}
+}
+#endif
+
 #ifdef DEBUG_COMPARE_LOCAL
 static char *
 hexdump_page(char *page)
@@ -2648,6 +2676,8 @@ hexdump_page(char *page)
  *		relation (ie, those before the current EOF).  To extend a relation,
  *		use mdextend().
  */
+
+
 void
 #if PG_MAJORVERSION_NUM < 16
 neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool skipFsync)
@@ -2664,8 +2694,11 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			if (mdexists(reln, forknum))
 			{
 				/* It exists locally. Guess it's unlogged then. */
+				#if PG_MAJORVERSION_NUM >= 17
+				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+				#else
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
-
+				#endif
 				/*
 				 * We could set relpersistence now that we have determined
 				 * that it's local. But we don't dare to do it, because that
@@ -2682,9 +2715,12 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
+			#if PG_MAJORVERSION_NUM >= 17
+			mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+			#else
 			mdwrite(reln, forknum, blocknum, buffer, skipFsync);
+			#endif
 			return;
-
 		default:
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
@@ -2701,9 +2737,26 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
+		#if PG_MAJORVERSION_NUM >= 17
+		mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+		#else
 		mdwrite(reln, forknum, blocknum, buffer, skipFsync);
+		#endif
 #endif
 }
+
+#if PG_MAJORVERSION_NUM >= 17
+void
+neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
+			 const void **buffers, BlockNumber nblocks, bool skipFsync)
+{
+	for (int i = 0; i < nblocks; i++)
+	{
+		neon_write(reln, forknum, blkno, buffers[i], skipFsync);
+	}
+}
+
+#endif
 
 /*
  *	neon_nblocks() -- Get the number of blocks stored in a relation.
@@ -3223,9 +3276,16 @@ static const struct f_smgr neon_smgr =
 #if PG_MAJORVERSION_NUM >= 16
 	.smgr_zeroextend = neon_zeroextend,
 #endif
+#if PG_MAJORVERSION_NUM >= 17
+	.smgr_prefetch = neon_prefetch,
+	.smgr_readv = neon_readv,
+	.smgr_writev = neon_writev,
+#else
 	.smgr_prefetch = neon_prefetch,
 	.smgr_read = neon_read,
 	.smgr_write = neon_write,
+#endif
+
 	.smgr_writeback = neon_writeback,
 	.smgr_nblocks = neon_nblocks,
 	.smgr_truncate = neon_truncate,
@@ -3239,11 +3299,11 @@ static const struct f_smgr neon_smgr =
 };
 
 const f_smgr *
-smgr_neon(BackendId backend, NRelFileInfo rinfo)
+smgr_neon(ProcNumber backend, NRelFileInfo rinfo)
 {
 
 	/* Don't use page server for temp relations */
-	if (backend != InvalidBackendId)
+	if (backend != INVALID_PROC_NUMBER)
 		return smgr_standard(backend, rinfo);
 	else
 		return &neon_smgr;

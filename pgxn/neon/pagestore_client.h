@@ -234,8 +234,13 @@ extern void neon_zeroextend(SMgrRelation reln, ForkNumber forknum,
 							BlockNumber blocknum, int nbuffers, bool skipFsync);
 #endif
 
+#if PG_MAJORVERSION_NUM >=17
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
-						  BlockNumber blocknum);
+						  BlockNumber blocknum, int nblocks);
+#else
+extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
+						  BlockNumber blocknum);	
+#endif
 
 /*
  * LSN values associated with each request to the pageserver

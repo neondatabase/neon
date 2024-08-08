@@ -6,7 +6,11 @@
 #ifndef NEON_PGVERSIONCOMPAT_H
 #define NEON_PGVERSIONCOMPAT_H
 
+#if PG_MAJORVERSION_NUM < 17
 #define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != InvalidBackendId)
+#else
+#define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != INVALID_PROC_NUMBER)
+#endif
 
 #define RelFileInfoEquals(a, b) ( \
 	NInfoGetSpcOid(a) == NInfoGetSpcOid(b) && \
@@ -116,6 +120,7 @@
 #if PG_MAJORVERSION_NUM < 17
 #define ProcNumber BackendId
 #define INVALID_PROC_NUMBER InvalidBackendId
+#define AmAutoVacuumWorkerProcess() (IsAutoVacuumWorkerProcess())
 #endif
 
 #endif							/* NEON_PGVERSIONCOMPAT_H */
