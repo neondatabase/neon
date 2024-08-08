@@ -1792,6 +1792,8 @@ impl Tenant {
             .unwrap()
             .success(&CIRCUIT_BREAKERS_UNBROKEN);
 
+        tracing::info!(?has_pending_task, "done");
+
         Ok(has_pending_task)
     }
 

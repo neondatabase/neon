@@ -270,6 +270,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             });
 
             // Sleep
+            tracing::info!("sleeping");
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
                 .await
                 .is_ok()
@@ -277,6 +278,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 break;
             }
         }
+
+        tracing::info!("exiting");
     }
     .await;
     TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
