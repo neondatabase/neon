@@ -92,7 +92,7 @@ jobs:
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: us-east-2
-        role-to-assume: ${{ secret.DEV_AWS_OIDC_ROLE_ARN }}
+        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
     - run: aws sts get-caller-identity
     - name: Download Neon artifact
       uses: ./.github/actions/download
