@@ -1125,6 +1125,10 @@ impl Timeline {
 
             if !self.shard_identity.is_key_disposable(&key) {
                 if writer.is_none() {
+                    if self.cancel.is_cancelled() {
+                        // to be somewhat responsive to cancellation, check for each new layer
+                        return Err(CompactionError::ShuttingDown);
+                    }
                     // Create writer if not initiaized yet
                     writer = Some(
                         DeltaLayerWriter::new(
