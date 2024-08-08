@@ -534,6 +534,13 @@ jobs:
         esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+        
+    - name: Configure AWS credentials # necessary on Azure runners to read/write from/to S3
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 10800 # 3 hours
 
     - name: Benchmark pgvector hnsw indexing
       uses: ./.github/actions/run-python-test-set
@@ -562,13 +569,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-
-    - name: Configure AWS credentials # necessary on Azure runners to read/write from/to S3
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-region: us-east-2
-        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-        
+    
     - name: Create Allure report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
