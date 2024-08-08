@@ -414,9 +414,6 @@ impl From<OperationError> for ApiError {
             OperationError::NodeStateChanged(err) | OperationError::FinalizeError(err) => {
                 ApiError::InternalServerError(anyhow::anyhow!(err))
             }
-            err @ OperationError::TenantShardRemoved(_) => {
-                ApiError::InternalServerError(anyhow::anyhow!(err.to_string()))
-            }
             OperationError::Cancelled => ApiError::Conflict("Operation was cancelled".into()),
         }
     }
@@ -5826,7 +5823,7 @@ impl Service {
                     let locked = self.inner.read().unwrap();
 
                     match tid_drain
-                        .tenant_shard_eligible_for_drain(&locked.tenants, &locked.scheduler)?
+                        .tenant_shard_eligible_for_drain(&locked.tenants, &locked.scheduler)
                     {
                         Some(node_id) => node_id,
                         None => {
@@ -5859,7 +5856,6 @@ impl Service {
                 {
                     let mut locked = self.inner.write().unwrap();
                     let (nodes, tenants, scheduler) = locked.parts_mut();
-                    // TODO: TenantShardRemoved should continue
                     let rescheduled = tid_drain.reschedule_to_secondary(
                         dest_node_id,
                         tenants,

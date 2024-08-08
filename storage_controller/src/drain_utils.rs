@@ -91,29 +91,29 @@ impl TenantShardDrain {
         &self,
         tenants: &BTreeMap<TenantShardId, TenantShard>,
         scheduler: &Scheduler,
-    ) -> Result<Option<NodeId>, OperationError> {
-        let tenant_shard = tenants
-            .get(&self.tenant_shard_id)
-            .ok_or(OperationError::TenantShardRemoved(self.tenant_shard_id))?;
+    ) -> Option<NodeId> {
+        let tenant_shard = tenants.get(&self.tenant_shard_id)?;
 
         if *tenant_shard.intent.get_attached() != Some(self.drained_node) {
-            return Ok(None);
+            return None;
         }
 
         match scheduler.node_preferred(tenant_shard.intent.get_secondary()) {
-            Some(node) => Ok(Some(node)),
+            Some(node) => Some(node),
             None => {
                 tracing::warn!(
                     tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(),
                     "No eligible secondary while draining {}", self.drained_node
                 );
 
-                Ok(None)
+                None
             }
         }
     }
 
     /// Attempt to reschedule the tenant shard under question to one of its secondary locations
+    /// Returns an Err when the operation should be aborted and Ok(None) when the tenant shard
+    /// should be skipped.
     pub(crate) fn reschedule_to_secondary<'a>(
         &self,
         destination: NodeId,
@@ -121,9 +121,14 @@ impl TenantShardDrain {
         scheduler: &mut Scheduler,
         nodes: &Arc<HashMap<NodeId, Node>>,
     ) -> Result<Option<&'a mut TenantShard>, OperationError> {
-        let tenant_shard = tenants
-            .get_mut(&self.tenant_shard_id)
-            .ok_or(OperationError::TenantShardRemoved(self.tenant_shard_id))?;
+        let tenant_shard = match tenants.get_mut(&self.tenant_shard_id) {
+            Some(some) => some,
+            None => {
+                // Tenant shard was removed in the meantime.
+                // Skip to the next one, but don't fail the overall operation
+                return Ok(None);
+            }
+        };
 
         if !nodes.contains_key(&destination) {
             return Err(OperationError::NodeStateChanged(
@@ -132,13 +137,12 @@ impl TenantShardDrain {
         }
 
         if !tenant_shard.intent.get_secondary().contains(&destination) {
-            return Err(OperationError::NodeStateChanged(
-                format!(
-                    "node {} not a secondary for {}",
-                    destination, self.tenant_shard_id
-                )
-                .into(),
-            ));
+            tracing::info!(
+                tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(),
+                "Secondary moved away from {destination} during drain"
+            );
+
+            return Ok(None);
         }
 
         match tenant_shard.reschedule_to_secondary(Some(destination), scheduler) {
