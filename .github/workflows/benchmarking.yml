@@ -334,7 +334,7 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     container:
-      image: ${{ matrix.iamge }}
+      image: ${{ matrix.image }}
       options: --init
 
     # Increase timeout to 8h, default timeout is 6h
