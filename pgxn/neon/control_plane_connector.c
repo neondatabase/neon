@@ -802,6 +802,11 @@ NeonProcessUtility(
 		case T_DropRoleStmt:
 			HandleDropRole(castNode(DropRoleStmt, parseTree));
 			break;
+		case T_CreateTableSpaceStmt:
+   			ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                 errmsg("CREATE TABLESPACE statements are not supported by Neon.")));
+   			break;
 		default:
 			break;
 	}
