@@ -224,21 +224,8 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 }
 
 /// See [`Self::spawn`].
-#[derive(Clone)]
-pub struct BackgroundPurges(Arc<std::sync::Mutex<BackgroundPurgesInner>>);
-enum BackgroundPurgesInner {
-    Open(tokio::task::JoinSet<()>),
-    // we use the async mutex for coalescing
-    ShuttingDown(Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>),
-}
-
-impl Default for BackgroundPurges {
-    fn default() -> Self {
-        Self(Arc::new(std::sync::Mutex::new(
-            BackgroundPurgesInner::Open(JoinSet::new()),
-        )))
-    }
-}
+#[derive(Clone, Default)]
+pub struct BackgroundPurges(tokio_util::task::TaskTracker);
 
 impl BackgroundPurges {
     /// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
@@ -247,24 +234,25 @@ impl BackgroundPurges {
     /// Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
     /// Thus the [`BackgroundPurges`] type to keep track of these tasks.
     pub fn spawn(&self, tmp_path: Utf8PathBuf) {
-        let mut guard = self.0.lock().unwrap();
-        let jset = match &mut *guard {
-            BackgroundPurgesInner::Open(ref mut jset) => jset,
-            BackgroundPurgesInner::ShuttingDown(_) => {
-                warn!("trying to spawn background purge during shutdown, ignoring");
-                return;
+        if self.0.is_closed() {
+            warn!(
+                ?tmp_path,
+                "trying to spawn background purge during shutdown, ignoring"
+            );
+            return;
+        }
+
+        let span = info_span!(parent: None, "background_purge", %tmp_path);
+
+        let task = move || {
+            let _entered = span.entered();
+            if let Err(error) = std::fs::remove_dir_all(tmp_path.as_path()) {
+                // should we fatal_io_error here?
+                warn!(%error, "failed to purge tenant directory");
             }
         };
-        jset.spawn_on(
-            async move {
-                if let Err(error) = fs::remove_dir_all(tmp_path.as_path()).await {
-                    // should we fatal_io_error here?
-                    warn!(%error, path=%tmp_path, "failed to purge tenant directory");
-                }
-            }
-            .instrument(info_span!(parent: None, "background_purge")),
-            BACKGROUND_RUNTIME.handle(),
-        );
+
+        self.0.spawn_blocking_on(task, BACKGROUND_RUNTIME.handle());
     }
 
     /// When this future completes, all background purges have completed.
@@ -278,42 +266,9 @@ impl BackgroundPurges {
     /// instances of this future will continue to be correct.
     #[instrument(skip_all)]
     pub async fn shutdown(&self) {
-        let jset = {
-            let mut guard = self.0.lock().unwrap();
-            match &mut *guard {
-                BackgroundPurgesInner::Open(jset) => {
-                    *guard = BackgroundPurgesInner::ShuttingDown(Arc::new(tokio::sync::Mutex::new(
-                        std::mem::take(jset),
-                    )))
-                }
-                BackgroundPurgesInner::ShuttingDown(_) => {
-                    // calling shutdown multiple times is most likely a bug in pageserver shutdown code
-                    warn!("already shutting down");
-                }
-            };
-            match &mut *guard {
-                BackgroundPurgesInner::ShuttingDown(ref mut jset) => jset.clone(),
-                BackgroundPurgesInner::Open(_) => {
-                    unreachable!("above code transitions into shut down state");
-                }
-            }
-        };
-        let mut jset = jset.lock().await; // concurrent callers coalesce here
-        while let Some(res) = jset.join_next().await {
-            match res {
-                Ok(()) => {}
-                Err(e) if e.is_panic() => {
-                    // If it panicked, the error is already logged by the panic hook.
-                }
-                Err(e) if e.is_cancelled() => {
-                    unreachable!("we don't cancel the joinset or runtime")
-                }
-                Err(e) => {
-                    // No idea when this can happen, but let's log it.
-                    warn!(%e, "background purge task failed or panicked");
-                }
-            }
-        }
+        // forbid new tasks (can be called many times)
+        self.0.close();
+        self.0.wait().await;
     }
 }
 
