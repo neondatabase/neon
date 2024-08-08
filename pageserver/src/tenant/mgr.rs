@@ -236,7 +236,7 @@ impl BackgroundPurges {
     pub fn spawn(&self, tmp_path: Utf8PathBuf) {
         if self.0.is_closed() {
             warn!(
-                ?tmp_path,
+                %tmp_path,
                 "trying to spawn background purge during shutdown, ignoring"
             );
             return;
