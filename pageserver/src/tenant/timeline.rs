@@ -4992,15 +4992,7 @@ impl Timeline {
 
             result.layers_removed = gc_layers.len() as u64;
 
-            self.remote_client
-                .schedule_gc_update(&gc_layers)
-                .map_err(|e| {
-                    if self.cancel.is_cancelled() {
-                        GcError::TimelineCancelled
-                    } else {
-                        GcError::Remote(e)
-                    }
-                })?;
+            self.remote_client.schedule_gc_update(&gc_layers)?;
 
             guard.open_mut()?.finish_gc_timeline(&gc_layers);
 
