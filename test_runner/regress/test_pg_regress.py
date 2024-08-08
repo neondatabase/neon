@@ -275,6 +275,9 @@ def test_sql_regress(
     runpath = test_output_dir / "regress"
     (runpath / "testtablespace").mkdir(parents=True)
 
+    # Enable the test mode, so that we don't need to patch the test cases.
+    endpoint.safe_psql(f"SET neon.regress_test_mode = true")
+
     # Compute all the file locations that pg_regress will need.
     # This test runs neon specific tests
     build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/regress"

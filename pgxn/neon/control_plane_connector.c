@@ -45,6 +45,7 @@ static const char *jwt_token = NULL;
 /* GUCs */
 static char *ConsoleURL = NULL;
 static bool ForwardDDL = true;
+static bool RegressTestMode = false;
 
 /*
  * CURL docs say that this buffer must exist until we call curl_easy_cleanup
@@ -803,9 +804,12 @@ NeonProcessUtility(
 			HandleDropRole(castNode(DropRoleStmt, parseTree));
 			break;
 		case T_CreateTableSpaceStmt:
-   			ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-                 errmsg("CREATE TABLESPACE statements are not supported by Neon.")));
+			if (!RegressTestMode)
+			{
+				ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					errmsg("CREATE TABLESPACE statements are not supported by Neon.")));
+			}
    			break;
 		default:
 			break;
@@ -863,6 +867,18 @@ InitControlPlaneConnector()
 							 NULL,
 							 &ForwardDDL,
 							 true,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomBoolVariable(
+							 "neon.regress_test_mode",
+							 "Controls whether we are running in the regression test mode",
+							 NULL,
+							 &RegressTestMode,
+							 false,
 							 PGC_SUSET,
 							 0,
 							 NULL,
