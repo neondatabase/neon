@@ -1533,6 +1533,7 @@ impl Timeline {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
+        tracing::info!("trying...");
         let prepare = async move {
             let guard = self.compaction_lock.lock().await;
 
@@ -1552,6 +1553,7 @@ impl Timeline {
             _ = self.cancel.cancelled() => return Ok(false),
             _ = cancel.cancelled() => return Ok(false),
         };
+        tracing::info!("acquired...");
 
         let last_record_lsn = self.get_last_record_lsn();
 
