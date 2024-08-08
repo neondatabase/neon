@@ -40,6 +40,11 @@ impl TimelineAnalysis {
             garbage_keys: Vec::new(),
         }
     }
+
+    /// Whether a timeline is healthy.
+    pub(crate) fn is_healthy(&self) -> bool {
+        self.errors.is_empty() && self.warnings.is_empty()
+    }
 }
 
 pub(crate) async fn branch_cleanup_and_check_errors(
@@ -87,7 +92,8 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             .push(format!("index_part.json version: {}", index_part.version()))
                     }
 
-                    if &index_part.version() != IndexPart::KNOWN_VERSIONS.last().unwrap() {
+                    let mut newest_versions = IndexPart::KNOWN_VERSIONS.iter().rev().take(3);
+                    if !newest_versions.any(|ip| ip == &index_part.version()) {
                         info!(
                             "index_part.json version is not latest: {}",
                             index_part.version()
@@ -166,8 +172,11 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                     }
                 }
                 BlobDataParseResult::Relic => {}
-                BlobDataParseResult::Incorrect(parse_errors) => result.errors.extend(
-                    parse_errors
+                BlobDataParseResult::Incorrect {
+                    errors,
+                    s3_layers: _,
+                } => result.errors.extend(
+                    errors
                         .into_iter()
                         .map(|error| format!("parse error: {error}")),
                 ),
@@ -294,7 +303,10 @@ pub(crate) enum BlobDataParseResult {
     },
     /// The remains of a deleted Timeline (i.e. an initdb archive only)
     Relic,
-    Incorrect(Vec<String>),
+    Incorrect {
+        errors: Vec<String>,
+        s3_layers: HashSet<(LayerName, Generation)>,
+    },
 }
 
 pub(crate) fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generation), String> {
@@ -437,7 +449,7 @@ pub(crate) async fn list_timeline_blobs(
     }
 
     Ok(S3TimelineBlobData {
-        blob_data: BlobDataParseResult::Incorrect(errors),
+        blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
         unused_index_keys: index_part_keys,
         unknown_keys,
     })

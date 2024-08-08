@@ -269,7 +269,7 @@ impl SnapshotDownloader {
                         .context("Downloading timeline")?;
                     }
                     BlobDataParseResult::Relic => {}
-                    BlobDataParseResult::Incorrect(_) => {
+                    BlobDataParseResult::Incorrect { .. } => {
                         tracing::error!("Bad metadata in timeline {ttid}");
                     }
                 };

@@ -1,7 +1,7 @@
 //! Man-in-the-middle tests
 //!
 //! Channel binding should prevent a proxy server
-//! - that has access to create valid certificates -
+//! *that has access to create valid certificates*
 //! from controlling the TLS connection.
 
 use std::fmt::Debug;
@@ -34,9 +34,14 @@ async fn proxy_mitm(
     tokio::spawn(async move {
         // begin handshake with end_server
         let end_server = connect_tls(server2, client_config2.make_tls_connect().unwrap()).await;
-        let (end_client, startup) = match handshake(client1, Some(&server_config1), false)
-            .await
-            .unwrap()
+        let (end_client, startup) = match handshake(
+            &RequestMonitoring::test(),
+            client1,
+            Some(&server_config1),
+            false,
+        )
+        .await
+        .unwrap()
         {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(_) => panic!("cancellation not supported"),

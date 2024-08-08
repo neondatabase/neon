@@ -144,7 +144,7 @@ impl UserFacingError for ConnInfoError {
 }
 
 fn get_conn_info(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     headers: &HeaderMap,
     tls: &TlsConfig,
 ) -> Result<ConnInfo, ConnInfoError> {
@@ -223,12 +223,12 @@ fn get_conn_info(
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
-    let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
+    let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
         Ok(r) => {
@@ -481,13 +481,16 @@ fn map_isolation_level_to_headers(level: IsolationLevel) -> Option<HeaderValue> 
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
-    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
+    let _requeset_gauge = Metrics::get()
+        .proxy
+        .connection_requests
+        .guard(ctx.protocol());
     info!(
-        protocol = %ctx.protocol,
+        protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
 
@@ -543,7 +546,7 @@ async fn handle_inner(
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
-            ctx.latency_timer.success();
+            ctx.success();
             Ok::<_, HttpConnError>(client)
         }
         .map_err(SqlOverHttpError::from),

@@ -13,7 +13,7 @@ use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,7 +55,7 @@ use utils::id::{TenantId, TimelineId};
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
 use super::timeline::detach_ancestor::PreparedTimelineDetach;
-use super::TenantSharedResources;
+use super::{GlobalShutDown, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
 /// - `Attached`: has a full Tenant object, is elegible to service
@@ -116,8 +116,6 @@ pub(crate) enum ShardSelector {
     /// Only return the 0th shard, if it is present.  If a non-0th shard is present,
     /// ignore it.
     Zero,
-    /// Pick the first shard we find for the TenantId
-    First,
     /// Pick the shard that holds this key
     Page(Key),
     /// The shard ID is known: pick the given shard
@@ -667,17 +665,20 @@ pub async fn init_tenant_mgr(
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
         let shard_identity = location_conf.shard;
         let slot = match location_conf.mode {
-            LocationMode::Attached(attached_conf) => TenantSlot::Attached(tenant_spawn(
-                conf,
-                tenant_shard_id,
-                &tenant_dir_path,
-                resources.clone(),
-                AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
-                shard_identity,
-                Some(init_order.clone()),
-                SpawnMode::Lazy,
-                &ctx,
-            )),
+            LocationMode::Attached(attached_conf) => TenantSlot::Attached(
+                tenant_spawn(
+                    conf,
+                    tenant_shard_id,
+                    &tenant_dir_path,
+                    resources.clone(),
+                    AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
+                    shard_identity,
+                    Some(init_order.clone()),
+                    SpawnMode::Lazy,
+                    &ctx,
+                )
+                .expect("global shutdown during init_tenant_mgr cannot happen"),
+            ),
             LocationMode::Secondary(secondary_conf) => {
                 info!(
                     tenant_id = %tenant_shard_id.tenant_id,
@@ -725,7 +726,7 @@ fn tenant_spawn(
     init_order: Option<InitializationOrder>,
     mode: SpawnMode,
     ctx: &RequestContext,
-) -> Arc<Tenant> {
+) -> Result<Arc<Tenant>, GlobalShutDown> {
     // All these conditions should have been satisfied by our caller: the tenant dir exists, is a well formed
     // path, and contains a configuration file.  Assertions that do synchronous I/O are limited to debug mode
     // to avoid impacting prod runtime performance.
@@ -1192,7 +1193,10 @@ impl TenantManager {
                     None,
                     spawn_mode,
                     ctx,
-                );
+                )
+                .map_err(|_: GlobalShutDown| {
+                    UpsertLocationError::Unavailable(TenantMapError::ShuttingDown)
+                })?;
 
                 TenantSlot::Attached(tenant)
             }
@@ -1313,7 +1317,7 @@ impl TenantManager {
             None,
             SpawnMode::Eager,
             ctx,
-        );
+        )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
 
@@ -1384,33 +1388,32 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
     ) -> Result<(), DeleteTenantError> {
         let remote_path = remote_tenant_path(&tenant_shard_id);
-        let keys = match self
-            .resources
-            .remote_storage
-            .list(
-                Some(&remote_path),
-                remote_storage::ListingMode::NoDelimiter,
-                None,
-                &self.cancel,
-            )
-            .await
-        {
-            Ok(listing) => listing.keys,
-            Err(remote_storage::DownloadError::Cancelled) => {
-                return Err(DeleteTenantError::Cancelled)
-            }
-            Err(remote_storage::DownloadError::NotFound) => return Ok(()),
-            Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
-        };
+        let mut keys_stream = self.resources.remote_storage.list_streaming(
+            Some(&remote_path),
+            remote_storage::ListingMode::NoDelimiter,
+            None,
+            &self.cancel,
+        );
+        while let Some(chunk) = keys_stream.next().await {
+            let keys = match chunk {
+                Ok(listing) => listing.keys,
+                Err(remote_storage::DownloadError::Cancelled) => {
+                    return Err(DeleteTenantError::Cancelled)
+                }
+                Err(remote_storage::DownloadError::NotFound) => return Ok(()),
+                Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
+            };
 
-        if keys.is_empty() {
-            tracing::info!("Remote storage already deleted");
-        } else {
-            tracing::info!("Deleting {} keys from remote storage", keys.len());
-            self.resources
-                .remote_storage
-                .delete_objects(&keys, &self.cancel)
-                .await?;
+            if keys.is_empty() {
+                tracing::info!("Remote storage already deleted");
+            } else {
+                tracing::info!("Deleting {} keys from remote storage", keys.len());
+                let keys = keys.into_iter().map(|o| o.key).collect::<Vec<_>>();
+                self.resources
+                    .remote_storage
+                    .delete_objects(&keys, &self.cancel)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -1764,14 +1767,9 @@ impl TenantManager {
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
                 tracing::info!(timeline_id=%timeline.timeline_id, "Loading list of layers to hardlink");
-                let timeline_layers = timeline
-                    .layers
-                    .read()
-                    .await
-                    .likely_resident_layers()
-                    .collect::<Vec<_>>();
+                let layers = timeline.layers.read().await;
 
-                for layer in timeline_layers {
+                for layer in layers.likely_resident_layers() {
                     let relative_path = layer
                         .local_path()
                         .strip_prefix(&parent_path)
@@ -1968,7 +1966,8 @@ impl TenantManager {
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
+        // FIXME: this is unnecessary, slotguard already has these semantics
         struct RevertOnDropSlot(Option<SlotGuard>);
 
         impl Drop for RevertOnDropSlot {
@@ -2048,7 +2047,7 @@ impl TenantManager {
             None,
             SpawnMode::Eager,
             ctx,
-        );
+        )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
 
@@ -2089,7 +2088,6 @@ impl TenantManager {
                     };
 
                     match selector {
-                        ShardSelector::First => return ShardResolveResult::Found(tenant.clone()),
                         ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
                             return ShardResolveResult::Found(tenant.clone())
                         }
@@ -2171,6 +2169,9 @@ pub(crate) enum GetActiveTenantError {
     /// never happen.
     #[error("Tenant is broken: {0}")]
     Broken(String),
+
+    #[error("reconnect to switch tenant id")]
+    SwitchedTenant,
 }
 
 #[derive(Debug, thiserror::Error)]

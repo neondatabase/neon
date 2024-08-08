@@ -203,7 +203,8 @@ jobs:
       fail-fast: false
       matrix:
         arch: [ x64 ]
-        build-type: [ debug, release ]
+        # Do not build or run tests in debug for release branches
+        build-type: ${{ fromJson((startsWith(github.ref_name, 'release' && github.event_name == 'push')) && '["release"]' || '["debug", "release"]') }}
         include:
           - build-type: release
             arch: arm64
@@ -213,6 +214,8 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
+      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
+      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16"]' || '["v16"]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -286,9 +289,6 @@ jobs:
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          PAGESERVER_GET_VECTORED_IMPL: vectored
-          PAGESERVER_GET_IMPL: vectored
-          PAGESERVER_VALIDATE_VEC_GET: false
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -309,7 +309,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   create-test-report:
-    needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image ]
+    needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image, benchmarks ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
@@ -499,6 +499,12 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
+      - uses: docker/login-action@v3
+        with:
+          registry: cache.neon.build
+          username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
+          password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
+
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -510,9 +516,8 @@ jobs:
           push: true
           pull: true
           file: Dockerfile
-          cache-from: type=registry,ref=neondatabase/neon:cache-${{ matrix.arch }}
-          # 23.07.2024 temporarily disable cache saving in the registry as it is very slow
-          # cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=neondatabase/neon:cache-{0},mode=max', matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon:cache-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0},mode=max', matrix.arch) || '' }}
           tags: |
             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -591,6 +596,12 @@ jobs:
           username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
+      - uses: docker/login-action@v3
+        with:
+          registry: cache.neon.build
+          username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
+          password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
+
       - name: Build compute-node image
         uses: docker/build-push-action@v6
         with:
@@ -604,9 +615,8 @@ jobs:
           push: true
           pull: true
           file: Dockerfile.compute-node
-          cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
-          # 23.07.2024 temporarily disable cache saving in the registry as it is very slow
-          # cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=neondatabase/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
           tags: |
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -625,9 +635,8 @@ jobs:
           pull: true
           file: Dockerfile.compute-node
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
-          # 23.07.2024 temporarily disable cache saving in the registry as it is very slow
-          # cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=neondatabase/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 
@@ -827,6 +836,9 @@ jobs:
           rm -rf .docker-custom
 
   promote-images:
+    permissions:
+      contents: read  # This is required for actions/checkout
+      id-token: write # This is required for Azure Login to work.
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
@@ -851,6 +863,28 @@ jobs:
           for version in ${VERSIONS}; do
             docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
+          done
+
+      - name: Azure login
+        if: github.ref_name == 'main'
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        if: github.ref_name == 'main'
+        run: |
+          az acr login --name=neoneastus2
+
+      - name: Copy docker images to ACR-dev
+        if: github.ref_name == 'main'
+        run: |
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+            docker buildx imagetools create \
+              -t neoneastus2.azurecr.io/neondatabase/${image}:${{ needs.tag.outputs.build-tag }} \
+                                        neondatabase/${image}:${{ needs.tag.outputs.build-tag }}
           done
 
       - name: Add latest tag to images

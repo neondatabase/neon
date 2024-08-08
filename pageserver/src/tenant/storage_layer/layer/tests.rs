@@ -39,7 +39,7 @@ async fn smoke_test() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.likely_resident_layers().collect::<Vec<_>>()
+            layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -50,13 +50,26 @@ async fn smoke_test() {
     // all layers created at pageserver are like `layer`, initialized with strong
     // Arc<DownloadedLayer>.
 
+    let controlfile_keyspace = KeySpace {
+        ranges: vec![CONTROLFILE_KEY..CONTROLFILE_KEY.next()],
+    };
+
     let img_before = {
-        let mut data = ValueReconstructState::default();
+        let mut data = ValuesReconstructState::default();
         layer
-            .get_value_reconstruct_data(CONTROLFILE_KEY, Lsn(0x10)..Lsn(0x11), &mut data, &ctx)
+            .get_values_reconstruct_data(
+                controlfile_keyspace.clone(),
+                Lsn(0x10)..Lsn(0x11),
+                &mut data,
+                &ctx,
+            )
             .await
             .unwrap();
-        data.img
+        data.keys
+            .remove(&CONTROLFILE_KEY)
+            .expect("must be present")
+            .expect("should not error")
+            .img
             .take()
             .expect("tenant harness writes the control file")
     };
@@ -74,13 +87,24 @@ async fn smoke_test() {
 
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
-        let mut data = ValueReconstructState::default();
+        let mut data = ValuesReconstructState::default();
         layer
-            .get_value_reconstruct_data(CONTROLFILE_KEY, Lsn(0x10)..Lsn(0x11), &mut data, &ctx)
+            .get_values_reconstruct_data(
+                controlfile_keyspace.clone(),
+                Lsn(0x10)..Lsn(0x11),
+                &mut data,
+                &ctx,
+            )
             .instrument(download_span.clone())
             .await
             .unwrap();
-        data.img.take().unwrap()
+        data.keys
+            .remove(&CONTROLFILE_KEY)
+            .expect("must be present")
+            .expect("should not error")
+            .img
+            .take()
+            .expect("tenant harness writes the control file")
     };
 
     assert_eq!(img_before, img_after);
@@ -152,7 +176,7 @@ async fn smoke_test() {
     {
         let layers = &[layer];
         let mut g = timeline.layers.write().await;
-        g.finish_gc_timeline(layers);
+        g.open_mut().unwrap().finish_gc_timeline(layers);
         // this just updates the remote_physical_size for demonstration purposes
         rtc.schedule_gc_update(layers).unwrap();
     }
@@ -192,7 +216,7 @@ async fn evict_and_wait_on_wanted_deleted() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.likely_resident_layers().collect::<Vec<_>>()
+            layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -236,7 +260,7 @@ async fn evict_and_wait_on_wanted_deleted() {
     // the deletion of the layer in remote_storage happens.
     {
         let mut layers = timeline.layers.write().await;
-        layers.finish_gc_timeline(&[layer]);
+        layers.open_mut().unwrap().finish_gc_timeline(&[layer]);
     }
 
     SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle).await;
@@ -277,7 +301,7 @@ fn read_wins_pending_eviction() {
         let layer = {
             let mut layers = {
                 let layers = timeline.layers.read().await;
-                layers.likely_resident_layers().collect::<Vec<_>>()
+                layers.likely_resident_layers().cloned().collect::<Vec<_>>()
             };
 
             assert_eq!(layers.len(), 1);
@@ -409,7 +433,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         let layer = {
             let mut layers = {
                 let layers = timeline.layers.read().await;
-                layers.likely_resident_layers().collect::<Vec<_>>()
+                layers.likely_resident_layers().cloned().collect::<Vec<_>>()
             };
 
             assert_eq!(layers.len(), 1);
@@ -578,7 +602,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.likely_resident_layers().collect::<Vec<_>>()
+            layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -658,7 +682,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.likely_resident_layers().collect::<Vec<_>>()
+            layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -777,9 +801,9 @@ async fn eviction_cancellation_on_drop() {
     let (evicted_layer, not_evicted) = {
         let mut layers = {
             let mut guard = timeline.layers.write().await;
-            let layers = guard.likely_resident_layers().collect::<Vec<_>>();
+            let layers = guard.likely_resident_layers().cloned().collect::<Vec<_>>();
             // remove the layers from layermap
-            guard.finish_gc_timeline(&layers);
+            guard.open_mut().unwrap().finish_gc_timeline(&layers);
 
             layers
         };
@@ -828,9 +852,9 @@ async fn eviction_cancellation_on_drop() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn layer_size() {
-    assert_eq!(std::mem::size_of::<LayerAccessStats>(), 8);
-    assert_eq!(std::mem::size_of::<PersistentLayerDesc>(), 104);
-    assert_eq!(std::mem::size_of::<LayerInner>(), 312);
+    assert_eq!(size_of::<LayerAccessStats>(), 8);
+    assert_eq!(size_of::<PersistentLayerDesc>(), 104);
+    assert_eq!(size_of::<LayerInner>(), 296);
     // it also has the utf8 path
 }
 

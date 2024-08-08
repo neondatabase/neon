@@ -296,6 +296,11 @@ impl From<GetActiveTenantError> for ApiError {
             GetActiveTenantError::WaitForActiveTimeout { .. } => {
                 ApiError::ResourceUnavailable(format!("{}", e).into())
             }
+            GetActiveTenantError::SwitchedTenant => {
+                // in our HTTP handlers, this error doesn't happen
+                // TODO: separate error types
+                ApiError::ResourceUnavailable("switched tenant".into())
+            }
         }
     }
 }
@@ -930,6 +935,7 @@ async fn tenant_list_handler(
             generation: (*gen)
                 .into()
                 .expect("Tenants are always attached with a generation"),
+            gc_blocking: None,
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -981,6 +987,7 @@ async fn tenant_status(
                     .generation()
                     .into()
                     .expect("Tenants are always attached with a generation"),
+                gc_blocking: tenant.gc_block.summary().map(|x| format!("{x:?}")),
             },
             walredo: tenant.wal_redo_manager_status(),
             timelines: tenant.list_timeline_ids(),
@@ -1155,7 +1162,10 @@ async fn layer_map_info_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let layer_map_info = timeline.layer_map_info(reset).await;
+    let layer_map_info = timeline
+        .layer_map_info(reset)
+        .await
+        .map_err(|_shutdown| ApiError::ShuttingDown)?;
 
     json_response(StatusCode::OK, layer_map_info)
 }
@@ -1219,6 +1229,72 @@ async fn evict_timeline_layer_handler(
             format!("Layer {tenant_shard_id}/{timeline_id}/{layer_file_name} not found"),
         ),
     }
+}
+
+async fn timeline_gc_blocking_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    block_or_unblock_gc(request, true).await
+}
+
+async fn timeline_gc_unblocking_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    block_or_unblock_gc(request, false).await
+}
+
+/// Adding a block is `POST ../block_gc`, removing a block is `POST ../unblock_gc`.
+///
+/// Both are technically unsafe because they might fire off index uploads, thus they are POST.
+async fn block_or_unblock_gc(
+    request: Request<Body>,
+    block: bool,
+) -> Result<Response<Body>, ApiError> {
+    use crate::tenant::{
+        remote_timeline_client::WaitCompletionError, upload_queue::NotInitialized,
+    };
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let state = get_state(&request);
+
+    let tenant = state
+        .tenant_manager
+        .get_attached_tenant_shard(tenant_shard_id)?;
+
+    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+    let timeline = tenant.get_timeline(timeline_id, true)?;
+
+    let fut = async {
+        if block {
+            timeline.block_gc(&tenant).await.map(|_| ())
+        } else {
+            timeline.unblock_gc(&tenant).await
+        }
+    };
+
+    let span = tracing::info_span!(
+        "block_or_unblock_gc",
+        tenant_id = %tenant_shard_id.tenant_id,
+        shard_id = %tenant_shard_id.shard_slug(),
+        timeline_id = %timeline_id,
+        block = block,
+    );
+
+    let res = fut.instrument(span).await;
+
+    res.map_err(|e| {
+        if e.is::<NotInitialized>() || e.is::<WaitCompletionError>() {
+            ApiError::ShuttingDown
+        } else {
+            ApiError::InternalServerError(e)
+        }
+    })?;
+
+    json_response(StatusCode::OK, ())
 }
 
 /// Get tenant_size SVG graph along with the JSON data.
@@ -1650,7 +1726,9 @@ async fn timeline_compact_handler(
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
         if wait_until_uploaded {
-            timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
+            timeline.remote_client.wait_completion().await
+            // XXX map to correct ApiError for the cases where it's due to shutdown
+            .context("wait completion").map_err(ApiError::InternalServerError)?;
         }
         json_response(StatusCode::OK, ())
     }
@@ -1709,7 +1787,9 @@ async fn timeline_checkpoint_handler(
         }
 
         if wait_until_uploaded {
-            timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
+            timeline.remote_client.wait_completion().await
+            // XXX map to correct ApiError for the cases where it's due to shutdown
+            .context("wait completion").map_err(ApiError::InternalServerError)?;
         }
 
         json_response(StatusCode::OK, ())
@@ -2125,14 +2205,24 @@ async fn secondary_download_handler(
 
     let timeout = wait.unwrap_or(Duration::MAX);
 
-    let status = match tokio::time::timeout(
+    let result = tokio::time::timeout(
         timeout,
         state.secondary_controller.download_tenant(tenant_shard_id),
     )
-    .await
-    {
-        // Download job ran to completion.
-        Ok(Ok(())) => StatusCode::OK,
+    .await;
+
+    let progress = secondary_tenant.progress.lock().unwrap().clone();
+
+    let status = match result {
+        Ok(Ok(())) => {
+            if progress.layers_downloaded >= progress.layers_total {
+                // Download job ran to completion
+                StatusCode::OK
+            } else {
+                // Download dropped out without errors because it ran out of time budget
+                StatusCode::ACCEPTED
+            }
+        }
         // Edge case: downloads aren't usually fallible: things like a missing heatmap are considered
         // okay.  We could get an error here in the unlikely edge case that the tenant
         // was detached between our check above and executing the download job.
@@ -2141,8 +2231,6 @@ async fn secondary_download_handler(
         // yet.  The caller will get a response body indicating status.
         Err(_) => StatusCode::ACCEPTED,
     };
-
-    let progress = secondary_tenant.progress.lock().unwrap().clone();
 
     json_response(status, progress)
 }
@@ -2886,6 +2974,14 @@ pub fn make_router(
         .delete(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, evict_timeline_layer_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/block_gc",
+            |r| api_handler(r, timeline_gc_blocking_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/unblock_gc",
+            |r| api_handler(r, timeline_gc_unblocking_handler),
         )
         .post("/v1/tenant/:tenant_shard_id/heatmap_upload", |r| {
             api_handler(r, secondary_upload_handler)

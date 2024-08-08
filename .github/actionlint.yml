@@ -8,6 +8,8 @@ self-hosted-runner:
     - small-arm64
     - us-east-2
 config-variables:
+  - BENCHMARK_PROJECT_ID_PUB
+  - BENCHMARK_PROJECT_ID_SUB
   - REMOTE_STORAGE_AZURE_CONTAINER
   - REMOTE_STORAGE_AZURE_REGION
   - SLACK_UPCOMING_RELEASE_CHANNEL_ID

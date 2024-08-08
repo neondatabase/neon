@@ -3,14 +3,18 @@ use crate::metrics::{
     METRICS_REGISTRY,
 };
 use crate::reconciler::ReconcileError;
-use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use crate::service::{LeadershipStatus, Service, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
 use futures::Future;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use metrics::{BuildInfo, NeonMetrics};
-use pageserver_api::controller_api::TenantCreateRequest;
+use pageserver_api::controller_api::{
+    MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
+    MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
+    TenantCreateRequest,
+};
 use pageserver_api::models::{
     TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
@@ -560,6 +564,51 @@ async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, A
     json_response(StatusCode::ACCEPTED, ())
 }
 
+async fn handle_metadata_health_update(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Scrubber)?;
+
+    let update_req = json_request::<MetadataHealthUpdateRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    state.service.metadata_health_update(update_req).await?;
+
+    json_response(StatusCode::OK, MetadataHealthUpdateResponse {})
+}
+
+async fn handle_metadata_health_list_unhealthy(
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let unhealthy_tenant_shards = state.service.metadata_health_list_unhealthy().await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListUnhealthyResponse {
+            unhealthy_tenant_shards,
+        },
+    )
+}
+
+async fn handle_metadata_health_list_outdated(
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let list_outdated_req = json_request::<MetadataHealthListOutdatedRequest>(&mut req).await?;
+    let state = get_state(&req);
+    let health_records = state
+        .service
+        .metadata_health_list_outdated(list_outdated_req.not_scrubbed_for)
+        .await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListOutdatedResponse { health_records },
+    )
+}
+
 async fn handle_tenant_shard_split(
     service: Arc<Service>,
     mut req: Request<Body>,
@@ -605,6 +654,13 @@ async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<
             .tenant_update_policy(tenant_id, update_req)
             .await?,
     )
+}
+
+async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    json_response(StatusCode::OK, state.service.step_down().await)
 }
 
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -734,6 +790,47 @@ struct RequestMeta {
     at: Instant,
 }
 
+pub fn prologue_leadership_status_check_middleware<
+    B: hyper::body::HttpBody + Send + Sync + 'static,
+>() -> Middleware<B, ApiError> {
+    Middleware::pre(move |req| async move {
+        let state = get_state(&req);
+        let leadership_status = state.service.get_leadership_status();
+
+        enum AllowedRoutes<'a> {
+            All,
+            Some(Vec<&'a str>),
+        }
+
+        let allowed_routes = match leadership_status {
+            LeadershipStatus::Leader => AllowedRoutes::All,
+            LeadershipStatus::SteppedDown => {
+                // TODO: does it make sense to allow /status here?
+                AllowedRoutes::Some(["/control/v1/step_down", "/status", "/metrics"].to_vec())
+            }
+            LeadershipStatus::Candidate => {
+                AllowedRoutes::Some(["/ready", "/status", "/metrics"].to_vec())
+            }
+        };
+
+        let uri = req.uri().to_string();
+        match allowed_routes {
+            AllowedRoutes::All => Ok(req),
+            AllowedRoutes::Some(allowed) if allowed.contains(&uri.as_str()) => Ok(req),
+            _ => {
+                tracing::info!(
+                    "Request {} not allowed due to current leadership state",
+                    req.uri()
+                );
+
+                Err(ApiError::ResourceUnavailable(
+                    format!("Current leadership status is {leadership_status}").into(),
+                ))
+            }
+        }
+    })
+}
+
 fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
@@ -820,6 +917,7 @@ pub fn make_router(
     build_info: BuildInfo,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router()
+        .middleware(prologue_leadership_status_check_middleware())
         .middleware(prologue_metrics_middleware())
         .middleware(epilogue_metrics_middleware());
     if auth.is_some() {
@@ -938,6 +1036,28 @@ pub fn make_router(
                 RequestName("control_v1_cancel_node_fill"),
             )
         })
+        // Metadata health operations
+        .post("/control/v1/metadata_health/update", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_update,
+                RequestName("control_v1_metadata_health_update"),
+            )
+        })
+        .get("/control/v1/metadata_health/unhealthy", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list_unhealthy,
+                RequestName("control_v1_metadata_health_list_unhealthy"),
+            )
+        })
+        .post("/control/v1/metadata_health/outdated", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list_outdated,
+                RequestName("control_v1_metadata_health_list_outdated"),
+            )
+        })
         // TODO(vlad): endpoint for cancelling drain and fill
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
@@ -970,6 +1090,9 @@ pub fn make_router(
                 handle_tenant_update_policy,
                 RequestName("control_v1_tenant_policy"),
             )
+        })
+        .put("/control/v1/step_down", |r| {
+            named_request_span(r, handle_step_down, RequestName("control_v1_step_down"))
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into

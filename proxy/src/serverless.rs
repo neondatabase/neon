@@ -334,7 +334,7 @@ async fn request_handler(
             &config.region,
         );
 
-        let span = ctx.span.clone();
+        let span = ctx.span();
         info!(parent: &span, "performing websocket upgrade");
 
         let (response, websocket) = framed_websockets::upgrade::upgrade(&mut request)
@@ -367,7 +367,7 @@ async fn request_handler(
             crate::metrics::Protocol::Http,
             &config.region,
         );
-        let span = ctx.span.clone();
+        let span = ctx.span();
 
         sql_over_http::handle(config, ctx, request, backend, http_cancellation_token)
             .instrument(span)

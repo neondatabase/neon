@@ -1,7 +1,8 @@
 use anyhow::{anyhow, bail};
 use camino::Utf8PathBuf;
+use pageserver_api::controller_api::{MetadataHealthUpdateRequest, MetadataHealthUpdateResponse};
 use pageserver_api::shard::TenantShardId;
-use reqwest::Url;
+use reqwest::{Method, Url};
 use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use storage_scrubber::pageserver_physical_gc::GcMode;
 use storage_scrubber::scan_pageserver_metadata::scan_metadata;
@@ -15,6 +16,11 @@ use storage_scrubber::{
 
 use clap::{Parser, Subcommand};
 use utils::id::TenantId;
+
+use utils::{project_build_tag, project_git_version};
+
+project_git_version!(GIT_VERSION);
+project_build_tag!(BUILD_TAG);
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -50,6 +56,8 @@ enum Command {
         input_path: String,
         #[arg(short, long, default_value_t = PurgeMode::DeletedOnly)]
         mode: PurgeMode,
+        #[arg(long = "min-age")]
+        min_age: humantime::Duration,
     },
     #[command(verbatim_doc_comment)]
     ScanMetadata {
@@ -59,6 +67,8 @@ enum Command {
         json: bool,
         #[arg(long = "tenant-id", num_args = 0..)]
         tenant_ids: Vec<TenantShardId>,
+        #[arg(long = "post", default_value_t = false)]
+        post_to_storage_controller: bool,
         #[arg(long, default_value = None)]
         /// For safekeeper node_kind only, points to db with debug dump
         dump_db_connstr: Option<String>,
@@ -96,6 +106,8 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
+
     let bucket_config = BucketConfig::from_env()?;
 
     let command_log_name = match &cli.command {
@@ -114,11 +126,20 @@ async fn main() -> anyhow::Result<()> {
         chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
     ));
 
+    let controller_client_conf = cli.controller_api.map(|controller_api| {
+        ControllerClientConfig {
+            controller_api,
+            // Default to no key: this is a convenience when working in a development environment
+            controller_jwt: cli.controller_jwt.unwrap_or("".to_owned()),
+        }
+    });
+
     match cli.command {
         Command::ScanMetadata {
             json,
             tenant_ids,
             node_kind,
+            post_to_storage_controller,
             dump_db_connstr,
             dump_db_table,
         } => {
@@ -157,6 +178,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             } else {
+                if controller_client_conf.is_none() && post_to_storage_controller {
+                    return Err(anyhow!("Posting pageserver scan health status to storage controller requires `--controller-api` and `--controller-jwt` to run"));
+                }
                 match scan_metadata(bucket_config.clone(), tenant_ids).await {
                     Err(e) => {
                         tracing::error!("Failed: {e}");
@@ -168,22 +192,37 @@ async fn main() -> anyhow::Result<()> {
                         } else {
                             println!("{}", summary.summary_string());
                         }
+
+                        if post_to_storage_controller {
+                            if let Some(conf) = controller_client_conf {
+                                let controller_client = conf.build_client();
+                                let body = summary.build_health_update_request();
+                                controller_client
+                                    .dispatch::<MetadataHealthUpdateRequest, MetadataHealthUpdateResponse>(
+                                        Method::POST,
+                                        "control/v1/metadata_health/update".to_string(),
+                                        Some(body),
+                                    )
+                                    .await?;
+                            }
+                        }
+
                         if summary.is_fatal() {
-                            Err(anyhow::anyhow!("Fatal scrub errors detected"))
+                            tracing::error!("Fatal scrub errors detected");
                         } else if summary.is_empty() {
                             // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
                             // scrubber they were likely expecting to scan something, and if we see no timelines
                             // at all then it's likely due to some configuration issues like a bad prefix
-                            Err(anyhow::anyhow!(
+                            tracing::error!(
                                 "No timelines found in bucket {} prefix {}",
                                 bucket_config.bucket,
                                 bucket_config
                                     .prefix_in_bucket
                                     .unwrap_or("<none>".to_string())
-                            ))
-                        } else {
-                            Ok(())
+                            );
                         }
+
+                        Ok(())
                     }
                 }
             }
@@ -196,9 +235,11 @@ async fn main() -> anyhow::Result<()> {
             let console_config = ConsoleConfig::from_env()?;
             find_garbage(bucket_config, console_config, depth, node_kind, output_path).await
         }
-        Command::PurgeGarbage { input_path, mode } => {
-            purge_garbage(input_path, mode, !cli.delete).await
-        }
+        Command::PurgeGarbage {
+            input_path,
+            mode,
+            min_age,
+        } => purge_garbage(input_path, mode, min_age.into(), !cli.delete).await,
         Command::TenantSnapshot {
             tenant_id,
             output_path,
@@ -213,14 +254,6 @@ async fn main() -> anyhow::Result<()> {
             min_age,
             mode,
         } => {
-            let controller_client_conf = cli.controller_api.map(|controller_api| {
-                ControllerClientConfig {
-                    controller_api,
-                    // Default to no key: this is a convenience when working in a development environment
-                    controller_jwt: cli.controller_jwt.unwrap_or("".to_owned()),
-                }
-            });
-
             match (&controller_client_conf, mode) {
                 (Some(_), _) => {
                     // Any mode may run when controller API is set

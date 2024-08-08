@@ -19,6 +19,10 @@ on:
         description: 'debug or release'
         required: true
         type: string
+      pg-versions:
+        description: 'a json array of postgres versions to run regression tests on'
+        required: true
+        type: string
 
 defaults:
   run:
@@ -254,7 +258,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [ v14, v15, v16 ]
+        pg_version: ${{ fromJson(inputs.pg-versions) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -278,14 +282,11 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          PAGESERVER_GET_VECTORED_IMPL: vectored
-          PAGESERVER_GET_IMPL: vectored
-          PAGESERVER_VALIDATE_VEC_GET: true
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
       - name: Merge and upload coverage data
         if: |
           false &&
-          inputs.build-type == 'debug' && matrix.pg_version == 'v14'
+          inputs.build-type == 'debug' && matrix.pg_version == 'v16'
         uses: ./.github/actions/save-coverage-data

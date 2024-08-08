@@ -5,6 +5,7 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
+use aws_config::Region;
 use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::AuthRateLimiter;
@@ -290,9 +291,10 @@ async fn main() -> anyhow::Result<()> {
     let config = build_config(&args)?;
 
     info!("Authentication backend: {}", config.auth_backend);
-    info!("Using region: {}", config.aws_region);
+    info!("Using region: {}", args.aws_region);
 
-    let region_provider = RegionProviderChain::default_provider().or_else(&*config.aws_region); // Replace with your Redis region if needed
+    let region_provider =
+        RegionProviderChain::default_provider().or_else(Region::new(args.aws_region.clone()));
     let provider_conf =
         ProviderConfig::without_region().with_region(region_provider.region().await);
     let aws_credentials_provider = {
@@ -318,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
         elasticache::AWSIRSAConfig::new(
-            config.aws_region.clone(),
+            args.aws_region.clone(),
             args.redis_cluster_name,
             args.redis_user_id,
         ),
@@ -376,11 +378,14 @@ async fn main() -> anyhow::Result<()> {
 
     let cancel_map = CancelMap::default();
 
-    let redis_publisher = match &redis_notifications_client {
+    let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
+    RateBucketInfo::validate(redis_rps_limit)?;
+
+    let redis_publisher = match &regional_redis_client {
         Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
             redis_publisher.clone(),
             args.region.clone(),
-            &config.redis_rps_limit,
+            redis_rps_limit,
         )?))),
         None => None,
     };
@@ -656,7 +661,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     )?;
 
     let http_config = HttpConfig {
-        request_timeout: args.sql_over_http.sql_over_http_timeout,
         pool_options: GlobalConnPoolOptions {
             max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
             gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
@@ -676,9 +680,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
-    let mut redis_rps_limit = args.redis_rps_limit.clone();
-    RateBucketInfo::validate(&mut redis_rps_limit)?;
-
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
@@ -687,11 +688,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         http_config,
         authentication_config,
         require_client_ip: args.require_client_ip,
-        disable_ip_check_for_http: args.disable_ip_check_for_http,
-        redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
-        aws_region: args.aws_region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute_retry_config: config::RetryConfig::parse(

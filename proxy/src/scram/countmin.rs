@@ -158,7 +158,7 @@ mod tests {
         let N = 1021 * 4096;
         let sketch = CountMinSketch::with_params(p / N as f64, 1.0 - q);
 
-        let memory = std::mem::size_of::<u32>() * sketch.buckets.len();
+        let memory = size_of::<u32>() * sketch.buckets.len();
         let time = sketch.depth;
         (memory, time)
     }
