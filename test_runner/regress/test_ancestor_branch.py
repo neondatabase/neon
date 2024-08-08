@@ -20,7 +20,9 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
         }
     )
 
-    pageserver_http.configure_failpoints(("flush-frozen-pausable", "sleep(10000)"))
+    failpoint = "flush-frozen-pausable"
+
+    pageserver_http.configure_failpoints((failpoint, "sleep(10000)"))
 
     endpoint_branch0 = env.endpoints.create_start("main", tenant_id=tenant)
     branch0_cur = endpoint_branch0.connect().cursor()
@@ -96,3 +98,5 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     assert query_scalar(branch1_cur, "SELECT count(*) FROM foo") == 200000
 
     assert query_scalar(branch2_cur, "SELECT count(*) FROM foo") == 300000
+
+    pageserver_http.configure_failpoints((failpoint, "off"))
