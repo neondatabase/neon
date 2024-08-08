@@ -112,5 +112,5 @@ USER neon
 EXPOSE 6400
 EXPOSE 9898
 
-CMD /usr/local/bin/pageserver -D /data/.neon
+CMD ["/usr/local/bin/pageserver", "-D", "/data/.neon"]
 
