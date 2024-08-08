@@ -151,6 +151,9 @@ def test_pg_regress(
     runpath = test_output_dir / "regress"
     (runpath / "testtablespace").mkdir(parents=True)
 
+    # Enable the test mode, so that we don't need to patch the test cases.
+    endpoint.safe_psql(f"SET neon.regress_test_mode = true")
+
     # Compute all the file locations that pg_regress will need.
     build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/regress"
     src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/regress"
@@ -213,6 +216,9 @@ def test_isolation(
     # Create some local directories for pg_isolation_regress to run in.
     runpath = test_output_dir / "regress"
     (runpath / "testtablespace").mkdir(parents=True)
+
+    # Enable the test mode, so that we don't need to patch the test cases.
+    endpoint.safe_psql(f"SET neon.regress_test_mode = true")
 
     # Compute all the file locations that pg_isolation_regress will need.
     build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/isolation"
