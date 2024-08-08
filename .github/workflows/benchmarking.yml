@@ -71,7 +71,7 @@ jobs:
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
-            RUNNER: [ self-hosted, eastus2, azure ]
+            RUNNER: [ self-hosted, eastus2, x64 ]
             IMAGE: neondatabase/build-tools:pinned
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
@@ -91,12 +91,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials # necessary on Azure runners
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-region: us-east-2
-        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
-    - run: aws sts get-caller-identity
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -251,7 +245,7 @@ jobs:
       run: |
         region_id_default=${{ env.DEFAULT_REGION_ID }}
         runner_default='["self-hosted", "us-east-2", "x64"]'
-        runner_azure='["self-hosted", "eastus2", "azure"]'
+        runner_azure='["self-hosted", "eastus2", "x64"]'
         image_default="369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned"
         matrix='{
           "pg_version" : [
@@ -350,12 +344,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Configure AWS credentials # necessary on Azure runners
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-region: us-east-2
-        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
-    - run: aws sts get-caller-identity
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -474,7 +462,7 @@ jobs:
             RUNNER: [ self-hosted, us-east-2, x64 ]
             IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - PLATFORM: "azure-captest-pgvector"
-            RUNNER: [ self-hosted, eastus2, azure ]
+            RUNNER: [ self-hosted, eastus2, x64 ]
             IMAGE: neondatabase/build-tools:pinned
 
     env:
