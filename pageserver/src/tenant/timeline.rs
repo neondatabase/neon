@@ -5559,7 +5559,7 @@ impl<'a> TimelineWriter<'a> {
 
         let action = self.get_open_layer_action(lsn, buf_size);
         let layer = self.handle_open_layer_action(lsn, action, ctx).await?;
-        let res = layer.put_value(key, lsn, &buf, ctx).await;
+        let res = layer.put_value(key.to_compact(), lsn, &buf, ctx).await;
 
         if res.is_ok() {
             // Update the current size only when the entire write was ok.
