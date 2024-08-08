@@ -742,11 +742,7 @@ pub(crate) enum WaitLsnError {
 impl From<CreateImageLayersError> for CompactionError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
-            CreateImageLayersError::Cancelled
-            | CreateImageLayersError::GetVectoredError(GetVectoredError::Cancelled)
-            | CreateImageLayersError::PageReconstructError(PageReconstructError::Cancelled) => {
-                CompactionError::ShuttingDown
-            }
+            CreateImageLayersError::Cancelled => CompactionError::ShuttingDown,
             CreateImageLayersError::Other(e) => {
                 CompactionError::Other(e.context("create image layers"))
             }
