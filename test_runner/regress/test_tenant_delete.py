@@ -128,6 +128,8 @@ def test_tenant_delete_smoke(
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "inprogress"}) == 0
 
+    env.pageserver.stop()
+
 
 def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonEnvBuilder):
     """Reproduction of 2023-11-23 stuck tenants investigation"""
@@ -200,11 +202,10 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
         if deletion is not None:
             deletion.join()
 
+    env.pageserver.stop()
 
-def test_tenant_delete_races_timeline_creation(
-    neon_env_builder: NeonEnvBuilder,
-    pg_bin: PgBin,
-):
+
+def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder):
     """
     Validate that timeline creation executed in parallel with deletion works correctly.
 
@@ -317,6 +318,8 @@ def test_tenant_delete_races_timeline_creation(
 
     # We deleted our only tenant, and the scrubber fails if it detects nothing
     neon_env_builder.disable_scrub_on_exit()
+
+    env.pageserver.stop()
 
 
 def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
