@@ -60,11 +60,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - DEFAULT_PG_VERSION: 16
-            PLATFORM: "neon-staging"
-            region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
-            RUNNER: [ self-hosted, us-east-2, x64 ]
-            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+          # - DEFAULT_PG_VERSION: 16
+          #   PLATFORM: "neon-staging"
+          #   region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+          #   RUNNER: [ self-hosted, us-east-2, x64 ]
+          #   IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
@@ -88,6 +88,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ secret.DEV_AWS_OIDC_ROLE_ARN }}
+    - run: aws sts get-caller-identity
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
