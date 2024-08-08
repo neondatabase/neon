@@ -43,7 +43,7 @@ pub struct StorageController {
 
 const COMMAND: &str = "storage_controller";
 
-const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
+const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 17;
 
 const DB_NAME: &str = "storage_controller";
 
@@ -183,7 +183,7 @@ impl StorageController {
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
     async fn get_pg_dir(&self, dir_name: &str) -> anyhow::Result<Utf8PathBuf> {
-        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 15, 14];
+        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 16, 15, 14];
 
         for v in prefer_versions {
             let path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, dir_name)?).unwrap();
