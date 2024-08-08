@@ -56,16 +56,23 @@ concurrency:
 jobs:
   bench:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    permissions:
+      contents: read
+      id-token: write # Required for OIDC authentication.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - DEFAULT_PG_VERSION: 16
-            PLATFORM: "neon-staging"
-            region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+          # - DEFAULT_PG_VERSION: 16
+          #   PLATFORM: "neon-staging"
+          #   region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+          #   RUNNER: [ self-hosted, us-east-2, x64 ]
+          #   IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
+            RUNNER: [ self-hosted, eastus2, azure ]
+            IMAGE: neondatabase/build-tools:pinned
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
@@ -76,14 +83,20 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
-    runs-on: [ self-hosted, us-east-2, x64 ]
+    runs-on: ${{ matrix.RUNNER }}
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ matrix.IMAGE }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
 
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: us-east-2
+        role-to-assume: ${{ secrets.DEV_AWS_OIDC_ROLE_ARN }}
+    - run: aws sts get-caller-identity
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -237,6 +250,8 @@ jobs:
       id: pgbench-compare-matrix
       run: |
         region_id_default=${{ env.DEFAULT_REGION_ID }}
+        runner_default="[ self-hosted, us-east-2, x64 ]"
+        image_default="369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned"
         matrix='{
           "pg_version" : [
             16
@@ -250,16 +265,19 @@ jobs:
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
+          "runner": [ "'"$runner_default"'" ],
+          "image": [ "'"$image_default"'" ],
+          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": "'"$runner_default"'", "image": "'"$image_default"'" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": "'"$runner_default"'", "image": "'"$image_default"'" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": "'"$runner_default"'", "image": "'"$image_default"'" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": "[ self-hosted, eastus2, azure ]", "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": "[ self-hosted, eastus2, azure ]", "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": "[ self-hosted, eastus2, azure ]", "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb",,"runner": "'"$runner_default"'", "image": "'"$image_default"'" }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb"}]')
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb","runner": "'"$runner_default"'", "image": "'"$image_default"'" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -317,9 +335,9 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    runs-on: [ self-hosted, us-east-2, x64 ]
+    runs-on: ${{ matrix.runner }}
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ matrix.image }}
       options: --init
 
     # Increase timeout to 8h, default timeout is 6h
@@ -440,7 +458,11 @@ jobs:
       matrix:
         include:
           - PLATFORM: "neonvm-captest-pgvector"
+            RUNNER: [ self-hosted, us-east-2, x64 ]
+            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - PLATFORM: "azure-captest-pgvector"
+            RUNNER: [ self-hosted, eastus2, azure ]
+            IMAGE: neondatabase/build-tools:pinned
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
@@ -453,9 +475,9 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
-    runs-on: [ self-hosted, us-east-2, x64 ]
+    runs-on: ${{ matrix.RUNNER }}
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ matrix.IMAGE }}
       options: --init
 
     steps:
