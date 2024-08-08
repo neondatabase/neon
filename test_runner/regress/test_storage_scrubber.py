@@ -204,6 +204,11 @@ def test_scrubber_physical_gc_ancestors(
         },
     )
 
+    # Create an extra timeline, to ensure the scrubber isn't confused by multiple timelines
+    env.storage_controller.pageserver_api().timeline_create(
+        env.pg_version, tenant_id=tenant_id, new_timeline_id=TimelineId.generate()
+    )
+
     # Make sure the original shard has some layers
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
@@ -213,6 +218,11 @@ def test_scrubber_physical_gc_ancestors(
     assert shard_count is None or new_shard_count > shard_count
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
     env.storage_controller.reconcile_until_idle()  # Move shards to their final locations immediately
+
+    # Create a timeline after split, to ensure scrubber can handle timelines that exist in child shards but not ancestors
+    env.storage_controller.pageserver_api().timeline_create(
+        env.pg_version, tenant_id=tenant_id, new_timeline_id=TimelineId.generate()
+    )
 
     # Make sure child shards have some layers.  Do not force upload, because the test helper calls checkpoint, which
     # compacts, and we only want to do tha explicitly later in the test.
