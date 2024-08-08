@@ -56,6 +56,9 @@ concurrency:
 jobs:
   bench:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    permissions:
+      contents: read
+      id-token: write # Required for OIDC authentication.
     strategy:
       fail-fast: false
       matrix:
