@@ -279,7 +279,6 @@ def test_snap_files(
     test_duration_min = 60
     test_interval_min = 5
     pgbench_duration = f"-T{test_duration_min * 60 * 2}"
-    num_replication_slots = 8
 
     env = benchmark_project_pub.pgbench_env
     connstr = benchmark_project_pub.connstr
@@ -288,22 +287,21 @@ def test_snap_files(
     conn = psycopg2.connect(connstr)
     conn.autocommit = True
     with conn.cursor() as cur:
-        for i in range(num_replication_slots):
-            cur.execute(
-                f"""
+        cur.execute(
+            f"""
                 DO $$
                     BEGIN
                     IF EXISTS (
                         SELECT 1
                         FROM pg_replication_slots
-                        WHERE slot_name = 'slotter{i}'
+                        WHERE slot_name = 'slotter'
                     ) THEN
-                        PERFORM pg_drop_replication_slot('slotter{i}');
+                        PERFORM pg_drop_replication_slot('slotter');
                     END IF;
                 END $$;
-                """
-            )
-            cur.execute(f"SELECT pg_create_logical_replication_slot('slotter{i}', 'test_decoding')")
+            """
+        )
+        cur.execute(f"SELECT pg_create_logical_replication_slot('slotter', 'test_decoding')")
     conn.close()
 
     workload = pg_bin.run_nonblocking(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env=env)
@@ -313,24 +311,9 @@ def test_snap_files(
         while time.time() - start < test_duration_min * 60:
             with psycopg2.connect(connstr) as conn:
                 with conn.cursor() as cur:
-                    for i in range(num_replication_slots):
-                        cur.execute(
-                            f"""
-                        SELECT data FROM
-                        pg_logical_slot_get_changes(
-                            'slotter{i}',
-                            NULL,
-                            NULL,
-                            'include-xids',
-                            '0',
-                            'skip-empty-xacts',
-                            '1')
-                        """
-                        )
-
-            check_pgbench_still_running(workload)
-
-            time.sleep(5)
+                    cur.execute("SELECT count(*) FROM (SELECT pg_log_standby_snapshot() FROM generate_series(1, 10000) g) s")
+                    check_pgbench_still_running(workload)
+                    cur.execute("SELECT pg_replication_slot_advance('slotter', pg_current_wal_lsn())")
 
             # Measure storage
             if time.time() - prev_measurement > test_interval_min * 60:
