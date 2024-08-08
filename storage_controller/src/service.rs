@@ -16,7 +16,7 @@ use crate::{
     compute_hook::NotifyError,
     drain_utils::{self, TenantShardDrain, TenantShardIterator},
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
-    metrics::LeadershipStatusGroup,
+    metrics,
     peer_client::{GlobalObservedState, PeerClient},
     persistence::{
         AbortShardSplitStatus, LeaderPersistence, MetadataHealthPersistence, TenantFilter,
@@ -142,7 +142,15 @@ enum NodeOperations {
 /// Allowed transitions are:
 /// 1. Leader -> SteppedDown
 /// 2. Candidate -> Leader
-#[derive(Copy, Clone, strum_macros::Display, measured::FixedCardinalityLabel)]
+#[derive(
+    Eq,
+    PartialEq,
+    Copy,
+    Clone,
+    strum_macros::Display,
+    strum_macros::EnumIter,
+    measured::FixedCardinalityLabel,
+)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum LeadershipStatus {
     /// This is the steady state where the storage controller can produce
@@ -230,16 +238,7 @@ impl ServiceState {
         delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
         initial_leadership_status: LeadershipStatus,
     ) -> Self {
-        let status = &crate::metrics::METRICS_REGISTRY
-            .metrics_group
-            .storage_controller_leadership_status;
-
-        status.set(
-            LeadershipStatusGroup {
-                status: initial_leadership_status,
-            },
-            1,
-        );
+        metrics::update_leadership_status(initial_leadership_status);
 
         Self {
             leadership_status: initial_leadership_status,
@@ -267,56 +266,12 @@ impl ServiceState {
 
     fn step_down(&mut self) {
         self.leadership_status = LeadershipStatus::SteppedDown;
-
-        let status = &crate::metrics::METRICS_REGISTRY
-            .metrics_group
-            .storage_controller_leadership_status;
-
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::SteppedDown,
-            },
-            1,
-        );
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::Leader,
-            },
-            0,
-        );
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::Candidate,
-            },
-            0,
-        );
+        metrics::update_leadership_status(self.leadership_status);
     }
 
     fn become_leader(&mut self) {
         self.leadership_status = LeadershipStatus::Leader;
-
-        let status = &crate::metrics::METRICS_REGISTRY
-            .metrics_group
-            .storage_controller_leadership_status;
-
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::Leader,
-            },
-            1,
-        );
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::SteppedDown,
-            },
-            0,
-        );
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::Candidate,
-            },
-            0,
-        );
+        metrics::update_leadership_status(self.leadership_status);
     }
 }
 
