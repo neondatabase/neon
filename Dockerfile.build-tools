@@ -195,6 +195,11 @@ WORKDIR /home/nonroot
 ENV RUSTC_VERSION=1.80.1
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
+ARG RUSTFILT_VERSION=0.2.1
+ARG CARGO_HAKARI_VERSION=0.9.30
+ARG CARGO_DENY_VERSION=0.16.1
+ARG CARGO_HACK_VERSION=0.6.31
+ARG CARGO_NEXTEST_VERSION=0.9.72
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -204,11 +209,11 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo --version && rustup --version && \
     rustup component add llvm-tools-preview rustfmt clippy && \
     cargo install --git https://github.com/paritytech/cachepot && \
-    cargo install rustfilt && \
-    cargo install cargo-hakari && \
-    cargo install cargo-deny --locked && \
-    cargo install cargo-hack && \
-    cargo install cargo-nextest && \
+    cargo install rustfilt            --version ${RUSTFILT_VERSION} && \
+    cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} && \
+    cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \
+    cargo install cargo-hack          --version ${CARGO_HACK_VERSION} && \
+    cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 ENV RUSTC_WRAPPER=cachepot
