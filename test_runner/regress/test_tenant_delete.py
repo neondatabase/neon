@@ -128,6 +128,8 @@ def test_tenant_delete_smoke(
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "inprogress"}) == 0
 
+    env.pageserver.stop()
+
 
 def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonEnvBuilder):
     """Reproduction of 2023-11-23 stuck tenants investigation"""
