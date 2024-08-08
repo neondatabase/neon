@@ -262,3 +262,80 @@ def test_publisher_restart(
             sub_workload.terminate()
     finally:
         pub_workload.terminate()
+
+
+@pytest.mark.remote_cluster
+@pytest.mark.timeout(2 * 60 * 60)
+def test_snap_files(
+    pg_bin: PgBin,
+    benchmark_project_pub: NeonApiEndpoint,
+    zenbenchmark: NeonBenchmarker,
+):
+    """
+    Creates a node with a replication slot. Generates pgbench into the replication slot,
+    then runs pgbench inserts while generating large numbers of snapfiles. Then restarts
+    the node and tries to peek the replication changes.
+    """
+    test_duration_min = 60
+    test_interval_min = 5
+    pgbench_duration = f"-T{test_duration_min * 60 * 2}"
+    num_replication_slots = 8
+
+    env = benchmark_project_pub.pgbench_env
+    connstr = benchmark_project_pub.connstr
+    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=env)
+
+    conn = psycopg2.connect(connstr)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        for i in range(num_replication_slots):
+            cur.execute(
+                f"""
+                DO $$
+                    BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_replication_slots
+                        WHERE slot_name = 'slotter{i}'
+                    ) THEN
+                        PERFORM pg_drop_replication_slot('slotter{i}');
+                    END IF;
+                END $$;
+                """
+            )
+            cur.execute(f"SELECT pg_create_logical_replication_slot('slotter{i}', 'test_decoding')")
+    conn.close()
+
+    workload = pg_bin.run_nonblocking(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env=env)
+    try:
+        start = time.time()
+        prev_measurement = time.time()
+        while time.time() - start < test_duration_min * 60:
+            with psycopg2.connect(connstr) as conn:
+                with conn.cursor() as cur:
+                    for i in range(num_replication_slots):
+                        cur.execute(
+                            f"""
+                        SELECT data FROM
+                        pg_logical_slot_get_changes(
+                            'slotter{i}',
+                            NULL,
+                            NULL,
+                            'include-xids',
+                            '0',
+                            'skip-empty-xacts',
+                            '1')
+                        """
+                        )
+
+            check_pgbench_still_running(workload)
+
+            time.sleep(5)
+
+            # Measure storage
+            if time.time() - prev_measurement > test_interval_min * 60:
+                storage = benchmark_project_pub.get_synthetic_storage_size()
+                zenbenchmark.record("storage", storage, "B", MetricReport.LOWER_IS_BETTER)
+                prev_measurement = time.time()
+    finally:
+        workload.terminate()
