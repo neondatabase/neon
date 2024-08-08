@@ -201,10 +201,7 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
             deletion.join()
 
 
-def test_tenant_delete_races_timeline_creation(
-    neon_env_builder: NeonEnvBuilder,
-    pg_bin: PgBin,
-):
+def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder):
     """
     Validate that timeline creation executed in parallel with deletion works correctly.
 
