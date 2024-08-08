@@ -361,6 +361,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         return (res.status_code, res.json())
 
+    def tenant_secondary_status(self, tenant_id: Union[TenantId, TenantShardId]):
+        url = f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/status"
+        res = self.get(url)
+        self.verbose_error(res)
+        return res.json()
+
     def set_tenant_config(self, tenant_id: Union[TenantId, TenantShardId], config: dict[str, Any]):
         assert "tenant_id" not in config.keys()
         res = self.put(
