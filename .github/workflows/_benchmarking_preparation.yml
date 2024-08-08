@@ -14,13 +14,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        # the following hard-coded connection string which contains a password is just used for testing the workflow
-        # and project will be immediately deleted after the workflow is running
-        # so please don't worry about the "security issue" for now
-        - BENCHMARK_CONNSTR: "postgresql://neondb_owner@ep-noisy-frost-w2k417od.us-east-2.aws.neon.build/neondb?sslmode=require"
+        # the following connection string is a temporary one to test the workflow
+        # and will be replaced by real RDS connection string once the workflow test is successful
+        - platform: aws-rds-postgres
+        - platform: aws-aurora-serverless-v2-postgres
+
     env:
       BENCHMARK_CONNSTR: ${{ matrix.BENCHMARK_CONNSTR }}
       LD_LIBRARY_PATH: /tmp/neon/pg_install/v16/lib
+      PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
@@ -28,6 +30,24 @@ jobs:
       options: --init
 
     steps:
+    - name: Set up Connection String
+      id: set-up-prep-connstr
+      run: |
+        case "${PLATFORM}" in
+          aws-rds-postgres)
+            CONNSTR=${{ secrets.BODOBOLERO_TEMPORARY_CONNSTR }} # FIXME! todo this is just for testing during the workflow development
+            ;;
+          aws-aurora-serverless-v2-postgres)
+            CONNSTR=${{ secrets.BODOBOLERO_TEMPORARY_CONNSTR }} # FIXME! todo this is just for testing during the workflow development, but is a good test for idempotency, second run should do nothing
+            ;;
+          *)
+            echo >&2 "Unknown PLATFORM=${PLATFORM}"
+            exit 1
+            ;;
+        esac
+
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT  
+
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -37,6 +57,8 @@ jobs:
 
     # we create a table that has one row for each database that we want to restore with the status whether the restore is done    
     - name: Create benchmark_restore_status table if it does not exist
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
       run: |
         /tmp/neon/pg_install/v16/bin/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
         CREATE TABLE IF NOT EXISTS benchmark_restore_status (

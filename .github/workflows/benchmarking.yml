@@ -60,6 +60,7 @@ jobs:
       contents: write
       statuses: write
       id-token: write # Required for OIDC authentication in azure runners
+    needs: [ prepare_AWS_RDS_databases ] # FIXME! this is a fake dependency that we need to remove before merging the workflow
     strategy:
       fail-fast: false
       matrix:
