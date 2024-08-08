@@ -200,6 +200,8 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
         if deletion is not None:
             deletion.join()
 
+    env.pageserver.stop()
+
 
 def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder):
     """
@@ -314,6 +316,8 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
 
     # We deleted our only tenant, and the scrubber fails if it detects nothing
     neon_env_builder.disable_scrub_on_exit()
+
+    env.pageserver.stop()
 
 
 def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
