@@ -1,5 +1,6 @@
 from fixtures.neon_fixtures import NeonEnvBuilder
 
+
 def test_combocid_delete(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start(
@@ -18,12 +19,12 @@ def test_combocid_delete(neon_env_builder: NeonEnvBuilder):
     cur.execute("create table t(id integer, val integer)")
 
     cur.execute("begin")
-    cur.execute("insert into t values (1, 0)");
-    cur.execute("insert into t values (2, 0)");
+    cur.execute("insert into t values (1, 0)")
+    cur.execute("insert into t values (2, 0)")
     cur.execute(f"insert into t select g, 0 from generate_series(3,{n_records}) g")
 
     # Open a cursor that scroll it halfway through
-    cur.execute("DECLARE c1 NO SCROLL CURSOR WITHOUT HOLD FOR SELECT * FROM t");
+    cur.execute("DECLARE c1 NO SCROLL CURSOR WITHOUT HOLD FOR SELECT * FROM t")
     cur.execute("fetch 500 from c1")
     rows = cur.fetchall()
     assert len(rows) == 500
