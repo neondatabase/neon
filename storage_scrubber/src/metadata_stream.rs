@@ -81,6 +81,11 @@ pub async fn stream_tenant_shards<'a>(
 ) -> anyhow::Result<impl Stream<Item = Result<TenantShardId, anyhow::Error>> + 'a> {
     let shards_target = target.tenant_shards_prefix(&tenant_id);
 
+    let prefix_str = &shards_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&shards_target.prefix_in_bucket);
+
     tracing::info!("Listing shards in {}", shards_target.prefix_in_bucket);
     let listing = list_objects_with_retries_generic(
         remote_client,
@@ -93,11 +98,7 @@ pub async fn stream_tenant_shards<'a>(
         .prefixes
         .iter()
         .map(|prefix| prefix.get_path().as_str())
-        .filter_map(|prefix| -> Option<&str> {
-            prefix
-                .strip_prefix(&target.tenants_root().prefix_in_bucket)?
-                .strip_suffix('/')
-        })
+        .filter_map(|prefix| -> Option<&str> { prefix.strip_prefix(prefix_str) })
         .map(|entry_id_str| {
             let first_part = entry_id_str.split('/').next().unwrap();
 
