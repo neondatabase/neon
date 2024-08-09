@@ -30,6 +30,7 @@ pub struct UnreliableWrapper {
 #[derive(Debug, Hash, Eq, PartialEq)]
 enum RemoteOp {
     ListPrefixes(Option<RemotePath>),
+    HeadObject(RemotePath),
     Upload(RemotePath),
     Download(RemotePath),
     Delete(RemotePath),
@@ -135,6 +136,16 @@ impl RemoteStorage for UnreliableWrapper {
         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))
             .map_err(DownloadError::Other)?;
         self.inner.list(prefix, mode, max_keys, cancel).await
+    }
+
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<crate::ListingObject, DownloadError> {
+        self.attempt(RemoteOp::HeadObject(key.clone()))
+            .map_err(DownloadError::Other)?;
+        self.inner.head_object(key, cancel).await
     }
 
     async fn upload(
