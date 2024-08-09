@@ -317,6 +317,12 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
     workload.init()
     workload.write_rows(100)
 
+    # Flush deletion queue so that we don't leave any orphan layers in the parent that will confuse subsequent checks: once
+    # a shard is split, any layers in its prefix that aren't referenced by a child will be considered GC'able, even
+    # if they were logically deleted before the shard split, just not physically deleted yet because of the queue.
+    for ps in env.pageservers:
+        ps.http_client().deletion_queue_flush(execute=True)
+
     new_shard_count = 4
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
 
