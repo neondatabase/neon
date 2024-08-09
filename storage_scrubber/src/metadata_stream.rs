@@ -79,17 +79,17 @@ pub async fn stream_tenant_shards<'a>(
     target: &'a RootTarget,
     tenant_id: TenantId,
 ) -> anyhow::Result<impl Stream<Item = Result<TenantShardId, anyhow::Error>> + 'a> {
-    let mut tenant_shard_ids: Vec<Result<TenantShardId, anyhow::Error>> = Vec::new();
     let shards_target = target.tenant_shards_prefix(&tenant_id);
 
-    tracing::info!("Listing in {}", shards_target.prefix_in_bucket);
+    tracing::info!("Listing shards in {}", shards_target.prefix_in_bucket);
     let listing = list_objects_with_retries_generic(
         remote_client,
         ListingMode::WithDelimiter,
         &shards_target,
     )
     .await?;
-    let new_entry_ids = listing
+
+    let tenant_shard_ids = listing
         .prefixes
         .iter()
         .map(|prefix| prefix.get_path().as_str())
@@ -104,12 +104,10 @@ pub async fn stream_tenant_shards<'a>(
             first_part
                 .parse::<TenantShardId>()
                 .with_context(|| format!("Incorrect entry id str: {first_part}"))
-        });
+        })
+        .collect::<Vec<_>>();
 
-    for i in new_entry_ids {
-        tenant_shard_ids.push(i);
-    }
-
+    tracing::debug!("Yielding {} shards for {tenant_id}", tenant_shard_ids.len());
     Ok(stream! {
         for i in tenant_shard_ids {
             let id = i?;
