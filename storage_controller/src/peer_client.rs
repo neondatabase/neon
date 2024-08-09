@@ -86,6 +86,9 @@ impl PeerClient {
             .map_err(|err| StorageControllerPeerError::DeserializationError(status, url, err))
     }
 
+    /// Request the peer to step down and return its current observed state
+    /// All errors are retried with exponential backoff for a maximum of 4 attempts.
+    /// Assuming all retries are performed, the function times out after roughly 4 seconds.
     pub(crate) async fn step_down(
         &self,
         cancel: &CancellationToken,
@@ -93,8 +96,8 @@ impl PeerClient {
         backoff::retry(
             || self.request_step_down(),
             |_e| false,
+            2,
             4,
-            8,
             "Send step down request",
             cancel,
         )
