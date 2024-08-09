@@ -710,10 +710,6 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 			FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
 
 			Assert(victim->access_count == 0);
-#ifdef FALLOC_FL_PUNCH_HOLE
-			if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0)
-				neon_log(LOG, "Failed to punch hole in file: %m");
-#endif
 			entry->offset = victim->offset; /* grab victim's chunk */
 			hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 			neon_log(DEBUG2, "Swap file cache page");
