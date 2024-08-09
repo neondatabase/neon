@@ -337,16 +337,18 @@ pub(crate) async fn list_timeline_blobs_generic(
     let mut index_part_keys: Vec<ListingObject> = Vec::new();
     let mut initdb_archive: bool = false;
 
+    let prefix_str = &timeline_dir_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&timeline_dir_target.prefix_in_bucket);
+
     let mut stream = std::pin::pin!(stream_listing_generic(remote_client, &timeline_dir_target));
     while let Some(obj) = stream.next().await {
         let (key, Some(obj)) = obj? else {
             panic!("ListingObject not specified");
         };
 
-        let blob_name = key
-            .get_path()
-            .as_str()
-            .strip_prefix(&timeline_dir_target.prefix_in_bucket);
+        let blob_name = key.get_path().as_str().strip_prefix(prefix_str);
         match blob_name {
             Some(name) if name.starts_with("index_part.json") => {
                 tracing::debug!("Index key {key}");

@@ -129,6 +129,11 @@ pub async fn stream_tenant_timelines_generic<'a>(
     let mut timeline_ids: Vec<Result<TimelineId, anyhow::Error>> = Vec::new();
     let timelines_target = target.timelines_root(&tenant);
 
+    let prefix_str = &timelines_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&timelines_target.prefix_in_bucket);
+
     let mut objects_stream = std::pin::pin!(stream_objects_with_retries(
         remote_client,
         ListingMode::WithDelimiter,
@@ -149,11 +154,7 @@ pub async fn stream_tenant_timelines_generic<'a>(
             .prefixes
             .iter()
             .filter_map(|prefix| -> Option<&str> {
-                prefix
-                    .get_path()
-                    .as_str()
-                    .strip_prefix(&timelines_target.prefix_in_bucket)?
-                    .strip_suffix('/')
+                prefix.get_path().as_str().strip_prefix(prefix_str)
             })
             .map(|entry_id_str| {
                 entry_id_str
@@ -166,7 +167,7 @@ pub async fn stream_tenant_timelines_generic<'a>(
         }
     }
 
-    tracing::debug!("Yielding for {}", tenant);
+    tracing::debug!("Yielding {} timelines for {}", timeline_ids.len(), tenant);
     Ok(stream! {
         for i in timeline_ids {
             let id = i?;
