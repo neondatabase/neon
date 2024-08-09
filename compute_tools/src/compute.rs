@@ -1070,8 +1070,8 @@ impl ComputeNode {
                     },
                 )?;
                 self.pg_reload_conf()?;
-                self.post_apply_config()?;
             }
+            //self.post_apply_config()?;
         }
 
         let startup_end_time = Utc::now();

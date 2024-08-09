@@ -123,10 +123,10 @@ $(POSTGRES_INSTALL_DIR)/build/%/config.status:
 postgres-configure-v17: $(POSTGRES_INSTALL_DIR)/build/v17/config.status
 .PHONY: postgres-configure-v16
 postgres-configure-v16: $(POSTGRES_INSTALL_DIR)/build/v16/config.status
-# .PHONY: postgres-configure-v15
-# postgres-configure-v15: $(POSTGRES_INSTALL_DIR)/build/v15/config.status
-# .PHONY: postgres-configure-v14
-# postgres-configure-v14: $(POSTGRES_INSTALL_DIR)/build/v14/config.status
+.PHONY: postgres-configure-v15
+postgres-configure-v15: $(POSTGRES_INSTALL_DIR)/build/v15/config.status
+.PHONY: postgres-configure-v14
+postgres-configure-v14: $(POSTGRES_INSTALL_DIR)/build/v14/config.status
 
 # Install the PostgreSQL header files into $(POSTGRES_INSTALL_DIR)/<version>/include
 .PHONY: postgres-headers-%
@@ -245,44 +245,44 @@ walproposer-lib-clean:
 
 .PHONY: neon-pg-ext
 neon-pg-ext: \
-	# neon-pg-ext-v14 \
-	# neon-pg-ext-v15 \
+	neon-pg-ext-v14 \
+	neon-pg-ext-v15 \
 	neon-pg-ext-v16 \
 	neon-pg-ext-v17
 
 .PHONY: neon-pg-clean-ext
 neon-pg-clean-ext: \
-	# neon-pg-clean-ext-v14 \
-	# neon-pg-clean-ext-v15 \
+	neon-pg-clean-ext-v14 \
+	neon-pg-clean-ext-v15 \
 	neon-pg-clean-ext-v16 \
 	neon-pg-clean-ext-v17
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
 postgres: \
-	# postgres-v14 \
-	# postgres-v15 \
+	postgres-v14 \
+	postgres-v15 \
 	postgres-v16 \
 	postgres-v17
 
 .PHONY: postgres-headers
 postgres-headers: \
-	# postgres-headers-v14 \
-	# postgres-headers-v15 \
+	postgres-headers-v14 \
+	postgres-headers-v15 \
 	postgres-headers-v16 \
 	postgres-headers-v17
 
 .PHONY: postgres-clean
 postgres-clean: \
-	# postgres-clean-v14 \
-	# postgres-clean-v15 \
+	postgres-clean-v14 \
+	postgres-clean-v15 \
 	postgres-clean-v16 \
 	postgres-clean-v17
 
 .PHONY: postgres-check
 postgres-check: \
-	# postgres-check-v14 \
-	# postgres-check-v15 \
+	postgres-check-v14 \
+	postgres-check-v15 \
 	postgres-check-v16 \
 	postgres-check-v17
 

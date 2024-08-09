@@ -2992,6 +2992,38 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 #endif
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+void
+neon_regisersync(SMgrRelation reln, ForkNumber forknum)
+{
+	switch (reln->smgr_relpersistence)
+	{
+		case 0:
+			neon_log(ERROR, "cannot call smgrregistersync() on rel with unknown persistence");
+			break;
+
+		case RELPERSISTENCE_PERMANENT:
+			break;
+
+		case RELPERSISTENCE_TEMP:
+		case RELPERSISTENCE_UNLOGGED:
+			mdregistersync(reln, forknum);
+			return;
+
+		default:
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+	}
+
+	neon_log(SmgrTrace, "[NEON_SMGR] registersync noop");
+
+#ifdef DEBUG_COMPARE_LOCAL
+	if (IS_LOCAL_REL(reln))
+		mdimmedsync(reln, forknum);
+#endif
+}
+#endif
+
+
 /*
  * neon_start_unlogged_build() -- Starting build operation on a rel.
  *
@@ -3290,7 +3322,9 @@ static const struct f_smgr neon_smgr =
 	.smgr_nblocks = neon_nblocks,
 	.smgr_truncate = neon_truncate,
 	.smgr_immedsync = neon_immedsync,
-
+#if PG_MAJORVERSION_NUM >= 17
+	.smgr_registersync = neon_regisersync,
+#endif
 	.smgr_start_unlogged_build = neon_start_unlogged_build,
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
 	.smgr_end_unlogged_build = neon_end_unlogged_build,

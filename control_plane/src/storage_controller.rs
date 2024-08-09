@@ -335,7 +335,7 @@ impl StorageController {
                 let initdb_args = [
                 "-D",
                 pg_data_path.as_ref(),
-                "--username", USER_NAME,
+                "--username", USER_NAME
             ];
             tracing::info!("Initializing storage controller database with args: {:?}", initdb_args);
 

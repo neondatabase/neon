@@ -98,7 +98,9 @@ static BlockNumber inmem_nblocks(SMgrRelation reln, ForkNumber forknum);
 static void inmem_truncate(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber nblocks);
 static void inmem_immedsync(SMgrRelation reln, ForkNumber forknum);
-
+#if PG_MAJORVERSION_NUM >= 17
+static void inmem_registersync(SMgrRelation reln, ForkNumber forknum);
+#endif
 
 /*
  *	inmem_init() -- Initialize private state
@@ -355,6 +357,13 @@ inmem_immedsync(SMgrRelation reln, ForkNumber forknum)
 {
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+static void
+inmem_registersync(SMgrRelation reln, ForkNumber forknum)
+{
+}
+#endif
+
 static const struct f_smgr inmem_smgr =
 {
 	.smgr_init = inmem_init,
@@ -381,6 +390,15 @@ static const struct f_smgr inmem_smgr =
 	.smgr_nblocks = inmem_nblocks,
 	.smgr_truncate = inmem_truncate,
 	.smgr_immedsync = inmem_immedsync,
+
+#if PG_MAJORVERSION_NUM >= 17
+	.smgr_registersync = inmem_registersync,
+#endif
+
+	.smgr_start_unlogged_build = NULL,
+	.smgr_finish_unlogged_build_phase_1 = NULL,
+	.smgr_end_unlogged_build = NULL,
+	.smgr_read_slru_segment = NULL,
 };
 
 const f_smgr *

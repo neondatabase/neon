@@ -176,7 +176,7 @@ impl WalIngest {
                                 .await?;
                         }
                     }
-                } else if pg_version == 16  {
+                } else if pg_version == 16 {
                     if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG {
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
                     } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY {

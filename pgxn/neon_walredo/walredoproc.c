@@ -517,6 +517,9 @@ CreateFakeSharedMemoryAndSemaphores()
 	/*
 	 * Set up xlog, clog, and buffers
 	 */
+#if PG_MAJORVERSION_NUM >= 17
+	VarsupShmemInit();
+#endif
 	XLOGShmemInit();
 	CLOGShmemInit();
 	CommitTsShmemInit();
