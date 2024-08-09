@@ -22,10 +22,14 @@ concurrency:
   group: pin-build-tools-image-${{ inputs.from-tag }}
   cancel-in-progress: false
 
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
 
 jobs:
   tag-image:
+    permissions:
+      id-token: write # for `azure/login`
+
     runs-on: ubuntu-22.04
 
     env:
