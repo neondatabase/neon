@@ -366,23 +366,38 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 	if (!TransactionIdIsValid(checkpoint->oldestActiveXid))
 	{
 		elog(LOG, "cannot restore running-xacts from CLOG because oldestActiveXid is not set");
-		goto fail;
-	}
+		if (running_xacts_overflow_policy == OP_WAIT)
+			goto fail;
 
-	/*
-	 * We will scan the CLOG starting from the oldest active XID.
-	 *
-	 * In some corner cases, the oldestActiveXid from the last checkpoint
-	 * might already have been truncated from the CLOG. That is,
-	 * oldestActiveXid might be older than oldestXid. That's possible because
-	 * oldestActiveXid is only updated at checkpoints. After the last
-	 * checkpoint, the oldest transaction might have committed, and the CLOG
-	 * might also have been already truncated. So if oldestActiveXid is older
-	 * than oldestXid, start at oldestXid instead. (Otherwise we'd try to
-	 * access CLOG segments that have already been truncated away.)
-	 */
-	from = TransactionIdPrecedes(checkpoint->oldestXid, checkpoint->oldestActiveXid)
-		? checkpoint->oldestActiveXid : checkpoint->oldestXid;
+		if (TransactionIdIsValid(checkpoint->oldestXid))
+		{
+			/* Scan from the beginning of CLOG */
+			from = checkpoint->oldestXid;
+		}
+		else
+		{
+			/* Assume that there are no active transactions except prepared */
+			PrescanPreparedTransactions(xids, nxids);
+			return true;
+		}
+	}
+	else
+	{
+		/*
+		 * We will scan the CLOG starting from the oldest active XID.
+		 *
+		 * In some corner cases, the oldestActiveXid from the last checkpoint
+		 * might already have been truncated from the CLOG. That is,
+		 * oldestActiveXid might be older than oldestXid. That's possible because
+		 * oldestActiveXid is only updated at checkpoints. After the last
+		 * checkpoint, the oldest transaction might have committed, and the CLOG
+		 * might also have been already truncated. So if oldestActiveXid is older
+		 * than oldestXid, start at oldestXid instead. (Otherwise we'd try to
+		 * access CLOG segments that have already been truncated away.)
+		 */
+		from = TransactionIdPrecedes(checkpoint->oldestXid, checkpoint->oldestActiveXid)
+			? checkpoint->oldestActiveXid : checkpoint->oldestXid;
+	}
 	till = XidFromFullTransactionId(checkpoint->nextXid);
 
 	/*
