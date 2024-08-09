@@ -66,16 +66,20 @@ jobs:
         "
     
     - name: Check if restore is already done
+      id: check-restore-done
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
       run: |
+        skip = false
         if ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -tAc "SELECT 1 FROM benchmark_restore_status WHERE databasename='${{ env.DATABASE_NAME }}' AND restore_done=true;" | grep -q 1; then
           echo "Restore already done for database ${{ env.DATABASE_NAME }} on platform ${{ env.PLATFORM }}. Skipping this database."
-          exit 0
+          skip = true
         fi
+        echo "skip=${skip}" | tee -a $GITHUB_OUTPUT
 
     - name: Check and create database if it does not exist
+      if: steps.check-restore-done.outputs.skip != 'true'
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
@@ -89,6 +93,7 @@ jobs:
         fi
 
     - name: Download dump from S3 to /tmp/dumps
+      if: steps.check-restore-done.outputs.skip != 'true'
       env:
         DATABASE_NAME: ${{ matrix.database }}
       run: |
@@ -96,6 +101,7 @@ jobs:
         aws s3 cp s3://neon-github-dev/performance/pgdumps/$DATABASE_NAME/$DATABASE_NAME.pg_dump /tmp/dumps/ 
 
     - name: Replace database name in connection string
+      if: steps.check-restore-done.outputs.skip != 'true'
       id: replace-dbname
       env:
         DATABASE_NAME: ${{ matrix.database }}
@@ -106,6 +112,7 @@ jobs:
         echo "database_connstr=${new_connstr}" >> $GITHUB_OUTPUT  
 
     - name: Restore dump
+      if: steps.check-restore-done.outputs.skip != 'true'
       env:
         DATABASE_NAME: ${{ matrix.database }}
         DATABASE_CONNSTR: ${{ steps.replace-dbname.outputs.database_connstr }}
@@ -116,6 +123,7 @@ jobs:
         -d "${DATABASE_CONNSTR}" /tmp/dumps/${DATABASE_NAME}.pg_dump
 
     - name: Update benchmark_restore_status table
+      if: steps.check-restore-done.outputs.skip != 'true'
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
