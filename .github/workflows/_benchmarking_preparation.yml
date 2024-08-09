@@ -19,6 +19,7 @@ jobs:
     env:
       LD_LIBRARY_PATH: /tmp/neon/pg_install/v16/lib
       PLATFORM: ${{ matrix.platform }}
+      PG_BINARIES: ${PG_BINARIES}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
@@ -57,7 +58,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
       run: |
-        /tmp/neon/pg_install/v16/bin/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
+        ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
         CREATE TABLE IF NOT EXISTS benchmark_restore_status (
         databasename text primary key,
         restore_done boolean
@@ -69,7 +70,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
       run: |
-        if /tmp/neon/pg_install/v16/bin/psql "${{ env.BENCHMARK_CONNSTR }}" -tAc "SELECT 1 FROM benchmark_restore_status WHERE databasename='${{ env.DATABASE_NAME }}' AND restore_done=true;" | grep -q 1; then
+        if ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -tAc "SELECT 1 FROM benchmark_restore_status WHERE databasename='${{ env.DATABASE_NAME }}' AND restore_done=true;" | grep -q 1; then
           echo "Restore already done for database ${{ env.DATABASE_NAME }} on platform ${{ env.PLATFORM }}. Skipping this database."
           exit 0
         fi
@@ -79,10 +80,10 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
       run: |
-        DB_EXISTS=$(/tmp/neon/pg_install/v16/bin/psql "${{ env.BENCHMARK_CONNSTR }}" -tAc "SELECT 1 FROM pg_database WHERE datname='${{ env.DATABASE_NAME }}'")
+        DB_EXISTS=$(${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -tAc "SELECT 1 FROM pg_database WHERE datname='${{ env.DATABASE_NAME }}'")
         if [ "$DB_EXISTS" != "1" ]; then
           echo "Database ${{ env.DATABASE_NAME }} does not exist. Creating it..."
-          /tmp/neon/pg_install/v16/bin/psql "${{ env.BENCHMARK_CONNSTR }}" -c "CREATE DATABASE \"${{ env.DATABASE_NAME }}\";"
+          ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -c "CREATE DATABASE \"${{ env.DATABASE_NAME }}\";"
         else
           echo "Database ${{ env.DATABASE_NAME }} already exists."
         fi
@@ -108,9 +109,10 @@ jobs:
       env:
         DATABASE_NAME: ${{ matrix.database }}
         DATABASE_CONNSTR: ${{ steps.replace-dbname.outputs.database_connstr }}
-        # the following works only with larger computes: PGOPTIONS: "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
+        # the following works only with larger computes: 
+        # PGOPTIONS: "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
       run: |
-        /tmp/neon/pg_install/v16/bin/pg_restore --clean --if-exists --no-owner --jobs=4 \
+        ${PG_BINARIES}/pg_restore --clean --if-exists --no-owner --jobs=4 \
         -d "${DATABASE_CONNSTR}" /tmp/dumps/${DATABASE_NAME}.pg_dump
 
     - name: Update benchmark_restore_status table
@@ -118,7 +120,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
       run: |
-        /tmp/neon/pg_install/v16/bin/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
+        ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
         INSERT INTO benchmark_restore_status (databasename, restore_done) VALUES ('${{ env.DATABASE_NAME }}', true)
         ON CONFLICT (databasename) DO UPDATE SET restore_done = true;
         "
