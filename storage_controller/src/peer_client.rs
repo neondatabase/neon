@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
+use hyper::Uri;
 use reqwest::{StatusCode, Url};
 use utils::{backoff, http::error::HttpErrorBody};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PeerClient {
-    url: Url,
+    uri: Uri,
     jwt: Option<String>,
     client: reqwest::Client,
 }
@@ -51,19 +52,16 @@ impl ResponseErrorMessageExt for reqwest::Response {
 pub(crate) struct GlobalObservedState(pub(crate) HashMap<TenantShardId, ObservedState>);
 
 impl PeerClient {
-    pub(crate) fn new(url: Url, jwt: Option<String>) -> Self {
+    pub(crate) fn new(uri: Uri, jwt: Option<String>) -> Self {
         Self {
-            url,
+            uri,
             jwt,
             client: reqwest::Client::new(),
         }
     }
 
     async fn request_step_down(&self) -> Result<GlobalObservedState> {
-        let step_down_path = self
-            .url
-            .join("control/v1/step_down")
-            .expect("Failed to build step-down path");
+        let step_down_path = format!("{}control/v1/step_down", self.uri);
         let req = self.client.put(step_down_path);
         let req = if let Some(jwt) = &self.jwt {
             req.header(reqwest::header::AUTHORIZATION, format!("Bearer {jwt}"))

@@ -1,6 +1,5 @@
 CREATE TABLE controllers (
-  hostname VARCHAR NOT NULL,
-  port INTEGER NOT NULL,
+  address VARCHAR NOT NULL,
   started_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY(hostname, port, started_at)
+  PRIMARY KEY(address, started_at)
 );

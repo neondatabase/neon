@@ -1,3 +1,4 @@
+use hyper::Uri;
 use std::{
     borrow::Cow,
     cmp::Ordering,
@@ -45,7 +46,7 @@ use pageserver_api::{
     },
     models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
-use reqwest::{StatusCode, Url};
+use reqwest::StatusCode;
 use tracing::{instrument, Instrument};
 
 use crate::pageserver_client::PageserverClient;
@@ -310,11 +311,14 @@ pub struct Config {
     // TODO: make this cfg(feature  = "testing")
     pub neon_local_repo_dir: Option<PathBuf>,
 
+
     // Maximum acceptable download lag for the secondary location
     // while draining a node. If the secondary location is lagging
     // by more than the configured amount, then the secondary is not
     // upgraded to primary.
     pub max_secondary_lag_bytes: Option<u64>,
+
+    pub address_for_peers: Option<Uri>,
 
     pub start_as_candidate: bool,
 
@@ -521,9 +525,8 @@ impl Service {
 
         let (observed, current_leader) = if let Some(state) = leader_step_down_state {
             tracing::info!(
-                "Using observed state received from leader at {}:{}",
-                state.leader.hostname,
-                state.leader.port
+                "Using observed state received from leader at {}",
+                state.leader.address,
             );
             (state.observed, Some(state.leader))
         } else {
@@ -609,16 +612,22 @@ impl Service {
 
         // Before making any obeservable changes to the cluster, persist self
         // as leader in database and memory.
+        if let Some(address_for_peers) = &self.config.address_for_peers {
+            // TODO: `address-for-peers` can become a mandatory cli arg
+            // after we update the k8s setup
+            let proposed_leader = ControllerPersistence {
+                address: address_for_peers.to_string(),
+                started_at: chrono::Utc::now(),
+            };
 
-        let proposed_leader = self.get_proposed_leader_info();
-
-        if let Err(err) = self
-            .persistence
-            .update_leader(current_leader, proposed_leader)
-            .await
-        {
-            tracing::error!("Failed to persist self as leader: {err}. Aborting start-up ...");
-            std::process::exit(1);
+            if let Err(err) = self
+                .persistence
+                .update_leader(current_leader, proposed_leader)
+                .await
+            {
+                tracing::error!("Failed to persist self as leader: {err}. Aborting start-up ...");
+                std::process::exit(1);
+            }
         }
 
         self.inner.write().unwrap().become_leader();
@@ -6330,42 +6339,6 @@ impl Service {
         global_observed
     }
 
-    /// Collect the details for the current proccess wishing to become the storage controller
-    /// leader.
-    ///
-    /// On failures to discover and resolve the hostname the process is killed and we rely on k8s to retry.
-    fn get_proposed_leader_info(&self) -> ControllerPersistence {
-        let hostname = match dns_lookup::get_hostname() {
-            Ok(name) => name,
-            Err(err) => {
-                tracing::error!("Failed to discover hostname: {err}. Aborting start-up ...");
-                std::process::exit(1);
-            }
-        };
-
-        let mut addrs = match dns_lookup::lookup_host(&hostname) {
-            Ok(addrs) => addrs,
-            Err(err) => {
-                tracing::error!("Failed to resolve hostname: {err}. Aborting start-up ...");
-                std::process::exit(1);
-            }
-        };
-
-        let addr = addrs
-            .pop()
-            .expect("k8s configured hostname always resolves");
-
-        let proposed = ControllerPersistence {
-            hostname: addr.to_string(),
-            port: self.get_config().http_service_port,
-            started_at: chrono::Utc::now(),
-        };
-
-        tracing::info!("Proposed leader details are: {proposed:?}");
-
-        proposed
-    }
-
     /// Request step down from the currently registered leader in the database
     ///
     /// If such an entry is persisted, the success path returns the observed
@@ -6391,8 +6364,7 @@ impl Service {
 
                 // TODO: jwt token
                 let client = PeerClient::new(
-                    Url::parse(format!("http://{}:{}", leader.hostname, leader.port).as_str())
-                        .expect("Failed to build leader URL"),
+                    Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
                     self.config.jwt_token.clone(),
                 );
                 let state = client.step_down(&self.cancel).await;
@@ -6407,9 +6379,8 @@ impl Service {
                         // but inferred as alive from the timestamp, abort start-up. This avoids
                         // a potential scenario in which we have two controllers acting as leaders.
                         tracing::error!(
-                            "Leader ({}:{}) did not respond to step-down request: {}",
-                            leader.hostname,
-                            leader.port,
+                            "Leader ({}) did not respond to step-down request: {}",
+                            leader.address,
                             err
                         );
                         None

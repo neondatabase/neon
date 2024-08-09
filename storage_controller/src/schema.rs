@@ -1,9 +1,8 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    controllers (hostname, port, started_at) {
-        hostname -> Varchar,
-        port -> Int4,
+    controllers (address, started_at) {
+        address -> Varchar,
         started_at -> Timestamptz,
     }
 }

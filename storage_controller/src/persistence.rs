@@ -825,12 +825,10 @@ impl Persistence {
                 move |conn| -> DatabaseResult<usize> {
                     let updated = match &prev {
                         Some(prev) => diesel::update(controllers)
-                            .filter(hostname.eq(prev.hostname.clone()))
-                            .filter(port.eq(prev.port))
+                            .filter(address.eq(prev.address.clone()))
                             .filter(started_at.eq(prev.started_at))
                             .set((
-                                hostname.eq(new.hostname.clone()),
-                                port.eq(new.port),
+                                address.eq(new.address.clone()),
                                 started_at.eq(new.started_at),
                             ))
                             .execute(conn)?,
@@ -983,7 +981,6 @@ impl From<MetadataHealthPersistence> for MetadataHealthRecord {
 )]
 #[diesel(table_name = crate::schema::controllers)]
 pub(crate) struct ControllerPersistence {
-    pub(crate) hostname: String,
-    pub(crate) port: i32,
+    pub(crate) address: String,
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,
 }

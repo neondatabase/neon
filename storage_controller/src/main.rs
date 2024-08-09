@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context};
 use clap::Parser;
 use diesel::Connection;
+use hyper::Uri;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::path::PathBuf;
@@ -85,6 +86,10 @@ struct Cli {
 
     #[arg(long, default_value = "false")]
     start_as_candidate: bool,
+
+    // TODO: make this mandatory once the helm chart gets updated
+    #[arg(long)]
+    address_for_peers: Option<Uri>,
 
     /// `neon_local` sets this to the path of the neon_local repo dir.
     /// Only relevant for testing.
@@ -288,6 +293,7 @@ async fn async_main() -> anyhow::Result<()> {
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
         max_secondary_lag_bytes: args.max_secondary_lag_bytes,
+        address_for_peers: args.address_for_peers,
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
     };
