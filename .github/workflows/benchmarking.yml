@@ -58,6 +58,7 @@ jobs:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     permissions:
       contents: write
+      statuses: write
       id-token: write # Required for OIDC authentication in azure runners
     strategy:
       fail-fast: false
@@ -325,6 +326,7 @@ jobs:
     needs: [ generate-matrices ]
     permissions:
       contents: write
+      statuses: write
       id-token: write # Required for OIDC authentication in azure runners
 
     strategy:
@@ -468,6 +470,7 @@ jobs:
   pgbench-pgvector:
     permissions:
       contents: write
+      statuses: write
       id-token: write # Required for OIDC authentication in azure runners
     strategy:
       fail-fast: false
