@@ -413,7 +413,7 @@ async fn gc_ancestor(
 
             // We apply a time threshold to GCing objects that are un-referenced: this preserves our ability
             // to roll back a shard split if we have to, by avoiding deleting ancestor layers right away
-            let path = RemotePath::from_string(&key.strip_prefix("/").unwrap_or(&key)).unwrap();
+            let path = RemotePath::from_string(key.strip_prefix("/").unwrap_or(&key)).unwrap();
             if check_is_old_enough(remote_client, &path, min_age, summary).await != Some(true) {
                 continue;
             }
