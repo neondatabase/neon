@@ -17,7 +17,7 @@ COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
 
-ENV BUILD_TYPE release
+ENV BUILD_TYPE=release
 RUN set -e \
     && mold -run make -j $(nproc) -s neon-pg-ext \
     && rm -rf pg_install/build \
@@ -104,7 +104,7 @@ RUN mkdir -p /data/.neon/ && \
 
 # When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
 # that want a particular postgres version will select it explicitly: this is just a default.
-ENV LD_LIBRARY_PATH /usr/local/v16/lib
+ENV LD_LIBRARY_PATH=/usr/local/v16/lib
 
 
 VOLUME ["/data"]
@@ -112,5 +112,5 @@ USER neon
 EXPOSE 6400
 EXPOSE 9898
 
-CMD /usr/local/bin/pageserver -D /data/.neon
+CMD ["/usr/local/bin/pageserver", "-D", "/data/.neon"]
 
