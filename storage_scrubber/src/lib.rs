@@ -451,23 +451,26 @@ fn stream_objects_with_retries<'a>(
         let mut list_stream =
             storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
         while let Some(res) = list_stream.next().await {
-            if let Err(err) = res {
-                let yield_err = if err.is_permanent() {
-                    true
-                } else {
-                    let backoff_time = 1 << trial.max(5);
-                    tokio::time::sleep(Duration::from_secs(backoff_time)).await;
-                    trial += 1;
-                    trial == MAX_RETRIES - 1
-                };
-                if yield_err {
-                    yield Err(err)
-                        .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
-                    break;
+            match res {
+                Err(err) => {
+                    let yield_err = if err.is_permanent() {
+                        true
+                    } else {
+                        let backoff_time = 1 << trial.max(5);
+                        tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+                        trial += 1;
+                        trial == MAX_RETRIES - 1
+                    };
+                    if yield_err {
+                        yield Err(err)
+                            .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                        break;
+                    }
                 }
-            } else {
-                trial = 0;
-                yield res.map_err(anyhow::Error::from);
+                Ok(res) => {
+                    trial = 0;
+                    yield Ok(res);
+                }
             }
         }
     }
