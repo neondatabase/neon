@@ -411,7 +411,7 @@ def test_detached_receives_flushes_while_being_detached(neon_env_builder: NeonEn
 
     assert client.timeline_detail(env.initial_tenant, timeline_id)["ancestor_timeline_id"] is None
 
-    assert ep.safe_psql("SELECT clear_buffer_cache();")
+    ep.clear_shared_buffers()
     assert ep.safe_psql("SELECT count(*) FROM foo;")[0][0] == rows
     assert ep.safe_psql("SELECT SUM(LENGTH(aux)) FROM foo")[0][0] != 0
     ep.stop()

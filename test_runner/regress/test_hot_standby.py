@@ -168,7 +168,7 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             # re-execute the query, it will make GetPage
             # requests. This does not clear the last-written LSN cache
             # so we still remember the LSNs of the pages.
-            s_cur.execute("SELECT clear_buffer_cache()")
+            secondary.clear_shared_buffers(cursor=s_cur)
 
             if pause_apply:
                 s_cur.execute("SELECT pg_wal_replay_pause()")
@@ -332,6 +332,7 @@ def test_replica_query_race(neon_simple_env: NeonEnv):
                 log.info(f"read {reads}: counter {readcounter}, last update {writecounter}")
             reads += 1
 
+            # FIXME: what about LFC clearing?
             await conn.execute("SELECT clear_buffer_cache()")
 
     async def both():
