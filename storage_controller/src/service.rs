@@ -6402,6 +6402,10 @@ impl Service {
                         leader: leader.clone(),
                     }),
                     Err(err) => {
+                        // TODO: Make leaders periodically update a timestamp field in the
+                        // database and, if the leader is not reachable from the current instance,
+                        // but inferred as alive from the timestamp, abort start-up. This avoids
+                        // a potential scenario in which we have two controllers acting as leaders.
                         tracing::error!(
                             "Leader ({}:{}) did not respond to step-down request: {}",
                             leader.hostname,
