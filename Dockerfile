@@ -33,8 +33,8 @@ ARG BUILD_TAG
 # Set up cachepot to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
 # cachepot falls back to local filesystem if S3 is misconfigured, not failing the build
 ARG RUSTC_WRAPPER=cachepot
-ENV AWS_REGION=eu-central-1
-ENV CACHEPOT_S3_KEY_PREFIX=cachepot
+ENV AWS_REGION eu-central-1
+ENV CACHEPOT_S3_KEY_PREFIX cachepot
 ARG CACHEPOT_BUCKET=neon-github-dev
 #ARG AWS_ACCESS_KEY_ID
 #ARG AWS_SECRET_ACCESS_KEY

@@ -66,13 +66,13 @@ RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v$
     && rm -rf protoc.zip protoc
 
 # s5cmd
-ENV S5CMD_VERSION=2.2.2
+ENV S5CMD_VERSION 2.2.2
 RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_Linux-$(uname -m | sed 's/x86_64/64bit/g' | sed 's/aarch64/arm64/g').tar.gz" | tar zxvf - s5cmd \
     && chmod +x s5cmd \
     && mv s5cmd /usr/local/bin/s5cmd
 
 # LLVM
-ENV LLVM_VERSION=18
+ENV LLVM_VERSION 18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
     && echo "deb http://apt.llvm.org/${DEBIAN_VERSION_CODENAME}/ llvm-toolchain-${DEBIAN_VERSION_CODENAME}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
@@ -125,8 +125,8 @@ RUN for package in Capture::Tiny DateTime Devel::Cover Digest::MD5 File::Spec JS
     && rm -rf ../lcov.tar.gz
 
 # Compile and install the static OpenSSL library
-ENV OPENSSL_VERSION=1.1.1w
-ENV OPENSSL_PREFIX=/usr/local/openssl
+ENV OPENSSL_VERSION 1.1.1w
+ENV OPENSSL_PREFIX /usr/local/openssl
 RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz && \
     echo "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8 /tmp/openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum --check && \
     cd /tmp && \
@@ -145,8 +145,8 @@ RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/sourc
 # TODO: at this time, Dockerfile.compute-node uses the debian bullseye libicu
 # package, which is 67.1. We're duplicating that knowledge here, and also, technically,
 # Debian has a few patches on top of 67.1 that we're not adding here.
-ENV ICU_VERSION=67.1
-ENV ICU_PREFIX=/usr/local/icu
+ENV ICU_VERSION 67.1
+ENV ICU_PREFIX /usr/local/icu
 
 # Download and build static ICU
 RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/releases/download/release-${ICU_VERSION//./-}/icu4c-${ICU_VERSION//./_}-src.tgz && \
@@ -168,9 +168,9 @@ USER nonroot:nonroot
 WORKDIR /home/nonroot
 
 # Python
-ENV PYTHON_VERSION=3.9.18 \
-    PYENV_ROOT=/home/nonroot/.pyenv \
-    PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
+ENV PYTHON_VERSION 3.9.18
+ENV PYENV_ROOT /home/nonroot/.pyenv
+ENV PATH /home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
 RUN set -e \
     && cd $HOME \
     && curl -sSO https://raw.githubusercontent.com/pyenv/pyenv-installer/master/bin/pyenv-installer \
@@ -192,9 +192,9 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.80.0
-ENV RUSTUP_HOME="/home/nonroot/.rustup"
-ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
+ENV RUSTC_VERSION 1.80.0
+ENV RUSTUP_HOME "/home/nonroot/.rustup"
+ENV PATH "/home/nonroot/.cargo/bin:${PATH}"
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -211,7 +211,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install cargo-nextest && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
-ENV RUSTC_WRAPPER=cachepot
+ENV RUSTC_WRAPPER cachepot
 
 # Show versions
 RUN whoami \

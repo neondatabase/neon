@@ -647,8 +647,8 @@ RUN apt-get update && \
     apt-get install -y curl libclang-dev cmake && \
     useradd -ms /bin/bash nonroot -b /home
 
-ENV HOME=/home/nonroot
-ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
+ENV HOME /home/nonroot
+ENV PATH "/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 ARG PG_VERSION
@@ -873,7 +873,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 #########################################################################################
 FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
 ARG BUILD_TAG
-ENV BUILD_TAG=$BUILD_TAG
+ENV BUILD_TAG $BUILD_TAG
 
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
@@ -968,11 +968,11 @@ RUN patch -p1 < /ext-src/pg_hintplan.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN patch -p1 </ext-src/pg_anon.patch
 RUN patch -p1 </ext-src/pg_cron.patch
-ENV PATH=/usr/local/pgsql/bin:$PATH
-ENV PGHOST=compute
-ENV PGPORT=55433
-ENV PGUSER=cloud_admin
-ENV PGDATABASE=postgres
+ENV PATH /usr/local/pgsql/bin:$PATH
+ENV PGHOST compute
+ENV PGPORT 55433
+ENV PGUSER cloud_admin
+ENV PGDATABASE postgres
 #########################################################################################
 #
 # Final layer
