@@ -4,6 +4,7 @@ use utils::seqwait::MonotonicCounter;
 mod auth;
 mod background_node_operations;
 mod compute_hook;
+mod drain_utils;
 mod heartbeater;
 pub mod http;
 mod id_lock_map;
