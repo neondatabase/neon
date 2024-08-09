@@ -746,7 +746,7 @@ impl From<CreateImageLayersError> for CompactionError {
             CreateImageLayersError::Other(e) => {
                 CompactionError::Other(e.context("create image layers"))
             }
-            _ => CompactionError::Other(e.into()),
+            value => CompactionError::Other(value.into()),
         }
     }
 }
