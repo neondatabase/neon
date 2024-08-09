@@ -963,7 +963,7 @@ class NeonEnvBuilder:
         if self.env:
             log.info("Cleaning up all storage and compute nodes")
             self.env.stop(
-                immediate=True,
+                immediate=False,
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
                 ps_assert_metric_no_errors=(exc_type is None),

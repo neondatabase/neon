@@ -985,7 +985,10 @@ impl RemoteTimelineClient {
     ///
     /// The files will be leaked in remote storage unless [`Self::schedule_deletion_of_unlinked`]
     /// is invoked on them.
-    pub(crate) fn schedule_gc_update(self: &Arc<Self>, gc_layers: &[Layer]) -> anyhow::Result<()> {
+    pub(crate) fn schedule_gc_update(
+        self: &Arc<Self>,
+        gc_layers: &[Layer],
+    ) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 

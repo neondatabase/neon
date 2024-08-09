@@ -335,7 +335,7 @@ pub(super) async fn handle_walreceiver_connection(
                             filtered_records += 1;
                         }
 
-                        fail_point!("walreceiver-after-ingest");
+                        utils::pausable_failpoint!("walreceiver-after-ingest-pausable");
 
                         last_rec_lsn = lsn;
 
