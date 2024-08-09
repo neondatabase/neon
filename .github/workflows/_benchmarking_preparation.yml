@@ -108,7 +108,7 @@ jobs:
       env:
         DATABASE_NAME: ${{ matrix.database }}
         DATABASE_CONNSTR: ${{ steps.replace-dbname.outputs.database_connstr }}
-        PGOPTIONS: "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
+        # the following works only with larger computes: PGOPTIONS: "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
       run: |
         /tmp/neon/pg_install/v16/bin/pg_restore --clean --if-exists --no-owner --jobs=4 \
         -d "${DATABASE_CONNSTR}" /tmp/dumps/${DATABASE_NAME}.pg_dump
