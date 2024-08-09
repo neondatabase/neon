@@ -15,7 +15,7 @@ use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use pageserver_api::controller_api::TenantDescribeResponse;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
-use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePath};
+use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
 use reqwest::Method;
 use serde::Serialize;
 use storage_controller_client::control_api;
@@ -273,17 +273,14 @@ async fn check_is_old_enough(
     min_age: &Duration,
     summary: &mut GcSummary,
 ) -> Option<bool> {
-    let list = remote_client
-        .list(
-            Some(key),
-            ListingMode::NoDelimiter,
-            None,
+    let listing_object = remote_client
+        .head_object(
+            key,
             &CancellationToken::new(),
         )
         .await
         .ok()?;
-    let listing_object = list.keys.last()?;
-    Some(is_old_enough(min_age, listing_object, summary))
+    Some(is_old_enough(min_age, &listing_object, summary))
 }
 
 async fn maybe_delete_index(
@@ -521,16 +518,9 @@ pub async fn pageserver_physical_gc(
         accumulator.lock().unwrap().update(ttid, index_part);
 
         for key in candidates {
-            maybe_delete_index(
-                remote_client,
-                min_age,
-                latest_gen,
-                &key,
-                mode,
-                &mut summary,
-            )
-            .instrument(info_span!("maybe_delete_index", %ttid, ?latest_gen, %key.key))
-            .await;
+            maybe_delete_index(remote_client, min_age, latest_gen, &key, mode, &mut summary)
+                .instrument(info_span!("maybe_delete_index", %ttid, ?latest_gen, %key.key))
+                .await;
         }
 
         Ok(summary)
@@ -541,14 +531,7 @@ pub async fn pageserver_physical_gc(
     // Drain futures for per-shard GC, populating accumulator as a side effect
     {
         let timelines = timelines.map_ok(|ttid| {
-            gc_timeline(
-                &remote_client,
-                &min_age,
-                &target,
-                mode,
-                ttid,
-                &accumulator,
-            )
+            gc_timeline(&remote_client, &min_age, &target, mode, ttid, &accumulator)
         });
         let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
 
