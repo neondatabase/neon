@@ -19,7 +19,7 @@ jobs:
     env:
       LD_LIBRARY_PATH: /tmp/neon/pg_install/v16/lib
       PLATFORM: ${{ matrix.platform }}
-      PG_BINARIES: ${PG_BINARIES}
+      PG_BINARIES: /tmp/neon/pg_install/v16/bin
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
