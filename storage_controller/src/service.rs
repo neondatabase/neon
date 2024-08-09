@@ -18,7 +18,7 @@ use crate::{
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     metrics::LeadershipStatusGroup,
     persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
-    reconciler::{ReconcileError, ReconcileUnits},
+    reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
@@ -5194,11 +5194,22 @@ impl Service {
         Ok(())
     }
 
-    /// Wrap [`TenantShard`] reconciliation methods with acquisition of [`Gate`] and [`ReconcileUnits`],
+    /// Like [`Self::maybe_configured_reconcile_shard`], but uses the default reconciler
+    /// configuration
     fn maybe_reconcile_shard(
         &self,
         shard: &mut TenantShard,
         nodes: &Arc<HashMap<NodeId, Node>>,
+    ) -> Option<ReconcilerWaiter> {
+        self.maybe_configured_reconcile_shard(shard, nodes, ReconcilerConfig::default())
+    }
+
+    /// Wrap [`TenantShard`] reconciliation methods with acquisition of [`Gate`] and [`ReconcileUnits`],
+    fn maybe_configured_reconcile_shard(
+        &self,
+        shard: &mut TenantShard,
+        nodes: &Arc<HashMap<NodeId, Node>>,
+        reconciler_config: ReconcilerConfig,
     ) -> Option<ReconcilerWaiter> {
         let reconcile_needed = shard.get_reconcile_needed(nodes);
 
@@ -5248,6 +5259,7 @@ impl Service {
             &self.result_tx,
             nodes,
             &self.compute_hook,
+            reconciler_config,
             &self.config,
             &self.persistence,
             units,
@@ -5763,6 +5775,16 @@ impl Service {
             .max_secondary_lag_bytes
             .unwrap_or(MAX_SECONDARY_LAG_BYTES_DEFAULT);
 
+        // By default, live migrations are generous about the wait time for getting
+        // the secondary location up to speed. When draining, give up earlier in order
+        // to not stall the operation when a cold secondary is encountered.
+        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
+        const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+        let reconciler_config = ReconcilerConfigBuilder::new()
+            .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
+            .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
+            .build();
+
         let mut waiters = Vec::new();
 
         let mut tid_iter = TenantShardIterator::new({
@@ -5864,7 +5886,11 @@ impl Service {
                     )?;
 
                     if let Some(tenant_shard) = rescheduled {
-                        let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
+                        let waiter = self.maybe_configured_reconcile_shard(
+                            tenant_shard,
+                            nodes,
+                            reconciler_config,
+                        );
                         if let Some(some) = waiter {
                             waiters.push(some);
                         }
