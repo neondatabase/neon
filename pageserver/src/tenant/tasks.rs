@@ -407,9 +407,16 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                         error_run_count += 1;
                         let wait_duration = Duration::from_secs_f64(wait_duration);
 
-                        error!(
-                        "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
-                    );
+                        if matches!(e, crate::tenant::GcError::TimelineCancelled) {
+                            // Timeline was cancelled during gc. We might either be in an event
+                            // that affects the entire tenant (tenant deletion, pageserver shutdown),
+                            // or in one that affects the timeline only (timeline deletion).
+                            // Therefore, don't exit the loop.
+                            info!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
+                        } else {
+                            error!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
+                        }
+
                         wait_duration
                     }
                 }

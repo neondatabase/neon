@@ -148,6 +148,7 @@ pub(crate) mod timeline;
 
 pub mod size;
 
+mod gc_block;
 pub(crate) mod throttle;
 
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -302,6 +303,12 @@ pub struct Tenant {
 
     /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
     ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
+
+    /// `index_part.json` based gc blocking reason tracking.
+    ///
+    /// New gc iterations must start a new iteration by acquiring `GcBlock::start` before
+    /// proceeding.
+    pub(crate) gc_block: gc_block::GcBlock,
 
     l0_flush_global_state: L0FlushGlobalState,
 }
@@ -594,6 +601,12 @@ impl From<PageReconstructError> for GcError {
     }
 }
 
+impl From<timeline::layer_manager::Shutdown> for GcError {
+    fn from(_: timeline::layer_manager::Shutdown) -> Self {
+        GcError::TimelineCancelled
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum LoadConfigError {
     #[error("TOML deserialization error: '{0}'")]
@@ -703,6 +716,7 @@ impl Tenant {
                     .read()
                     .await
                     .layer_map()
+                    .expect("currently loading, layer manager cannot be shutdown already")
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -1036,6 +1050,8 @@ impl Tenant {
             }
         }
 
+        let mut gc_blocks = HashMap::new();
+
         // For every timeline, download the metadata file, scan the local directory,
         // and build a layer map that contains an entry for each remote and local
         // layer file.
@@ -1044,6 +1060,16 @@ impl Tenant {
             let (index_part, remote_client) = remote_index_and_client
                 .remove(&timeline_id)
                 .expect("just put it in above");
+
+            if let Some(blocking) = index_part.gc_blocking.as_ref() {
+                // could just filter these away, but it helps while testing
+                anyhow::ensure!(
+                    !blocking.reasons.is_empty(),
+                    "index_part for {timeline_id} is malformed: it should not have gc blocking with zero reasons"
+                );
+                let prev = gc_blocks.insert(timeline_id, blocking.reasons);
+                assert!(prev.is_none());
+            }
 
             // TODO again handle early failure
             self.load_remote_timeline(
@@ -1088,6 +1114,8 @@ impl Tenant {
         // The local filesystem contents are a cache of what's in the remote IndexPart;
         // IndexPart is the source of truth.
         self.clean_up_timelines(&existent_timelines)?;
+
+        self.gc_block.set_scanned(gc_blocks);
 
         fail::fail_point!("attach-before-activate", |_| {
             anyhow::bail!("attach-before-activate");
@@ -1678,6 +1706,14 @@ impl Tenant {
                 return Ok(GcResult::default());
             }
         }
+
+        let _guard = match self.gc_block.start().await {
+            Ok(guard) => guard,
+            Err(reasons) => {
+                info!("Skipping GC: {reasons}");
+                return Ok(GcResult::default());
+            }
+        };
 
         self.gc_iteration_internal(target_timeline_id, horizon, pitr, cancel, ctx)
             .await
@@ -2691,6 +2727,7 @@ impl Tenant {
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
+            gc_block: Default::default(),
             l0_flush_global_state,
         }
     }
@@ -2974,54 +3011,6 @@ impl Tenant {
         // grab mutex to prevent new timelines from being created here; avoid doing long operations
         // because that will stall branch creation.
         let gc_cs = self.gc_cs.lock().await;
-
-        // Paranoia check: it is critical that GcInfo's list of child timelines is correct, to avoid incorrectly GC'ing data they
-        // depend on.  So although GcInfo is updated continuously by Timeline::new and Timeline::drop, we also calculate it here
-        // and fail out if it's inaccurate.
-        // (this can be removed later, it's a risk mitigation for https://github.com/neondatabase/neon/pull/8427)
-        {
-            let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> =
-                BTreeMap::new();
-            timelines.iter().for_each(|timeline| {
-                if let Some(ancestor_timeline_id) = &timeline.get_ancestor_timeline_id() {
-                    let ancestor_children =
-                        all_branchpoints.entry(*ancestor_timeline_id).or_default();
-                    ancestor_children.push((timeline.get_ancestor_lsn(), timeline.timeline_id));
-                }
-            });
-
-            for timeline in &timelines {
-                let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
-                    .remove(&timeline.timeline_id)
-                    .unwrap_or_default();
-
-                branchpoints.sort_by_key(|b| b.0);
-
-                let target = timeline.gc_info.read().unwrap();
-
-                // We require that retain_lsns contains everything in `branchpoints`, but not that
-                // they are exactly equal: timeline deletions can race with us, so retain_lsns
-                // may contain some extra stuff.  It is safe to have extra timelines in there, because it
-                // just means that we retain slightly more data than we otherwise might.
-                let have_branchpoints = target.retain_lsns.iter().copied().collect::<HashSet<_>>();
-                for b in &branchpoints {
-                    if !have_branchpoints.contains(b) {
-                        tracing::error!(
-                            "Bug: `retain_lsns` is set incorrectly.  Expected be {:?}, but found {:?}",
-                            branchpoints,
-                            target.retain_lsns
-                        );
-                        debug_assert!(false);
-                        // Do not GC based on bad information!
-                        // (ab-use an existing GcError type rather than adding a new one, since this is a
-                        // "should never happen" check that will be removed soon).
-                        return Err(GcError::Remote(anyhow::anyhow!(
-                            "retain_lsns failed validation!"
-                        )));
-                    }
-                }
-            }
-        }
 
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
@@ -4092,7 +4081,7 @@ pub(crate) mod harness {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::keyspace::KeySpaceAccum;
@@ -4644,10 +4633,10 @@ mod tests {
 
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map
-            .layer_map()
-            .get_level0_deltas()
-            .into_iter()
-            .map(|desc| layer_map.get_from_desc(&desc))
+            .layer_map()?
+            .level0_deltas()
+            .iter()
+            .map(|desc| layer_map.get_from_desc(desc))
             .collect::<Vec<_>>();
 
         assert!(!level0_deltas.is_empty());
@@ -4767,7 +4756,7 @@ mod tests {
         lsn: Lsn,
         repeat: usize,
         key_count: usize,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HashMap<Key, BTreeSet<Lsn>>> {
         let compact = true;
         bulk_insert_maybe_compact_gc(tenant, timeline, ctx, lsn, repeat, key_count, compact).await
     }
@@ -4780,7 +4769,9 @@ mod tests {
         repeat: usize,
         key_count: usize,
         compact: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HashMap<Key, BTreeSet<Lsn>>> {
+        let mut inserted: HashMap<Key, BTreeSet<Lsn>> = Default::default();
+
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
         let mut blknum = 0;
 
@@ -4801,6 +4792,7 @@ mod tests {
                         ctx,
                     )
                     .await?;
+                inserted.entry(test_key).or_default().insert(lsn);
                 writer.finish_write(lsn);
                 drop(writer);
 
@@ -4825,7 +4817,7 @@ mod tests {
             assert_eq!(res.layers_removed, 0, "this never removes anything");
         }
 
-        Ok(())
+        Ok(inserted)
     }
 
     //
@@ -4872,14 +4864,16 @@ mod tests {
             .await?;
 
         let lsn = Lsn(0x10);
-        bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
+        let inserted = bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         let guard = tline.layers.read().await;
-        guard.layer_map().dump(true, &ctx).await?;
+        let lm = guard.layer_map()?;
+
+        lm.dump(true, &ctx).await?;
 
         let mut reads = Vec::new();
         let mut prev = None;
-        guard.layer_map().iter_historic_layers().for_each(|desc| {
+        lm.iter_historic_layers().for_each(|desc| {
             if !desc.is_delta() {
                 prev = Some(desc.clone());
                 return;
@@ -4933,9 +4927,39 @@ mod tests {
                     &ctx,
                 )
                 .await;
-            tline
-                .validate_get_vectored_impl(&vectored_res, read, reads_lsn, &ctx)
-                .await;
+
+            let mut expected_lsns: HashMap<Key, Lsn> = Default::default();
+            let mut expect_missing = false;
+            let mut key = read.start().unwrap();
+            while key != read.end().unwrap() {
+                if let Some(lsns) = inserted.get(&key) {
+                    let expected_lsn = lsns.iter().rfind(|lsn| **lsn <= reads_lsn);
+                    match expected_lsn {
+                        Some(lsn) => {
+                            expected_lsns.insert(key, *lsn);
+                        }
+                        None => {
+                            expect_missing = true;
+                            break;
+                        }
+                    }
+                } else {
+                    expect_missing = true;
+                    break;
+                }
+
+                key = key.next();
+            }
+
+            if expect_missing {
+                assert!(matches!(vectored_res, Err(GetVectoredError::MissingKey(_))));
+            } else {
+                for (key, image) in vectored_res? {
+                    let expected_lsn = expected_lsns.get(&key).expect("determined above");
+                    let expected_image = test_img(&format!("{} at {}", key.field6, expected_lsn));
+                    assert_eq!(image?, expected_image);
+                }
+            }
         }
 
         Ok(())
@@ -4983,10 +5007,6 @@ mod tests {
                 &mut ValuesReconstructState::new(),
                 &ctx,
             )
-            .await;
-
-        child_timeline
-            .validate_get_vectored_impl(&vectored_res, aux_keyspace, read_lsn, &ctx)
             .await;
 
         let images = vectored_res?;
@@ -5859,23 +5879,12 @@ mod tests {
             tline.freeze_and_flush().await?; // force create a delta layer
         }
 
-        let before_num_l0_delta_files = tline
-            .layers
-            .read()
-            .await
-            .layer_map()
-            .get_level0_deltas()
-            .len();
+        let before_num_l0_delta_files =
+            tline.layers.read().await.layer_map()?.level0_deltas().len();
 
         tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
 
-        let after_num_l0_delta_files = tline
-            .layers
-            .read()
-            .await
-            .layer_map()
-            .get_level0_deltas()
-            .len();
+        let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
 
         assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
 
@@ -6899,7 +6908,10 @@ mod tests {
         }
 
         let cancel = CancellationToken::new();
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
 
         for (idx, expected) in expected_result.iter().enumerate() {
             assert_eq!(
@@ -6993,7 +7005,10 @@ mod tests {
             guard.cutoffs.time = Lsn(0x40);
             guard.cutoffs.space = Lsn(0x40);
         }
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
 
         Ok(())
     }
@@ -7327,7 +7342,10 @@ mod tests {
         }
 
         let cancel = CancellationToken::new();
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
 
         for idx in 0..10 {
             assert_eq!(
@@ -7353,7 +7371,10 @@ mod tests {
             guard.cutoffs.time = Lsn(0x40);
             guard.cutoffs.space = Lsn(0x40);
         }
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
 
         Ok(())
     }
@@ -7898,11 +7919,28 @@ mod tests {
         verify_result().await;
 
         let cancel = CancellationToken::new();
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        let mut dryrun_flags = EnumSet::new();
+        dryrun_flags.insert(CompactFlags::DryRun);
+
+        tline
+            .compact_with_gc(&cancel, dryrun_flags, &ctx)
+            .await
+            .unwrap();
+        // We expect layer map to be the same b/c the dry run flag, but we don't know whether there will be other background jobs
+        // cleaning things up, and therefore, we don't do sanity checks on the layer map during unit tests.
+        verify_result().await;
+
+        tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
         verify_result().await;
 
         // compact again
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
         verify_result().await;
 
         // increase GC horizon and compact again
@@ -7912,11 +7950,17 @@ mod tests {
             guard.cutoffs.time = Lsn(0x38);
             guard.cutoffs.space = Lsn(0x38);
         }
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
         verify_result().await; // no wals between 0x30 and 0x38, so we should obtain the same result
 
         // not increasing the GC horizon and compact again
-        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
         verify_result().await;
 
         Ok(())
@@ -8097,7 +8141,10 @@ mod tests {
         verify_result().await;
 
         let cancel = CancellationToken::new();
-        branch_tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+        branch_tline
+            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
 
         verify_result().await;
 

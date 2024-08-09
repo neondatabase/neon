@@ -936,6 +936,9 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    # just make sure this doesn't hit an assertion
+    client.timeline_detail(tenant_id, timeline_id, force_await_initial_logical_size=True)
+
     # load in some data
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     endpoint.safe_psql_many(

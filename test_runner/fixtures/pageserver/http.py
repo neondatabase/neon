@@ -61,6 +61,7 @@ class HistoricLayerInfo:
     remote: bool
     # None for image layers, true if pageserver thinks this is an L0 delta layer
     l0: Optional[bool]
+    visible: bool
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
@@ -79,6 +80,7 @@ class HistoricLayerInfo:
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
             l0=l0_ness,
+            visible=d["access_stats"]["visible"],
         )
 
 
@@ -556,6 +558,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, dict)
         return res_json
 
+    def timeline_block_gc(self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/block_gc",
+        )
+        log.info(f"Got GC request response code: {res.status_code}")
+        self.verbose_error(res)
+
+    def timeline_unblock_gc(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/unblock_gc",
+        )
+        log.info(f"Got GC request response code: {res.status_code}")
+        self.verbose_error(res)
+
     def timeline_compact(
         self,
         tenant_id: Union[TenantId, TenantShardId],
@@ -839,7 +857,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         batch_size: int | None = None,
         **kwargs,
-    ) -> List[TimelineId]:
+    ) -> Set[TimelineId]:
         params = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
@@ -850,7 +868,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         json = res.json()
-        return list(map(TimelineId, json["reparented_timelines"]))
+        return set(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

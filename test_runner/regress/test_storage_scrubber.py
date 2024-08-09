@@ -516,9 +516,8 @@ def test_scrubber_scan_pageserver_metadata(
     assert len(index.layer_metadata) > 0
     it = iter(index.layer_metadata.items())
 
-    scan_summary = env.storage_scrubber.scan_metadata(post_to_storage_controller=True)
-    assert not scan_summary["with_warnings"]
-    assert not scan_summary["with_errors"]
+    healthy, scan_summary = env.storage_scrubber.scan_metadata(post_to_storage_controller=True)
+    assert healthy
 
     assert env.storage_controller.metadata_health_is_healthy()
 
@@ -532,16 +531,18 @@ def test_scrubber_scan_pageserver_metadata(
     log.info(f"delete response: {delete_response}")
 
     # Check scan summary without posting to storage controller. Expect it to be a L0 layer so only emit warnings.
-    scan_summary = env.storage_scrubber.scan_metadata()
+    _, scan_summary = env.storage_scrubber.scan_metadata()
     log.info(f"{pprint.pformat(scan_summary)}")
     assert len(scan_summary["with_warnings"]) > 0
 
     assert env.storage_controller.metadata_health_is_healthy()
 
     # Now post to storage controller, expect seeing one unhealthy health record
-    scan_summary = env.storage_scrubber.scan_metadata(post_to_storage_controller=True)
+    _, scan_summary = env.storage_scrubber.scan_metadata(post_to_storage_controller=True)
     log.info(f"{pprint.pformat(scan_summary)}")
     assert len(scan_summary["with_warnings"]) > 0
 
     unhealthy = env.storage_controller.metadata_health_list_unhealthy()["unhealthy_tenant_shards"]
     assert len(unhealthy) == 1 and unhealthy[0] == str(tenant_shard_id)
+
+    neon_env_builder.disable_scrub_on_exit()

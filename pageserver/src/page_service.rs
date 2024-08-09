@@ -122,16 +122,19 @@ impl Listener {
     }
 }
 impl Connections {
-    pub async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         let Self { cancel, mut tasks } = self;
         cancel.cancel();
         while let Some(res) = tasks.join_next().await {
-            // the logging done here mimics what was formerly done by task_mgr
-            match res {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => error!("error in page_service connection task: {:?}", e),
-                Err(e) => error!("page_service connection task panicked: {:?}", e),
-            }
+            Self::handle_connection_completion(res);
+        }
+    }
+
+    fn handle_connection_completion(res: Result<anyhow::Result<()>, tokio::task::JoinError>) {
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("error in page_service connection task: {:?}", e),
+            Err(e) => error!("page_service connection task panicked: {:?}", e),
         }
     }
 }
@@ -155,20 +158,19 @@ pub async fn libpq_listener_main(
     let connections_cancel = CancellationToken::new();
     let mut connection_handler_tasks = tokio::task::JoinSet::default();
 
-    // Wait for a new connection to arrive, or for server shutdown.
-    while let Some(res) = tokio::select! {
-        biased;
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            _ = listener_cancel.cancelled() => break,
+            next = connection_handler_tasks.join_next(), if !connection_handler_tasks.is_empty() => {
+                let res = next.expect("we dont poll while empty");
+                Connections::handle_connection_completion(res);
+                continue;
+            }
+            accepted = listener.accept() => accepted,
+        };
 
-        _ = listener_cancel.cancelled() => {
-            // We were requested to shut down.
-            None
-        }
-
-        res = listener.accept() => {
-            Some(res)
-        }
-    } {
-        match res {
+        match accepted {
             Ok((socket, peer_addr)) => {
                 // Connection established. Spawn a new task to handle it.
                 debug!("accepted connection from {}", peer_addr);
