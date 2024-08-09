@@ -1,0 +1,463 @@
+commit 4b68f82b89327289a33c5fde77fac6dbf8e06f4f
+Author: Alexey Masterov <alexeymasterov@neon.tech>
+Date:   Fri Aug 9 15:49:24 2024 +0200
+
+    i2
+
+diff --git a/src/test/regress/parallel_schedule b/src/test/regress/parallel_schedule
+index cf46fa3359..709602df28 100644
+--- a/src/test/regress/parallel_schedule
++++ b/src/test/regress/parallel_schedule
+@@ -130,4 +130,4 @@ test: fast_default
+ 
+ # run tablespace test at the end because it drops the tablespace created during
+ # setup that other tests may use.
+-test: tablespace
++#test: tablespace
+diff --git a/src/test/regress/sql/aggregates.sql b/src/test/regress/sql/aggregates.sql
+index 897334aac9..1ea43f1e2d 100644
+--- a/src/test/regress/sql/aggregates.sql
++++ b/src/test/regress/sql/aggregates.sql
+@@ -15,7 +15,7 @@ CREATE TABLE aggtest (
+ );
+ 
+ \set filename :abs_srcdir '/data/agg.data'
+-\set command '\\copy aggtest FROM ' :'filename'; 
++\set command '\\copy aggtest FROM ' :'filename';
+ :command
+ 
+ ANALYZE aggtest;
+diff --git a/src/test/regress/sql/arrays.sql b/src/test/regress/sql/arrays.sql
+index c791f52cd9..35abfb841c 100644
+--- a/src/test/regress/sql/arrays.sql
++++ b/src/test/regress/sql/arrays.sql
+@@ -22,7 +22,7 @@ CREATE TABLE array_op_test (
+ );
+ 
+ \set filename :abs_srcdir '/data/array.data'
+-\set command '\\copy array_op_test FROM ' :'filename'; 
++\set command '\\copy array_op_test FROM ' :'filename';
+ :command
+ ANALYZE array_op_test;
+ 
+diff --git a/src/test/regress/sql/btree_index.sql b/src/test/regress/sql/btree_index.sql
+index 239f4a4755..f29d87bdff 100644
+--- a/src/test/regress/sql/btree_index.sql
++++ b/src/test/regress/sql/btree_index.sql
+@@ -26,16 +26,20 @@ CREATE TABLE bt_f8_heap (
+ );
+ 
+ \set filename :abs_srcdir '/data/desc.data'
+-COPY bt_i4_heap FROM :'filename';
++\set command '\\copy bt_i4_heap FROM ' :'filename';
++:command
+ 
+ \set filename :abs_srcdir '/data/hash.data'
+-COPY bt_name_heap FROM :'filename';
++\set command '\\copy bt_name_heap FROM ' :'filename';
++:command
+ 
+ \set filename :abs_srcdir '/data/desc.data'
+-COPY bt_txt_heap FROM :'filename';
++\set command '\\copy bt_txt_heap FROM ' :'filename';
++:command
+ 
+ \set filename :abs_srcdir '/data/hash.data'
+-COPY bt_f8_heap FROM :'filename';
++\set command '\\copy bt_f8_heap FROM ' :'filename';
++:command
+ 
+ ANALYZE bt_i4_heap;
+ ANALYZE bt_name_heap;
+diff --git a/src/test/regress/sql/constraints.sql b/src/test/regress/sql/constraints.sql
+index 5ffcd4ffc7..913c7ad80d 100644
+--- a/src/test/regress/sql/constraints.sql
++++ b/src/test/regress/sql/constraints.sql
+@@ -243,12 +243,14 @@ CREATE TABLE COPY_TBL (x INT, y TEXT, z INT,
+ 	CHECK (x > 3 AND y <> 'check failed' AND x < 7 ));
+ 
+ \set filename :abs_srcdir '/data/constro.data'
+-COPY COPY_TBL FROM :'filename';
++\set command '\\copy COPY_TBL FROM ' :'filename';
++:command
+ 
+ SELECT * FROM COPY_TBL;
+ 
+ \set filename :abs_srcdir '/data/constrf.data'
+-COPY COPY_TBL FROM :'filename';
++\set command '\\copy COPY_TBL FROM ' :'filename';
++:command
+ 
+ SELECT * FROM COPY_TBL;
+ 
+diff --git a/src/test/regress/sql/copy.sql b/src/test/regress/sql/copy.sql
+index 3fa3b4a837..0f40c136da 100644
+--- a/src/test/regress/sql/copy.sql
++++ b/src/test/regress/sql/copy.sql
+@@ -34,10 +34,10 @@ truncate copytest2;
+ 
+ --- same test but with an escape char different from quote char
+ 
+-\set command '\\copy copytest to ' :'filename' csv quote '''' escape E'\\';
++\set command '\\copy copytest to ' :'filename' ' csv quote ' '\'\'\'\'' ' escape ' 'E\'' '\\\\\'';
+ :command
+ 
+-\set command '\\copy copytest2 from ' :'filename' csv quote '''' escape E'\\';
++\set command '\\copy copytest2 from ' :'filename' ' csv quote ' '\'\'\'\'' ' escape ' 'E\'' '\\\\\'';
+ :command
+ 
+ select * from copytest except select * from copytest2;
+@@ -56,8 +56,7 @@ this is just a line full of junk that would error out if parsed
+ 2,b,2
+ \.
+ 
+-\set command '\\copy copytest3 to ' stdout csv header;
+-:command
++copy copytest3 to stdout csv header;
+ 
+ create temp table copytest4 (
+ 	c1 int,
+@@ -69,8 +68,7 @@ this is just a line full of junk that would error out if parsed
+ 2	b
+ \.
+ 
+-\set command '\\copy copytest4 to ' stdout (header);
+-:command
++copy copytest4 to stdout (header);
+ 
+ -- test copy from with a partitioned table
+ create table parted_copytest (
+@@ -92,11 +90,12 @@ insert into parted_copytest select x,2,'Two' from generate_series(1001,1010) x;
+ insert into parted_copytest select x,1,'One' from generate_series(1011,1020) x;
+ 
+ \set filename :abs_builddir '/results/parted_copytest.csv'
+-copy (select * from parted_copytest order by a) to :'filename';
++\set command '\\copy (select * from parted_copytest order by a) to ' :'filename';
++:command
+ 
+ truncate parted_copytest;
+ 
+-\set command '\\copy parted_copytest from ' :'filename'; 
++\set command '\\copy parted_copytest from ' :'filename';
+ :command
+ 
+ -- Ensure COPY FREEZE errors for partitioned tables.
+@@ -123,7 +122,7 @@ create trigger part_ins_trig
+ 	for each row
+ 	execute procedure part_ins_func();
+ 
+-\set command '\\copy parted_copytest from ' :'filename'; 
++\set command '\\copy parted_copytest from ' :'filename';
+ :command
+ 
+ select tableoid::regclass,count(*),sum(a) from parted_copytest
+@@ -133,7 +132,7 @@ truncate table parted_copytest;
+ create index on parted_copytest (b);
+ drop trigger part_ins_trig on parted_copytest_a2;
+ 
+-\set command '\\copy parted_copytest from ' stdin; 
++\set command '\\copy parted_copytest from ' stdin;
+ :command
+ 1	1	str1
+ 2	2	str2
+@@ -192,8 +191,7 @@ create trigger check_after_tab_progress_reporting
+ 	execute function notice_after_tab_progress_reporting();
+ 
+ -- Generate COPY FROM report with PIPE.
+-\set command '\\copy tab_progress_reporting from ' stdin; 
+-:command
++copy tab_progress_reporting from stdin;
+ sharon	25	(15,12)	1000	sam
+ sam	30	(10,5)	2000	bill
+ bill	20	(11,10)	1000	sharon
+@@ -202,7 +200,7 @@ bill	20	(11,10)	1000	sharon
+ -- Generate COPY FROM report with FILE, with some excluded tuples.
+ truncate tab_progress_reporting;
+ \set filename :abs_srcdir '/data/emp.data'
+-\set command '\\copy tab_progress_reporting from ' :'filename' 
++\set command '\\copy tab_progress_reporting from ' :'filename'
+ :command
+ 	where (salary < 2000);
+ 
+@@ -219,8 +217,7 @@ create table header_copytest (
+ -- Make sure it works with dropped columns
+ alter table header_copytest drop column c;
+ alter table header_copytest add column c text;
+-\set command '\\copy header_copytest to ' stdout with (header match);
+-:command
++copy header_copytest to stdout with (header match);
+ copy header_copytest from stdin with (header wrong_choice);
+ -- works
+ copy header_copytest from stdin with (header match);
+@@ -287,8 +284,7 @@ create temp table oversized_column_default (
+     col1 varchar(5) DEFAULT 'more than 5 chars',
+     col2 varchar(5));
+ -- normal COPY should work
+-\set command '\\copy oversized_column_default from ' stdin; 
+-:command
++copy oversized_column_default from stdin;
+ \.
+ -- error if the column is excluded
+ copy oversized_column_default (col2) from stdin;
+@@ -325,7 +321,8 @@ CREATE TABLE parted_si_p_odd PARTITION OF parted_si FOR VALUES IN (1);
+ -- https://postgr.es/m/18130-7a86a7356a75209d%40postgresql.org
+ -- https://postgr.es/m/257696.1695670946%40sss.pgh.pa.us
+ \set filename :abs_srcdir '/data/desc.data'
+-COPY parted_si(id, data) FROM :'filename';
++\set command '\\COPY parted_si(id, data) FROM ' :'filename';
++:command
+ 
+ -- An earlier bug (see commit b1ecb9b3fcf) could end up using a buffer from
+ -- the wrong partition. This test is *not* guaranteed to trigger that bug, but
+diff --git a/src/test/regress/sql/create_index.sql b/src/test/regress/sql/create_index.sql
+index d49ce9f300..1ac43c1301 100644
+--- a/src/test/regress/sql/create_index.sql
++++ b/src/test/regress/sql/create_index.sql
+@@ -71,7 +71,8 @@ CREATE TABLE fast_emp4000 (
+ );
+ 
+ \set filename :abs_srcdir '/data/rect.data'
+-COPY slow_emp4000 FROM :'filename';
++\set command '\\copy slow_emp4000 FROM ' :'filename';
++:command
+ 
+ INSERT INTO fast_emp4000 SELECT * FROM slow_emp4000;
+ 
+@@ -269,7 +270,8 @@ CREATE TABLE array_index_op_test (
+ );
+ 
+ \set filename :abs_srcdir '/data/array.data'
+-COPY array_index_op_test FROM :'filename';
++\set command '\\copy array_index_op_test FROM ' :'filename';
++:command
+ ANALYZE array_index_op_test;
+ 
+ SELECT * FROM array_index_op_test WHERE i = '{NULL}' ORDER BY seqno;
+diff --git a/src/test/regress/sql/create_view.sql b/src/test/regress/sql/create_view.sql
+index 8838a40f7a..4b09319ebd 100644
+--- a/src/test/regress/sql/create_view.sql
++++ b/src/test/regress/sql/create_view.sql
+@@ -23,7 +23,8 @@ CREATE TABLE real_city (
+ );
+ 
+ \set filename :abs_srcdir '/data/real_city.data'
+-COPY real_city FROM :'filename';
++\set command '\\copy real_city FROM ' :'filename';
++:command
+ ANALYZE real_city;
+ 
+ SELECT *
+diff --git a/src/test/regress/sql/hash_index.sql b/src/test/regress/sql/hash_index.sql
+index 527024f710..de49c0b85f 100644
+--- a/src/test/regress/sql/hash_index.sql
++++ b/src/test/regress/sql/hash_index.sql
+@@ -26,10 +26,14 @@ CREATE TABLE hash_f8_heap (
+ );
+ 
+ \set filename :abs_srcdir '/data/hash.data'
+-COPY hash_i4_heap FROM :'filename';
+-COPY hash_name_heap FROM :'filename';
+-COPY hash_txt_heap FROM :'filename';
+-COPY hash_f8_heap FROM :'filename';
++\set command '\\copy hash_i4_heap FROM ' :'filename';
++:command
++\set command '\\copy hash_name_heap FROM ' :'filename';
++:command
++\set command '\\copy hash_txt_heap FROM ' :'filename';
++:command
++\set command '\\copy hash_f8_heap FROM ' :'filename';
++:command
+ 
+ -- the data in this file has a lot of duplicates in the index key
+ -- fields, leading to long bucket chains and lots of table expansion.
+diff --git a/src/test/regress/sql/jsonb.sql b/src/test/regress/sql/jsonb.sql
+index 6dae715afd..aa320ba7be 100644
+--- a/src/test/regress/sql/jsonb.sql
++++ b/src/test/regress/sql/jsonb.sql
+@@ -6,7 +6,8 @@ CREATE TABLE testjsonb (
+ );
+ 
+ \set filename :abs_srcdir '/data/jsonb.data'
+-COPY testjsonb FROM :'filename';
++\set command '\\copy testjsonb FROM ' :'filename';
++:command
+ 
+ -- Strings.
+ SELECT '""'::jsonb;				-- OK.
+diff --git a/src/test/regress/sql/misc.sql b/src/test/regress/sql/misc.sql
+index 165a2e175f..08d7096e2c 100644
+--- a/src/test/regress/sql/misc.sql
++++ b/src/test/regress/sql/misc.sql
+@@ -74,22 +74,26 @@ DROP TABLE tmp;
+ -- copy
+ --
+ \set filename :abs_builddir '/results/onek.data'
+-COPY onek TO :'filename';
++\set command '\\copy onek TO ' :'filename';
++:command
+ 
+ CREATE TEMP TABLE onek_copy (LIKE onek);
+ 
+-COPY onek_copy FROM :'filename';
++\set command '\\copy onek_copy FROM ' :'filename';
++:command
+ 
+ SELECT * FROM onek EXCEPT ALL SELECT * FROM onek_copy;
+ 
+ SELECT * FROM onek_copy EXCEPT ALL SELECT * FROM onek;
+ 
+ \set filename :abs_builddir '/results/stud_emp.data'
+-COPY BINARY stud_emp TO :'filename';
++\set command '\\COPY BINARY stud_emp TO ' :'filename';
++:command
+ 
+ CREATE TEMP TABLE stud_emp_copy (LIKE stud_emp);
+ 
+-COPY BINARY stud_emp_copy FROM :'filename';
++\set command '\\COPY BINARY stud_emp_copy FROM ' :'filename';
++:command
+ 
+ SELECT * FROM stud_emp_copy;
+ 
+diff --git a/src/test/regress/sql/psql.sql b/src/test/regress/sql/psql.sql
+index f3bc6cd07e..e9db7377a0 100644
+--- a/src/test/regress/sql/psql.sql
++++ b/src/test/regress/sql/psql.sql
+@@ -1431,11 +1431,14 @@ CREATE TEMPORARY TABLE reload_output(
+ );
+ 
+ SELECT 1 AS a \g :g_out_file
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++:command
+ SELECT 2 AS b\; SELECT 3 AS c\; SELECT 4 AS d \g :g_out_file
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++:command
+ COPY (SELECT 'foo') TO STDOUT \; COPY (SELECT 'bar') TO STDOUT \g :g_out_file
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++:command
+ 
+ SELECT line FROM reload_output ORDER BY lineno;
+ TRUNCATE TABLE reload_output;
+@@ -1452,17 +1455,20 @@ SELECT 1 AS a\; SELECT 2 AS b\; SELECT 3 AS c;
+ -- COPY TO file
+ -- The data goes to :g_out_file and the status to :o_out_file
+ \set QUIET false
+-COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO :'g_out_file';
++\set command '\\COPY (SELECT unique2 FROM onek ORDER BY unique1 LIMIT 10) TO ' :'g_out_file';
++:command
+ -- DML command status
+ UPDATE onek SET unique1 = unique1 WHERE false;
+ \set QUIET true
+ \o
+ 
+ -- Check the contents of the files generated.
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+ TRUNCATE TABLE reload_output;
+-COPY reload_output(line) FROM :'o_out_file';
++\set command '\\copy reload_output(line) FROM ' :'o_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+ TRUNCATE TABLE reload_output;
+ 
+@@ -1475,10 +1481,12 @@ COPY (SELECT 'foo2') TO STDOUT \; COPY (SELECT 'bar2') TO STDOUT \g :g_out_file
+ \o
+ 
+ -- Check the contents of the files generated.
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+ TRUNCATE TABLE reload_output;
+-COPY reload_output(line) FROM :'o_out_file';
++\set command '\\copy reload_output(line) FROM ' :'o_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+ 
+ DROP TABLE reload_output;
+diff --git a/src/test/regress/sql/test_setup.sql b/src/test/regress/sql/test_setup.sql
+index 106d4eb2c0..b765c748b8 100644
+--- a/src/test/regress/sql/test_setup.sql
++++ b/src/test/regress/sql/test_setup.sql
+@@ -135,7 +135,7 @@ CREATE TABLE onek (
+ );
+ 
+ \set filename :abs_srcdir '/data/onek.data'
+-\set command '\\copy onek FROM ' :'filename'; 
++\set command '\\copy onek FROM ' :'filename';
+ :command
+ VACUUM ANALYZE onek;
+ 
+@@ -162,7 +162,7 @@ CREATE TABLE tenk1 (
+ );
+ 
+ \set filename :abs_srcdir '/data/tenk.data'
+-\set command '\\copy tenk1 FROM ' :'filename'; 
++\set command '\\copy tenk1 FROM ' :'filename';
+ :command
+ VACUUM ANALYZE tenk1;
+ 
+@@ -176,7 +176,7 @@ CREATE TABLE person (
+ );
+ 
+ \set filename :abs_srcdir '/data/person.data'
+-\set command '\\copy person FROM ' :'filename'; 
++\set command '\\copy person FROM ' :'filename';
+ :command
+ VACUUM ANALYZE person;
+ 
+@@ -186,7 +186,7 @@ CREATE TABLE emp (
+ ) INHERITS (person);
+ 
+ \set filename :abs_srcdir '/data/emp.data'
+-\set command '\\copy emp FROM ' :'filename'; 
++\set command '\\copy emp FROM ' :'filename';
+ :command
+ VACUUM ANALYZE emp;
+ 
+@@ -195,7 +195,7 @@ CREATE TABLE student (
+ ) INHERITS (person);
+ 
+ \set filename :abs_srcdir '/data/student.data'
+-\set command '\\copy student FROM ' :'filename'; 
++\set command '\\copy student FROM ' :'filename';
+ :command
+ VACUUM ANALYZE student;
+ 
+@@ -204,7 +204,7 @@ CREATE TABLE stud_emp (
+ ) INHERITS (emp, student);
+ 
+ \set filename :abs_srcdir '/data/stud_emp.data'
+-\set command '\\copy stud_emp FROM ' :'filename'; 
++\set command '\\copy stud_emp FROM ' :'filename';
+ :command
+ VACUUM ANALYZE stud_emp;
+ 
+@@ -214,7 +214,7 @@ CREATE TABLE road (
+ );
+ 
+ \set filename :abs_srcdir '/data/streets.data'
+-\set command '\\copy road FROM ' :'filename'; 
++\set command '\\copy road FROM ' :'filename';
+ :command
+ VACUUM ANALYZE road;
+ 
+diff --git a/src/test/regress/sql/tsearch.sql b/src/test/regress/sql/tsearch.sql
+index db2e09be94..f6c6c3e180 100644
+--- a/src/test/regress/sql/tsearch.sql
++++ b/src/test/regress/sql/tsearch.sql
+@@ -49,7 +49,8 @@ CREATE TABLE test_tsvector(
+ );
+ 
+ \set filename :abs_srcdir '/data/tsearch.data'
+-COPY test_tsvector FROM :'filename';
++\set command '\\copy test_tsvector FROM ' :'filename';
++:command
+ 
+ ANALYZE test_tsvector;
+ 
