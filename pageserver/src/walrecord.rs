@@ -571,6 +571,22 @@ impl XlCreateDatabase {
 
 #[repr(C)]
 #[derive(Debug)]
+pub struct XlCreateDatabaseFromWal {
+    pub db_id: Oid,
+    pub tablespace_id: Oid,
+}
+
+impl XlCreateDatabaseFromWal {
+    pub fn decode(buf: &mut Bytes) -> XlCreateDatabaseFromWal {
+        XlCreateDatabaseFromWal {
+            db_id: buf.get_u32_le(),
+            tablespace_id: buf.get_u32_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
 pub struct XlDropDatabase {
     pub db_id: Oid,
     pub n_tablespaces: Oid, /* number of tablespace IDs */
