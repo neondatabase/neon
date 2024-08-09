@@ -89,6 +89,7 @@ async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
     for (k, v) in all {
         let value = cursor.read_blob(v.pos(), ctx).await?;
         println!("key:{} value_len:{}", k, value.len());
+        assert!(k.is_i128_representable(), "invalid key: ");
     }
     // TODO(chi): special handling for last key?
     Ok(())
