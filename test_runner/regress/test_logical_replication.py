@@ -4,11 +4,13 @@ from random import choice
 from string import ascii_lowercase
 
 import pytest
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     AuxFileStore,
     NeonEnv,
     NeonEnvBuilder,
+    PgProtocol,
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
@@ -524,3 +526,90 @@ def test_replication_shutdown(neon_simple_env: NeonEnv):
             assert [r[0] for r in res] == [10, 20, 30, 40]
 
         wait_until(10, 0.5, check_that_changes_propagated)
+
+
+def logical_replication_wait_flush_lsn_sync(publisher: PgProtocol) -> Lsn:
+    """
+    Wait for logical replication subscriber reported flush_lsn to reach
+    pg_current_wal_flush_lsn on publisher. Note that this is somewhat unreliable
+    because for some WAL records like vacuum subscriber won't get any data at
+    all.
+    """
+    publisher_flush_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+
+    def check_caughtup():
+        res = publisher.safe_psql(
+            """
+select sent_lsn, flush_lsn, pg_current_wal_flush_lsn() from pg_stat_replication sr, pg_replication_slots s
+   where s.active_pid = sr.pid and s.slot_type = 'logical';
+                                  """
+        )[0]
+        sent_lsn, flush_lsn, curr_publisher_flush_lsn = Lsn(res[0]), Lsn(res[1]), Lsn(res[2])
+        log.info(
+            f"sent_lsn={sent_lsn}, flush_lsn={flush_lsn}, publisher_flush_lsn={curr_publisher_flush_lsn}, waiting flush_lsn to reach {publisher_flush_lsn}"
+        )
+        assert flush_lsn >= publisher_flush_lsn
+
+    wait_until(30, 0.5, check_caughtup)
+    return publisher_flush_lsn
+
+
+# Test that subscriber takes into account quorum committed flush_lsn in
+# flush_lsn reporting to publisher. Without this, it may ack too far, losing
+# data on restart because publisher advances START_REPLICATION position to the
+# confirmed_flush_lsn of the slot.
+def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
+    env = neon_simple_env
+    # use vanilla as publisher to allow writes on it when safekeeper is down
+    vanilla_pg.configure(
+        [
+            "wal_level = 'logical'",
+            # neon fork uses custom WAL records which won't work without extension installed with obscure
+            # ERROR:  resource manager with ID 134 not registered
+            # error.
+            "shared_preload_libraries = 'neon'",
+        ]
+    )
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create extension neon;")
+
+    env.neon_cli.create_branch("subscriber")
+    sub = env.endpoints.create("subscriber")
+    sub.start()
+
+    with vanilla_pg.cursor() as pcur:
+        with sub.cursor() as scur:
+            pcur.execute("CREATE TABLE t (pk integer primary key, sk integer)")
+            pcur.execute("CREATE PUBLICATION pub FOR TABLE t")
+            scur.execute("CREATE TABLE t (pk integer primary key, sk integer)")
+
+            pub_connstr = vanilla_pg.connstr().replace("'", "''")
+            log.info(f"pub connstr is {pub_connstr}, subscriber connstr {sub.connstr()}")
+            query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_connstr}' PUBLICATION pub with (synchronous_commit=off)"
+            scur.execute(query)
+            time.sleep(2)  # let initial table sync complete
+
+    # stop safekeeper so it won't get any data
+    for sk in env.safekeepers:
+        sk.stop()
+    # and insert to publisher
+    with vanilla_pg.cursor() as pcur:
+        for i in range(0, 1000):
+            pcur.execute("INSERT into t values (%s, random()*100000)", (i,))
+    # wait until sub receives all data
+    logical_replication_sync(sub, vanilla_pg)
+    # Update confirmed_flush_lsn of the slot. If subscriber ack'ed recevied data
+    # as flushed we'll now lose it if subscriber restars. That's why
+    # logical_replication_wait_flush_lsn_sync is expected to hang while
+    # safekeeper is down.
+    vanilla_pg.safe_psql("checkpoint;")
+    assert sub.safe_psql_scalar("SELECT count(*) FROM t") == 1000
+
+    # restart subscriber and ensure it can catch up lost tail again
+    sub.stop(mode="immediate")
+    for sk in env.safekeepers:
+        sk.start()
+    sub.start()
+    log.info("waiting for sync after restart")
+    logical_replication_wait_flush_lsn_sync(vanilla_pg)
+    assert sub.safe_psql_scalar("SELECT count(*) FROM t") == 1000
