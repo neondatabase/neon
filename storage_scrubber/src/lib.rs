@@ -34,7 +34,6 @@ use remote_storage::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use storage_controller_client::control_api;
-use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -511,48 +510,6 @@ async fn list_objects_with_retries_generic(
         }
     }
     panic!("MAX_RETRIES is not allowed to be 0");
-}
-
-async fn download_object_with_retries(
-    s3_client: &Client,
-    bucket_name: &str,
-    key: &str,
-) -> anyhow::Result<Vec<u8>> {
-    for _ in 0..MAX_RETRIES {
-        let mut body_buf = Vec::new();
-        let response_stream = match s3_client
-            .get_object()
-            .bucket(bucket_name)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => {
-                error!("Failed to download object for key {key}: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        };
-
-        match response_stream
-            .body
-            .into_async_read()
-            .read_to_end(&mut body_buf)
-            .await
-        {
-            Ok(bytes_read) => {
-                tracing::debug!("Downloaded {bytes_read} bytes for object {key}");
-                return Ok(body_buf);
-            }
-            Err(e) => {
-                error!("Failed to stream object body for key {key}: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    }
-
-    anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
 }
 
 async fn download_object_with_retries_generic(

@@ -1,12 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::checks::{
-    list_timeline_blobs_generic, BlobDataParseResult, RemoteTimelineBlobData
-};
-use crate::metadata_stream::{
-    stream_tenant_shards, stream_tenant_timelines_generic,
-};
+use crate::checks::{list_timeline_blobs_generic, BlobDataParseResult, RemoteTimelineBlobData};
+use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines_generic};
 use crate::{
     download_object_to_file, init_remote, init_remote_generic, BucketConfig, NodeKind, RootTarget,
     TenantShardTimelineId,
@@ -255,7 +251,8 @@ impl SnapshotDownloader {
                 let data = list_timeline_blobs_generic(remote_client, ttid, target).await?;
                 Ok((ttid, data))
             }
-            let timelines = timelines.map_ok(|ttid| load_timeline_index(&remote_client, &target, ttid));
+            let timelines =
+                timelines.map_ok(|ttid| load_timeline_index(&remote_client, &target, ttid));
             let mut timelines = std::pin::pin!(timelines.try_buffered(8));
 
             while let Some(i) = timelines.next().await {
