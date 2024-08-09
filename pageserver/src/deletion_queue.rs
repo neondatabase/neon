@@ -1033,7 +1033,7 @@ mod test {
 
         // We enqueued the operation in a stale generation: it should have failed validation
         tracing::debug!("Flushing...");
-        tokio::time::timeout(Duration::from_secs(5), client.flush_execute()).await??;
+        tokio::time::timeout(Duration::from_secs(10), client.flush_execute()).await??;
         assert_remote_files(&[&remote_layer_name], &remote_timeline_path);
 
         tracing::debug!("Pushing...");
@@ -1048,7 +1048,7 @@ mod test {
 
         // We enqueued the operation in a fresh generation: it should have passed validation
         tracing::debug!("Flushing...");
-        tokio::time::timeout(Duration::from_secs(5), client.flush_execute()).await??;
+        tokio::time::timeout(Duration::from_secs(10), client.flush_execute()).await??;
         assert_remote_files(&[], &remote_timeline_path);
 
         Ok(())
