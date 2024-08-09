@@ -213,10 +213,7 @@ impl TenantRefAccumulator {
                         .iter()
                         .map(|s| s.tenant_shard_id.to_index())
                         .collect();
-                    if !controller_indices
-                        .iter()
-                        .eq(latest_shards.iter().map(|i| *i))
-                    {
+                    if !controller_indices.iter().eq(latest_shards.iter().copied()) {
                         tracing::info!(%tenant_id, "Latest shards seen in S3 ({latest_shards:?}) don't match controller state ({controller_indices:?})");
                         continue;
                     }
