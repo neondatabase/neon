@@ -67,7 +67,7 @@ CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
 # Force cargo not to print progress bar
 CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
 # Set PQ_LIB_DIR to make sure `storage_controller` get linked with bundled libpq (through diesel)
-CARGO_CMD_PREFIX += PQ_LIB_DIR=$(POSTGRES_INSTALL_DIR)/v16/lib
+CARGO_CMD_PREFIX += PQ_LIB_DIR=$(POSTGRES_INSTALL_DIR)/v17/lib
 
 CACHEDIR_TAG_CONTENTS := "Signature: 8a477f597d28d172789f06886806bc55"
 
@@ -220,11 +220,11 @@ neon-pg-clean-ext-%:
 walproposer-lib: neon-pg-ext-v17
 	+@echo "Compiling walproposer-lib"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile walproposer-lib
-	cp $(POSTGRES_INSTALL_DIR)/v16/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
-	cp $(POSTGRES_INSTALL_DIR)/v16/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 ifeq ($(UNAME_S),Linux)
 	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgport.a \
 		pg_strong_random.o
@@ -239,7 +239,7 @@ endif
 
 .PHONY: walproposer-lib-clean
 walproposer-lib-clean:
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config \
 		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
 
@@ -330,12 +330,12 @@ postgres-%-pgindent: postgres-%-pg-bsd-indent postgres-%-typedefs.list
 
 # Indent pxgn/neon.
 .PHONY: neon-pgindent
-neon-pgindent: postgres-v16-pg-bsd-indent neon-pg-ext-v16
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
-		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v16/src/tools/find_typedef \
-		INDENT=$(POSTGRES_INSTALL_DIR)/build/v16/src/tools/pg_bsd_indent/pg_bsd_indent \
-		PGINDENT_SCRIPT=$(ROOT_PROJECT_DIR)/vendor/postgres-v16/src/tools/pgindent/pgindent \
-		-C $(POSTGRES_INSTALL_DIR)/build/neon-v16 \
+neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
+		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/find_typedef \
+		INDENT=$(POSTGRES_INSTALL_DIR)/build/v17/src/tools/pg_bsd_indent/pg_bsd_indent \
+		PGINDENT_SCRIPT=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/pgindent/pgindent \
+		-C $(POSTGRES_INSTALL_DIR)/build/neon-v17 \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile pgindent
 
 
