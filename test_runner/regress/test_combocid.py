@@ -73,12 +73,13 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     cur.execute("CREATE EXTENSION neon_test_utils")
 
     cur.execute("create table t(id integer, val integer)")
+    file_path = f"{endpoint.pg_data_dir_path()}/t.csv"
     cur.execute(f"insert into t select g, 0 from generate_series(1,{n_records}) g")
-    cur.execute("copy t to '/tmp/t.csv'")
+    cur.execute(f"copy t to '{file_path}'")
     cur.execute("truncate table t")
 
     cur.execute("begin")
-    cur.execute("copy t from '/tmp/t.csv'")
+    cur.execute(f"copy t from '{file_path}'")
 
     # Open a cursor that scroll it halfway through
     cur.execute("DECLARE c1 NO SCROLL CURSOR WITHOUT HOLD FOR SELECT * FROM t")
