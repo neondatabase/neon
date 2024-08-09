@@ -36,7 +36,8 @@ impl RequestKind {
     }
 }
 
-pub(crate) struct RequestTyped<C>([C; 6]);
+const REQUEST_KIND_COUNT: usize = 7;
+pub(crate) struct RequestTyped<C>([C; REQUEST_KIND_COUNT]);
 
 impl<C> RequestTyped<C> {
     pub(crate) fn get(&self, kind: RequestKind) -> &C {
@@ -45,8 +46,8 @@ impl<C> RequestTyped<C> {
 
     fn build_with(mut f: impl FnMut(RequestKind) -> C) -> Self {
         use RequestKind::*;
-        let mut it = [Get, Put, Delete, List, Copy, TimeTravel].into_iter();
-        let arr = std::array::from_fn::<C, 6, _>(|index| {
+        let mut it = [Get, Put, Delete, List, Copy, TimeTravel, Head].into_iter();
+        let arr = std::array::from_fn::<C, REQUEST_KIND_COUNT, _>(|index| {
             let next = it.next().unwrap();
             assert_eq!(index, next.as_index());
             f(next)
