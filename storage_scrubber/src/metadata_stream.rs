@@ -81,10 +81,8 @@ pub async fn stream_tenant_shards<'a>(
 ) -> anyhow::Result<impl Stream<Item = Result<TenantShardId, anyhow::Error>> + 'a> {
     let shards_target = target.tenant_shards_prefix(&tenant_id);
 
-    let prefix_str = &shards_target
-        .prefix_in_bucket
-        .strip_prefix("/")
-        .unwrap_or(&shards_target.prefix_in_bucket);
+    let strip_prefix = target.tenants_root().prefix_in_bucket;
+    let prefix_str = &strip_prefix.strip_prefix("/").unwrap_or(&strip_prefix);
 
     tracing::info!("Listing shards in {}", shards_target.prefix_in_bucket);
     let listing = list_objects_with_retries_generic(
