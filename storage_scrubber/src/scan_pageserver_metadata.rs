@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::checks::{
-    branch_cleanup_and_check_errors, list_timeline_blobs_generic, BlobDataParseResult, RemoteTimelineBlobData, TenantObjectListing, TimelineAnalysis
+    branch_cleanup_and_check_errors, list_timeline_blobs_generic, BlobDataParseResult,
+    RemoteTimelineBlobData, TenantObjectListing, TimelineAnalysis,
 };
 use crate::metadata_stream::{stream_tenant_timelines_generic, stream_tenants_generic};
 use crate::{init_remote_generic, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};

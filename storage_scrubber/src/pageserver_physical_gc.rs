@@ -274,10 +274,7 @@ async fn check_is_old_enough(
     summary: &mut GcSummary,
 ) -> Option<bool> {
     let listing_object = remote_client
-        .head_object(
-            key,
-            &CancellationToken::new(),
-        )
+        .head_object(key, &CancellationToken::new())
         .await
         .ok()?;
     Some(is_old_enough(min_age, &listing_object, summary))
