@@ -29,24 +29,12 @@ WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
 
-# Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
-# Set up cachepot to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
-# cachepot falls back to local filesystem if S3 is misconfigured, not failing the build
-ARG RUSTC_WRAPPER=cachepot
-ENV AWS_REGION=eu-central-1
-ENV CACHEPOT_S3_KEY_PREFIX=cachepot
-ARG CACHEPOT_BUCKET=neon-github-dev
-#ARG AWS_ACCESS_KEY_ID
-#ARG AWS_SECRET_ACCESS_KEY
-
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v16/lib                       pg_install/v16/lib
 COPY --chown=nonroot . .
 
-# Show build caching stats to check if it was used in the end.
-# Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
     && PQ_LIB_DIR=$(pwd)/pg_install/v16/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build \
       --bin pg_sni_router  \
@@ -58,8 +46,7 @@ RUN set -e \
       --bin proxy  \
       --bin neon_local \
       --bin storage_scrubber \
-      --locked --release \
-    && cachepot -s
+      --locked --release
 
 # Build final image
 #
