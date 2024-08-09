@@ -5734,11 +5734,20 @@ impl Service {
         self.gate.close().await;
     }
 
+    /// Spot check the download lag for a secondary location of a shard.
+    /// Should be used as a heuristic, since it's not always precise: the
+    /// secondary might have not downloaded the new heat map yet and, hence,
+    /// is not aware of the lag.
+    ///
+    /// Returns:
+    /// * Ok(None) if the lag could not be determined from the status,
+    /// * Ok(Some(_)) if the lag could be determind
+    /// * Err on failures to query the pageserver.
     async fn secondary_lag(
         &self,
         secondary: &NodeId,
         tenant_shard_id: TenantShardId,
-    ) -> Result<u64, mgmt_api::Error> {
+    ) -> Result<Option<u64>, mgmt_api::Error> {
         let nodes = self.inner.read().unwrap().nodes.clone();
         let node = nodes.get(secondary).ok_or(mgmt_api::Error::ApiError(
             StatusCode::NOT_FOUND,
@@ -5756,7 +5765,10 @@ impl Service {
             )
             .await
         {
-            Some(Ok(status)) => Ok(status.bytes_total - status.bytes_downloaded),
+            Some(Ok(status)) => match status.heatmap_mtime {
+                Some(_) => Ok(Some(status.bytes_total - status.bytes_downloaded)),
+                None => Ok(None),
+            },
             Some(Err(e)) => Err(e),
             None => Err(mgmt_api::Error::Cancelled),
         }
@@ -5855,14 +5867,21 @@ impl Service {
                 };
 
                 match self.secondary_lag(&dest_node_id, tid).await {
-                    Ok(lag) if lag <= max_secondary_lag_bytes => {
+                    Ok(Some(lag)) if lag <= max_secondary_lag_bytes => {
                         // The secondary is reasonably up to date.
                         // Migrate to it
                     }
-                    Ok(lag) => {
+                    Ok(Some(lag)) => {
                         tracing::info!(
                             tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
                             "Secondary on node {dest_node_id} is lagging by {lag}. Skipping reconcile."
+                        );
+                        continue;
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                            "Could not determine lag for secondary on node {dest_node_id}. Skipping reconcile."
                         );
                         continue;
                     }
