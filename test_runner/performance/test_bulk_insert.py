@@ -29,7 +29,7 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
             # Run INSERT, recording the time and I/O it takes
             with env.record_pageserver_writes("pageserver_writes"):
                 with env.record_duration("insert"):
-                    cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
+                    cur.execute("insert into huge values (generate_series(1, 20000000), 0);")
                     env.flush(compact=False, gc=False)
 
             env.report_peak_memory_use()
