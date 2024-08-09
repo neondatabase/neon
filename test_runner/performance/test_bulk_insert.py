@@ -1,9 +1,9 @@
 from contextlib import closing
 
-import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare, PgCompare
+from fixtures.log_helper import log
 from fixtures.pg_version import PgVersion
 
 
@@ -17,7 +17,6 @@ from fixtures.pg_version import PgVersion
 # 3. Disk space used
 # 4. Peak memory usage
 #
-@pytest.mark.skip("See https://github.com/neondatabase/neon/issues/7124")
 def test_bulk_insert(neon_with_baseline: PgCompare):
     env = neon_with_baseline
 
@@ -71,7 +70,9 @@ def measure_recovery_time(env: NeonCompare):
 
     # Measure recovery time
     with env.record_duration("wal_recovery"):
+        log.info("Entering recovery...")
         client.timeline_create(pg_version, env.tenant, env.timeline)
 
         # Flush, which will also wait for lsn to catch up
         env.flush()
+        log.info("Finished recovery.")
