@@ -43,9 +43,10 @@ pub struct StorageController {
 
 const COMMAND: &str = "storage_controller";
 
-const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 17;
+const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 
 const DB_NAME: &str = "storage_controller";
+const USER_NAME: &str = "ana";
 
 pub struct NeonStorageControllerStartArgs {
     pub instance_id: u8,
@@ -211,7 +212,7 @@ impl StorageController {
     /// Readiness check for our postgres process
     async fn pg_isready(&self, pg_bin_dir: &Utf8Path, postgres_port: u16) -> anyhow::Result<bool> {
         let bin_path = pg_bin_dir.join("pg_isready");
-        let args = ["-h", "localhost", "-p", &format!("{}", postgres_port)];
+        let args = ["-h", "localhost", "-U", USER_NAME, "-d", DB_NAME ,"-p", &format!("{}", postgres_port)];
         let exitcode = Command::new(bin_path).args(args).spawn()?.wait().await?;
 
         Ok(exitcode.success())
@@ -225,7 +226,7 @@ impl StorageController {
     ///
     /// Returns the database url
     pub async fn setup_database(&self, postgres_port: u16) -> anyhow::Result<String> {
-        let database_url = format!("postgresql://localhost:{}/{DB_NAME}", postgres_port);
+        let database_url = format!("postgresql://{USER_NAME}@localhost:{}/{DB_NAME}", postgres_port);
 
         let pg_bin_dir = self.get_pg_bin_dir().await?;
         let createdb_path = pg_bin_dir.join("createdb");
@@ -235,6 +236,9 @@ impl StorageController {
                 "localhost",
                 "-p",
                 &format!("{}", postgres_port),
+                "-U",
+                USER_NAME,
+                "-O", USER_NAME,
                 DB_NAME,
             ])
             .output()
@@ -271,7 +275,7 @@ impl StorageController {
             // But tokio-postgres fork doesn't have this upstream commit:
             // https://github.com/sfackler/rust-postgres/commit/cb609be758f3fb5af537f04b584a2ee0cebd5e79
             // => we should rebase our fork => TODO https://github.com/neondatabase/neon/issues/8399
-            .user(&whoami::username())
+            .user(USER_NAME)
             .dbname(DB_NAME)
             .connect(tokio_postgres::NoTls)
             .await
@@ -328,14 +332,21 @@ impl StorageController {
             let pg_log_path = pg_data_path.join("postgres.log");
 
             if !tokio::fs::try_exists(&pg_data_path).await? {
-                // Initialize empty database
-                let initdb_path = pg_bin_dir.join("initdb");
-                let mut child = Command::new(&initdb_path)
-                    .envs(vec![
-                        ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                        ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                    ])
-                    .args(["-D", pg_data_path.as_ref()])
+                let initdb_args = [
+                "-D",
+                pg_data_path.as_ref(),
+                "--username", USER_NAME,
+            ];
+            tracing::info!("Initializing storage controller database with args: {:?}", initdb_args);
+
+            // Initialize empty database
+            let initdb_path = pg_bin_dir.join("initdb");
+            let mut child = Command::new(&initdb_path)
+                .envs(vec![
+                    ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+                    ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+                ])
+                .args(initdb_args)
                     .spawn()
                     .expect("Failed to spawn initdb");
                 let status = child.wait().await?;
@@ -364,8 +375,10 @@ impl StorageController {
                 pg_data_path.as_ref(),
                 "-l",
                 pg_log_path.as_ref(),
-                "start",
+                "-U", USER_NAME,
+            "start",
             ];
+        tracing::info!("Starting storage controller database with args: {:?}", db_start_args);
 
             background_process::start_process(
                 "storage_controller_db",

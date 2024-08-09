@@ -944,8 +944,12 @@ class NeonEnvBuilder:
 
         for directory_to_clean in reversed(directories_to_clean):
             if not os.listdir(directory_to_clean):
-                log.debug(f"Removing empty directory {directory_to_clean}")
-                directory_to_clean.rmdir()
+                log.info(f"Removing empty directory {directory_to_clean}")
+                try:
+                    directory_to_clean.rmdir()
+                except Exception as e:
+                    log.error(f"Error removing empty directory {directory_to_clean}: {e}")
+
 
     def cleanup_remote_storage(self):
         for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage]:

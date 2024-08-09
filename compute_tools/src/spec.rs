@@ -745,7 +745,7 @@ pub fn handle_extension_neon(client: &mut Client) -> Result<()> {
     // which may happen in two cases:
     // - extension was just installed
     // - extension was already installed and is up to date
-    let query = "ALTER EXTENSION neon UPDATE";
+    let query = "ALTER EXTENSION neon.neon UPDATE";
     info!("update neon extension version with query: {}", query);
     if let Err(e) = client.simple_query(query) {
         error!(

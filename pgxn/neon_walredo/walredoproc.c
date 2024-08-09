@@ -137,7 +137,7 @@ static BufferTag target_redo_tag;
 
 static XLogReaderState *reader_state;
 
-#define TRACE DEBUG5
+#define TRACE LOG
 
 #ifdef HAVE_LIBSECCOMP
 

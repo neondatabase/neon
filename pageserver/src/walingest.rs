@@ -176,7 +176,7 @@ impl WalIngest {
                                 .await?;
                         }
                     }
-                } else if pg_version == 16 {
+                } else if pg_version == 16  {
                     if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG {
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
                     } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY {
@@ -188,6 +188,26 @@ impl WalIngest {
                         self.ingest_xlog_dbase_create(modification, &createdb, ctx)
                             .await?;
                     } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_DROP {
+                        let dropdb = XlDropDatabase::decode(&mut buf);
+                        for tablespace_id in dropdb.tablespace_ids {
+                            trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                            modification
+                                .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                                .await?;
+                        }
+                    }
+                } else if pg_version == 17  {
+                    if info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_WAL_LOG {
+                        debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                    } else if info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY {
+                        // The XLOG record was renamed between v14 and v15,
+                        // but the record format is the same.
+                        // So we can reuse XlCreateDatabase here.
+                        debug!("XLOG_DBASE_CREATE_FILE_COPY");
+                        let createdb = XlCreateDatabase::decode(&mut buf);
+                        self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                            .await?;
+                    } else if info == postgres_ffi::v17::bindings::XLOG_DBASE_DROP {
                         let dropdb = XlDropDatabase::decode(&mut buf);
                         for tablespace_id in dropdb.tablespace_ids {
                             trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
@@ -770,6 +790,73 @@ impl WalIngest {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
+            17  => {
+                if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+
+                    if info == pg_constants::XLOG_HEAP_INSERT {
+                        let xlrec = v17::XlHeapInsert::decode(buf);
+                        assert_eq!(0, buf.remaining());
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_DELETE {
+                        let xlrec = v17::XlHeapDelete::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_UPDATE
+                        || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+                    {
+                        let xlrec = v17::XlHeapUpdate::decode(buf);
+                        // the size of tuple data is inferred from the size of the record.
+                        // we can't validate the remaining number of bytes without parsing
+                        // the tuple data.
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
+                        }
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                            // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                            // non-HOT update where the new tuple goes to different page than
+                            // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                            // set.
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v17::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+                    if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+                        let xlrec = v17::XlHeapMultiInsert::decode(buf);
+
+                        let offset_array_len =
+                            if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                                0
+                            } else {
+                                size_of::<u16>() * xlrec.ntuples as usize
+                            };
+                        assert_eq!(offset_array_len, buf.remaining());
+
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v17::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else {
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                }
+            }
             _ => {}
         }
 
@@ -878,26 +965,26 @@ impl WalIngest {
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match pg_version {
-            16 => {
+            17 => {
                 let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 
                 match info {
                     pg_constants::XLOG_NEON_HEAP_INSERT => {
-                        let xlrec = v16::rm_neon::XlNeonHeapInsert::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapInsert::decode(buf);
                         assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_DELETE => {
-                        let xlrec = v16::rm_neon::XlNeonHeapDelete::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapDelete::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_UPDATE
                     | pg_constants::XLOG_NEON_HEAP_HOT_UPDATE => {
-                        let xlrec = v16::rm_neon::XlNeonHeapUpdate::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapUpdate::decode(buf);
                         // the size of tuple data is inferred from the size of the record.
                         // we can't validate the remaining number of bytes without parsing
                         // the tuple data.
@@ -913,7 +1000,7 @@ impl WalIngest {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_MULTI_INSERT => {
-                        let xlrec = v16::rm_neon::XlNeonHeapMultiInsert::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapMultiInsert::decode(buf);
 
                         let offset_array_len =
                             if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
@@ -929,7 +1016,7 @@ impl WalIngest {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_LOCK => {
-                        let xlrec = v16::rm_neon::XlNeonHeapLock::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;

@@ -16,3 +16,12 @@ pub fn bkpimg_is_compressed(bimg_info: u8) -> bool {
 
     (bimg_info & ANY_COMPRESS_FLAG) != 0
 }
+
+
+pub const XLOG_HEAP2_PRUNE_ON_ACCESS: u8 = 0x10;
+pub const XLOG_HEAP2_PRUNE_VACUUM_SCAN: u8 = 0x20;
+pub const XLOG_HEAP2_PRUNE_VACUUM_CLEANUP: u8 = 0x30;
+
+
+pub const XLOG_OVERWRITE_CONTRECORD: u8 = 0xD0;
+pub const XLOG_CHECKPOINT_REDO: u8 = 0xE0;
