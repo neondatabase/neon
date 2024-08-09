@@ -13,6 +13,7 @@ pub(crate) enum RequestKind {
     List = 3,
     Copy = 4,
     TimeTravel = 5,
+    Head = 6,
 }
 
 use scopeguard::ScopeGuard;
@@ -27,6 +28,7 @@ impl RequestKind {
             List => "list_objects",
             Copy => "copy_object",
             TimeTravel => "time_travel_recover",
+            Head => "head_object",
         }
     }
     const fn as_index(&self) -> usize {
