@@ -424,7 +424,6 @@ async fn gc_ancestor(
             }
 
             // All validations passed: erase the object
-            let path = RemotePath::from_string(&key).unwrap();
             match remote_client.delete(&path, &CancellationToken::new()).await {
                 Ok(_) => {
                     tracing::info!("Successfully deleted unreferenced ancestor layer {key}");
