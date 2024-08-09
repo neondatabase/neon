@@ -204,6 +204,11 @@ def test_scrubber_physical_gc_ancestors(
         },
     )
 
+    # Create an extra timeline, to ensure the scrubber isn't confused by multiple timelines
+    env.storage_controller.pageserver_api().timeline_create(
+        env.pg_version, tenant_id=tenant_id, new_timeline_id=TimelineId.generate()
+    )
+
     # Make sure the original shard has some layers
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
@@ -213,6 +218,11 @@ def test_scrubber_physical_gc_ancestors(
     assert shard_count is None or new_shard_count > shard_count
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
     env.storage_controller.reconcile_until_idle()  # Move shards to their final locations immediately
+
+    # Create a timeline after split, to ensure scrubber can handle timelines that exist in child shards but not ancestors
+    env.storage_controller.pageserver_api().timeline_create(
+        env.pg_version, tenant_id=tenant_id, new_timeline_id=TimelineId.generate()
+    )
 
     # Make sure child shards have some layers.  Do not force upload, because the test helper calls checkpoint, which
     # compacts, and we only want to do tha explicitly later in the test.
@@ -306,6 +316,12 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
     workload.write_rows(100)
+
+    # Flush deletion queue so that we don't leave any orphan layers in the parent that will confuse subsequent checks: once
+    # a shard is split, any layers in its prefix that aren't referenced by a child will be considered GC'able, even
+    # if they were logically deleted before the shard split, just not physically deleted yet because of the queue.
+    for ps in env.pageservers:
+        ps.http_client().deletion_queue_flush(execute=True)
 
     new_shard_count = 4
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
