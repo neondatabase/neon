@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   trigger_bench_on_ec2_machine_in_eu_central_1:
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: neondatabase/build-tools:pinned
       credentials:
@@ -72,7 +72,7 @@ jobs:
           echo "COMMIT_HASH=$INPUT_COMMIT_HASH" >> $GITHUB_ENV
         fi
 
-    - name: Start Bench with run_id   
+    - name: Start Bench with run_id
       run: |
         curl -k -X 'POST' \
         "${EC2_MACHINE_URL_US}/start_test/${GITHUB_RUN_ID}" \
@@ -116,7 +116,7 @@ jobs:
         -H 'accept: application/gzip' \
         -H "Authorization: Bearer $API_KEY" \
         --output "test_log_${GITHUB_RUN_ID}.gz"
-    
+
     - name: Unzip Test Log and Print it into this job's log
       if: always() && steps.poll_step.outputs.too_many_runs != 'true'
       run: |
@@ -140,7 +140,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
     - name: Cleanup Test Resources
-      if: always() 
+      if: always()
       run: |
         curl -k -X 'POST' \
         "${EC2_MACHINE_URL_US}/cleanup_test/${GITHUB_RUN_ID}" \
