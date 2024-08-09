@@ -7,11 +7,19 @@ on:
         description: 'Source tag'
         required: true
         type: string
+      force:
+        description: 'Force the image to be pinned'
+        default: 'false'
+        type: string
   workflow_call:
     inputs:
       from-tag:
         description: 'Source tag'
         required: true
+        type: string
+      force:
+        description: 'Force the image to be pinned'
+        default: 'false'
         type: string
 
 defaults:
@@ -52,7 +60,7 @@ jobs:
           echo "skip=${skip}" | tee -a $GITHUB_OUTPUT
 
       - uses: docker/login-action@v3
-        if: steps.check-manifests.outputs.skip == 'false'
+        if: steps.check-manifests.outputs.skip == 'false' || inputs.force == 'true'
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -64,14 +72,14 @@ jobs:
                                              neondatabase/build-tools:${FROM_TAG}
 
       - uses: docker/login-action@v3
-        if: steps.check-manifests.outputs.skip == 'false'
+        if: steps.check-manifests.outputs.skip == 'false' || inputs.force == 'true'
         with:
           registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
           username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
       - name: Azure login
-        if: steps.check-manifests.outputs.skip == 'false'
+        if: steps.check-manifests.outputs.skip == 'false' || inputs.force == 'true'
         uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
         with:
           client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
@@ -79,12 +87,12 @@ jobs:
           subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
 
       - name: Login to ACR
-        if: steps.check-manifests.outputs.skip == 'false'
+        if: steps.check-manifests.outputs.skip == 'false' || inputs.force == 'true'
         run: |
           az acr login --name=neoneastus2
 
       - name: Tag build-tools with `${{ env.TO_TAG }}` in ECR and ACR
-        if: steps.check-manifests.outputs.skip == 'false'
+        if: steps.check-manifests.outputs.skip == 'false' || inputs.force == 'true'
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG} \
                                           -t neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG} \
