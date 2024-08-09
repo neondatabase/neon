@@ -1,5 +1,6 @@
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fixtures.log_helper import log
@@ -12,11 +13,13 @@ from fixtures.neon_fixtures import NeonEnv, PgBin
 @pytest.mark.timeout(600)
 def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
+    cache_dir = Path(env.repo_dir) / "file_cache"
+    cache_dir.mkdir(exist_ok=True)
     env.neon_cli.create_branch("test_lfc_resize", "empty")
     endpoint = env.endpoints.create_start(
         "test_lfc_resize",
         config_lines=[
-            "neon.file_cache_path='file.cache'",
+            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size=1GB",
             "neon.file_cache_size_limit=1GB",
         ],
