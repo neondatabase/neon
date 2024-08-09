@@ -19,7 +19,7 @@ use crate::{
     metrics,
     peer_client::{GlobalObservedState, PeerClient},
     persistence::{
-        AbortShardSplitStatus, LeaderPersistence, MetadataHealthPersistence, TenantFilter,
+        AbortShardSplitStatus, ControllerPersistence, MetadataHealthPersistence, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
@@ -488,7 +488,7 @@ pub(crate) enum ReconcileResultRequest {
 
 struct LeaderStepDownState {
     observed: GlobalObservedState,
-    leader: LeaderPersistence,
+    leader: ControllerPersistence,
 }
 
 impl Service {
@@ -6334,7 +6334,7 @@ impl Service {
     /// leader.
     ///
     /// On failures to discover and resolve the hostname the process is killed and we rely on k8s to retry.
-    fn get_proposed_leader_info(&self) -> LeaderPersistence {
+    fn get_proposed_leader_info(&self) -> ControllerPersistence {
         let hostname = match dns_lookup::get_hostname() {
             Ok(name) => name,
             Err(err) => {
@@ -6355,7 +6355,7 @@ impl Service {
             .pop()
             .expect("k8s configured hostname always resolves");
 
-        let proposed = LeaderPersistence {
+        let proposed = ControllerPersistence {
             hostname: addr.to_string(),
             port: self.get_config().http_service_port,
             started_at: chrono::Utc::now(),

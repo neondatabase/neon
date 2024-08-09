@@ -790,12 +790,12 @@ impl Persistence {
 
     /// Get the current entry from the `leader` table if one exists.
     /// It is an error for the table to contain more than one entry.
-    pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<LeaderPersistence>> {
-        let mut leader: Vec<LeaderPersistence> = self
+    pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
+        let mut leader: Vec<ControllerPersistence> = self
             .with_measured_conn(
                 DatabaseOperation::GetLeader,
                 move |conn| -> DatabaseResult<_> {
-                    Ok(crate::schema::leader::table.load::<LeaderPersistence>(conn)?)
+                    Ok(crate::schema::controllers::table.load::<ControllerPersistence>(conn)?)
                 },
             )
             .await?;
@@ -814,17 +814,17 @@ impl Persistence {
     /// When `prev` is not specified, the update is forced.
     pub(crate) async fn update_leader(
         &self,
-        prev: Option<LeaderPersistence>,
-        new: LeaderPersistence,
+        prev: Option<ControllerPersistence>,
+        new: ControllerPersistence,
     ) -> DatabaseResult<()> {
-        use crate::schema::leader::dsl::*;
+        use crate::schema::controllers::dsl::*;
 
         let updated = self
             .with_measured_conn(
                 DatabaseOperation::UpdateLeader,
                 move |conn| -> DatabaseResult<usize> {
                     let updated = match &prev {
-                        Some(prev) => diesel::update(leader)
+                        Some(prev) => diesel::update(controllers)
                             .filter(hostname.eq(prev.hostname.clone()))
                             .filter(port.eq(prev.port))
                             .filter(started_at.eq(prev.started_at))
@@ -834,7 +834,7 @@ impl Persistence {
                                 started_at.eq(new.started_at),
                             ))
                             .execute(conn)?,
-                        None => diesel::insert_into(leader)
+                        None => diesel::insert_into(controllers)
                             .values(new.clone())
                             .execute(conn)?,
                     };
@@ -981,8 +981,8 @@ impl From<MetadataHealthPersistence> for MetadataHealthRecord {
 #[derive(
     Serialize, Deserialize, Queryable, Selectable, Insertable, Eq, PartialEq, Debug, Clone,
 )]
-#[diesel(table_name = crate::schema::leader)]
-pub(crate) struct LeaderPersistence {
+#[diesel(table_name = crate::schema::controllers)]
+pub(crate) struct ControllerPersistence {
     pub(crate) hostname: String,
     pub(crate) port: i32,
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,

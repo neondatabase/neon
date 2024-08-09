@@ -1,7 +1,7 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    leader (hostname, port, started_at) {
+    controllers (hostname, port, started_at) {
         hostname -> Varchar,
         port -> Int4,
         started_at -> Timestamptz,
@@ -44,4 +44,4 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(leader, metadata_health, nodes, tenant_shards,);
+diesel::allow_tables_to_appear_in_same_query!(controllers, metadata_health, nodes, tenant_shards,);

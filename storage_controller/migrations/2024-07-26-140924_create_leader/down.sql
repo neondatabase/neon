@@ -1,1 +1,1 @@
-DROP TABLE leader;
+DROP TABLE controllers;
