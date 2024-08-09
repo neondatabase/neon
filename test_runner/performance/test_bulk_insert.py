@@ -30,7 +30,7 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
             with env.record_pageserver_writes("pageserver_writes"):
                 with env.record_duration("insert"):
                     cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
-                    env.flush()
+                    env.flush(compact=False, gc=False)
 
             env.report_peak_memory_use()
             env.report_size()
@@ -47,6 +47,9 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
     # is the bottleneck.
     if isinstance(env, NeonCompare):
         measure_recovery_time(env)
+
+    with env.record_duration("compaction"):
+        env.compact()
 
 
 def measure_recovery_time(env: NeonCompare):
@@ -74,5 +77,5 @@ def measure_recovery_time(env: NeonCompare):
         client.timeline_create(pg_version, env.tenant, env.timeline)
 
         # Flush, which will also wait for lsn to catch up
-        env.flush()
+        env.flush(compact=False, gc=False)
         log.info("Finished recovery.")
