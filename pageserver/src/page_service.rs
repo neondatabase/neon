@@ -754,16 +754,24 @@ impl PageServerHandler {
         }
 
         if request_lsn < **latest_gc_cutoff_lsn {
-            // Check explicitly for INVALID just to get a less scary error message if the
-            // request is obviously bogus
-            return Err(if request_lsn == Lsn::INVALID {
-                PageStreamError::BadRequest("invalid LSN(0) in request".into())
-            } else {
-                PageStreamError::BadRequest(format!(
+            let gc_info = &timeline.gc_info.read().unwrap();
+            if !gc_info.leases.contains_key(&request_lsn) {
+                // Check explicitly for INVALID just to get a less scary error message if the
+                // request is obviously bogus
+                return Err(if request_lsn == Lsn::INVALID {
+                    PageStreamError::BadRequest("invalid LSN(0) in request".into())
+                } else {
+                    PageStreamError::BadRequest(format!(
                         "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
                         request_lsn, **latest_gc_cutoff_lsn
                     ).into())
-            });
+                });
+            }
+            tracing::info!(
+                "requesting a leased lsn {} below gc cutoff {}",
+                request_lsn,
+                **latest_gc_cutoff_lsn
+            );
         }
 
         // Wait for WAL up to 'not_modified_since' to arrive, if necessary
@@ -822,9 +830,8 @@ impl PageServerHandler {
             b"valid_until",
         )]))?
         .write_message_noflush(&BeMessage::DataRow(&[Some(
-            &valid_until.as_millis().to_be_bytes(),
-        )]))?
-        .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            valid_until.as_millis().to_string().as_bytes(),
+        )]))?;
 
         Ok(())
     }

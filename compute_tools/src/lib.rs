@@ -11,6 +11,7 @@ pub mod logger;
 pub mod catalog;
 pub mod compute;
 pub mod extension_server;
+pub mod lsn_lease;
 mod migration;
 pub mod monitor;
 pub mod params;

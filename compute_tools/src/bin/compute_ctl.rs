@@ -44,6 +44,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use tracing::{error, info, warn};
@@ -365,6 +366,8 @@ fn wait_spec(
         // not include the time that we waited for the spec.
         state.start_time = now;
     }
+
+    launch_lsn_lease_bg_task_for_static(&compute);
 
     Ok(WaitSpecResult {
         compute,
