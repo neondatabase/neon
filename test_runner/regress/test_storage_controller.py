@@ -1598,6 +1598,8 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
 
     # Perform a graceful rolling restart
     for ps in env.pageservers:
+        env.storage_controller.warm_up_all_secondaries()
+
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
         )
@@ -1781,6 +1783,7 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
 
     ps_id_to_drain = env.pageservers[0].id
 
+    env.storage_controller.warm_up_all_secondaries()
     env.storage_controller.retryable_node_operation(
         lambda ps_id: env.storage_controller.node_drain(ps_id),
         ps_id_to_drain,

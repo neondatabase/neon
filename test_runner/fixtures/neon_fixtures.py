@@ -2714,6 +2714,23 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         return tenant_placement
 
+    def warm_up_all_secondaries(self):
+        log.info("Warming up all secondary locations")
+
+        tenant_placement = self.get_tenants_placement()
+        for tid, placement in tenant_placement.items():
+            assert placement["observed"]["attached"] is not None
+            primary_id = placement["observed"]["attached"]
+
+            assert len(placement["observed"]["secondary"]) == 1
+            secondary_id = placement["observed"]["secondary"][0]
+
+            parsed_tid = TenantShardId.parse(tid)
+            self.env.get_pageserver(primary_id).http_client().tenant_heatmap_upload(parsed_tid)
+            self.env.get_pageserver(secondary_id).http_client().tenant_secondary_download(
+                parsed_tid, wait_ms=250
+            )
+
     @property
     def workdir(self) -> Path:
         return self.env.repo_dir
