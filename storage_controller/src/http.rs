@@ -16,7 +16,8 @@ use pageserver_api::controller_api::{
     TenantCreateRequest,
 };
 use pageserver_api::models::{
-    TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest, TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest
+    TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
+    TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
