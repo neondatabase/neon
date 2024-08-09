@@ -133,7 +133,7 @@ pub async fn stream_tenant_shards<'a>(
 /// Given a TenantShardId, output a stream of the timelines within that tenant, discovered
 /// using ListObjectsv2.  The listing is done before the stream is built, so that this
 /// function can be used to generate concurrency on a stream using buffer_unordered.
-pub async fn stream_tenant_timelines<'a>(
+pub(crate) async fn stream_tenant_timelines<'a>(
     s3_client: &'a Client,
     target: &'a RootTarget,
     tenant: TenantShardId,

@@ -5,6 +5,7 @@ use aws_sdk_s3::Client;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use utils::generation::Generation;
 use utils::id::TimelineId;
@@ -51,13 +52,13 @@ impl TimelineAnalysis {
 }
 
 pub(crate) async fn branch_cleanup_and_check_errors(
-    s3_client: &Client,
-    target: &RootTarget,
+    remote_client: &GenericRemoteStorage,
+    _target: &RootTarget,
     id: &TenantShardTimelineId,
     tenant_objects: &mut TenantObjectListing,
     s3_active_branch: Option<&BranchData>,
     console_branch: Option<BranchData>,
-    s3_data: Option<S3TimelineBlobData>,
+    s3_data: Option<RemoteTimelineBlobData>,
 ) -> TimelineAnalysis {
     let mut result = TimelineAnalysis::new();
 
@@ -81,7 +82,9 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 
     match s3_data {
         Some(s3_data) => {
-            result.garbage_keys.extend(s3_data.unknown_keys);
+            result
+                .garbage_keys
+                .extend(s3_data.unknown_keys.into_iter().map(|k| k.key.to_string()));
 
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
@@ -146,11 +149,8 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 
                             // HEAD request used here to address a race condition  when an index was uploaded concurrently
                             // with our scan. We check if the object is uploaded to S3 after taking the listing snapshot.
-                            let response = s3_client
-                                .head_object()
-                                .bucket(target.bucket_name())
-                                .key(path.get_path().as_str())
-                                .send()
+                            let response = remote_client
+                                .head_object(&path, &CancellationToken::new())
                                 .await;
 
                             if response.is_err() {
@@ -291,9 +291,11 @@ pub(crate) struct S3TimelineBlobData {
     pub(crate) blob_data: BlobDataParseResult,
 
     // Index objects that were not used when loading `blob_data`, e.g. those from old generations
+    #[allow(unused)]
     pub(crate) unused_index_keys: Vec<String>,
 
     // Objects whose keys were not recognized at all, i.e. not layer files, not indices
+    #[allow(unused)]
     pub(crate) unknown_keys: Vec<String>,
 }
 
