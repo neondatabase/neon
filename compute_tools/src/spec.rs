@@ -7,10 +7,11 @@ use postgres::config::Config;
 use postgres::{Client, NoTls};
 use reqwest::StatusCode;
 use tracing::{error, info, info_span, instrument, span_enabled, warn, Level};
+use url::Url;
 
 use crate::config;
 use crate::logger::inlinify;
-use crate::migration::MigrationRunner;
+use crate::migration::{Migration, MigrationRunner};
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
@@ -768,7 +769,7 @@ pub fn handle_neon_extension_upgrade(client: &mut Client) -> Result<()> {
 }
 
 #[instrument(skip_all)]
-pub fn handle_migrations(client: &mut Client) -> Result<()> {
+pub fn handle_migrations(connstr: Url) -> Result<()> {
     info!("handle migrations");
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -777,25 +778,38 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
 
     // Add new migrations in numerical order.
     let migrations = [
-        include_str!("./migrations/0001-neon_superuser_bypass_rls.sql"),
-        include_str!("./migrations/0002-alter_roles.sql"),
-        include_str!("./migrations/0003-grant_pg_create_subscription_to_neon_superuser.sql"),
-        include_str!("./migrations/0004-grant_pg_monitor_to_neon_superuser.sql"),
-        include_str!("./migrations/0005-grant_all_on_tables_to_neon_superuser.sql"),
-        include_str!("./migrations/0006-grant_all_on_sequences_to_neon_superuser.sql"),
-        include_str!(
+        Migration::Cluster(include_str!(
+            "./migrations/0001-neon_superuser_bypass_rls.sql"
+        )),
+        Migration::Cluster(include_str!("./migrations/0002-alter_roles.sql")),
+        Migration::Cluster(include_str!(
+            "./migrations/0003-grant_pg_create_subscription_to_neon_superuser.sql"
+        )),
+        Migration::Cluster(include_str!(
+            "./migrations/0004-grant_pg_monitor_to_neon_superuser.sql"
+        )),
+        Migration::Cluster(include_str!(
+            "./migrations/0005-grant_all_on_tables_to_neon_superuser.sql"
+        )),
+        Migration::Cluster(include_str!(
+            "./migrations/0006-grant_all_on_sequences_to_neon_superuser.sql"
+        )),
+        Migration::Cluster(include_str!(
             "./migrations/0007-grant_all_on_tables_to_neon_superuser_with_grant_option.sql"
-        ),
-        include_str!(
+        )),
+        Migration::Cluster(include_str!(
             "./migrations/0008-grant_all_on_sequences_to_neon_superuser_with_grant_option.sql"
-        ),
-        include_str!("./migrations/0009-revoke_replication_for_previously_allowed_roles.sql"),
-        include_str!(
+        )),
+        Migration::Cluster(include_str!(
+            "./migrations/0009-revoke_replication_for_previously_allowed_roles.sql"
+        )),
+        Migration::Cluster(include_str!(
             "./migrations/0010-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
-        ),
+        )),
+        Migration::PerDatabase(include_str!("./migrations/0011-fix-CVE-2024-4317.sql")),
     ];
 
-    MigrationRunner::new(client, &migrations).run_migrations()?;
+    MigrationRunner::new(connstr, &migrations)?.run_migrations()?;
 
     Ok(())
 }
