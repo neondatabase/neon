@@ -11,7 +11,6 @@ use axum::{routing::get, Router, Server};
 use clap::Parser;
 use futures::Future;
 use std::{fmt::Debug, time::Duration};
-use sysinfo::{RefreshKind, System, SystemExt};
 use tokio::{sync::broadcast, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -22,9 +21,10 @@ use runner::Runner;
 pub mod dispatcher;
 pub mod protocol;
 
-pub mod cgroup;
 pub mod filecache;
 pub mod runner;
+
+pub mod sliding_window;
 
 /// The vm-monitor is an autoscaling component started by compute_ctl.
 ///
@@ -32,8 +32,7 @@ pub mod runner;
 /// memory pressure by making requests to the autoscaler-agent.
 #[derive(Debug, Parser)]
 pub struct Args {
-    /// The name of the cgroup we should monitor for memory.high events. This
-    /// is the cgroup that postgres should be running in.
+    /// Unused but accepted for backwards compatibility.
     #[arg(short, long)]
     pub cgroup: Option<String>,
 
@@ -63,10 +62,6 @@ pub fn bytes_to_mebibytes(bytes: u64) -> f32 {
     (bytes as f32) / (MiB as f32)
 }
 
-pub fn get_total_system_memory() -> u64 {
-    System::new_with_specifics(RefreshKind::new().with_memory()).total_memory()
-}
-
 /// Global app state for the Axum server
 #[derive(Debug, Clone)]
 pub struct ServerState {
@@ -87,8 +82,7 @@ pub struct ServerState {
 ///
 /// This is mainly meant to be called with futures that will be pending for a very
 /// long time, or are not mean to return. If it is not desirable for the future to
-/// ever resolve, such as in the case of [`cgroup::CgroupWatcher::watch`], the error can
-/// be logged with `f`.
+/// ever resolve, the error can be logged with `f`.
 pub fn spawn_with_cancel<T, F>(
     token: CancellationToken,
     f: F,
