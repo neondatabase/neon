@@ -281,7 +281,8 @@ jobs:
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]')
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
+                                                     { "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-aurora", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -728,7 +729,7 @@ jobs:
             ENV_PLATFORM=RDS_AURORA_TPCH
             ;;
           rds-postgres)
-            ENV_PLATFORM=RDS_AURORA_TPCH
+            ENV_PLATFORM=RDS_POSTGRES_TPCH
             ;;
           *)
             echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neonvm-captest-reuse', 'rds-aurora', or 'rds-postgres'"
