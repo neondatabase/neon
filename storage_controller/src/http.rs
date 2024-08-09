@@ -345,11 +345,11 @@ async fn handle_tenant_timeline_archival_config(
 
     let create_req = json_request::<TimelineArchivalConfigRequest>(&mut req).await?;
 
-    let res = service
+    service
         .tenant_timeline_archival_config(tenant_id, timeline_id, create_req)
         .await?;
 
-    json_response(StatusCode::OK, res)
+    json_response(StatusCode::OK, ())
 }
 
 async fn handle_tenant_timeline_detach_ancestor(

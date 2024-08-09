@@ -3016,7 +3016,7 @@ impl Service {
                 ))
             })
             .await?;
-        assert!(results.len() > 0, "must have at least one result");
+        assert!(!results.is_empty(), "must have at least one result");
 
         Ok(())
     }
