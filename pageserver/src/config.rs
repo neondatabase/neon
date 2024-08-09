@@ -90,8 +90,7 @@ pub mod defaults {
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
-    pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
-        ImageCompressionAlgorithm::Disabled;
+    pub const DEFAULT_IMAGE_COMPRESSION: &str = "zstd(1)";
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
 
@@ -498,7 +497,7 @@ impl PageServerConfigBuilder {
             max_vectored_read_bytes: Set(MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
-            image_compression: Set(DEFAULT_IMAGE_COMPRESSION),
+            image_compression: Set(DEFAULT_IMAGE_COMPRESSION.parse().unwrap()),
             validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: Set(L0FlushConfig::default()),
@@ -1112,7 +1111,7 @@ impl PageServerConf {
                 NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                     .expect("Invalid default constant"),
             ),
-            image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
+            image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
             validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             l0_flush: L0FlushConfig::default(),
@@ -1356,7 +1355,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
-                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
@@ -1432,7 +1431,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
-                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
