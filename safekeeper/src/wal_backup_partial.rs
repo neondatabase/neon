@@ -24,7 +24,7 @@ use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 
 use tracing::{debug, error, info, instrument, warn};
-use utils::lsn::Lsn;
+use utils::{id::NodeId, lsn::Lsn};
 
 use crate::{
     metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
@@ -82,6 +82,12 @@ pub struct State {
     pub segments: Vec<PartialRemoteSegment>,
 }
 
+#[derive(Debug)]
+pub(crate) struct ReplaceUploadedSegment {
+    pub(crate) previous: PartialRemoteSegment,
+    pub(crate) current: PartialRemoteSegment,
+}
+
 impl State {
     /// Find an Uploaded segment. There should be only one Uploaded segment at a time.
     pub(crate) fn uploaded_segment(&self) -> Option<PartialRemoteSegment> {
@@ -89,6 +95,33 @@ impl State {
             .iter()
             .find(|seg| seg.status == UploadStatus::Uploaded)
             .cloned()
+    }
+
+    /// Replace the name of the Uploaded segment (if one exists) in order to match
+    /// it with `destination` safekeeper. Returns a description of the change or None.
+    pub(crate) fn replace_uploaded_segment(
+        &mut self,
+        source: NodeId,
+        destination: NodeId,
+    ) -> Option<ReplaceUploadedSegment> {
+        let current = self
+            .segments
+            .iter_mut()
+            .find(|seg| seg.status == UploadStatus::Uploaded)?;
+
+        let previous = current.clone();
+
+        let new_name = current.name.replace(
+            format!("_sk{}", source.0).as_str(),
+            format!("_sk{}", destination.0).as_str(),
+        );
+
+        current.name = new_name;
+
+        Some(ReplaceUploadedSegment {
+            previous,
+            current: current.clone(),
+        })
     }
 }
 
