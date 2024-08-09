@@ -17,7 +17,6 @@ jobs:
         database: [ clickbench, tpch, userexample ]
   
     env:
-      BENCHMARK_CONNSTR: ${{ matrix.BENCHMARK_CONNSTR }}
       LD_LIBRARY_PATH: /tmp/neon/pg_install/v16/lib
       PLATFORM: ${{ matrix.platform }}
 
@@ -60,7 +59,7 @@ jobs:
       run: |
         /tmp/neon/pg_install/v16/bin/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
         CREATE TABLE IF NOT EXISTS benchmark_restore_status (
-        databasename text,
+        databasename text primary key,
         restore_done boolean
         );
         "
@@ -94,3 +93,32 @@ jobs:
       run: |
         mkdir -p /tmp/dumps
         aws s3 cp s3://neon-github-dev/performance/pgdumps/$DATABASE_NAME/$DATABASE_NAME.pg_dump /tmp/dumps/ 
+
+    - name: Replace database name in connection string
+      id: replace-dbname
+      env:
+        DATABASE_NAME: ${{ matrix.database }}
+        BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
+      run: |
+        current_dbname=$(echo "${BENCHMARK_CONNSTR}" | sed 's|.*/||' | sed 's|?.*||')
+        new_connstr=$(echo "${BENCHMARK_CONNSTR}" | sed "s|/${current_dbname}\([/?]\)|/${DATABASE_NAME}\1|")
+        echo "database_connstr=${new_connstr}" >> $GITHUB_OUTPUT  
+
+    - name: Restore dump
+      env:
+        DATABASE_NAME: ${{ matrix.database }}
+        DATABASE_CONNSTR: ${{ steps.replace-dbname.outputs.database_connstr }}
+        PGOPTIONS: "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
+      run: |
+        /tmp/neon/pg_install/v16/bin/pg_restore --clean --if-exists --no-owner --jobs=4 \
+        -d "${DATABASE_CONNSTR}" /tmp/dumps/${DATABASE_NAME}.pg_dump
+
+    - name: Update benchmark_restore_status table
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
+        DATABASE_NAME: ${{ matrix.database }}
+      run: |
+        /tmp/neon/pg_install/v16/bin/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
+        INSERT INTO benchmark_restore_status (databasename, restore_done) VALUES ('${{ env.DATABASE_NAME }}', true)
+        ON CONFLICT (databasename) DO UPDATE SET restore_done = true;
+        "
