@@ -64,7 +64,7 @@ use crate::{
         mgr::TenantManager,
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
-        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName},
+        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName, LayerVisibilityHint},
     },
     CancellableTask, DiskUsageEvictionTask,
 };
@@ -644,6 +644,7 @@ pub(crate) struct EvictionCandidate {
     pub(crate) layer: EvictionLayer,
     pub(crate) last_activity_ts: SystemTime,
     pub(crate) relative_last_activity: finite_f32::FiniteF32,
+    pub(crate) visibility: LayerVisibilityHint,
 }
 
 impl std::fmt::Display for EvictionLayer {
@@ -894,6 +895,7 @@ async fn collect_eviction_candidates(
         // cumsum above/below min_resident_size.
         tenant_candidates
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
+
         let mut cumsum: i128 = 0;
 
         let total = tenant_candidates.len();

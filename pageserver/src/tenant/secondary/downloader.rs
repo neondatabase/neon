@@ -22,7 +22,7 @@ use crate::{
             FAILED_REMOTE_OP_RETRIES,
         },
         span::debug_assert_current_span_has_tenant_id,
-        storage_layer::{layer::local_layer_path, LayerName},
+        storage_layer::{layer::local_layer_path, LayerName, LayerVisibilityHint},
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
     },
     virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
@@ -296,6 +296,9 @@ impl SecondaryDetail {
                         }),
                         last_activity_ts: ods.access_time,
                         relative_last_activity: finite_f32::FiniteF32::ZERO,
+                        // Secondary location layers are presumed visible, because Covered layers
+                        // are excluded from the heatmap
+                        visibility: LayerVisibilityHint::Visible,
                     }
                 }));
 
