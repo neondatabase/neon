@@ -71,10 +71,10 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
       run: |
-        skip = false
+        skip=false
         if ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -tAc "SELECT 1 FROM benchmark_restore_status WHERE databasename='${{ env.DATABASE_NAME }}' AND restore_done=true;" | grep -q 1; then
           echo "Restore already done for database ${{ env.DATABASE_NAME }} on platform ${{ env.PLATFORM }}. Skipping this database."
-          skip = true
+          skip=true
         fi
         echo "skip=${skip}" | tee -a $GITHUB_OUTPUT
 
@@ -107,8 +107,16 @@ jobs:
         DATABASE_NAME: ${{ matrix.database }}
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
       run: |
-        current_dbname=$(echo "${BENCHMARK_CONNSTR}" | sed 's|.*/||' | sed 's|?.*||')
-        new_connstr=$(echo "${BENCHMARK_CONNSTR}" | sed "s|/${current_dbname}\([/?]\)|/${DATABASE_NAME}\1|")
+        # Extract the part before the database name
+        base_connstr="${BENCHMARK_CONNSTR%/*}"
+        # Extract the query parameters (if any) after the database name
+        query_params="${BENCHMARK_CONNSTR#*\?}"
+        # Reconstruct the new connection string
+        if [ "$query_params" != "$BENCHMARK_CONNSTR" ]; then
+          new_connstr="${base_connstr}/${DATABASE_NAME}?${query_params}"
+        else
+          new_connstr="${base_connstr}/${DATABASE_NAME}"
+        fi
         echo "database_connstr=${new_connstr}" >> $GITHUB_OUTPUT  
 
     - name: Restore dump
