@@ -239,8 +239,7 @@ impl SnapshotDownloader {
 
         for shard in shards.into_iter().filter(|s| s.shard_count == shard_count) {
             // Generate a stream of TenantTimelineId
-            let timelines =
-                stream_tenant_timelines_generic(&remote_client, &self.s3_root, shard).await?;
+            let timelines = stream_tenant_timelines_generic(&remote_client, &target, shard).await?;
 
             // Generate a stream of S3TimelineBlobData
             async fn load_timeline_index(
@@ -282,7 +281,7 @@ impl SnapshotDownloader {
 
         for (ttid, layers) in ancestor_layers.into_iter() {
             tracing::info!(
-                "Downloading {} layers from ancvestor timeline {ttid}...",
+                "Downloading {} layers from ancestor timeline {ttid}...",
                 layers.len()
             );
 
