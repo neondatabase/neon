@@ -101,9 +101,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: false
-          fetch-depth: 1
 
       - name: Cache poetry deps
         uses: actions/cache@v4
@@ -142,7 +139,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
 #      Disabled for now
 #      - name: Restore cargo deps cache
@@ -980,7 +976,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: false
           fetch-depth: 0
 
       - name: Trigger deploy workflow
