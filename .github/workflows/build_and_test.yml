@@ -298,9 +298,8 @@ jobs:
       with:
         channel-id: C060CNA47S9 # on-call-staging-storage-stream
         slack-message: |
-          Benchmarks failed on main: ${{ github.event.head_commit.url }}
-
-          Allure report: ${{ needs.create-test-report.outputs.report-url }}
+          Benchmarks failed on main <${{ github.event.head_commit.url }}|${{ github.sha }}>
+          <${{ needs.create-test-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
