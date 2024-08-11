@@ -322,6 +322,7 @@ async fn main_impl(
                         .to_rel_block()
                         .expect("we filter non-rel-block keys out above");
                     PagestreamGetPageRequest {
+                        reqid: 0,
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX
                         } else {
