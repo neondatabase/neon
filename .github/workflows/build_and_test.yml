@@ -48,7 +48,7 @@ jobs:
 
   tag:
     needs: [ check-permissions ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -90,7 +90,7 @@ jobs:
 
   check-codestyle-python:
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -224,7 +224,7 @@ jobs:
     outputs:
       json: ${{ steps.get-benchmark-durations.outputs.json }}
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -257,7 +257,7 @@ jobs:
   benchmarks:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     needs: [ check-permissions, build-and-test-locally, build-build-tools-image, get-benchmarks-durations ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -314,7 +314,7 @@ jobs:
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -361,7 +361,7 @@ jobs:
 
   coverage-report:
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -475,7 +475,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -551,7 +551,7 @@ jobs:
         version: [ v14, v15, v16 ]
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -696,7 +696,7 @@ jobs:
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, large ]
     strategy:
       fail-fast: false
       matrix:
@@ -745,7 +745,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
       - name: Checkout
@@ -960,7 +960,7 @@ jobs:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
     if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
       - name: Fix git ownership
@@ -1061,7 +1061,7 @@ jobs:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally ]
     if: github.ref_name == 'release'
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
