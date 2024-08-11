@@ -17,7 +17,7 @@ use pageserver_api::models::{
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetSlruSegmentRequest,
     PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
-    PagestreamProtocolVersion,
+    PagestreamProtocolVersion, RequestId,
 };
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{
@@ -537,6 +537,29 @@ impl From<WaitLsnError> for QueryError {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+struct BatchedPageStreamError {
+    err: PageStreamError,
+    reqid: RequestId,
+    request_lsn: Lsn,
+    not_modified_since: Lsn,
+}
+
+impl std::fmt::Display for BatchedPageStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.err.fmt(f)
+    }
+}
+
+struct BatchedGetPageRequest {
+    rel: RelTag,
+    blkno: BlockNumber,
+    reqid: RequestId,
+    request_lsn: Lsn,
+    not_modified_since: Lsn,
+    timer: SmgrOpTimer,
+}
+
 enum BatchedFeMessage {
     Exists {
         span: Span,
@@ -554,7 +577,7 @@ enum BatchedFeMessage {
         span: Span,
         shard: timeline::handle::Handle<TenantManagerTypes>,
         effective_request_lsn: Lsn,
-        pages: smallvec::SmallVec<[(RelTag, BlockNumber, SmgrOpTimer); 1]>,
+        pages: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
     },
     DbSize {
         span: Span,
@@ -570,7 +593,7 @@ enum BatchedFeMessage {
     },
     RespondError {
         span: Span,
-        error: PageStreamError,
+        error: BatchedPageStreamError,
     },
 }
 
@@ -595,7 +618,7 @@ impl BatchedFeMessage {
             BatchedFeMessage::GetPage { shard, pages, .. } => (
                 shard,
                 pages.len(),
-                itertools::Either::Right(pages.iter_mut().map(|(_, _, timer)| timer)),
+                itertools::Either::Right(pages.iter_mut().map(|p| &mut p.timer)),
             ),
             BatchedFeMessage::RespondError { .. } => return Ok(()),
         };
@@ -661,6 +684,7 @@ impl PageServerHandler {
         timeline_handles: &mut TimelineHandles,
         cancel: &CancellationToken,
         ctx: &RequestContext,
+        protocol_version: PagestreamProtocolVersion,
         parent_span: Span,
     ) -> Result<Option<BatchedFeMessage>, QueryError>
     where
@@ -695,7 +719,8 @@ impl PageServerHandler {
         fail::fail_point!("ps::handle-pagerequest-message");
 
         // parse request
-        let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
+        let neon_fe_msg =
+            PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
 
         let batched_msg = match neon_fe_msg {
             PagestreamFeMessage::Exists(req) => {
@@ -763,6 +788,7 @@ impl PageServerHandler {
                 }
             }
             PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
+                reqid,
                 request_lsn,
                 not_modified_since,
                 rel,
@@ -774,7 +800,12 @@ impl PageServerHandler {
                     ($error:expr) => {{
                         let error = BatchedFeMessage::RespondError {
                             span,
-                            error: $error,
+                            error: BatchedPageStreamError {
+                                err: $error,
+                                reqid,
+                                request_lsn,
+                                not_modified_since,
+                            },
                         };
                         Ok(Some(error))
                     }};
@@ -831,7 +862,14 @@ impl PageServerHandler {
                     span,
                     shard,
                     effective_request_lsn,
-                    pages: smallvec::smallvec![(rel, blkno, timer)],
+                    pages: smallvec::smallvec![BatchedGetPageRequest {
+                        rel,
+                        blkno,
+                        reqid,
+                        request_lsn,
+                        not_modified_since,
+                        timer
+                    }],
                 }
             }
         };
@@ -910,6 +948,7 @@ impl PageServerHandler {
         pgb_writer: &mut PostgresBackend<IO>,
         batch: BatchedFeMessage,
         cancel: &CancellationToken,
+        protocol_version: PagestreamProtocolVersion,
         ctx: &RequestContext,
     ) -> Result<(), QueryError>
     where
@@ -917,7 +956,7 @@ impl PageServerHandler {
     {
         // invoke handler function
         let (handler_results, span): (
-            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), PageStreamError>>,
+            Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>>,
             _,
         ) = match batch {
             BatchedFeMessage::Exists {
@@ -932,7 +971,13 @@ impl PageServerHandler {
                         .handle_get_rel_exists_request(&shard, &req, ctx)
                         .instrument(span.clone())
                         .await
-                        .map(|msg| (msg, timer))],
+                        .map(|msg| (msg, timer))
+                        .map_err(|err| BatchedPageStreamError {
+                            err,
+                            reqid: req.reqid,
+                            request_lsn: req.request_lsn,
+                            not_modified_since: req.not_modified_since,
+                        })],
                     span,
                 )
             }
@@ -948,7 +993,13 @@ impl PageServerHandler {
                         .handle_get_nblocks_request(&shard, &req, ctx)
                         .instrument(span.clone())
                         .await
-                        .map(|msg| (msg, timer))],
+                        .map(|msg| (msg, timer))
+                        .map_err(|err| BatchedPageStreamError {
+                            err,
+                            reqid: req.reqid,
+                            request_lsn: req.request_lsn,
+                            not_modified_since: req.not_modified_since,
+                        })],
                     span,
                 )
             }
@@ -990,7 +1041,13 @@ impl PageServerHandler {
                         .handle_db_size_request(&shard, &req, ctx)
                         .instrument(span.clone())
                         .await
-                        .map(|msg| (msg, timer))],
+                        .map(|msg| (msg, timer))
+                        .map_err(|err| BatchedPageStreamError {
+                            err,
+                            reqid: req.reqid,
+                            request_lsn: req.request_lsn,
+                            not_modified_since: req.not_modified_since,
+                        })],
                     span,
                 )
             }
@@ -1006,7 +1063,13 @@ impl PageServerHandler {
                         .handle_get_slru_segment_request(&shard, &req, ctx)
                         .instrument(span.clone())
                         .await
-                        .map(|msg| (msg, timer))],
+                        .map(|msg| (msg, timer))
+                        .map_err(|err| BatchedPageStreamError {
+                            err,
+                            reqid: req.reqid,
+                            request_lsn: req.request_lsn,
+                            not_modified_since: req.not_modified_since,
+                        })],
                     span,
                 )
             }
@@ -1022,7 +1085,7 @@ impl PageServerHandler {
         // Other handler errors are sent back as an error message and we stay in pagestream protocol.
         for handler_result in handler_results {
             let (response_msg, timer) = match handler_result {
-                Err(e) => match &e {
+                Err(e) => match &e.err {
                     PageStreamError::Shutdown => {
                         // If we fail to fulfil a request during shutdown, which may be _because_ of
                         // shutdown, then do not send the error to the client.  Instead just drop the
@@ -1047,7 +1110,10 @@ impl PageServerHandler {
                         });
                         (
                             PagestreamBeMessage::Error(PagestreamErrorResponse {
-                                message: e.to_string(),
+                                reqid: e.reqid,
+                                request_lsn: e.request_lsn,
+                                not_modified_since: e.not_modified_since,
+                                message: e.err.to_string(),
                             }),
                             None, // TODO: measure errors
                         )
@@ -1060,7 +1126,9 @@ impl PageServerHandler {
             // marshal & transmit response message
             //
 
-            pgb_writer.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
+            pgb_writer.write_message_noflush(&BeMessage::CopyData(
+                &response_msg.serialize(protocol_version),
+            ))?;
 
             // We purposefully don't count flush time into the timer.
             //
@@ -1123,7 +1191,7 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend<IO>,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        _protocol_version: PagestreamProtocolVersion,
+        protocol_version: PagestreamProtocolVersion,
         ctx: RequestContext,
     ) -> Result<(), QueryError>
     where
@@ -1163,6 +1231,7 @@ impl PageServerHandler {
                     timeline_handles,
                     request_span,
                     pipelining_config,
+                    protocol_version,
                     &ctx,
                 )
                 .await
@@ -1175,6 +1244,7 @@ impl PageServerHandler {
                     timeline_id,
                     timeline_handles,
                     request_span,
+                    protocol_version,
                     &ctx,
                 )
                 .await
@@ -1201,6 +1271,7 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         mut timeline_handles: TimelineHandles,
         request_span: Span,
+        protocol_version: PagestreamProtocolVersion,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1218,6 +1289,7 @@ impl PageServerHandler {
                 &mut timeline_handles,
                 &cancel,
                 ctx,
+                protocol_version,
                 request_span.clone(),
             )
             .await;
@@ -1238,7 +1310,7 @@ impl PageServerHandler {
             }
 
             let err = self
-                .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, ctx)
+                .pagesteam_handle_batched_message(pgb_writer, msg, &cancel, protocol_version, ctx)
                 .await;
             match err {
                 Ok(()) => {}
@@ -1261,6 +1333,7 @@ impl PageServerHandler {
         mut timeline_handles: TimelineHandles,
         request_span: Span,
         pipelining_config: PageServicePipeliningConfigPipelined,
+        protocol_version: PagestreamProtocolVersion,
         ctx: &RequestContext,
     ) -> (
         (PostgresBackendReader<IO>, TimelineHandles),
@@ -1358,6 +1431,7 @@ impl PageServerHandler {
                         &mut timeline_handles,
                         &cancel_batcher,
                         &ctx,
+                        protocol_version,
                         request_span.clone(),
                     )
                     .await;
@@ -1403,8 +1477,14 @@ impl PageServerHandler {
                     batch
                         .throttle_and_record_start_processing(&self.cancel)
                         .await?;
-                    self.pagesteam_handle_batched_message(pgb_writer, batch, &cancel, &ctx)
-                        .await?;
+                    self.pagesteam_handle_batched_message(
+                        pgb_writer,
+                        batch,
+                        &cancel,
+                        protocol_version,
+                        &ctx,
+                    )
+                    .await?;
                 }
             }
         });
@@ -1590,6 +1670,10 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
+            reqid: req.reqid,
+            request_lsn: req.request_lsn,
+            not_modified_since: req.not_modified_since,
+            rel: req.rel,
             exists,
         }))
     }
@@ -1616,6 +1700,10 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
+            reqid: req.reqid,
+            request_lsn: req.request_lsn,
+            not_modified_since: req.not_modified_since,
+            rel: req.rel,
             n_blocks,
         }))
     }
@@ -1643,6 +1731,10 @@ impl PageServerHandler {
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
+            reqid: req.reqid,
+            request_lsn: req.request_lsn,
+            not_modified_since: req.not_modified_since,
+            db_node: req.dbnode,
             db_size,
         }))
     }
@@ -1652,9 +1744,9 @@ impl PageServerHandler {
         &mut self,
         timeline: &Timeline,
         effective_lsn: Lsn,
-        requests: smallvec::SmallVec<[(RelTag, BlockNumber, SmgrOpTimer); 1]>,
+        requests: smallvec::SmallVec<[BatchedGetPageRequest; 1]>,
         ctx: &RequestContext,
-    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), PageStreamError>> {
+    ) -> Vec<Result<(PagestreamBeMessage, SmgrOpTimer), BatchedPageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         timeline
@@ -1663,7 +1755,7 @@ impl PageServerHandler {
 
         let results = timeline
             .get_rel_page_at_lsn_batched(
-                requests.iter().map(|(reltag, blkno, _)| (reltag, blkno)),
+                requests.iter().map(|p| (&p.rel, &p.blkno)),
                 effective_lsn,
                 ctx,
             )
@@ -1675,16 +1767,26 @@ impl PageServerHandler {
             requests
                 .into_iter()
                 .zip(results.into_iter())
-                .map(|((_, _, timer), res)| {
+                .map(|(req, res)| {
                     res.map(|page| {
                         (
                             PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
+                                reqid: req.reqid,
+                                request_lsn: req.request_lsn,
+                                not_modified_since: req.not_modified_since,
+                                rel: req.rel,
+                                blkno: req.blkno,
                                 page,
                             }),
-                            timer,
+                            req.timer,
                         )
                     })
-                    .map_err(PageStreamError::from)
+                    .map_err(|e| BatchedPageStreamError {
+                        err: PageStreamError::from(e),
+                        reqid: req.reqid,
+                        request_lsn: req.request_lsn,
+                        not_modified_since: req.not_modified_since,
+                    })
                 }),
         )
     }
@@ -1711,7 +1813,14 @@ impl PageServerHandler {
         let segment = timeline.get_slru_segment(kind, req.segno, lsn, ctx).await?;
 
         Ok(PagestreamBeMessage::GetSlruSegment(
-            PagestreamGetSlruSegmentResponse { segment },
+            PagestreamGetSlruSegmentResponse {
+                reqid: req.reqid,
+                request_lsn: req.request_lsn,
+                not_modified_since: req.not_modified_since,
+                kind: req.kind,
+                segno: req.segno,
+                segment,
+            },
         ))
     }
 
@@ -1906,6 +2015,7 @@ struct FullBackupCmd {
 struct PageStreamCmd {
     tenant_id: TenantId,
     timeline_id: TimelineId,
+    protocol_version: PagestreamProtocolVersion,
 }
 
 /// `lease lsn tenant timeline lsn`
@@ -1926,7 +2036,7 @@ enum PageServiceCmd {
 }
 
 impl PageStreamCmd {
-    fn parse(query: &str) -> anyhow::Result<Self> {
+    fn parse(query: &str, protocol_version: PagestreamProtocolVersion) -> anyhow::Result<Self> {
         let parameters = query.split_whitespace().collect_vec();
         if parameters.len() != 2 {
             bail!(
@@ -1941,6 +2051,7 @@ impl PageStreamCmd {
         Ok(Self {
             tenant_id,
             timeline_id,
+            protocol_version,
         })
     }
 }
@@ -2078,7 +2189,14 @@ impl PageServiceCmd {
             bail!("cannot parse query: {query}")
         };
         match cmd.to_ascii_lowercase().as_str() {
-            "pagestream_v2" => Ok(Self::PageStream(PageStreamCmd::parse(other)?)),
+            "pagestream_v2" => Ok(Self::PageStream(PageStreamCmd::parse(
+                other,
+                PagestreamProtocolVersion::V2,
+            )?)),
+            "pagestream_v3" => Ok(Self::PageStream(PageStreamCmd::parse(
+                other,
+                PagestreamProtocolVersion::V3,
+            )?)),
             "basebackup" => Ok(Self::BaseBackup(BaseBackupCmd::parse(other)?)),
             "fullbackup" => Ok(Self::FullBackup(FullBackupCmd::parse(other)?)),
             "lease" => {
@@ -2160,25 +2278,21 @@ where
             PageServiceCmd::PageStream(PageStreamCmd {
                 tenant_id,
                 timeline_id,
+                protocol_version,
             }) => {
                 tracing::Span::current()
                     .record("tenant_id", field::display(tenant_id))
                     .record("timeline_id", field::display(timeline_id));
 
                 self.check_permission(Some(tenant_id))?;
+                let command_kind = match protocol_version {
+                    PagestreamProtocolVersion::V2 => ComputeCommandKind::PageStreamV2,
+                    PagestreamProtocolVersion::V3 => ComputeCommandKind::PageStreamV3,
+                };
+                COMPUTE_COMMANDS_COUNTERS.for_command(command_kind).inc();
 
-                COMPUTE_COMMANDS_COUNTERS
-                    .for_command(ComputeCommandKind::PageStreamV2)
-                    .inc();
-
-                self.handle_pagerequests(
-                    pgb,
-                    tenant_id,
-                    timeline_id,
-                    PagestreamProtocolVersion::V2,
-                    ctx,
-                )
-                .await?;
+                self.handle_pagerequests(pgb, tenant_id, timeline_id, protocol_version, ctx)
+                    .await?;
             }
             PageServiceCmd::BaseBackup(BaseBackupCmd {
                 tenant_id,
@@ -2357,7 +2471,8 @@ mod tests {
             cmd,
             PageServiceCmd::PageStream(PageStreamCmd {
                 tenant_id,
-                timeline_id
+                timeline_id,
+                PagestreamProtocolVersion::V2,
             })
         );
         let cmd = PageServiceCmd::parse(&format!("basebackup {tenant_id} {timeline_id}")).unwrap();
