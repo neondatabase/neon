@@ -222,6 +222,10 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        store-test-results-into-db: true
+      env:
+        REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
