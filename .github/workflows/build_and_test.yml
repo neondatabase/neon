@@ -200,7 +200,7 @@ jobs:
       matrix:
         arch: [ x64 ]
         # Do not build or run tests in debug for release branches
-        build-type: ${{ fromJson((startsWith(github.ref_name, 'release' && github.event_name == 'push')) && '["release"]' || '["debug", "release"]') }}
+        build-type: ${{ fromJson((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
         include:
           - build-type: release
             arch: arm64
