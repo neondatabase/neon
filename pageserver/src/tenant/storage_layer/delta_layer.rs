@@ -1020,7 +1020,7 @@ impl DeltaLayerInner {
                     for (_, blob_meta) in read.blobs_at.as_slice() {
                         reconstruct_state.on_key_error(
                             blob_meta.key,
-                            PageReconstructError::from(anyhow!(
+                            PageReconstructError::Other(anyhow!(
                                 "Failed to read blobs from virtual file {}: {}",
                                 self.file.path,
                                 kind
@@ -1047,7 +1047,7 @@ impl DeltaLayerInner {
                     Err(e) => {
                         reconstruct_state.on_key_error(
                             meta.meta.key,
-                            PageReconstructError::from(anyhow!(e).context(format!(
+                            PageReconstructError::Other(anyhow!(e).context(format!(
                                 "Failed to deserialize blob from virtual file {}",
                                 self.file.path,
                             ))),

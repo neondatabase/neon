@@ -1864,7 +1864,7 @@ impl<'a> DatadirModification<'a> {
                     // work directly with Images, and we never need to read actual
                     // data pages. We could handle this if we had to, by calling
                     // the walredo manager, but let's keep it simple for now.
-                    Err(PageReconstructError::from(anyhow::anyhow!(
+                    Err(PageReconstructError::Other(anyhow::anyhow!(
                         "unexpected pending WAL record"
                     )))
                 };

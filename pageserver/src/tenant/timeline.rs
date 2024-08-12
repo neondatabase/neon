@@ -511,7 +511,7 @@ pub(crate) struct TimelineVisitOutcome {
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum PageReconstructError {
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 
     #[error("Ancestor LSN wait error: {0}")]
     AncestorLsnTimeout(WaitLsnError),
@@ -525,6 +525,16 @@ pub(crate) enum PageReconstructError {
 
     #[error("{0}")]
     MissingKey(MissingKeyError),
+}
+
+impl From<anyhow::Error> for PageReconstructError {
+    fn from(value: anyhow::Error) -> Self {
+        // with walingest.rs many PageReconstructError are wrapped in as anyhow::Error
+        match value.downcast::<PageReconstructError>() {
+            Ok(pre) => pre,
+            Err(other) => PageReconstructError::Other(other),
+        }
+    }
 }
 
 impl From<utils::bin_ser::DeserializeError> for PageReconstructError {
