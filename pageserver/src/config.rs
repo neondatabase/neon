@@ -135,8 +135,6 @@ pub mod defaults {
 
 #max_vectored_read_bytes = '{DEFAULT_MAX_VECTORED_READ_BYTES}'
 
-#validate_vectored_get = '{DEFAULT_VALIDATE_VECTORED_GET}'
-
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
@@ -276,8 +274,6 @@ pub struct PageServerConf {
 
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
-    pub validate_vectored_get: bool,
-
     pub image_compression: ImageCompressionAlgorithm,
 
     /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
@@ -390,8 +386,6 @@ struct PageServerConfigBuilder {
 
     max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
 
-    validate_vectored_get: BuilderValue<bool>,
-
     image_compression: BuilderValue<ImageCompressionAlgorithm>,
 
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
@@ -485,7 +479,6 @@ impl PageServerConfigBuilder {
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             image_compression: Set(DEFAULT_IMAGE_COMPRESSION),
-            validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: Set(L0FlushConfig::default()),
             compact_level0_phase1_value_access: Set(CompactL0Phase1ValueAccess::default()),
@@ -649,10 +642,6 @@ impl PageServerConfigBuilder {
         self.max_vectored_read_bytes = BuilderValue::Set(value);
     }
 
-    pub fn get_validate_vectored_get(&mut self, value: bool) {
-        self.validate_vectored_get = BuilderValue::Set(value);
-    }
-
     pub fn get_image_compression(&mut self, value: ImageCompressionAlgorithm) {
         self.image_compression = BuilderValue::Set(value);
     }
@@ -724,7 +713,6 @@ impl PageServerConfigBuilder {
                 secondary_download_concurrency,
                 ingest_batch_size,
                 max_vectored_read_bytes,
-                validate_vectored_get,
                 image_compression,
                 ephemeral_bytes_per_memory_kb,
                 l0_flush,
@@ -984,9 +972,6 @@ impl PageServerConf {
                         MaxVectoredReadBytes(
                             NonZeroUsize::new(bytes).expect("Max byte size of vectored read must be greater than 0")))
                 }
-                "validate_vectored_get" => {
-                    builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
-                }
                 "image_compression" => {
                     builder.get_image_compression(parse_toml_from_str("image_compression", item)?)
                 }
@@ -1081,7 +1066,6 @@ impl PageServerConf {
                     .expect("Invalid default constant"),
             ),
             image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
-            validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             l0_flush: L0FlushConfig::default(),
             compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
@@ -1321,7 +1305,6 @@ background_task_maximum_delay = '334 s'
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
@@ -1395,7 +1378,6 @@ background_task_maximum_delay = '334 s'
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
