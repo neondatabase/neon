@@ -194,8 +194,9 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
                 log.info(f"{gc_result=}")
 
-                # No layers should be removed, old layers are guarded by leases.
-                assert gc_result["layers_removed"] == 0
+                assert (
+                    gc_result["layers_removed"] == 0
+                ), "No layers should be removed, old layers are guarded by leases."
 
             with ep_static.cursor() as cur:
                 cur.execute("SELECT count(*) FROM t0")
@@ -211,8 +212,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
         log.info(f"{gc_result=}")
 
-        # No layers should be removed, old layers are guarded by leases.
-        assert gc_result["layers_removed"] > 0
+        assert gc_result["layers_removed"] > 0, "Old layers should be removed after leases expired."
 
 
 # Similar test, but with more data, and we force checkpoints
