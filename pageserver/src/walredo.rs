@@ -107,8 +107,10 @@ enum ProcessOnceCell {
 }
 
 struct Process {
-    _launched_processes_guard: utils::sync::gate::GateGuard,
     process: process::WalRedoProcess,
+    /// This field is last in this struct so the guard gets dropped _after_ [`Self::process`].
+    /// (Reminder: dropping [`Self::process`] synchronously sends SIGKILL and then `wait()`s for it to exit).
+    _launched_processes_guard: utils::sync::gate::GateGuard,
 }
 
 impl std::ops::Deref for Process {
