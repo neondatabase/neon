@@ -45,7 +45,7 @@ def test_basebackup_with_high_slru_count(
     max_file_descriptors = 500000
     neon_env_builder.pageserver_config_override = (
         f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}; "
-        f"get_vectored_impl='vectored'; validate_vectored_get=false"
+        f"validate_vectored_get=false"
     )
     params.update(
         {

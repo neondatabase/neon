@@ -34,7 +34,7 @@ use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
-use crate::{l0_flush::L0FlushConfig, tenant::timeline::GetVectoredImpl};
+use crate::l0_flush::L0FlushConfig;
 use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
@@ -132,8 +132,6 @@ pub mod defaults {
 #ingest_batch_size = {DEFAULT_INGEST_BATCH_SIZE}
 
 #virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
-
-#get_vectored_impl = '{DEFAULT_GET_VECTORED_IMPL}'
 
 #get_impl = '{DEFAULT_GET_IMPL}'
 
@@ -278,8 +276,6 @@ pub struct PageServerConf {
 
     pub virtual_file_io_engine: virtual_file::IoEngineKind,
 
-    pub get_vectored_impl: GetVectoredImpl,
-
     pub get_impl: GetImpl,
 
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
@@ -396,8 +392,6 @@ struct PageServerConfigBuilder {
 
     virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
 
-    get_vectored_impl: BuilderValue<GetVectoredImpl>,
-
     get_impl: BuilderValue<GetImpl>,
 
     max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
@@ -493,7 +487,6 @@ impl PageServerConfigBuilder {
 
             virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
 
-            get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
             get_impl: Set(DEFAULT_GET_IMPL.parse().unwrap()),
             max_vectored_read_bytes: Set(MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
@@ -659,10 +652,6 @@ impl PageServerConfigBuilder {
         self.virtual_file_io_engine = BuilderValue::Set(value);
     }
 
-    pub fn get_vectored_impl(&mut self, value: GetVectoredImpl) {
-        self.get_vectored_impl = BuilderValue::Set(value);
-    }
-
     pub fn get_impl(&mut self, value: GetImpl) {
         self.get_impl = BuilderValue::Set(value);
     }
@@ -745,7 +734,6 @@ impl PageServerConfigBuilder {
                 heatmap_upload_concurrency,
                 secondary_download_concurrency,
                 ingest_batch_size,
-                get_vectored_impl,
                 get_impl,
                 max_vectored_read_bytes,
                 validate_vectored_get,
@@ -1002,9 +990,6 @@ impl PageServerConf {
                 "virtual_file_io_engine" => {
                     builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
                 }
-                "get_vectored_impl" => {
-                    builder.get_vectored_impl(parse_toml_from_str("get_vectored_impl", item)?)
-                }
                 "get_impl" => {
                     builder.get_impl(parse_toml_from_str("get_impl", item)?)
                 }
@@ -1106,7 +1091,6 @@ impl PageServerConf {
             secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-            get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
             get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
             max_vectored_read_bytes: MaxVectoredReadBytes(
                 NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
@@ -1349,7 +1333,6 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
                 get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
@@ -1425,7 +1408,6 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: 100,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
                 get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
