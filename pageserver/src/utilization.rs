@@ -5,12 +5,17 @@
 
 use anyhow::Context;
 use std::path::Path;
+use utils::serde_percent::Percent;
 
 use pageserver_api::models::PageserverUtilization;
 
-pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtilization> {
-    // TODO: currently the http api ratelimits this to 1Hz at most, which is probably good enough
+use crate::{config::PageServerConf, tenant::mgr::TenantManager};
 
+pub(crate) fn regenerate(
+    conf: &PageServerConf,
+    tenants_path: &Path,
+    tenant_manager: &TenantManager,
+) -> anyhow::Result<PageserverUtilization> {
     let statvfs = nix::sys::statvfs::statvfs(tenants_path)
         .map_err(std::io::Error::from)
         .context("statvfs tenants directory")?;
@@ -34,13 +39,31 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
 
     let captured_at = std::time::SystemTime::now();
 
+    let (disk_wanted_bytes, shard_count) = tenant_manager.calculate_utilization()?;
+
+    // Calculate how much disk space can actually be used (we will not use disk space
+    // beyond the eviction threshold)
+    let max_usage_pct = match conf.disk_usage_based_eviction.clone() {
+        Some(e) => e.max_usage_pct,
+        None => Percent::new(100).unwrap(),
+    };
+    let disk_usable_capacity = ((used + free) * max_usage_pct.get() as u64) / 100;
+
+    // Utilization score will be a number scaled to 100.  The scale is totally arbitrary: these
+    // scores are only meaningful when compared to one another.  The value can go over 100
+    // if we are uncomfortably overloaded.
+    let disk_utilization_score = disk_wanted_bytes * 100 / disk_usable_capacity;
+
+    // In case we have many tiny tenants, also apply an absolute limit on the number of
+    // shards we will host on one pageserver
+    const MAX_SHARDS: usize = 20000;
+    let shard_utilization_score = (shard_count * 100 / MAX_SHARDS) as u64;
+
     let doc = PageserverUtilization {
         disk_usage_bytes: used,
         free_space_bytes: free,
-        // lower is better; start with a constant
-        //
-        // note that u64::MAX will be output as i64::MAX as u64, but that should not matter
-        utilization_score: u64::MAX,
+        disk_wanted_bytes,
+        utilization_score: std::cmp::max(disk_utilization_score, shard_utilization_score),
         captured_at: utils::serde_system_time::SystemTime(captured_at),
     };
 
