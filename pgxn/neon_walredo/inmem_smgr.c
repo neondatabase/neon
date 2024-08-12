@@ -405,10 +405,11 @@ const f_smgr *
 smgr_inmem(ProcNumber backend, NRelFileInfo rinfo)
 {
 	Assert(InRecovery);
-	if (backend != INVALID_PROC_NUMBER)
-		return smgr_standard(backend, rinfo);
-	else
-		return &inmem_smgr;
+	// // What does this code do?
+	// if (backend != INVALID_PROC_NUMBER)
+	// 	return smgr_standard(backend, rinfo);
+	// else
+	return &inmem_smgr;
 }
 
 void
