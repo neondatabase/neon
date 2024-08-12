@@ -94,7 +94,7 @@ RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar
     DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
     make clean && cp -R /sfcgal/* /
 
-ENV PATH "/usr/local/pgsql/bin:$PATH"
+ENV PATH="/usr/local/pgsql/bin:$PATH"
 
 RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.3.tar.gz -O postgis.tar.gz && \
     echo "74eb356e3f85f14233791013360881b6748f78081cc688ff9d6f0f673a762d13 postgis.tar.gz" | sha256sum --check && \
@@ -411,7 +411,7 @@ FROM build-deps AS timescaledb-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ARG PG_VERSION
-ENV PATH "/usr/local/pgsql/bin:$PATH"
+ENV PATH="/usr/local/pgsql/bin:$PATH"
 
 RUN case "${PG_VERSION}" in \
       "v14" | "v15") \
@@ -444,7 +444,7 @@ FROM build-deps AS pg-hint-plan-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ARG PG_VERSION
-ENV PATH "/usr/local/pgsql/bin:$PATH"
+ENV PATH="/usr/local/pgsql/bin:$PATH"
 
 RUN case "${PG_VERSION}" in \
       "v14") \
@@ -480,7 +480,7 @@ RUN case "${PG_VERSION}" in \
 FROM build-deps AS pg-cron-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/citusdata/pg_cron/archive/refs/tags/v1.6.0.tar.gz -O pg_cron.tar.gz && \
     echo "383a627867d730222c272bfd25cd5e151c578d73f696d32910c7db8c665cc7db pg_cron.tar.gz" | sha256sum --check && \
     mkdir pg_cron-src && cd pg_cron-src && tar xzf ../pg_cron.tar.gz --strip-components=1 -C . && \
@@ -506,7 +506,7 @@ RUN apt-get update && \
         libboost-system1.74-dev \
         libeigen3-dev
 
-ENV PATH "/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
 RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_3.tar.gz -O rdkit.tar.gz && \
     echo "bdbf9a2e6988526bfeb8c56ce3cdfe2998d60ac289078e2215374288185e8c8d rdkit.tar.gz" | sha256sum --check && \
     mkdir rdkit-src && cd rdkit-src && tar xzf ../rdkit.tar.gz --strip-components=1 -C . && \
@@ -546,7 +546,7 @@ RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_3.tar.
 FROM build-deps AS pg-uuidv7-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/fboulnois/pg_uuidv7/archive/refs/tags/v1.0.1.tar.gz -O pg_uuidv7.tar.gz && \
     echo "0d0759ab01b7fb23851ecffb0bce27822e1868a4a5819bfd276101c716637a7a pg_uuidv7.tar.gz" | sha256sum --check && \
     mkdir pg_uuidv7-src && cd pg_uuidv7-src && tar xzf ../pg_uuidv7.tar.gz --strip-components=1 -C . && \
@@ -563,7 +563,7 @@ RUN wget https://github.com/fboulnois/pg_uuidv7/archive/refs/tags/v1.0.1.tar.gz 
 FROM build-deps AS pg-roaringbitmap-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4.tar.gz -O pg_roaringbitmap.tar.gz && \
     echo "b75201efcb1c2d1b014ec4ae6a22769cc7a224e6e406a587f5784a37b6b5a2aa pg_roaringbitmap.tar.gz" | sha256sum --check && \
     mkdir pg_roaringbitmap-src && cd pg_roaringbitmap-src && tar xzf ../pg_roaringbitmap.tar.gz --strip-components=1 -C . && \
@@ -580,7 +580,7 @@ RUN wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4
 FROM build-deps AS pg-semver-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/theory/pg-semver/archive/refs/tags/v0.32.1.tar.gz -O pg_semver.tar.gz && \
     echo "fbdaf7512026d62eec03fad8687c15ed509b6ba395bff140acd63d2e4fbe25d7 pg_semver.tar.gz" | sha256sum --check && \
     mkdir pg_semver-src && cd pg_semver-src && tar xzf ../pg_semver.tar.gz --strip-components=1 -C . && \
@@ -598,7 +598,7 @@ FROM build-deps AS pg-embedding-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ARG PG_VERSION
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in \
       "v14" | "v15") \
         export PG_EMBEDDING_VERSION=0.3.5 \
@@ -622,7 +622,7 @@ RUN case "${PG_VERSION}" in \
 FROM build-deps AS pg-anon-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
     echo "321ea8d5c1648880aafde850a2c576e4a9e7b9933a34ce272efc839328999fa9  pg_anon.tar.gz" | sha256sum --check && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
@@ -750,7 +750,7 @@ RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.5.tar.gz -
 FROM build-deps AS wal2json-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_5.tar.gz && \
     echo "b516653575541cf221b99cf3f8be9b6821f6dbcfc125675c85f35090f824f00e wal2json_2_5.tar.gz" | sha256sum --check && \
     mkdir wal2json-src && cd wal2json-src && tar xzf ../wal2json_2_5.tar.gz --strip-components=1 -C . && \
@@ -766,7 +766,7 @@ RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_5.tar.
 FROM build-deps AS pg-ivm-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.7.tar.gz -O pg_ivm.tar.gz && \
     echo "ebfde04f99203c7be4b0e873f91104090e2e83e5429c32ac242d00f334224d5e pg_ivm.tar.gz" | sha256sum --check && \
     mkdir pg_ivm-src && cd pg_ivm-src && tar xzf ../pg_ivm.tar.gz --strip-components=1 -C . && \
@@ -783,7 +783,7 @@ RUN wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.7.tar.gz -O pg_iv
 FROM build-deps AS pg-partman-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PATH "/usr/local/pgsql/bin/:$PATH"
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.0.1.tar.gz -O pg_partman.tar.gz && \
     echo "75b541733a9659a6c90dbd40fccb904a630a32880a6e3044d0c4c5f4c8a65525 pg_partman.tar.gz" | sha256sum --check && \
     mkdir pg_partman-src && cd pg_partman-src && tar xzf ../pg_partman.tar.gz --strip-components=1 -C . && \
@@ -1034,6 +1034,6 @@ RUN apt update &&  \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
-ENV LANG en_US.utf8
+ENV LANG=en_US.utf8
 USER postgres
 ENTRYPOINT ["/usr/local/bin/compute_ctl"]

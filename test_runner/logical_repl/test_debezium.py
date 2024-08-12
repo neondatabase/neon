@@ -12,7 +12,6 @@ import requests
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
 from fixtures.utils import wait_until
-from kafka import KafkaConsumer
 
 
 class DebeziumAPI:
@@ -95,6 +94,8 @@ def debezium(remote_pg: RemotePostgres):
     log.debug("%s %s %s", resp.status_code, resp.ok, resp.text)
     assert resp.status_code == 201
     assert len(dbz.list_connectors()) == 1
+    from kafka import KafkaConsumer
+
     consumer = KafkaConsumer(
         "dbserver1.inventory.customers",
         bootstrap_servers=["kafka:9092"],

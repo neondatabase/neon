@@ -4412,31 +4412,33 @@ impl From<CollectKeySpaceError> for CompactionError {
 impl From<super::upload_queue::NotInitialized> for CompactionError {
     fn from(value: super::upload_queue::NotInitialized) -> Self {
         match value {
-            super::upload_queue::NotInitialized::Uninitialized
-            | super::upload_queue::NotInitialized::Stopped => {
+            super::upload_queue::NotInitialized::Uninitialized => {
                 CompactionError::Other(anyhow::anyhow!(value))
             }
-            super::upload_queue::NotInitialized::ShuttingDown => CompactionError::ShuttingDown,
+            super::upload_queue::NotInitialized::ShuttingDown
+            | super::upload_queue::NotInitialized::Stopped => CompactionError::ShuttingDown,
         }
     }
 }
 
-impl CompactionError {
-    /// We cannot do compaction because we could not download a layer that is input to the compaction.
-    pub(crate) fn input_layer_download_failed(
-        e: super::storage_layer::layer::DownloadError,
-    ) -> Self {
+impl From<super::storage_layer::layer::DownloadError> for CompactionError {
+    fn from(e: super::storage_layer::layer::DownloadError) -> Self {
         match e {
-            super::storage_layer::layer::DownloadError::TimelineShutdown |
-            /* TODO DownloadCancelled correct here? */
-            super::storage_layer::layer::DownloadError::DownloadCancelled  => CompactionError::ShuttingDown,
-            super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads |
-            super::storage_layer::layer::DownloadError::DownloadRequired |
-            super::storage_layer::layer::DownloadError::NotFile(_) |
-            super::storage_layer::layer::DownloadError::DownloadFailed |
-            super::storage_layer::layer::DownloadError::PreStatFailed(_)=>CompactionError::Other(anyhow::anyhow!(e)),
+            super::storage_layer::layer::DownloadError::TimelineShutdown
+            | super::storage_layer::layer::DownloadError::DownloadCancelled => {
+                CompactionError::ShuttingDown
+            }
+            super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads
+            | super::storage_layer::layer::DownloadError::DownloadRequired
+            | super::storage_layer::layer::DownloadError::NotFile(_)
+            | super::storage_layer::layer::DownloadError::DownloadFailed
+            | super::storage_layer::layer::DownloadError::PreStatFailed(_) => {
+                CompactionError::Other(anyhow::anyhow!(e))
+            }
             #[cfg(test)]
-            super::storage_layer::layer::DownloadError::Failpoint(_) =>  CompactionError::Other(anyhow::anyhow!(e)),
+            super::storage_layer::layer::DownloadError::Failpoint(_) => {
+                CompactionError::Other(anyhow::anyhow!(e))
+            }
         }
     }
 }
@@ -4990,15 +4992,7 @@ impl Timeline {
 
             result.layers_removed = gc_layers.len() as u64;
 
-            self.remote_client
-                .schedule_gc_update(&gc_layers)
-                .map_err(|e| {
-                    if self.cancel.is_cancelled() {
-                        GcError::TimelineCancelled
-                    } else {
-                        GcError::Remote(e)
-                    }
-                })?;
+            self.remote_client.schedule_gc_update(&gc_layers)?;
 
             guard.open_mut()?.finish_gc_timeline(&gc_layers);
 

@@ -335,6 +335,9 @@ pub(super) async fn handle_walreceiver_connection(
                             filtered_records += 1;
                         }
 
+                        // FIXME: this cannot be made pausable_failpoint without fixing the
+                        // failpoint library; in tests, the added amount of debugging will cause us
+                        // to timeout the tests.
                         fail_point!("walreceiver-after-ingest");
 
                         last_rec_lsn = lsn;
