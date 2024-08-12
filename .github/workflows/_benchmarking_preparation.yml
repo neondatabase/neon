@@ -57,12 +57,16 @@ jobs:
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
+      # to avoid a race condition of multiple jobs trying to create the table at the same time, 
+      # we use an advisory lock
       run: |
         ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
+        SELECT pg_advisory_lock(4711);  
         CREATE TABLE IF NOT EXISTS benchmark_restore_status (
         databasename text primary key,
         restore_done boolean
         );
+        SELECT pg_advisory_unlock(4711);
         "
     
     - name: Check if restore is already done
@@ -126,9 +130,12 @@ jobs:
         DATABASE_CONNSTR: ${{ steps.replace-dbname.outputs.database_connstr }}
         # the following works only with larger computes: 
         # PGOPTIONS: "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
+        # we add the || true because:
+        # the dumps were created with Neon and contain neon extensions that are not 
+        # available in RDS, so we will always report an error, but we can ignore it
       run: |
         ${PG_BINARIES}/pg_restore --clean --if-exists --no-owner --jobs=4 \
-        -d "${DATABASE_CONNSTR}" /tmp/dumps/${DATABASE_NAME}.pg_dump
+        -d "${DATABASE_CONNSTR}" /tmp/dumps/${DATABASE_NAME}.pg_dump || true
 
     - name: Update benchmark_restore_status table
       if: steps.check-restore-done.outputs.skip != 'true'
