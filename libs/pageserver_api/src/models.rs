@@ -637,6 +637,13 @@ pub struct TenantInfo {
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
     pub generation: u32,
+
+    /// Opaque explanation if gc is being blocked.
+    ///
+    /// Only looked up for the individual tenant detail, not the listing. This is purely for
+    /// debugging, not included in openapi.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_blocking: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -940,6 +947,8 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
+    use std::path::PathBuf;
+
     #[derive(
         Copy,
         Clone,
@@ -957,6 +966,53 @@ pub mod virtual_file {
         StdFs,
         #[cfg(target_os = "linux")]
         TokioEpollUring,
+    }
+
+    /// Direct IO modes for a pageserver.
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+    pub enum DirectIoMode {
+        /// Direct IO disabled (uses usual buffered IO).
+        #[default]
+        Disabled,
+        /// Direct IO disabled (performs checks and perf simulations).
+        Evaluate {
+            /// Alignment check level
+            alignment_check: DirectIoAlignmentCheckLevel,
+            /// Latency padded for performance simulation.
+            latency_padding: DirectIoLatencyPadding,
+        },
+        /// Direct IO enabled.
+        Enabled {
+            /// Actions to perform on alignment error.
+            on_alignment_error: DirectIoOnAlignmentErrorAction,
+        },
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum DirectIoAlignmentCheckLevel {
+        #[default]
+        Error,
+        Log,
+        None,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum DirectIoOnAlignmentErrorAction {
+        Error,
+        #[default]
+        FallbackToBuffered,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(tag = "type", rename_all = "kebab-case")]
+    pub enum DirectIoLatencyPadding {
+        /// Pad virtual file operations with IO to a fake file.
+        FakeFileRW { path: PathBuf },
+        #[default]
+        None,
     }
 }
 
@@ -1427,6 +1483,7 @@ mod tests {
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
             generation: 1,
+            gc_blocking: None,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1449,6 +1506,7 @@ mod tests {
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
             generation: 1,
+            gc_blocking: None,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),

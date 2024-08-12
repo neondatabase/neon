@@ -10,11 +10,11 @@ use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
 use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
-use crate::tenant::storage_layer::ValueReconstructResult;
 use crate::tenant::timeline::GetVectoredError;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::PageReconstructError;
 use crate::{l0_flush, page_cache, walrecord};
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, Result};
+use camino::Utf8PathBuf;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
@@ -34,8 +34,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use super::{
-    DeltaLayerWriter, ResidentLayer, ValueReconstructSituation, ValueReconstructState,
-    ValuesReconstructState,
+    DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -54,9 +53,6 @@ pub struct InMemoryLayer {
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.
     pub(crate) end_lsn: OnceLock<Lsn>,
-
-    /// Used for traversal path. Cached representation of the in-memory layer before frozen.
-    local_path_str: Arc<str>,
 
     /// Used for traversal path. Cached representation of the in-memory layer after frozen.
     frozen_local_path_str: OnceLock<Arc<str>>,
@@ -248,12 +244,6 @@ impl InMemoryLayer {
         self.start_lsn..self.end_lsn_or_max()
     }
 
-    pub(crate) fn local_path_str(&self) -> &Arc<str> {
-        self.frozen_local_path_str
-            .get()
-            .unwrap_or(&self.local_path_str)
-    }
-
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
@@ -301,60 +291,6 @@ impl InMemoryLayer {
         }
 
         Ok(())
-    }
-
-    /// Look up given value in the layer.
-    pub(crate) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        ensure!(lsn_range.start >= self.start_lsn);
-        let mut need_image = true;
-
-        let ctx = RequestContextBuilder::extend(ctx)
-            .page_content_kind(PageContentKind::InMemoryLayer)
-            .build();
-
-        let inner = self.inner.read().await;
-
-        let reader = inner.file.block_cursor();
-
-        // Scan the page versions backwards, starting from `lsn`.
-        if let Some(vec_map) = inner.index.get(&key) {
-            let slice = vec_map.slice_range(lsn_range);
-            for (entry_lsn, pos) in slice.iter().rev() {
-                let buf = reader.read_blob(*pos, &ctx).await?;
-                let value = Value::des(&buf)?;
-                match value {
-                    Value::Image(img) => {
-                        reconstruct_state.img = Some((*entry_lsn, img));
-                        return Ok(ValueReconstructResult::Complete);
-                    }
-                    Value::WalRecord(rec) => {
-                        let will_init = rec.will_init();
-                        reconstruct_state.records.push((*entry_lsn, rec));
-                        if will_init {
-                            // This WAL record initializes the page, so no need to go further back
-                            need_image = false;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // release lock on 'inner'
-
-        // If an older page image is needed to reconstruct the page, let the
-        // caller know.
-        if need_image {
-            Ok(ValueReconstructResult::Continue)
-        } else {
-            Ok(ValueReconstructResult::Complete)
-        }
     }
 
     // Look up the keys in the provided keyspace and update
@@ -449,20 +385,17 @@ impl InMemoryLayer {
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
         start_lsn: Lsn,
+        gate_guard: utils::sync::gate::GateGuard,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayer> {
         trace!("initializing new empty InMemoryLayer for writing on timeline {timeline_id} at {start_lsn}");
 
-        let file = EphemeralFile::create(conf, tenant_shard_id, timeline_id, ctx).await?;
+        let file =
+            EphemeralFile::create(conf, tenant_shard_id, timeline_id, gate_guard, ctx).await?;
         let key = InMemoryLayerFileId(file.page_cache_file_id());
 
         Ok(InMemoryLayer {
             file_id: key,
-            local_path_str: {
-                let mut buf = String::new();
-                inmem_layer_log_display(&mut buf, timeline_id, start_lsn, Lsn::MAX).unwrap();
-                buf.into()
-            },
             frozen_local_path_str: OnceLock::new(),
             conf,
             timeline_id,
@@ -482,8 +415,7 @@ impl InMemoryLayer {
 
     /// Common subroutine of the public put_wal_record() and put_page_image() functions.
     /// Adds the page version to the in-memory tree
-
-    pub(crate) async fn put_value(
+    pub async fn put_value(
         &self,
         key: Key,
         lsn: Lsn,
@@ -548,8 +480,6 @@ impl InMemoryLayer {
     /// Records the end_lsn for non-dropped layers.
     /// `end_lsn` is exclusive
     pub async fn freeze(&self, end_lsn: Lsn) {
-        let inner = self.inner.write().await;
-
         assert!(
             self.start_lsn < end_lsn,
             "{} >= {}",
@@ -567,9 +497,13 @@ impl InMemoryLayer {
             })
             .expect("frozen_local_path_str set only once");
 
-        for vec_map in inner.index.values() {
-            for (lsn, _pos) in vec_map.as_slice() {
-                assert!(*lsn < end_lsn);
+        #[cfg(debug_assertions)]
+        {
+            let inner = self.inner.write().await;
+            for vec_map in inner.index.values() {
+                for (lsn, _pos) in vec_map.as_slice() {
+                    assert!(*lsn < end_lsn);
+                }
             }
         }
     }
@@ -579,12 +513,12 @@ impl InMemoryLayer {
     /// if there are no matching keys.
     ///
     /// Returns a new delta layer with all the same data as this in-memory layer
-    pub(crate) async fn write_to_disk(
+    pub async fn write_to_disk(
         &self,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         key_range: Option<Range<Key>>,
-    ) -> Result<Option<ResidentLayer>> {
+        l0_flush_global_state: &l0_flush::Inner,
+    ) -> Result<Option<(PersistentLayerDesc, Utf8PathBuf)>> {
         // Grab the lock in read-mode. We hold it over the I/O, but because this
         // layer is not writeable anymore, no one should be trying to acquire the
         // write lock on it, so we shouldn't block anyone. There's one exception
@@ -596,9 +530,8 @@ impl InMemoryLayer {
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().await;
 
-        let l0_flush_global_state = timeline.l0_flush_global_state.inner().clone();
         use l0_flush::Inner;
-        let _concurrency_permit = match &*l0_flush_global_state {
+        let _concurrency_permit = match l0_flush_global_state {
             Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
         };
@@ -628,7 +561,7 @@ impl InMemoryLayer {
         )
         .await?;
 
-        match &*l0_flush_global_state {
+        match l0_flush_global_state {
             l0_flush::Inner::PageCached => {
                 let ctx = RequestContextBuilder::extend(ctx)
                     .page_content_kind(PageContentKind::InMemoryLayer)
@@ -693,7 +626,7 @@ impl InMemoryLayer {
         }
 
         // MAX is used here because we identify L0 layers by full key range
-        let delta_layer = delta_layer_writer.finish(Key::MAX, timeline, ctx).await?;
+        let (desc, path) = delta_layer_writer.finish(Key::MAX, ctx).await?;
 
         // Hold the permit until all the IO is done, including the fsync in `delta_layer_writer.finish()``.
         //
@@ -705,6 +638,6 @@ impl InMemoryLayer {
         // we dirtied when writing to the filesystem have been flushed and marked !dirty.
         drop(_concurrency_permit);
 
-        Ok(Some(delta_layer))
+        Ok(Some((desc, path)))
     }
 }

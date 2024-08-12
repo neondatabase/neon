@@ -218,7 +218,7 @@ impl RateBucketInfo {
 impl AuthenticationConfig {
     pub fn check_rate_limit(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         config: &AuthenticationConfig,
         secret: AuthSecret,
         endpoint: &EndpointId,
@@ -243,7 +243,7 @@ impl AuthenticationConfig {
         let limit_not_exceeded = self.rate_limiter.check(
             (
                 endpoint_int,
-                MaskedIp::new(ctx.peer_addr, config.rate_limit_ip_subnet),
+                MaskedIp::new(ctx.peer_addr(), config.rate_limit_ip_subnet),
             ),
             password_weight,
         );
@@ -274,7 +274,7 @@ impl AuthenticationConfig {
 ///
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     api: &impl console::Api,
     user_info: ComputeUserInfoMaybeEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -303,8 +303,8 @@ async fn auth_quirks(
     let (allowed_ips, maybe_secret) = api.get_allowed_ips_and_secret(ctx, &info).await?;
 
     // check allowed list
-    if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
-        return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr));
+    if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
+        return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
     }
 
     if !endpoint_rate_limiter.check(info.endpoint.clone().into(), 1) {
@@ -356,7 +356,7 @@ async fn auth_quirks(
 }
 
 async fn authenticate_with_secret(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     secret: AuthSecret,
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -421,7 +421,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub async fn authenticate(
         self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
@@ -467,7 +467,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
 impl BackendType<'_, ComputeUserInfo, &()> {
     pub async fn get_role_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         use BackendType::*;
         match self {
@@ -478,7 +478,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
 
     pub async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         use BackendType::*;
         match self {
@@ -492,7 +492,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
 impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
         use BackendType::*;
 
@@ -514,7 +514,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
 impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
         use BackendType::*;
 
@@ -571,7 +571,7 @@ mod tests {
     impl console::Api for Auth {
         async fn get_role_secret(
             &self,
-            _ctx: &mut RequestMonitoring,
+            _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError> {
             Ok(CachedRoleSecret::new_uncached(Some(self.secret.clone())))
@@ -579,7 +579,7 @@ mod tests {
 
         async fn get_allowed_ips_and_secret(
             &self,
-            _ctx: &mut RequestMonitoring,
+            _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>
         {
@@ -591,7 +591,7 @@ mod tests {
 
         async fn wake_compute(
             &self,
-            _ctx: &mut RequestMonitoring,
+            _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
             unimplemented!()
@@ -665,7 +665,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
@@ -723,7 +723,7 @@ mod tests {
         ));
 
         let _creds = auth_quirks(
-            &mut ctx,
+            &ctx,
             &api,
             user_info,
             &mut stream,
@@ -742,7 +742,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
@@ -775,7 +775,7 @@ mod tests {
         ));
 
         let _creds = auth_quirks(
-            &mut ctx,
+            &ctx,
             &api,
             user_info,
             &mut stream,
@@ -794,7 +794,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
@@ -828,7 +828,7 @@ mod tests {
         ));
 
         let creds = auth_quirks(
-            &mut ctx,
+            &ctx,
             &api,
             user_info,
             &mut stream,

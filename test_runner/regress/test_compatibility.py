@@ -496,11 +496,10 @@ def test_historic_storage_formats(
     # Check the scrubber handles this old data correctly (can read it and doesn't consider it corrupt)
     #
     # Do this _before_ importing to the pageserver, as that import may start writing immediately
-    metadata_summary = env.storage_scrubber.scan_metadata()
+    healthy, metadata_summary = env.storage_scrubber.scan_metadata()
+    assert healthy
     assert metadata_summary["tenant_count"] >= 1
     assert metadata_summary["timeline_count"] >= 1
-    assert not metadata_summary["with_errors"]
-    assert not metadata_summary["with_warnings"]
 
     env.neon_cli.import_tenant(dataset.tenant_id)
 

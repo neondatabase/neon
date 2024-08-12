@@ -14,10 +14,11 @@ use crate::{
         Drain, Fill, Operation, OperationError, OperationHandler, MAX_RECONCILES_PER_OPERATION,
     },
     compute_hook::NotifyError,
+    drain_utils::{self, TenantShardDrain, TenantShardIterator},
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
     metrics::LeadershipStatusGroup,
     persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
-    reconciler::{ReconcileError, ReconcileUnits},
+    reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
@@ -325,6 +326,12 @@ pub struct Config {
 
     // TODO: make this cfg(feature  = "testing")
     pub neon_local_repo_dir: Option<PathBuf>,
+
+    // Maximum acceptable download lag for the secondary location
+    // while draining a node. If the secondary location is lagging
+    // by more than the configured amount, then the secondary is not
+    // upgraded to primary.
+    pub max_secondary_lag_bytes: Option<u64>,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -2954,7 +2961,6 @@ impl Service {
         }
 
         // no shard needs to go first/last; the operation should be idempotent
-        // TODO: it would be great to ensure that all shards return the same error
         let mut results = self
             .tenant_for_shards(targets, |tenant_shard_id, node| {
                 futures::FutureExt::boxed(detach_one(
@@ -2973,6 +2979,7 @@ impl Service {
             .filter(|(_, res)| res != &any.1)
             .collect::<Vec<_>>();
         if !mismatching.is_empty() {
+            // this can be hit by races which should not happen because operation lock on cplane
             let matching = results.len() - mismatching.len();
             tracing::error!(
                 matching,
@@ -5187,11 +5194,22 @@ impl Service {
         Ok(())
     }
 
-    /// Wrap [`TenantShard`] reconciliation methods with acquisition of [`Gate`] and [`ReconcileUnits`],
+    /// Like [`Self::maybe_configured_reconcile_shard`], but uses the default reconciler
+    /// configuration
     fn maybe_reconcile_shard(
         &self,
         shard: &mut TenantShard,
         nodes: &Arc<HashMap<NodeId, Node>>,
+    ) -> Option<ReconcilerWaiter> {
+        self.maybe_configured_reconcile_shard(shard, nodes, ReconcilerConfig::default())
+    }
+
+    /// Wrap [`TenantShard`] reconciliation methods with acquisition of [`Gate`] and [`ReconcileUnits`],
+    fn maybe_configured_reconcile_shard(
+        &self,
+        shard: &mut TenantShard,
+        nodes: &Arc<HashMap<NodeId, Node>>,
+        reconciler_config: ReconcilerConfig,
     ) -> Option<ReconcilerWaiter> {
         let reconcile_needed = shard.get_reconcile_needed(nodes);
 
@@ -5241,6 +5259,7 @@ impl Service {
             &self.result_tx,
             nodes,
             &self.compute_hook,
+            reconciler_config,
             &self.config,
             &self.persistence,
             units,
@@ -5715,18 +5734,92 @@ impl Service {
         self.gate.close().await;
     }
 
+    /// Spot check the download lag for a secondary location of a shard.
+    /// Should be used as a heuristic, since it's not always precise: the
+    /// secondary might have not downloaded the new heat map yet and, hence,
+    /// is not aware of the lag.
+    ///
+    /// Returns:
+    /// * Ok(None) if the lag could not be determined from the status,
+    /// * Ok(Some(_)) if the lag could be determind
+    /// * Err on failures to query the pageserver.
+    async fn secondary_lag(
+        &self,
+        secondary: &NodeId,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<Option<u64>, mgmt_api::Error> {
+        let nodes = self.inner.read().unwrap().nodes.clone();
+        let node = nodes.get(secondary).ok_or(mgmt_api::Error::ApiError(
+            StatusCode::NOT_FOUND,
+            format!("Node with id {} not found", secondary),
+        ))?;
+
+        match node
+            .with_client_retries(
+                |client| async move { client.tenant_secondary_status(tenant_shard_id).await },
+                &self.config.jwt_token,
+                1,
+                3,
+                Duration::from_millis(250),
+                &self.cancel,
+            )
+            .await
+        {
+            Some(Ok(status)) => match status.heatmap_mtime {
+                Some(_) => Ok(Some(status.bytes_total - status.bytes_downloaded)),
+                None => Ok(None),
+            },
+            Some(Err(e)) => Err(e),
+            None => Err(mgmt_api::Error::Cancelled),
+        }
+    }
+
     /// Drain a node by moving the shards attached to it as primaries.
     /// This is a long running operation and it should run as a separate Tokio task.
     pub(crate) async fn drain_node(
-        &self,
+        self: &Arc<Self>,
         node_id: NodeId,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
-        let mut last_inspected_shard: Option<TenantShardId> = None;
-        let mut inspected_all_shards = false;
+        const MAX_SECONDARY_LAG_BYTES_DEFAULT: u64 = 256 * 1024 * 1024;
+        let max_secondary_lag_bytes = self
+            .config
+            .max_secondary_lag_bytes
+            .unwrap_or(MAX_SECONDARY_LAG_BYTES_DEFAULT);
+
+        // By default, live migrations are generous about the wait time for getting
+        // the secondary location up to speed. When draining, give up earlier in order
+        // to not stall the operation when a cold secondary is encountered.
+        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
+        const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+        let reconciler_config = ReconcilerConfigBuilder::new()
+            .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
+            .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
+            .build();
+
         let mut waiters = Vec::new();
 
-        while !inspected_all_shards {
+        let mut tid_iter = TenantShardIterator::new({
+            let service = self.clone();
+            move |last_inspected_shard: Option<TenantShardId>| {
+                let locked = &service.inner.read().unwrap();
+                let tenants = &locked.tenants;
+                let entry = match last_inspected_shard {
+                    Some(skip_past) => {
+                        // Skip to the last seen tenant shard id
+                        let mut cursor = tenants.iter().skip_while(|(tid, _)| **tid != skip_past);
+
+                        // Skip past the last seen
+                        cursor.nth(1)
+                    }
+                    None => tenants.first_key_value(),
+                };
+
+                entry.map(|(tid, _)| tid).copied()
+            }
+        });
+
+        while !tid_iter.finished() {
             if cancel.is_cancelled() {
                 match self
                     .node_configure(node_id, None, Some(NodeSchedulingPolicy::Active))
@@ -5745,71 +5838,82 @@ impl Service {
                 }
             }
 
-            {
-                let mut locked = self.inner.write().unwrap();
-                let (nodes, tenants, scheduler) = locked.parts_mut();
+            drain_utils::validate_node_state(&node_id, self.inner.read().unwrap().nodes.clone())?;
 
-                let node = nodes.get(&node_id).ok_or(OperationError::NodeStateChanged(
-                    format!("node {node_id} was removed").into(),
-                ))?;
-
-                let current_policy = node.get_scheduling();
-                if !matches!(current_policy, NodeSchedulingPolicy::Draining) {
-                    // TODO(vlad): maybe cancel pending reconciles before erroring out. need to think
-                    // about it
-                    return Err(OperationError::NodeStateChanged(
-                        format!("node {node_id} changed state to {current_policy:?}").into(),
-                    ));
-                }
-
-                let mut cursor = tenants.iter_mut().skip_while({
-                    let skip_past = last_inspected_shard;
-                    move |(tid, _)| match skip_past {
-                        Some(last) => **tid != last,
-                        None => false,
+            while waiters.len() < MAX_RECONCILES_PER_OPERATION {
+                let tid = match tid_iter.next() {
+                    Some(tid) => tid,
+                    None => {
+                        break;
                     }
-                });
+                };
 
-                while waiters.len() < MAX_RECONCILES_PER_OPERATION {
-                    let (tid, tenant_shard) = match cursor.next() {
-                        Some(some) => some,
+                let tid_drain = TenantShardDrain {
+                    drained_node: node_id,
+                    tenant_shard_id: tid,
+                };
+
+                let dest_node_id = {
+                    let locked = self.inner.read().unwrap();
+
+                    match tid_drain
+                        .tenant_shard_eligible_for_drain(&locked.tenants, &locked.scheduler)
+                    {
+                        Some(node_id) => node_id,
                         None => {
-                            inspected_all_shards = true;
-                            break;
+                            continue;
                         }
-                    };
+                    }
+                };
 
-                    // If the shard is not attached to the node being drained, skip it.
-                    if *tenant_shard.intent.get_attached() != Some(node_id) {
-                        last_inspected_shard = Some(*tid);
+                match self.secondary_lag(&dest_node_id, tid).await {
+                    Ok(Some(lag)) if lag <= max_secondary_lag_bytes => {
+                        // The secondary is reasonably up to date.
+                        // Migrate to it
+                    }
+                    Ok(Some(lag)) => {
+                        tracing::info!(
+                            tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                            "Secondary on node {dest_node_id} is lagging by {lag}. Skipping reconcile."
+                        );
                         continue;
                     }
+                    Ok(None) => {
+                        tracing::info!(
+                            tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                            "Could not determine lag for secondary on node {dest_node_id}. Skipping reconcile."
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                            "Failed to get secondary lag from node {dest_node_id}. Skipping reconcile: {err}"
+                        );
+                        continue;
+                    }
+                }
 
-                    match tenant_shard.reschedule_to_secondary(None, scheduler) {
-                        Err(e) => {
-                            tracing::warn!(
-                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                "Scheduling error when draining pageserver {} : {e}", node_id
-                            );
-                        }
-                        Ok(()) => {
-                            let scheduled_to = tenant_shard.intent.get_attached();
-                            tracing::info!(
-                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                "Rescheduled shard while draining node {}: {} -> {:?}",
-                                node_id,
-                                node_id,
-                                scheduled_to
-                            );
+                {
+                    let mut locked = self.inner.write().unwrap();
+                    let (nodes, tenants, scheduler) = locked.parts_mut();
+                    let rescheduled = tid_drain.reschedule_to_secondary(
+                        dest_node_id,
+                        tenants,
+                        scheduler,
+                        nodes,
+                    )?;
 
-                            let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
-                            if let Some(some) = waiter {
-                                waiters.push(some);
-                            }
+                    if let Some(tenant_shard) = rescheduled {
+                        let waiter = self.maybe_configured_reconcile_shard(
+                            tenant_shard,
+                            nodes,
+                            reconciler_config,
+                        );
+                        if let Some(some) = waiter {
+                            waiters.push(some);
                         }
                     }
-
-                    last_inspected_shard = Some(*tid);
                 }
             }
 

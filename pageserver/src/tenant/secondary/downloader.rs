@@ -55,7 +55,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    id::TimelineId, serde_system_time,
+    id::TimelineId, pausable_failpoint, serde_system_time,
 };
 
 use super::{
@@ -1146,11 +1146,13 @@ impl<'a> TenantDownloader<'a> {
         layer: HeatMapLayer,
         ctx: &RequestContext,
     ) -> Result<Option<HeatMapLayer>, UpdateError> {
-        // Failpoint for simulating slow remote storage
+        // Failpoints for simulating slow remote storage
         failpoint_support::sleep_millis_async!(
             "secondary-layer-download-sleep",
             &self.secondary_state.cancel
         );
+
+        pausable_failpoint!("secondary-layer-download-pausable");
 
         let local_path = local_layer_path(
             self.conf,
