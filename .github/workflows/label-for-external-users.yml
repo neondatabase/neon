@@ -1,0 +1,35 @@
+name: Add `external` label to issues and PRs created by external users
+
+on:
+  issues:
+    types:
+      - opened
+  pull_request:
+    types:
+      - opened
+
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
+
+env:
+  LABEL: external
+
+jobs:
+  add-label:
+    # This workflow uses `author_association` for PRs and issues to determine if the user is an external user.
+    # Possible values for `author_association`: https://docs.github.com/en/graphql/reference/enums#commentauthorassociation
+    if: ${{ !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event[github.event_name == 'pull_request' && 'pull_request' || 'issue'].author_association) }}
+
+    runs-on: ubuntu-22.04
+    permissions:
+      pull-requests: write
+      issues: write
+
+    steps:
+    - name: Label new ${{ github.event_name }}
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ITEM_NUMBER: ${{ github.event[github.event_name == 'pull_request' && 'pull_request' || 'issue'].number }}
+        GH_CLI_COMMAND: ${{ github.event_name == 'pull_request' && 'pr' || 'issue' }}
+      run: |
+        gh ${GH_CLI_COMMAND} --repo ${GITHUB_REPOSITORY} edit --add-label=${LABEL} ${ITEM_NUMBER}
