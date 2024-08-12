@@ -520,6 +520,15 @@ async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiErr
     json_response(StatusCode::OK, node_status)
 }
 
+async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let leader = state.service.get_leader().await?;
+
+    json_response(StatusCode::OK, leader)
+}
+
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -1015,6 +1024,9 @@ pub fn make_router(
         })
         .get("/control/v1/node/:node_id", |r| {
             named_request_span(r, handle_node_status, RequestName("control_v1_node_status"))
+        })
+        .get("/control/v1/leader", |r| {
+            named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))
         })
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))

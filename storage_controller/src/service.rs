@@ -4641,6 +4641,14 @@ impl Service {
             ))
     }
 
+    pub(crate) async fn get_leader(&self) -> Result<Option<ControllerPersistence>, ApiError> {
+        self.persistence.get_leader().await.map_err(|err| {
+            ApiError::InternalServerError(anyhow::anyhow!(
+                "Failed to read leader from database: {err}"
+            ))
+        })
+    }
+
     pub(crate) async fn node_register(
         &self,
         register_req: NodeRegisterRequest,
