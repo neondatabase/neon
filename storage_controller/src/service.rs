@@ -490,7 +490,7 @@ pub(crate) enum ReconcileResultRequest {
 }
 
 struct LeaderStepDownState {
-    observed: GlobalObservedState,
+    observed: Option<GlobalObservedState>,
     leader: ControllerPersistence,
 }
 
@@ -523,11 +523,20 @@ impl Service {
             .expect("Reconcile timeout is a modest constant");
 
         let (observed, current_leader) = if let Some(state) = leader_step_down_state {
-            tracing::info!(
-                "Using observed state received from leader at {}",
-                state.leader.address,
-            );
-            (state.observed, Some(state.leader))
+            match state.observed {
+                Some(observed) => {
+                    tracing::info!(
+                        "Using observed state received from leader at {}",
+                        state.leader.address
+                    );
+
+                    (observed, Some(state.leader))
+                }
+                None => (
+                    self.build_global_observed_state(node_scan_deadline).await,
+                    Some(state.leader),
+                ),
+            }
         } else {
             (
                 self.build_global_observed_state(node_scan_deadline).await,
@@ -1382,13 +1391,13 @@ impl Service {
                 };
 
                 let leadership_status = this.inner.read().unwrap().get_leadership_status();
-                let peer_observed_state = match leadership_status {
+                let leader_step_down_state = match leadership_status {
                     LeadershipStatus::Candidate => this.request_step_down().await,
                     LeadershipStatus::Leader => None,
                     LeadershipStatus::SteppedDown => unreachable!(),
                 };
 
-                this.startup_reconcile(peer_observed_state, bg_compute_notify_result_tx)
+                this.startup_reconcile(leader_step_down_state, bg_compute_notify_result_tx)
                     .await;
 
                 drop(startup_completion);
@@ -6378,8 +6387,8 @@ impl Service {
                 let state = client.step_down(&self.cancel).await;
                 match state {
                     Ok(state) => Some(LeaderStepDownState {
-                        observed: state,
-                        leader: leader.clone(),
+                        leader,
+                        observed: Some(state),
                     }),
                     Err(err) => {
                         // TODO: Make leaders periodically update a timestamp field in the
@@ -6391,7 +6400,10 @@ impl Service {
                             leader.address,
                             err
                         );
-                        None
+                        Some(LeaderStepDownState {
+                            leader,
+                            observed: None,
+                        })
                     }
                 }
             }
