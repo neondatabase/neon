@@ -329,20 +329,23 @@ impl PostgresRedoManager {
                 },
                 Err(permit) => {
                     let start = Instant::now();
-                    let proc = Arc::new(Process {
-                            _launched_processes_guard: match self.launched_processes.enter() {
+                    // acquire guard before spawning process, so that we don't spawn new processes
+                    // if the gate is already closed.
+                    let _launched_processes_guard = match self.launched_processes.enter() {
                                 Ok(guard) => guard,
                                 Err(GateError::GateClosed) => unreachable!(
                                     "shutdown sets the once cell to `ManagerShutDown` state before closing the gate"
                                 ),
-                            },
-                            process: process::WalRedoProcess::launch(
-                                self.conf,
-                                self.tenant_shard_id,
-                                pg_version,
-                            )
-                            .context("launch walredo process")?,
-                        });
+                            };
+                    let proc = Arc::new(Process {
+                        process: process::WalRedoProcess::launch(
+                            self.conf,
+                            self.tenant_shard_id,
+                            pg_version,
+                        )
+                        .context("launch walredo process")?,
+                        _launched_processes_guard,
+                    });
                     let duration = start.elapsed();
                     WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
                     info!(
