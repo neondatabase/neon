@@ -316,15 +316,18 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
     workload.write_rows(100)
-
-    # Flush deletion queue so that we don't leave any orphan layers in the parent that will confuse subsequent checks: once
-    # a shard is split, any layers in its prefix that aren't referenced by a child will be considered GC'able, even
-    # if they were logically deleted before the shard split, just not physically deleted yet because of the queue.
-    for ps in env.pageservers:
-        ps.http_client().deletion_queue_flush(execute=True)
+    workload.stop()
 
     new_shard_count = 4
-    env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
+    shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
+        ps.http_client().timeline_checkpoint(
+            shard, timeline_id, compact=False, wait_until_uploaded=True
+        )
+
+        ps.http_client().deletion_queue_flush(execute=True)
 
     # Create a second timeline so that when we delete the first one, child shards still have some content in S3.
     #
