@@ -515,7 +515,7 @@ impl WalIngest {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
             // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)?
+            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)
             // do not materialize null pages because them most likely be soon replaced with real data
             && blk.bimg_len != 0
         {
