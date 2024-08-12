@@ -1702,7 +1702,7 @@ async fn get_relsize(
     modification: &DatadirModification<'_>,
     rel: RelTag,
     ctx: &RequestContext,
-) -> anyhow::Result<BlockNumber> {
+) -> Result<BlockNumber, PageReconstructError> {
     let nblocks = if !modification
         .tline
         .get_rel_exists(rel, Version::Modified(modification), ctx)
