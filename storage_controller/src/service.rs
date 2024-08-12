@@ -311,7 +311,6 @@ pub struct Config {
     // TODO: make this cfg(feature  = "testing")
     pub neon_local_repo_dir: Option<PathBuf>,
 
-
     // Maximum acceptable download lag for the secondary location
     // while draining a node. If the secondary location is lagging
     // by more than the configured amount, then the secondary is not
