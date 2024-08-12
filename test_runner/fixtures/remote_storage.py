@@ -177,9 +177,14 @@ class S3Storage:
 
     def access_env_vars(self) -> Dict[str, str]:
         if self.aws_profile is not None:
-            return {
+            env = {
                 "AWS_PROFILE": self.aws_profile,
             }
+            # Pass through HOME env var because AWS_PROFILE needs it in order to work
+            home = os.getenv("HOME")
+            if home is not None:
+                env["HOME"] = home
+            return env
         if self.access_key is not None and self.secret_key is not None:
             return {
                 "AWS_ACCESS_KEY_ID": self.access_key,
