@@ -49,12 +49,15 @@ pub trait FetchAuthRules: Clone + Send + Sync + 'static {
 }
 
 #[derive(Clone)]
-struct FetchAuthFromCplane(EndpointIdInt);
+struct FetchAuthFromCplane {
+    #[allow(dead_code)]
+    endpoint: EndpointIdInt,
+}
 
 #[async_trait]
 impl FetchAuthRules for FetchAuthFromCplane {
     async fn fetch_auth_rules(&self) -> anyhow::Result<AuthRules> {
-        bail!("not yet implemented")
+        Err(anyhow::anyhow!("not yet implemented"))
     }
 }
 
@@ -198,9 +201,7 @@ impl JWKCacheEntryLock {
                 .key_sets
                 .values()
                 .flat_map(|jwks| &jwks.keys)
-                .find(|jwk| {
-                    jwk.prm.kid.as_deref() == Some(kid) && jwk.key.is_supported(&header.alg)
-                });
+                .find(|jwk| jwk.prm.kid.as_deref() == Some(kid));
 
             match jwk {
                 Some(jwk) => break jwk,
@@ -213,6 +214,11 @@ impl JWKCacheEntryLock {
                 }
             }
         };
+
+        ensure!(
+            jwk.is_supported(&header.alg),
+            "signature algorithm not supported"
+        );
 
         let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
             .context("not a valid compact JWT encoding")?;
@@ -252,7 +258,7 @@ impl JWKCache {
             }
         };
 
-        let fetch = FetchAuthFromCplane(endpoint);
+        let fetch = FetchAuthFromCplane { endpoint };
         entry.check_jwt(jwt, &self.client, &fetch).await
     }
 }
