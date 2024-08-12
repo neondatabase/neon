@@ -3,8 +3,10 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
+use bytes::Bytes;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
+use serde::de::DeserializeOwned;
 use signature::Verifier;
 use tokio::time::Instant;
 
@@ -116,12 +118,27 @@ impl JWKCacheEntryLock {
                 // todo: should we re-insert JWKs if we want to keep this JWKs URL?
                 // I expect these failures would be quite sparse.
                 Err(e) => tracing::warn!(?url, error=?e, "could not fetch JWKs"),
-                Ok(r) => match r.json::<jose_jwk::JwkSet>().await {
-                    Err(e) => tracing::warn!(?url, error=?e, "could not decode JWKs"),
-                    Ok(jwks) => {
-                        key_sets.insert(url, jwks);
+                Ok(r) => {
+                    if r.content_length()
+                        .is_some_and(|l| l > MAX_JWK_BODY_SIZE as u64)
+                    {
+                        tracing::warn!(
+                            ?url,
+                            error = "JWKs response too large",
+                            "could not decode JWKs"
+                        );
+                        continue;
                     }
-                },
+
+                    let resp: http::Response<reqwest::Body> = r.into();
+                    match parse_json::<jose_jwk::JwkSet>(resp.into_body(), MAX_JWK_BODY_SIZE).await
+                    {
+                        Err(e) => tracing::warn!(?url, error=?e, "could not decode JWKs"),
+                        Ok(jwks) => {
+                            key_sets.insert(url, jwks);
+                        }
+                    }
+                }
             }
         }
 
@@ -341,6 +358,28 @@ impl Drop for AttachedPermit<'_> {
     fn drop(&mut self) {
         self.0.add_permits(1);
     }
+}
+
+const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
+pub async fn parse_json<D>(
+    mut b: impl hyper1::body::Body<Data = Bytes, Error = reqwest::Error> + Unpin,
+    limit: usize,
+) -> anyhow::Result<D>
+where
+    D: DeserializeOwned,
+{
+    use http_body_util::BodyExt;
+    let mut bytes = vec![];
+    while let Some(frame) = b.frame().await.transpose()? {
+        if let Ok(data) = frame.into_data() {
+            if bytes.len() + data.len() > limit {
+                bail!("overflow")
+            }
+            bytes.extend_from_slice(&data);
+        }
+    }
+
+    Ok(serde_json::from_slice::<D>(&bytes)?)
 }
 
 #[cfg(test)]
