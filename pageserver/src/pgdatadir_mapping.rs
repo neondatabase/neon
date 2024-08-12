@@ -690,13 +690,14 @@ impl Timeline {
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let kv = self
             .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
-            .await
-            .context("scan")?;
+            .await?;
         let mut result = HashMap::new();
         let mut sz = 0;
         for (_, v) in kv {
-            let v = v.context("get value")?;
-            let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
+            let v = v?;
+            let v = aux_file::decode_file_value_bytes(&v)
+                .context("value decode")
+                .map_err(PageReconstructError::Other)?;
             for (fname, content) in v {
                 sz += fname.len();
                 sz += content.len();
@@ -764,11 +765,10 @@ impl Timeline {
     ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
         let kv = self
             .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
-            .await
-            .context("scan")?;
+            .await?;
         let mut result = HashMap::new();
         for (k, v) in kv {
-            let v = v.context("get value")?;
+            let v = v?;
             let origin_id = k.field6 as RepOriginId;
             let origin_lsn = Lsn::des(&v).unwrap();
             if origin_lsn != Lsn::INVALID {
