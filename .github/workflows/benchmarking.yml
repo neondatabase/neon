@@ -280,9 +280,9 @@ jobs:
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]
         }'
 
-        if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                                                     { "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-aurora", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]')
+        if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
+                                                     { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "rds-aurora", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
