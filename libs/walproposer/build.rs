@@ -95,6 +95,7 @@ fn main() -> anyhow::Result<()> {
         .allowlist_var("ERROR")
         .allowlist_var("FATAL")
         .allowlist_var("PANIC")
+        .allowlist_var("PG_VERSION_NUM")
         .allowlist_var("WPEVENT")
         .allowlist_var("WL_LATCH_SET")
         .allowlist_var("WL_SOCKET_READABLE")
