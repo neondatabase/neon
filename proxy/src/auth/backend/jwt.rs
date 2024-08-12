@@ -349,7 +349,6 @@ mod tests {
 
     use std::{future::IntoFuture, net::SocketAddr, time::SystemTime};
 
-    use anyhow::Error;
     use async_trait::async_trait;
     use base64::URL_SAFE_NO_PAD;
     use bytes::Bytes;
@@ -439,12 +438,32 @@ mod tests {
         let jwt3 = new_ec_jwt("3".into(), ec1);
         let jwt4 = new_ec_jwt("4".into(), ec2);
 
-        let foo = jose_jwk::JwkSet {
+        let foo_jwks = jose_jwk::JwkSet {
             keys: vec![jwk1, jwk3],
         };
-        let bar = jose_jwk::JwkSet {
+        let bar_jwks = jose_jwk::JwkSet {
             keys: vec![jwk2, jwk4],
         };
+
+        let service = service_fn(move |req| {
+            let foo_jwks = foo_jwks.clone();
+            let bar_jwks = bar_jwks.clone();
+            async move {
+                let jwks = match req.uri().path() {
+                    "/foo" => &foo_jwks,
+                    "/bar" => &bar_jwks,
+                    _ => {
+                        return Response::builder()
+                            .status(404)
+                            .body(Full::new(Bytes::new()));
+                    }
+                };
+                let body = serde_json::to_vec(jwks).unwrap();
+                Response::builder()
+                    .status(200)
+                    .body(Full::new(Bytes::from(body)))
+            }
+        });
 
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
         let server = hyper1::server::conn::http1::Builder::new();
@@ -452,37 +471,8 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 let (s, _) = listener.accept().await.unwrap();
-                let foo = foo.clone();
-                let bar = bar.clone();
-                tokio::spawn(
-                    server
-                        .serve_connection(
-                            TokioIo::new(s),
-                            service_fn(move |req| {
-                                let foo = foo.clone();
-                                let bar = bar.clone();
-                                async move {
-                                    let jwks = match req.uri().path() {
-                                        "/foo" => &foo,
-                                        "/bar" => &bar,
-                                        _ => {
-                                            return Ok::<_, Error>(
-                                                Response::builder()
-                                                    .status(404)
-                                                    .body(Full::new(Bytes::new()))
-                                                    .unwrap(),
-                                            )
-                                        }
-                                    };
-
-                                    Ok::<_, Error>(Response::new(Full::new(Bytes::from(
-                                        serde_json::to_vec(jwks).unwrap(),
-                                    ))))
-                                }
-                            }),
-                        )
-                        .into_future(),
-                );
+                let serve = server.serve_connection(TokioIo::new(s), service.clone());
+                tokio::spawn(serve.into_future());
             }
         });
 
