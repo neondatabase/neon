@@ -1704,11 +1704,16 @@ impl<'a> DatadirModification<'a> {
                     // the original code assumes all other errors are missing keys. Therefore, we keep the code path
                     // the same for now, though in theory, we should only match the `MissingKey` variant.
                     Err(
-                        PageReconstructError::Other(_)
+                        e @ (PageReconstructError::Other(_)
                         | PageReconstructError::WalRedo(_)
-                        | PageReconstructError::MissingKey { .. },
+                        | PageReconstructError::MissingKey(_)),
                     ) => {
                         // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                        if !matches!(e, PageReconstructError::MissingKey(_)) {
+                            let e = utils::error::report_compact_sources(&e);
+                            tracing::warn!("treating error as if it was a missing key: {}", e);
+                        }
 
                         let mut dir = AuxFilesDirectory {
                             files: HashMap::new(),
