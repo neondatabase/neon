@@ -552,6 +552,7 @@ impl From<layer_manager::Shutdown> for GetVectoredError {
     }
 }
 
+#[derive(thiserror::Error)]
 pub struct MissingKeyError {
     key: Key,
     shard: ShardNumber,
