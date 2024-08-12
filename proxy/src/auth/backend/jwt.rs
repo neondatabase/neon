@@ -1,8 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
-use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
@@ -45,9 +44,8 @@ pub struct JWKCacheEntry {
 }
 
 /// How to get the JWT auth rules
-#[async_trait]
 pub trait FetchAuthRules: Clone + Send + Sync + 'static {
-    async fn fetch_auth_rules(&self) -> anyhow::Result<AuthRules>;
+    fn fetch_auth_rules(&self) -> impl Future<Output = anyhow::Result<AuthRules>> + Send;
 }
 
 #[derive(Clone)]
@@ -56,7 +54,6 @@ struct FetchAuthFromCplane {
     endpoint: EndpointIdInt,
 }
 
-#[async_trait]
 impl FetchAuthRules for FetchAuthFromCplane {
     async fn fetch_auth_rules(&self) -> anyhow::Result<AuthRules> {
         Err(anyhow::anyhow!("not yet implemented"))
@@ -388,7 +385,6 @@ mod tests {
 
     use std::{future::IntoFuture, net::SocketAddr, time::SystemTime};
 
-    use async_trait::async_trait;
     use base64::URL_SAFE_NO_PAD;
     use bytes::Bytes;
     use http::Response;
@@ -520,7 +516,6 @@ mod tests {
         #[derive(Clone)]
         struct Fetch(SocketAddr);
 
-        #[async_trait]
         impl FetchAuthRules for Fetch {
             async fn fetch_auth_rules(&self) -> anyhow::Result<AuthRules> {
                 Ok(AuthRules {
