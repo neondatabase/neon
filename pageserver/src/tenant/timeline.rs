@@ -527,6 +527,12 @@ pub(crate) enum PageReconstructError {
     MissingKey(MissingKeyError),
 }
 
+impl From<utils::bin_ser::DeserializeError> for PageReconstructError {
+    fn from(value: utils::bin_ser::DeserializeError) -> Self {
+        PageReconstructError::Other(anyhow::Error::new(value).context("deserialization failure"))
+    }
+}
+
 impl From<layer_manager::Shutdown> for PageReconstructError {
     fn from(_: layer_manager::Shutdown) -> Self {
         PageReconstructError::Cancelled
@@ -585,11 +591,8 @@ impl PageReconstructError {
     pub(crate) fn is_stopping(&self) -> bool {
         use PageReconstructError::*;
         match self {
-            Other(_) => false,
-            AncestorLsnTimeout(_) => false,
             Cancelled => true,
-            WalRedo(_) => false,
-            MissingKey { .. } => false,
+            Other(_) | AncestorLsnTimeout(_) | WalRedo(_) | MissingKey { .. } => false,
         }
     }
 }

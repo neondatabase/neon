@@ -287,10 +287,7 @@ impl Timeline {
         // then check if the database was already initialized.
         // get_rel_exists can be called before dbdir is created.
         let buf = version.get(self, DBDIR_KEY, ctx).await?;
-        let dbdirs = match DbDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.dbdirs),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }?;
+        let dbdirs = DbDirectory::des(&buf)?.dbdirs;
         if !dbdirs.contains_key(&(tag.spcnode, tag.dbnode)) {
             return Ok(false);
         }
@@ -298,13 +295,8 @@ impl Timeline {
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = version.get(self, key, ctx).await?;
 
-        match RelDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let exists = dir.rels.contains(&(tag.relnode, tag.forknum));
-                Ok(exists)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        let dir = RelDirectory::des(&buf)?;
+        Ok(dir.rels.contains(&(tag.relnode, tag.forknum)))
     }
 
     /// Get a list of all existing relations in given tablespace and database.
@@ -323,20 +315,16 @@ impl Timeline {
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = version.get(self, key, ctx).await?;
 
-        match RelDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let rels: HashSet<RelTag> =
-                    HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
-                        spcnode,
-                        dbnode,
-                        relnode: *relnode,
-                        forknum: *forknum,
-                    }));
+        let dir = RelDirectory::des(&buf)?;
+        let rels: HashSet<RelTag> =
+            HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
+                spcnode,
+                dbnode,
+                relnode: *relnode,
+                forknum: *forknum,
+            }));
 
-                Ok(rels)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(rels)
     }
 
     /// Get the whole SLRU segment
@@ -398,13 +386,8 @@ impl Timeline {
         let key = slru_dir_to_key(kind);
         let buf = version.get(self, key, ctx).await?;
 
-        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let exists = dir.segments.contains(&segno);
-                Ok(exists)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        let dir = SlruSegmentDirectory::des(&buf)?;
+        Ok(dir.segments.contains(&segno))
     }
 
     /// Locate LSN, such that all transactions that committed before
@@ -620,10 +603,7 @@ impl Timeline {
         let key = slru_dir_to_key(kind);
 
         let buf = version.get(self, key, ctx).await?;
-        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.segments),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(SlruSegmentDirectory::des(&buf)?.segments)
     }
 
     pub(crate) async fn get_relmap_file(
@@ -647,10 +627,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
 
-        match DbDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.dbdirs),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(DbDirectory::des(&buf)?.dbdirs)
     }
 
     pub(crate) async fn get_twophase_file(
@@ -672,10 +649,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
 
-        match TwoPhaseDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.xids),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(TwoPhaseDirectory::des(&buf)?.xids)
     }
 
     pub(crate) async fn get_control_file(
@@ -700,10 +674,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         match self.get(AUX_FILES_KEY, lsn, ctx).await {
-            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
-                Ok(dir) => Ok(dir.files),
-                Err(e) => Err(PageReconstructError::from(e)),
-            },
+            Ok(buf) => Ok(AuxFilesDirectory::des(&buf)?.files),
             Err(e) => {
                 // This is expected: historical databases do not have the key.
                 debug!("Failed to get info about AUX files: {}", e);
