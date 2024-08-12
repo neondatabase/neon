@@ -29,12 +29,12 @@ use utils::{
     logging::LogFormat,
 };
 
+use crate::l0_flush::L0FlushConfig;
+use crate::tenant::config::TenantConfOpt;
 use crate::tenant::timeline::compaction::CompactL0Phase1ValueAccess;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
-use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
-use crate::l0_flush::L0FlushConfig;
 use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
