@@ -116,7 +116,7 @@ def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
     # Configure failpoint to slow down walreceiver ingest
     with closing(env.pageserver.connect()) as psconn:
         with psconn.cursor(cursor_factory=psycopg2.extras.DictCursor) as pscur:
-            pscur.execute("failpoints walreceiver-after-ingest-pausable=sleep(20)")
+            pscur.execute("failpoints walreceiver-after-ingest=sleep(20)")
 
     # FIXME
     # Wait for the check thread to start

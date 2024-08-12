@@ -927,7 +927,7 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     the warm-up which forces the initial logical size calculation.
     2. A fail point (initial-size-calculation-permit-pause) is used to block the initial
     computation of the logical size until forced.
-    3. A fail point (walreceiver-after-ingest-pausable) is used to pause the walreceiver since
+    3. A fail point (walreceiver-after-ingest) is used to pause the walreceiver since
     otherwise it would force the logical size computation.
     """
     env = neon_env_builder.init_start()
@@ -957,7 +957,7 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest-pausable=pause"
+            "FAILPOINTS": "initial-size-calculation-permit-pause=pause;walreceiver-after-ingest=pause"
         }
     )
 
@@ -979,10 +979,7 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
     assert details["current_logical_size_is_accurate"] is True
 
     client.configure_failpoints(
-        [
-            ("initial-size-calculation-permit-pause", "off"),
-            ("walreceiver-after-ingest-pausable", "off"),
-        ]
+        [("initial-size-calculation-permit-pause", "off"), ("walreceiver-after-ingest", "off")]
     )
 
 
@@ -1012,7 +1009,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
     # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest-pausable=pause"
+            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest=pause"
         }
     )
 
@@ -1058,10 +1055,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
     other_is_attaching()
 
     client.configure_failpoints(
-        [
-            ("timeline-calculate-logical-size-pause", "off"),
-            ("walreceiver-after-ingest-pausable", "off"),
-        ]
+        [("timeline-calculate-logical-size-pause", "off"), ("walreceiver-after-ingest", "off")]
     )
 
 
@@ -1091,7 +1085,7 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
     # pause at logical size calculation, also pause before walreceiver can give feedback so it will give priority to logical size calculation
     env.pageserver.start(
         extra_env_vars={
-            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest-pausable=pause"
+            "FAILPOINTS": "timeline-calculate-logical-size-pause=pause;walreceiver-after-ingest=pause"
         }
     )
 
