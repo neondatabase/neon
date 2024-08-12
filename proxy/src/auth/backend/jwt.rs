@@ -134,6 +134,47 @@ impl JWKCacheEntryLock {
         Ok(x)
     }
 
+    async fn get_or_update_jwk_cache<F: FetchAuthRules>(
+        self: &Arc<Self>,
+        client: &reqwest::Client,
+        fetch: &F,
+    ) -> Result<Arc<JWKCacheEntry>, anyhow::Error> {
+        let now = Instant::now();
+        let guard = self.cached.load_full();
+
+        // if we have no cached JWKs, try and get some
+        let Some(cached) = guard else {
+            let permit = self.acquire_permit().await;
+            return self.renew_jwks(permit, client, fetch).await;
+        };
+
+        let last_update = now.duration_since(cached.last_retrieved);
+
+        // check if the cached JWKs need updating.
+        if last_update > MAX_RENEW {
+            let permit = self.acquire_permit().await;
+
+            // it's been too long since we checked the keys. wait for them to update.
+            return self.renew_jwks(permit, client, fetch).await;
+        }
+
+        // every 5 minutes we should spawn a job to eagerly update the token.
+        if last_update > AUTO_RENEW {
+            if let Some(permit) = self.try_acquire_permit() {
+                let entry = self.clone();
+                let client = client.clone();
+                let fetch = fetch.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = entry.renew_jwks(permit, &client, &fetch).await {
+                        tracing::warn!(error=?e, "could not fetch JWKs in background job");
+                    }
+                });
+            }
+        }
+
+        Ok(cached)
+    }
+
     async fn check_jwt<F: FetchAuthRules>(
         self: &Arc<Self>,
         jwt: String,
@@ -159,41 +200,7 @@ impl JWKCacheEntryLock {
         ensure!(header.typ == "JWT");
         let kid = header.kid.context("missing key id")?;
 
-        // check if the cached JWKs need updating.
-        let mut guard = {
-            let now = Instant::now();
-            let guard = self.cached.load_full();
-
-            if let Some(cached) = guard {
-                let last_update = now.duration_since(cached.last_retrieved);
-
-                if last_update > MAX_RENEW {
-                    let permit = self.acquire_permit().await;
-
-                    // it's been too long since we checked the keys. wait for them to update.
-                    self.renew_jwks(permit, client, fetch).await?
-                } else if last_update > MIN_RENEW {
-                    // every 5 minutes we should spawn a job to eagerly update the token.
-                    if let Some(permit) = self.try_acquire_permit() {
-                        let entry = self.clone();
-                        let client = client.clone();
-                        let fetch = fetch.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = entry.renew_jwks(permit, &client, &fetch).await {
-                                tracing::warn!(error=?e, "could not fetch JWKs in background job");
-                            }
-                        });
-                    }
-
-                    cached
-                } else {
-                    cached
-                }
-            } else {
-                let permit = self.acquire_permit().await;
-                self.renew_jwks(permit, client, fetch).await?
-            }
-        };
+        let mut guard = self.get_or_update_jwk_cache(client, fetch).await?;
 
         // get the key from the JWKs if possible. If not, wait for the keys to update.
         let jwk = loop {
@@ -238,7 +245,8 @@ impl JWKCacheEntryLock {
     }
 }
 
-const MIN_RENEW: Duration = Duration::from_secs(300);
+const MIN_RENEW: Duration = Duration::from_secs(30);
+const AUTO_RENEW: Duration = Duration::from_secs(300);
 const MAX_RENEW: Duration = Duration::from_secs(3600);
 
 impl JWKCache {
