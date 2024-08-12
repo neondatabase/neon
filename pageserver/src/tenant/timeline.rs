@@ -603,7 +603,7 @@ impl PageReconstructError {
         use PageReconstructError::*;
         match self {
             Cancelled => true,
-            Other(_) | AncestorLsnTimeout(_) | WalRedo(_) | MissingKey { .. } => false,
+            Other(_) | AncestorLsnTimeout(_) | WalRedo(_) | MissingKey(_) => false,
         }
     }
 }
