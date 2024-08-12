@@ -754,6 +754,8 @@ impl PageServerHandler {
         if request_lsn < **latest_gc_cutoff_lsn {
             let gc_info = &timeline.gc_info.read().unwrap();
             if !gc_info.leases.contains_key(&request_lsn) {
+                // The requested LSN is below gc cutoff and is not guarded by a lease.
+
                 // Check explicitly for INVALID just to get a less scary error message if the
                 // request is obviously bogus
                 return Err(if request_lsn == Lsn::INVALID {
@@ -765,11 +767,6 @@ impl PageServerHandler {
                     ).into())
                 });
             }
-            tracing::info!(
-                "requesting a leased lsn {} below gc cutoff {}",
-                request_lsn,
-                **latest_gc_cutoff_lsn
-            );
         }
 
         // Wait for WAL up to 'not_modified_since' to arrive, if necessary
