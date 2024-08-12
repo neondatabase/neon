@@ -324,7 +324,7 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
         ps.http_client().deletion_queue_flush(execute=True)
 
     new_shard_count = 4
-    shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)
 
     # Create a second timeline so that when we delete the first one, child shards still have some content in S3.
     #
@@ -334,15 +334,6 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
     env.storage_controller.pageserver_api().timeline_create(
         PgVersion.NOT_SET, tenant_id, other_timeline_id
     )
-
-    # Write after split so that child shards have some indices in S3
-    workload.write_rows(100, upload=False)
-    for shard in shards:
-        ps = env.get_tenant_pageserver(shard)
-        log.info(f"Waiting for shard {shard} on pageserver {ps.id}")
-        ps.http_client().timeline_checkpoint(
-            shard, timeline_id, compact=False, wait_until_uploaded=True
-        )
 
     # The timeline still exists in child shards and they reference its layers, so scrubbing
     # now shouldn't delete anything.
