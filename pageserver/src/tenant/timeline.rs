@@ -4000,7 +4000,7 @@ impl Timeline {
                                     warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
                                     ZERO_PAGE.clone()
                                 } else {
-                                    return Err(CreateImageLayersError::PageReconstructError(err));
+                                    return Err(CreateImageLayersError::from(err));
                                 }
                             }
                         };
@@ -4060,7 +4060,7 @@ impl Timeline {
             let mut total_kb_retrieved = 0;
             let mut total_keys_retrieved = 0;
             for (k, v) in data {
-                let v = v.map_err(CreateImageLayersError::PageReconstructError)?;
+                let v = v?;
                 total_kb_retrieved += KEY_SIZE + v.len();
                 total_keys_retrieved += 1;
                 new_data.insert(k, v);
