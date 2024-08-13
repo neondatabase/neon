@@ -605,7 +605,7 @@ jobs:
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
-        if: matrix.version == 'v17'
+        if: matrix.version == 'v16'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -663,7 +663,7 @@ jobs:
                                              neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
-        if: matrix.version == 'v17'
+        if: matrix.version == 'v16'
         run: |
           docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
                                              neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
@@ -862,8 +862,8 @@ jobs:
                                                  $repo/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
             done
           done
-          docker buildx imagetools create -t neondatabase/neon-test-extensions-v17:latest \
-                                             neondatabase/neon-test-extensions-v17:${{ needs.tag.outputs.build-tag }}
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
+                                              neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
 
       - name: Login to prod ECR
         uses: docker/login-action@v3
