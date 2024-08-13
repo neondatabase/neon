@@ -2095,7 +2095,7 @@ impl TenantManager {
     ///
     /// This function is quite expensive: callers are expected to cache the result and
     /// limit how often they call it.
-    pub(crate) fn calculate_utilization(&self) -> Result<(u64, usize), TenantMapListError> {
+    pub(crate) fn calculate_utilization(&self) -> Result<(u64, u32), TenantMapListError> {
         let tenants = self.tenants.read().unwrap();
         let m = match &*tenants {
             TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
@@ -2134,7 +2134,7 @@ impl TenantManager {
             }
         }
 
-        Ok((wanted_bytes, shard_count))
+        Ok((wanted_bytes, shard_count as u32))
     }
 }
 
