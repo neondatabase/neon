@@ -613,11 +613,11 @@ pub(crate) enum CreateImageLayersError {
     #[error("timeline shutting down")]
     Cancelled,
 
-    #[error(transparent)]
-    GetVectoredError(GetVectoredError),
+    #[error("read failed")]
+    GetVectoredError(#[source] GetVectoredError),
 
-    #[error(transparent)]
-    PageReconstructError(PageReconstructError),
+    #[error("reconstruction failed")]
+    PageReconstructError(#[source] PageReconstructError),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -641,10 +641,10 @@ pub(crate) enum FlushLayerError {
 
     // Arc<> the following non-clonable error types: we must be Clone-able because the flush error is propagated from the flush
     // loop via a watch channel, where we can only borrow it.
-    #[error(transparent)]
+    #[error("create image layers (shared)")]
     CreateImageLayersError(Arc<CreateImageLayersError>),
 
-    #[error(transparent)]
+    #[error("other (shared)")]
     Other(#[from] Arc<anyhow::Error>),
 }
 
@@ -677,13 +677,13 @@ pub(crate) enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
-    #[error("Requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
+    #[error("requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
     Oversized(u64),
 
-    #[error("Requested at invalid LSN: {0}")]
+    #[error("requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
 
-    #[error("Requested key not found: {0}")]
+    #[error("requested key not found: {0}")]
     MissingKey(MissingKeyError),
 
     #[error("ancestory walk")]
@@ -707,16 +707,16 @@ impl From<GetReadyAncestorError> for GetVectoredError {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum GetReadyAncestorError {
-    #[error("Ancestor LSN wait error: {0}")]
+    #[error("ancestor LSN wait error")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
-    #[error("Bad state on timeline {timeline_id}: {state:?}")]
+    #[error("bad state on timeline {timeline_id}: {state:?}")]
     BadState {
         timeline_id: TimelineId,
         state: TimelineState,
     },
 
-    #[error("Cancelled")]
+    #[error("cancelled")]
     Cancelled,
 }
 
