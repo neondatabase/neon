@@ -17,7 +17,6 @@
 //! file. Code updates state in the control file before doing any S3 operations.
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
-
 use camino::Utf8PathBuf;
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
@@ -98,16 +97,37 @@ impl State {
     }
 
     /// Replace the name of the Uploaded segment (if one exists) in order to match
-    /// it with `destination` safekeeper. Returns a description of the change or None.
+    /// it with `destination` safekeeper. Returns a description of the change or None
+    /// wrapped in anyhow::Result.
     pub(crate) fn replace_uploaded_segment(
         &mut self,
         source: NodeId,
         destination: NodeId,
-    ) -> Option<ReplaceUploadedSegment> {
+    ) -> anyhow::Result<Option<ReplaceUploadedSegment>> {
         let current = self
             .segments
             .iter_mut()
-            .find(|seg| seg.status == UploadStatus::Uploaded)?;
+            .find(|seg| seg.status == UploadStatus::Uploaded);
+
+        let current = match current {
+            Some(some) => some,
+            None => {
+                return anyhow::Ok(None);
+            }
+        };
+
+        // Sanity check that the partial segment we are replacing is belongs
+        // to the `source` SK.
+        if !current
+            .name
+            .ends_with(format!("sk{}.partial", source.0).as_str())
+        {
+            anyhow::bail!(
+                "Partial segment name ({}) doesn't match self node id ({})",
+                current.name,
+                source
+            );
+        }
 
         let previous = current.clone();
 
@@ -118,10 +138,10 @@ impl State {
 
         current.name = new_name;
 
-        Some(ReplaceUploadedSegment {
+        anyhow::Ok(Some(ReplaceUploadedSegment {
             previous,
             current: current.clone(),
-        })
+        }))
     }
 }
 

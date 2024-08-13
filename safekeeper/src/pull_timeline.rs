@@ -177,7 +177,7 @@ impl WalResidentTimeline {
         let mut control_store = control_file::FileStorage::load_control_file(&cf_path)?;
         let replace = control_store
             .partial_backup
-            .replace_uploaded_segment(source, destination);
+            .replace_uploaded_segment(source, destination)?;
 
         if let Some(replace) = replace {
             // The deserialized control file has an uploaded partial. We upload a copy
