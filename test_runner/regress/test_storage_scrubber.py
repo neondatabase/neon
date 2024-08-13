@@ -315,7 +315,7 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
     # Make sure the original shard has some layers
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
-    workload.write_rows(100)
+    workload.write_rows(100, upload=False)
     workload.stop()
 
     new_shard_count = 4
