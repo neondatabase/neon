@@ -759,14 +759,10 @@ impl RemoteTimelineClient {
                 // nothing to do
                 None
             } else {
-                let mut modified = false;
+                upload_queue.dirty.metadata.reparent(new_parent);
+                upload_queue.dirty.lineage.record_previous_ancestor(&prev);
 
-                modified |= upload_queue.dirty.metadata.reparent(new_parent);
-                modified |= upload_queue.dirty.lineage.record_previous_ancestor(&prev);
-
-                if modified {
-                    self.schedule_index_upload(upload_queue)?;
-                }
+                self.schedule_index_upload(upload_queue)?;
 
                 Some(self.schedule_barrier0(upload_queue))
             }
@@ -794,21 +790,18 @@ impl RemoteTimelineClient {
             if upload_queue.clean.0.lineage.detached_previous_ancestor() == Some(adopted) {
                 None
             } else {
-                let mut modified = false;
-                modified |= upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
-                modified |= upload_queue.dirty.lineage.record_detaching(&adopted);
+                upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
+                upload_queue.dirty.lineage.record_detaching(&adopted);
 
                 for layer in layers {
                     let prev = upload_queue
                         .dirty
                         .layer_metadata
                         .insert(layer.layer_desc().layer_name(), layer.metadata());
-                    modified |= prev.is_none();
+                    assert!(prev.is_none(), "copied layer existed already {layer}");
                 }
 
-                if modified {
-                    self.schedule_index_upload(upload_queue)?;
-                }
+                self.schedule_index_upload(upload_queue)?;
 
                 Some(self.schedule_barrier0(upload_queue))
             }
