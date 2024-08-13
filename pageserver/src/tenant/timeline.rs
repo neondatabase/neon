@@ -672,11 +672,23 @@ pub(crate) enum GetVectoredError {
     #[error("Requested key not found: {0}")]
     MissingKey(MissingKeyError),
 
-    #[error(transparent)]
-    GetReadyAncestorError(GetReadyAncestorError),
+    #[error("ancestory walk")]
+    GetReadyAncestorError(#[source] GetReadyAncestorError),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl From<GetReadyAncestorError> for GetVectoredError {
+    fn from(value: GetReadyAncestorError) -> Self {
+        use GetReadyAncestorError::*;
+        match value {
+            Cancelled => GetVectoredError::Cancelled,
+            AncestorLsnTimeout(_) | BadState { .. } => {
+                GetVectoredError::GetReadyAncestorError(value)
+            }
+        }
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -3081,8 +3093,7 @@ impl Timeline {
             cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
             timeline_owned = timeline
                 .get_ready_ancestor_timeline(ancestor_timeline, ctx)
-                .await
-                .map_err(GetVectoredError::GetReadyAncestorError)?;
+                .await?;
             timeline = &*timeline_owned;
         };
 
