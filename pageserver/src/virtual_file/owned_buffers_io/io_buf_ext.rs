@@ -5,6 +5,8 @@ use tokio_epoll_uring::{BoundedBuf, Slice};
 pub(crate) trait IoBufExt {
     /// Get a [`Slice`] covering the range `[0..self.len()]`.
     /// It is guaranteed that the resulting slice has [`Slice::bytes_init`] equal to [`Slice::bytes_total`].
+    ///
+    /// This is for use on the write path.
     fn slice_len(self) -> Slice<Self>
     where
         Self: Sized;
