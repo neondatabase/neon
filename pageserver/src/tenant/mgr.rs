@@ -2034,6 +2034,9 @@ impl TenantManager {
 
         if let Some(reparented) = resp.completed() {
             // finally ask the restarted tenant to complete the detach
+            //
+            // rationale for 9999s: we don't really have a timetable here; if retried, the caller
+            // will get an 503.
             tenant
                 .wait_to_become_active(std::time::Duration::from_secs(9999))
                 .await
