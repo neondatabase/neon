@@ -15,6 +15,14 @@ env:
   LABEL: external
 
 jobs:
+  debug:
+    runs-on: ubuntu-22.04
+    steps:
+    - shell: bash -euxo pipefail {0}
+      run: |
+        echo ${{ github.event[github.event_name == 'pull_request' && 'pull_request' || 'issue'].author_association}}
+        echo ${{ github.event['pull_request'].author_association}}
+
   add-label:
     # This workflow uses `author_association` for PRs and issues to determine if the user is an external user.
     # Possible values for `author_association`: https://docs.github.com/en/graphql/reference/enums#commentauthorassociation
