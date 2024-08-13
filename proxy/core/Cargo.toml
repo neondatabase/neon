@@ -62,7 +62,7 @@ pq_proto.workspace = true
 prometheus.workspace = true
 rand.workspace = true
 regex.workspace = true
-remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
+remote_storage = { version = "0.1", path = "../../libs/remote_storage/" }
 reqwest.workspace = true
 reqwest-middleware = { workspace = true, features = ["json"] }
 reqwest-retry.workspace = true

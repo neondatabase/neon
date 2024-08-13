@@ -9,7 +9,7 @@ members = [
     "pageserver/ctl",
     "pageserver/client",
     "pageserver/pagebench",
-    "proxy",
+    "proxy/core",
     "safekeeper",
     "storage_broker",
     "storage_controller",
