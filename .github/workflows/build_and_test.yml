@@ -605,7 +605,7 @@ jobs:
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -626,7 +626,7 @@ jobs:
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         uses: docker/build-push-action@v6
         with:
           target: compute-tools-image
@@ -663,14 +663,14 @@ jobs:
                                              neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         run: |
           docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
                                              neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
                                              neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
 
       - name: Create multi-arch compute-tools image
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         run: |
           docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
                                              neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-x64 \
@@ -688,7 +688,7 @@ jobs:
                                                                                 neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Push multi-arch compute-tools image to ECR
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
                                                                                 neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
@@ -862,8 +862,8 @@ jobs:
                                                  $repo/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
             done
           done
-          docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
-                                             neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-v17:latest \
+                                             neondatabase/neon-test-extensions-v17:${{ needs.tag.outputs.build-tag }}
 
       - name: Login to prod ECR
         uses: docker/login-action@v3
@@ -1071,6 +1071,7 @@ jobs:
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           # Update compatibility snapshot for the release
+          # TODO Add v17
           for pg_version in v14 v15 v16; do
             for build_type in debug release; do
               OLD_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}-${GITHUB_RUN_ID}.tar.zst
