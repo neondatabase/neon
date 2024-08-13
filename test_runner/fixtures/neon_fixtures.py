@@ -24,7 +24,7 @@ from functools import cached_property, partial
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import quote, urlparse
 
 import asyncpg
@@ -388,7 +388,7 @@ class PgProtocol:
         return self.safe_psql_many([query], **kwargs)[0]
 
     def safe_psql_many(
-        self, queries: List[str], log_query=True, **kwargs: Any
+        self, queries: Iterable[str], log_query=True, **kwargs: Any
     ) -> List[List[Tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
