@@ -3917,6 +3917,10 @@ impl Timeline {
                         .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
                         .await?;
 
+                    if self.cancel.is_cancelled() {
+                        return Err(CreateImageLayersError::Cancelled);
+                    }
+
                     for (img_key, img) in results {
                         let img = match img {
                             Ok(img) => img,
@@ -4023,6 +4027,9 @@ impl Timeline {
                 image: None,
                 next_start_key: img_range.end,
             });
+        }
+        if self.cancel.is_cancelled() {
+            return Err(CreateImageLayersError::Cancelled);
         }
         let mut wrote_any_image = false;
         for (k, v) in data {
@@ -4138,6 +4145,10 @@ impl Timeline {
         let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
 
         for partition in partitioning.parts.iter() {
+            if self.cancel.is_cancelled() {
+                return Err(CreateImageLayersError::Cancelled);
+            }
+
             let img_range = start..partition.ranges.last().unwrap().end;
             let compact_metadata = partition.overlaps(&Key::metadata_key_range());
             if compact_metadata {

@@ -1251,6 +1251,8 @@ class NeonEnv:
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.
+
+        Unless of course, some stopping failed, in that case, all remaining child processes are leaked.
         """
         self.endpoints.stop_all(fail_on_endpoint_errors)
 
