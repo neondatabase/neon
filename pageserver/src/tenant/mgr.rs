@@ -13,7 +13,7 @@ use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,7 +55,7 @@ use utils::id::{TenantId, TimelineId};
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
 use super::timeline::detach_ancestor::PreparedTimelineDetach;
-use super::TenantSharedResources;
+use super::{GlobalShutDown, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
 /// - `Attached`: has a full Tenant object, is elegible to service
@@ -116,8 +116,6 @@ pub(crate) enum ShardSelector {
     /// Only return the 0th shard, if it is present.  If a non-0th shard is present,
     /// ignore it.
     Zero,
-    /// Pick the first shard we find for the TenantId
-    First,
     /// Pick the shard that holds this key
     Page(Key),
     /// The shard ID is known: pick the given shard
@@ -226,21 +224,8 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 }
 
 /// See [`Self::spawn`].
-#[derive(Clone)]
-pub struct BackgroundPurges(Arc<std::sync::Mutex<BackgroundPurgesInner>>);
-enum BackgroundPurgesInner {
-    Open(tokio::task::JoinSet<()>),
-    // we use the async mutex for coalescing
-    ShuttingDown(Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>),
-}
-
-impl Default for BackgroundPurges {
-    fn default() -> Self {
-        Self(Arc::new(std::sync::Mutex::new(
-            BackgroundPurgesInner::Open(JoinSet::new()),
-        )))
-    }
-}
+#[derive(Clone, Default)]
+pub struct BackgroundPurges(tokio_util::task::TaskTracker);
 
 impl BackgroundPurges {
     /// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
@@ -249,24 +234,32 @@ impl BackgroundPurges {
     /// Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
     /// Thus the [`BackgroundPurges`] type to keep track of these tasks.
     pub fn spawn(&self, tmp_path: Utf8PathBuf) {
-        let mut guard = self.0.lock().unwrap();
-        let jset = match &mut *guard {
-            BackgroundPurgesInner::Open(ref mut jset) => jset,
-            BackgroundPurgesInner::ShuttingDown(_) => {
-                warn!("trying to spawn background purge during shutdown, ignoring");
-                return;
+        // because on shutdown we close and wait, we are misusing TaskTracker a bit.
+        //
+        // so first acquire a token, then check if the tracker has been closed. the tracker might get closed
+        // right after, but at least the shutdown will wait for what we are spawning next.
+        let token = self.0.token();
+
+        if self.0.is_closed() {
+            warn!(
+                %tmp_path,
+                "trying to spawn background purge during shutdown, ignoring"
+            );
+            return;
+        }
+
+        let span = info_span!(parent: None, "background_purge", %tmp_path);
+
+        let task = move || {
+            let _token = token;
+            let _entered = span.entered();
+            if let Err(error) = std::fs::remove_dir_all(tmp_path.as_path()) {
+                // should we fatal_io_error here?
+                warn!(%error, "failed to purge tenant directory");
             }
         };
-        jset.spawn_on(
-            async move {
-                if let Err(error) = fs::remove_dir_all(tmp_path.as_path()).await {
-                    // should we fatal_io_error here?
-                    warn!(%error, path=%tmp_path, "failed to purge tenant directory");
-                }
-            }
-            .instrument(info_span!(parent: None, "background_purge")),
-            BACKGROUND_RUNTIME.handle(),
-        );
+
+        BACKGROUND_RUNTIME.spawn_blocking(task);
     }
 
     /// When this future completes, all background purges have completed.
@@ -280,42 +273,9 @@ impl BackgroundPurges {
     /// instances of this future will continue to be correct.
     #[instrument(skip_all)]
     pub async fn shutdown(&self) {
-        let jset = {
-            let mut guard = self.0.lock().unwrap();
-            match &mut *guard {
-                BackgroundPurgesInner::Open(jset) => {
-                    *guard = BackgroundPurgesInner::ShuttingDown(Arc::new(tokio::sync::Mutex::new(
-                        std::mem::take(jset),
-                    )))
-                }
-                BackgroundPurgesInner::ShuttingDown(_) => {
-                    // calling shutdown multiple times is most likely a bug in pageserver shutdown code
-                    warn!("already shutting down");
-                }
-            };
-            match &mut *guard {
-                BackgroundPurgesInner::ShuttingDown(ref mut jset) => jset.clone(),
-                BackgroundPurgesInner::Open(_) => {
-                    unreachable!("above code transitions into shut down state");
-                }
-            }
-        };
-        let mut jset = jset.lock().await; // concurrent callers coalesce here
-        while let Some(res) = jset.join_next().await {
-            match res {
-                Ok(()) => {}
-                Err(e) if e.is_panic() => {
-                    // If it panicked, the error is already logged by the panic hook.
-                }
-                Err(e) if e.is_cancelled() => {
-                    unreachable!("we don't cancel the joinset or runtime")
-                }
-                Err(e) => {
-                    // No idea when this can happen, but let's log it.
-                    warn!(%e, "background purge task failed or panicked");
-                }
-            }
-        }
+        // forbid new tasks (can be called many times)
+        self.0.close();
+        self.0.wait().await;
     }
 }
 
@@ -667,17 +627,20 @@ pub async fn init_tenant_mgr(
         let tenant_dir_path = conf.tenant_path(&tenant_shard_id);
         let shard_identity = location_conf.shard;
         let slot = match location_conf.mode {
-            LocationMode::Attached(attached_conf) => TenantSlot::Attached(tenant_spawn(
-                conf,
-                tenant_shard_id,
-                &tenant_dir_path,
-                resources.clone(),
-                AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
-                shard_identity,
-                Some(init_order.clone()),
-                SpawnMode::Lazy,
-                &ctx,
-            )),
+            LocationMode::Attached(attached_conf) => TenantSlot::Attached(
+                tenant_spawn(
+                    conf,
+                    tenant_shard_id,
+                    &tenant_dir_path,
+                    resources.clone(),
+                    AttachedTenantConf::new(location_conf.tenant_conf, attached_conf),
+                    shard_identity,
+                    Some(init_order.clone()),
+                    SpawnMode::Lazy,
+                    &ctx,
+                )
+                .expect("global shutdown during init_tenant_mgr cannot happen"),
+            ),
             LocationMode::Secondary(secondary_conf) => {
                 info!(
                     tenant_id = %tenant_shard_id.tenant_id,
@@ -725,7 +688,7 @@ fn tenant_spawn(
     init_order: Option<InitializationOrder>,
     mode: SpawnMode,
     ctx: &RequestContext,
-) -> Arc<Tenant> {
+) -> Result<Arc<Tenant>, GlobalShutDown> {
     // All these conditions should have been satisfied by our caller: the tenant dir exists, is a well formed
     // path, and contains a configuration file.  Assertions that do synchronous I/O are limited to debug mode
     // to avoid impacting prod runtime performance.
@@ -1192,7 +1155,10 @@ impl TenantManager {
                     None,
                     spawn_mode,
                     ctx,
-                );
+                )
+                .map_err(|_: GlobalShutDown| {
+                    UpsertLocationError::Unavailable(TenantMapError::ShuttingDown)
+                })?;
 
                 TenantSlot::Attached(tenant)
             }
@@ -1313,7 +1279,7 @@ impl TenantManager {
             None,
             SpawnMode::Eager,
             ctx,
-        );
+        )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
 
@@ -1384,33 +1350,32 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
     ) -> Result<(), DeleteTenantError> {
         let remote_path = remote_tenant_path(&tenant_shard_id);
-        let keys = match self
-            .resources
-            .remote_storage
-            .list(
-                Some(&remote_path),
-                remote_storage::ListingMode::NoDelimiter,
-                None,
-                &self.cancel,
-            )
-            .await
-        {
-            Ok(listing) => listing.keys,
-            Err(remote_storage::DownloadError::Cancelled) => {
-                return Err(DeleteTenantError::Cancelled)
-            }
-            Err(remote_storage::DownloadError::NotFound) => return Ok(()),
-            Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
-        };
+        let mut keys_stream = self.resources.remote_storage.list_streaming(
+            Some(&remote_path),
+            remote_storage::ListingMode::NoDelimiter,
+            None,
+            &self.cancel,
+        );
+        while let Some(chunk) = keys_stream.next().await {
+            let keys = match chunk {
+                Ok(listing) => listing.keys,
+                Err(remote_storage::DownloadError::Cancelled) => {
+                    return Err(DeleteTenantError::Cancelled)
+                }
+                Err(remote_storage::DownloadError::NotFound) => return Ok(()),
+                Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
+            };
 
-        if keys.is_empty() {
-            tracing::info!("Remote storage already deleted");
-        } else {
-            tracing::info!("Deleting {} keys from remote storage", keys.len());
-            self.resources
-                .remote_storage
-                .delete_objects(&keys, &self.cancel)
-                .await?;
+            if keys.is_empty() {
+                tracing::info!("Remote storage already deleted");
+            } else {
+                tracing::info!("Deleting {} keys from remote storage", keys.len());
+                let keys = keys.into_iter().map(|o| o.key).collect::<Vec<_>>();
+                self.resources
+                    .remote_storage
+                    .delete_objects(&keys, &self.cancel)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -1764,14 +1729,9 @@ impl TenantManager {
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
                 tracing::info!(timeline_id=%timeline.timeline_id, "Loading list of layers to hardlink");
-                let timeline_layers = timeline
-                    .layers
-                    .read()
-                    .await
-                    .likely_resident_layers()
-                    .collect::<Vec<_>>();
+                let layers = timeline.layers.read().await;
 
-                for layer in timeline_layers {
+                for layer in layers.likely_resident_layers() {
                     let relative_path = layer
                         .local_path()
                         .strip_prefix(&parent_path)
@@ -1968,7 +1928,8 @@ impl TenantManager {
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
+        // FIXME: this is unnecessary, slotguard already has these semantics
         struct RevertOnDropSlot(Option<SlotGuard>);
 
         impl Drop for RevertOnDropSlot {
@@ -2048,7 +2009,7 @@ impl TenantManager {
             None,
             SpawnMode::Eager,
             ctx,
-        );
+        )?;
 
         slot_guard.upsert(TenantSlot::Attached(tenant))?;
 
@@ -2089,7 +2050,6 @@ impl TenantManager {
                     };
 
                     match selector {
-                        ShardSelector::First => return ShardResolveResult::Found(tenant.clone()),
                         ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
                             return ShardResolveResult::Found(tenant.clone())
                         }
@@ -2171,6 +2131,9 @@ pub(crate) enum GetActiveTenantError {
     /// never happen.
     #[error("Tenant is broken: {0}")]
     Broken(String),
+
+    #[error("reconnect to switch tenant id")]
+    SwitchedTenant,
 }
 
 #[derive(Debug, thiserror::Error)]

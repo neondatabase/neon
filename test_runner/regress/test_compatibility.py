@@ -3,18 +3,15 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 import pytest
 import toml
-from fixtures.common_types import Lsn
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnv,
-    NeonEnvBuilder,
-    PgBin,
-)
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
@@ -22,7 +19,8 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.remote_storage import RemoteStorageKind
+from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
+from fixtures.workload import Workload
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
@@ -227,12 +225,6 @@ def test_forward_compatibility(
     )
 
     try:
-        # Previous version neon_local and pageserver are not aware
-        # of the new config.
-        # TODO: remove these once the previous version of neon local supports them
-        neon_env_builder.pageserver_get_impl = None
-        neon_env_builder.pageserver_validate_vectored_get = None
-
         neon_env_builder.num_safekeepers = 3
 
         # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
@@ -415,3 +407,132 @@ def dump_differs(
                     break
 
     return differs
+
+
+@dataclass
+class HistoricDataSet:
+    name: str
+    tenant_id: TenantId
+    pg_version: PgVersion
+    url: str
+
+    def __str__(self):
+        return self.name
+
+
+HISTORIC_DATA_SETS = [
+    # From before we enabled image layer compression.
+    # - IndexPart::LATEST_VERSION 7
+    # - STORAGE_FORMAT_VERSION 3
+    HistoricDataSet(
+        "2024-07-18",
+        TenantId("17bf64a53509714687664b3a84e9b3ba"),
+        PgVersion.V16,
+        "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2024-07-18-pgv16.tar.zst",
+    ),
+]
+
+
+@pytest.mark.parametrize("dataset", HISTORIC_DATA_SETS)
+@pytest.mark.xdist_group("compatibility")
+def test_historic_storage_formats(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_version: PgVersion,
+    dataset: HistoricDataSet,
+):
+    """
+    This test is like test_backward_compatibility, but it looks back further to examples of our storage format from long ago.
+    """
+
+    ARTIFACT_CACHE_DIR = "./artifact_cache"
+
+    import tarfile
+    from contextlib import closing
+
+    import requests
+    import zstandard
+
+    artifact_unpack_path = ARTIFACT_CACHE_DIR / Path("unpacked") / Path(dataset.name)
+
+    # Note: we assume that when running across a matrix of PG versions, the matrix includes all the versions needed by
+    # HISTORIC_DATA_SETS. If we ever remove a PG version from the matrix, then historic datasets built using that version
+    # will no longer be covered by this test.
+    if pg_version != dataset.pg_version:
+        pytest.skip(f"Dataset {dataset} is for different PG version, skipping")
+
+    with closing(requests.get(dataset.url, stream=True)) as r:
+        unzstd = zstandard.ZstdDecompressor()
+        with unzstd.stream_reader(r.raw) as stream:
+            with tarfile.open(mode="r|", fileobj=stream) as tf:
+                tf.extractall(artifact_unpack_path)
+
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.pg_version = dataset.pg_version
+    env = neon_env_builder.init_configs()
+    env.start()
+    assert isinstance(env.pageserver_remote_storage, S3Storage)
+
+    # Link artifact data into test's remote storage.  We don't want the whole repo dir, just the remote storage part: we are not testing
+    # compat of local disk data across releases (test_backward_compat does that), we're testing really long-lived data in S3 like layer files and indices.
+    #
+    # The code generating the snapshot uses local_fs, but this test uses S3Storage, so we are copying a tree of files into a bucket.  We use
+    # S3Storage so that the scrubber can run (the scrubber doesn't speak local_fs)
+    artifact_pageserver_path = (
+        artifact_unpack_path / Path("repo") / Path("local_fs_remote_storage") / Path("pageserver")
+    )
+    for root, _dirs, files in os.walk(artifact_pageserver_path):
+        for file in files:
+            local_path = os.path.join(root, file)
+            remote_key = (
+                env.pageserver_remote_storage.prefix_in_bucket
+                + str(local_path)[len(str(artifact_pageserver_path)) :]
+            )
+            log.info(f"Uploading {local_path} -> {remote_key}")
+            env.pageserver_remote_storage.client.upload_file(
+                local_path, env.pageserver_remote_storage.bucket_name, remote_key
+            )
+
+    # Check the scrubber handles this old data correctly (can read it and doesn't consider it corrupt)
+    #
+    # Do this _before_ importing to the pageserver, as that import may start writing immediately
+    healthy, metadata_summary = env.storage_scrubber.scan_metadata()
+    assert healthy
+    assert metadata_summary["tenant_count"] >= 1
+    assert metadata_summary["timeline_count"] >= 1
+
+    env.neon_cli.import_tenant(dataset.tenant_id)
+
+    # Discover timelines
+    timelines = env.pageserver.http_client().timeline_list(dataset.tenant_id)
+    # All our artifacts should contain at least one timeline
+    assert len(timelines) > 0
+
+    # TODO: ensure that the snapshots we're importing contain a sensible variety of content, at the very
+    # least they should include a mixture of deltas and image layers.  Preferably they should also
+    # contain some "exotic" stuff like aux files from logical replication.
+
+    # Check we can start an endpoint and read the SQL that the artifact is meant to contain
+    reference_sql_dump = artifact_unpack_path / Path("dump.sql")
+    ep = env.endpoints.create_start("main", tenant_id=dataset.tenant_id)
+    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
+    pg_bin.run_capture(
+        ["pg_dumpall", f"--dbname={ep.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
+    )
+    assert not dump_differs(
+        reference_sql_dump,
+        test_output_dir / "dump.sql",
+        test_output_dir / "dump.filediff",
+    )
+    ep.stop()
+
+    # Check we can also do writes to the database
+    existing_timeline_id = TimelineId(timelines[0]["timeline_id"])
+    workload = Workload(env, dataset.tenant_id, existing_timeline_id)
+    workload.init()
+    workload.write_rows(100)
+
+    # Check that compaction works
+    env.pageserver.http_client().timeline_compact(
+        dataset.tenant_id, existing_timeline_id, force_image_layer_creation=True
+    )

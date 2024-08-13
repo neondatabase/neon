@@ -591,7 +591,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
         abs_diff = abs(ratio - expected_ratio)
         assert original_count > count_now
 
-        expectation = 0.06
+        expectation = 0.065
         log.info(
             f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < {expectation}"
         )

@@ -144,15 +144,23 @@ impl RemotePath {
 ///
 /// The WithDelimiter mode will populate `prefixes` and `keys` in the result.  The
 /// NoDelimiter mode will only populate `keys`.
+#[derive(Copy, Clone)]
 pub enum ListingMode {
     WithDelimiter,
     NoDelimiter,
 }
 
+#[derive(PartialEq, Eq, Debug)]
+pub struct ListingObject {
+    pub key: RemotePath,
+    pub last_modified: SystemTime,
+    pub size: u64,
+}
+
 #[derive(Default)]
 pub struct Listing {
     pub prefixes: Vec<RemotePath>,
-    pub keys: Vec<RemotePath>,
+    pub keys: Vec<ListingObject>,
 }
 
 /// Storage (potentially remote) API to manage its state.
@@ -188,7 +196,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> impl Stream<Item = Result<Listing, DownloadError>>;
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + Send;
 
     async fn list(
         &self,
@@ -201,7 +209,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         let mut combined = stream.next().await.expect("At least one item required")?;
         while let Some(list) = stream.next().await {
             let list = list?;
-            combined.keys.extend_from_slice(&list.keys);
+            combined.keys.extend(list.keys.into_iter());
             combined.prefixes.extend_from_slice(&list.prefixes);
         }
         Ok(combined)
@@ -345,10 +353,10 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &'a CancellationToken,
-    ) -> impl Stream<Item = Result<Listing, DownloadError>> + 'a {
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + 'a + Send {
         match self {
             Self::LocalFs(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel))
-                as Pin<Box<dyn Stream<Item = Result<Listing, DownloadError>>>>,
+                as Pin<Box<dyn Stream<Item = Result<Listing, DownloadError>> + Send>>,
             Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),

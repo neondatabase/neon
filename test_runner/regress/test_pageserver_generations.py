@@ -214,12 +214,11 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     # Having written a mixture of generation-aware and legacy index_part.json,
     # ensure the scrubber handles the situation as expected.
-    metadata_summary = env.storage_scrubber.scan_metadata()
+    healthy, metadata_summary = env.storage_scrubber.scan_metadata()
     assert metadata_summary["tenant_count"] == 1  # Scrubber should have seen our timeline
     assert metadata_summary["timeline_count"] == 1
     assert metadata_summary["timeline_shard_count"] == 1
-    assert not metadata_summary["with_errors"]
-    assert not metadata_summary["with_warnings"]
+    assert healthy
 
 
 def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
@@ -596,19 +595,26 @@ def test_multi_attach(
     for ps in pageservers:
         ps.stop()
 
-    # Returning to a normal healthy state: all pageservers will start, but only the one most
-    # recently attached via the control plane will re-attach on startup
+    # Returning to a normal healthy state: all pageservers will start
     for ps in pageservers:
         ps.start()
 
-    with pytest.raises(PageserverApiException):
-        _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
-    with pytest.raises(PageserverApiException):
-        _detail = http_clients[1].timeline_detail(tenant_id, timeline_id)
-    _detail = http_clients[2].timeline_detail(tenant_id, timeline_id)
+    # Pageservers are marked offline by the storage controller during the rolling restart
+    # above. This may trigger a reschedulling, so there's no guarantee that the tenant
+    # shard ends up attached to the most recent ps.
+    raised = 0
+    serving_ps_idx = None
+    for idx, http_client in enumerate(http_clients):
+        try:
+            _detail = http_client.timeline_detail(tenant_id, timeline_id)
+            serving_ps_idx = idx
+        except PageserverApiException:
+            raised += 1
+
+    assert raised == 2 and serving_ps_idx is not None
 
     # All data we wrote while multi-attached remains readable
-    workload.validate(pageservers[2].id)
+    workload.validate(pageservers[serving_ps_idx].id)
 
 
 def test_upgrade_generationless_local_file_paths(

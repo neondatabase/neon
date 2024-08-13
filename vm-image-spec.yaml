@@ -277,8 +277,12 @@ files:
         help: 'Bytes between received and replayed LSN'
         key_labels:
         values: [replication_delay_bytes]
+        # We use a GREATEST call here because this calculation can be negative.
+        # The calculation is not atomic, meaning after we've gotten the receive
+        # LSN, the replay LSN may have advanced past the receive LSN we
+        # are using for the calculation.
         query: |
-          SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()) AS replication_delay_bytes;
+          SELECT GREATEST(0, pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())) AS replication_delay_bytes;
 
       - metric_name: replication_delay_seconds
         type: gauge
@@ -404,7 +408,7 @@ files:
             x::text as duration_seconds,
             neon.approximate_working_set_size_seconds(x) as size
           from
-            (select generate_series * 60 as x from generate_series(1, 60));
+            (select generate_series * 60 as x from generate_series(1, 60)) as t (x);
 build: |
   # Build cgroup-tools
   #
@@ -412,7 +416,7 @@ build: |
   # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
   # requires cgroup v2, so we'll build cgroup-tools ourselves.
   FROM debian:bullseye-slim as libcgroup-builder
-  ENV LIBCGROUP_VERSION v2.0.3
+  ENV LIBCGROUP_VERSION=v2.0.3
 
   RUN set -exu \
       && apt update \
@@ -456,7 +460,7 @@ build: |
           pkg-config
 
   # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
-  ENV PGBOUNCER_TAG pgbouncer_1_22_1
+  ENV PGBOUNCER_TAG=pgbouncer_1_22_1
   RUN set -e \
       && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
       && cd pgbouncer \

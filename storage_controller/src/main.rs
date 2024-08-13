@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context};
 use clap::Parser;
 use diesel::Connection;
+use hyper::Uri;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::path::PathBuf;
@@ -9,11 +10,14 @@ use std::time::Duration;
 use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
+use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
-    Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    Config, Service, MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
+    RECONCILER_CONCURRENCY_DEFAULT,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use utils::auth::{JwtAuth, SwappableJwtAuth};
 use utils::logging::{self, LogFormat};
 
@@ -61,7 +65,12 @@ struct Cli {
 
     /// Grace period before marking unresponsive pageserver offline
     #[arg(long)]
-    max_unavailable_interval: Option<humantime::Duration>,
+    max_offline_interval: Option<humantime::Duration>,
+
+    /// More tolerant grace period before marking unresponsive pagserver offline used
+    /// around pageserver restarts
+    #[arg(long)]
+    max_warming_up_interval: Option<humantime::Duration>,
 
     /// Size threshold for automatically splitting shards (disabled by default)
     #[arg(long)]
@@ -75,11 +84,27 @@ struct Cli {
     #[arg(long, default_value = "5s")]
     db_connect_timeout: humantime::Duration,
 
+    #[arg(long, default_value = "false")]
+    start_as_candidate: bool,
+
+    // TODO: make this mandatory once the helm chart gets updated
+    #[arg(long)]
+    address_for_peers: Option<Uri>,
+
     /// `neon_local` sets this to the path of the neon_local repo dir.
     /// Only relevant for testing.
     // TODO: make `cfg(feature = "testing")`
     #[arg(long)]
     neon_local_repo_dir: Option<PathBuf>,
+
+    /// Chaos testing
+    #[arg(long)]
+    chaos_interval: Option<humantime::Duration>,
+
+    // Maximum acceptable lag for the secondary location while draining
+    // a pageserver
+    #[arg(long)]
+    max_secondary_lag_bytes: Option<u64>,
 }
 
 enum StrictMode {
@@ -254,15 +279,23 @@ async fn async_main() -> anyhow::Result<()> {
         jwt_token: secrets.jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
-        max_unavailable_interval: args
-            .max_unavailable_interval
+        max_offline_interval: args
+            .max_offline_interval
             .map(humantime::Duration::into)
-            .unwrap_or(MAX_UNAVAILABLE_INTERVAL_DEFAULT),
+            .unwrap_or(MAX_OFFLINE_INTERVAL_DEFAULT),
+        max_warming_up_interval: args
+            .max_warming_up_interval
+            .map(humantime::Duration::into)
+            .unwrap_or(MAX_WARMING_UP_INTERVAL_DEFAULT),
         reconciler_concurrency: args
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
+        max_secondary_lag_bytes: args.max_secondary_lag_bytes,
+        address_for_peers: args.address_for_peers,
+        start_as_candidate: args.start_as_candidate,
+        http_service_port: args.listen.port() as i32,
     };
 
     // After loading secrets & config, but before starting anything else, apply database migrations
@@ -299,6 +332,22 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::info!("Serving on {0}", args.listen);
     let server_task = tokio::task::spawn(server);
 
+    let chaos_task = args.chaos_interval.map(|interval| {
+        let service = service.clone();
+        let cancel = CancellationToken::new();
+        let cancel_bg = cancel.clone();
+        (
+            tokio::task::spawn(
+                async move {
+                    let mut chaos_injector = ChaosInjector::new(service, interval.into());
+                    chaos_injector.run(cancel_bg).await
+                }
+                .instrument(tracing::info_span!("chaos_injector")),
+            ),
+            cancel,
+        )
+    });
+
     // Wait until we receive a signal
     let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
     let mut sigquit = tokio::signal::unix::signal(SignalKind::quit())?;
@@ -325,6 +374,12 @@ async fn async_main() -> anyhow::Result<()> {
             // We will fall through and shut down the service anyway, any request handlers
             // in flight will experience cancellation & their clients will see a torn connection.
         }
+    }
+
+    // If we were injecting chaos, stop that so that we're not calling into Service while it shuts down
+    if let Some((chaos_jh, chaos_cancel)) = chaos_task {
+        chaos_cancel.cancel();
+        chaos_jh.await.ok();
     }
 
     service.shutdown().await;

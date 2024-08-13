@@ -33,6 +33,7 @@ use tracing::debug;
 use utils::backoff;
 
 use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
+use crate::ListingObject;
 use crate::{
     config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError, Listing,
     ListingMode, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
@@ -352,7 +353,12 @@ impl RemoteStorage for AzureBlobStorage {
                 let blob_iter = entry
                     .blobs
                     .blobs()
-                    .map(|k| self.name_to_relative_path(&k.name));
+                    .map(|k| ListingObject{
+                        key: self.name_to_relative_path(&k.name),
+                        last_modified: k.properties.last_modified.into(),
+                        size: k.properties.content_length,
+                    }
+                    );
 
                 for key in blob_iter {
                     res.keys.push(key);

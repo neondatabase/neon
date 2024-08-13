@@ -138,14 +138,19 @@ def test_pg_regress(
         neon_env_builder.num_pageservers = shard_count
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(
         initial_tenant_conf=TENANT_CONF,
         initial_tenant_shard_count=shard_count,
     )
 
     # Connect to postgres and create a database called "regression".
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            # Enable the test mode, so that we don't need to patch the test cases.
+            "neon.regress_test_mode = true",
+        ],
+    )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
 
     # Create some local directories for pg_regress to run in.
@@ -202,14 +207,20 @@ def test_isolation(
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(
         initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
     )
 
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-    endpoint = env.endpoints.create_start("main", config_lines=["max_prepared_transactions=100"])
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            "max_prepared_transactions=100",
+            # Enable the test mode, so that we don't need to patch the test cases.
+            "neon.regress_test_mode = true",
+        ],
+    )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
 
     # Create some local directories for pg_isolation_regress to run in.
@@ -265,13 +276,18 @@ def test_sql_regress(
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     env = neon_env_builder.init_start(
         initial_tenant_conf=TENANT_CONF, initial_tenant_shard_count=shard_count
     )
 
     # Connect to postgres and create a database called "regression".
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            # Enable the test mode, so that we don't need to patch the test cases.
+            "neon.regress_test_mode = true",
+        ],
+    )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
 
     # Create some local directories for pg_regress to run in.

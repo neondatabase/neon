@@ -295,10 +295,11 @@ where
         };
     }
 
-    for key in listing.keys {
-        let object_name = key
+    for object in listing.keys {
+        let object_name = object
+            .key
             .object_name()
-            .ok_or_else(|| anyhow::anyhow!("object name for key {key}"))?;
+            .ok_or_else(|| anyhow::anyhow!("object name for key {}", object.key))?;
         other_prefixes.insert(object_name.to_string());
     }
 
@@ -459,7 +460,7 @@ pub(crate) async fn download_index_part(
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
     let max_previous_generation = indices
         .into_iter()
-        .filter_map(parse_remote_index_path)
+        .filter_map(|o| parse_remote_index_path(o.key))
         .filter(|g| g <= &my_generation)
         .max();
 
