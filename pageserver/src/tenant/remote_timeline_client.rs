@@ -1877,21 +1877,6 @@ impl RemoteTimelineClient {
                         );
                     }
 
-                    let shutting_down = self
-                        .upload_queue
-                        .lock()
-                        .unwrap()
-                        .initialized_mut()
-                        .map(|uq| uq.shutting_down)
-                        // if uninitialized or stopping, just stop
-                        .unwrap_or(true);
-
-                    if shutting_down {
-                        info!("upload task retrying cancelled by shutdown request");
-                        self.stop();
-                        return;
-                    }
-
                     // sleep until it's time to retry, or we're cancelled
                     exponential_backoff(
                         retries,
