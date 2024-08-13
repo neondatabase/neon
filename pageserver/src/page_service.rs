@@ -552,12 +552,12 @@ impl std::fmt::Display for BatchedPageStreamError {
 }
 
 struct BatchedGetPageRequest {
-    rel: RelTag,
-    blkno: BlockNumber,
+	rel: RelTag,
+	blkno: BlockNumber,
     reqid: RequestId,
     request_lsn: Lsn,
     not_modified_since: Lsn,
-    timer: SmgrOpTimer,
+	timer: SmgrOpTimer,
 }
 
 enum BatchedFeMessage {
@@ -863,13 +863,8 @@ impl PageServerHandler {
                     shard,
                     effective_request_lsn,
                     pages: smallvec::smallvec![BatchedGetPageRequest {
-                        rel,
-                        blkno,
-                        reqid,
-                        request_lsn,
-                        not_modified_since,
-                        timer
-                    }],
+					    rel, blkno, reqid, request_lsn, not_modified_since, timer
+					}],
                 }
             }
         };
@@ -1232,7 +1227,7 @@ impl PageServerHandler {
                     request_span,
                     pipelining_config,
                     protocol_version,
-                    &ctx,
+					&ctx,
                 )
                 .await
             }
@@ -1245,7 +1240,7 @@ impl PageServerHandler {
                     timeline_handles,
                     request_span,
                     protocol_version,
-                    &ctx,
+					&ctx,
                 )
                 .await
             }
@@ -1763,32 +1758,29 @@ impl PageServerHandler {
         assert_eq!(results.len(), requests.len());
 
         // TODO: avoid creating the new Vec here
-        Vec::from_iter(
-            requests
-                .into_iter()
-                .zip(results.into_iter())
-                .map(|(req, res)| {
-                    res.map(|page| {
-                        (
-                            PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
-                                reqid: req.reqid,
-                                request_lsn: req.request_lsn,
-                                not_modified_since: req.not_modified_since,
-                                rel: req.rel,
-                                blkno: req.blkno,
-                                page,
-                            }),
-                            req.timer,
-                        )
-                    })
-                    .map_err(|e| BatchedPageStreamError {
-                        err: PageStreamError::from(e),
-                        reqid: req.reqid,
-                        request_lsn: req.request_lsn,
-                        not_modified_since: req.not_modified_since,
-                    })
-                }),
-        )
+        Vec::from_iter(requests.into_iter().zip(results.into_iter()).map(
+            |(req, res)| {
+                res.map(|page| {
+                    (
+                        PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse {
+                            reqid: req.reqid,
+                            request_lsn: req.request_lsn,
+                            not_modified_since: req.not_modified_since,
+                            rel: req.rel,
+                            blkno: req.blkno,
+                            page,
+                        }),
+                        req.timer,
+                    )
+                })
+                .map_err(|e| BatchedPageStreamError {
+                    err: PageStreamError::from(e),
+                    reqid: req.reqid,
+                    request_lsn: req.request_lsn,
+                    not_modified_since: req.not_modified_since,
+                })
+            },
+        ))
     }
 
     #[instrument(skip_all, fields(shard_id))]
