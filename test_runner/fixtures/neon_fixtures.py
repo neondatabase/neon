@@ -950,7 +950,6 @@ class NeonEnvBuilder:
                 except Exception as e:
                     log.error(f"Error removing empty directory {directory_to_clean}: {e}")
 
-
     def cleanup_remote_storage(self):
         for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage]:
             if isinstance(x, S3Storage):
