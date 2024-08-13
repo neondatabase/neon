@@ -2085,6 +2085,57 @@ impl TenantManager {
             }
         }
     }
+
+    /// Calculate the tenant shards' contributions to this pageserver's utilization metrics.  The
+    /// returned values are:
+    ///  - the number of bytes of local disk space this pageserver's shards are requesting, i.e.
+    ///    how much space they would use if not impacted by disk usage eviction.
+    ///  - the number of tenant shards currently on this pageserver, including attached
+    ///    and secondary.
+    ///
+    /// This function is quite expensive: callers are expected to cache the result and
+    /// limit how often they call it.
+    pub(crate) fn calculate_utilization(&self) -> Result<(u64, u32), TenantMapListError> {
+        let tenants = self.tenants.read().unwrap();
+        let m = match &*tenants {
+            TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
+        };
+        let shard_count = m.len();
+        let mut wanted_bytes = 0;
+
+        for tenant_slot in m.values() {
+            match tenant_slot {
+                TenantSlot::InProgress(_barrier) => {
+                    // While a slot is being changed, we can't know how much storage it wants.  This
+                    // means this function's output can fluctuate if a lot of changes are going on
+                    // (such as transitions from secondary to attached).
+                    //
+                    // We could wait for the barrier and retry, but it's important that the utilization
+                    // API is responsive, and the data quality impact is not very significant.
+                    continue;
+                }
+                TenantSlot::Attached(tenant) => {
+                    wanted_bytes += tenant.local_storage_wanted();
+                }
+                TenantSlot::Secondary(secondary) => {
+                    let progress = secondary.progress.lock().unwrap();
+                    wanted_bytes += if progress.heatmap_mtime.is_some() {
+                        // If we have heatmap info, then we will 'want' the sum
+                        // of the size of layers in the heatmap: this is how much space
+                        // we would use if not doing any eviction.
+                        progress.bytes_total
+                    } else {
+                        // In the absence of heatmap info, assume that the secondary location simply
+                        // needs as much space as it is currently using.
+                        secondary.resident_size_metric.get()
+                    }
+                }
+            }
+        }
+
+        Ok((wanted_bytes, shard_count as u32))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
