@@ -2989,6 +2989,7 @@ impl Service {
             );
 
             let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+
             client
                 .timeline_detach_ancestor(tenant_shard_id, timeline_id)
                 .await
@@ -3005,7 +3006,8 @@ impl Service {
                         Error::ApiError(StatusCode::BAD_REQUEST, msg) => {
                             ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
                         }
-                        // rest can be mapped
+                        // rest can be mapped as usual
+                        // FIXME: this converts some 500 to 409 which is not per openapi
                         other => passthrough_api_error(&node, other),
                     }
                 })

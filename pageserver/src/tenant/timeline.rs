@@ -4328,18 +4328,34 @@ impl Timeline {
         detach_ancestor::prepare(self, tenant, options, ctx).await
     }
 
-    /// Completes the ancestor detach. This method is to be called while holding the
-    /// TenantManager's tenant slot, so during this method we cannot be deleted nor can any
-    /// timeline be deleted. After this method returns successfully, tenant must be reloaded.
+    /// Second step of detach from ancestor; detaches the `self` from it's current ancestor and
+    /// reparents any reparentable children of previous ancestor.
     ///
-    /// Pageserver receiving a SIGKILL during this operation is not supported (yet).
-    pub(crate) async fn complete_detaching_timeline_ancestor(
+    /// This method is to be called while holding the TenantManager's tenant slot, so during this
+    /// method we cannot be deleted nor can any timeline be deleted. After this method returns
+    /// successfully, tenant must be reloaded.
+    ///
+    /// Final step will be to [`Self::complete_detaching_timeline_ancestor`] after optionally
+    /// resetting the tenant.
+    pub(crate) async fn detach_from_ancestor_and_reparent(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
-        detach_ancestor::complete(self, tenant, prepared, ctx).await
+    ) -> Result<detach_ancestor::DetachingAndReparenting, anyhow::Error> {
+        detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
+    }
+
+    /// Final step which unblocks the GC.
+    ///
+    /// The tenant must've been reset if ancestry was modified previously (in tenant manager).
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        attempt: detach_ancestor::Attempt,
+        ctx: &RequestContext,
+    ) -> Result<(), detach_ancestor::Error> {
+        detach_ancestor::complete(self, tenant, attempt, ctx).await
     }
 
     /// Switch aux file policy and schedule upload to the index part.
