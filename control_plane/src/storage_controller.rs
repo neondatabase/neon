@@ -212,7 +212,16 @@ impl StorageController {
     /// Readiness check for our postgres process
     async fn pg_isready(&self, pg_bin_dir: &Utf8Path, postgres_port: u16) -> anyhow::Result<bool> {
         let bin_path = pg_bin_dir.join("pg_isready");
-        let args = ["-h", "localhost", "-U", USER_NAME, "-d", DB_NAME ,"-p", &format!("{}", postgres_port)];
+        let args = [
+            "-h",
+            "localhost",
+            "-U",
+            USER_NAME,
+            "-d",
+            DB_NAME,
+            "-p",
+            &format!("{}", postgres_port),
+        ];
         let exitcode = Command::new(bin_path).args(args).spawn()?.wait().await?;
 
         Ok(exitcode.success())
@@ -226,7 +235,10 @@ impl StorageController {
     ///
     /// Returns the database url
     pub async fn setup_database(&self, postgres_port: u16) -> anyhow::Result<String> {
-        let database_url = format!("postgresql://{USER_NAME}@localhost:{}/{DB_NAME}", postgres_port);
+        let database_url = format!(
+            "postgresql://{USER_NAME}@localhost:{}/{DB_NAME}",
+            postgres_port
+        );
 
         let pg_bin_dir = self.get_pg_bin_dir().await?;
         let createdb_path = pg_bin_dir.join("createdb");
@@ -238,7 +250,8 @@ impl StorageController {
                 &format!("{}", postgres_port),
                 "-U",
                 USER_NAME,
-                "-O", USER_NAME,
+                "-O",
+                USER_NAME,
                 DB_NAME,
             ])
             .output()
@@ -332,12 +345,11 @@ impl StorageController {
             let pg_log_path = pg_data_path.join("postgres.log");
 
             if !tokio::fs::try_exists(&pg_data_path).await? {
-                let initdb_args = [
-                "-D",
-                pg_data_path.as_ref(),
-                "--username", USER_NAME
-            ];
-            tracing::info!("Initializing storage controller database with args: {:?}", initdb_args);
+                let initdb_args = ["-D", pg_data_path.as_ref(), "--username", USER_NAME];
+            tracing::info!(
+                "Initializing storage controller database with args: {:?}",
+                initdb_args
+            );
 
             // Initialize empty database
             let initdb_path = pg_bin_dir.join("initdb");
@@ -375,10 +387,14 @@ impl StorageController {
                 pg_data_path.as_ref(),
                 "-l",
                 pg_log_path.as_ref(),
-                "-U", USER_NAME,
+                "-U",
+            USER_NAME,
             "start",
             ];
-        tracing::info!("Starting storage controller database with args: {:?}", db_start_args);
+        tracing::info!(
+            "Starting storage controller database with args: {:?}",
+            db_start_args
+        );
 
             background_process::start_process(
                 "storage_controller_db",

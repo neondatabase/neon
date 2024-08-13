@@ -196,7 +196,7 @@ impl WalIngest {
                                 .await?;
                         }
                     }
-                } else if pg_version == 17  {
+                } else if pg_version == 17 {
                     if info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_WAL_LOG {
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
                     } else if info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY {
@@ -790,7 +790,7 @@ impl WalIngest {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
-            17  => {
+            17 => {
                 if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
                     let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 

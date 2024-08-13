@@ -505,14 +505,11 @@ pub mod v16 {
     }
 }
 
-
 pub mod v17 {
     pub use super::v14::XlHeapLockUpdated;
 
-
     pub use super::v16::rm_neon;
     pub use super::v16::{XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate};
-
 }
 
 #[repr(C)]
@@ -536,7 +533,6 @@ impl XlSmgrCreate {
         }
     }
 }
-
 
 #[repr(C)]
 #[derive(Debug)]

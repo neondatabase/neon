@@ -155,7 +155,6 @@ pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 // From heapam_xlog.h
 pub const XLOG_HEAP2_REWRITE: u8 = 0x00;
 
-
 // From replication/message.h
 pub const XLOG_LOGICAL_MESSAGE: u8 = 0x00;
 
