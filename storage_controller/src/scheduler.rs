@@ -1,6 +1,6 @@
 use crate::{node::Node, tenant_shard::TenantShard};
 use itertools::Itertools;
-use pageserver_api::controller_api::UtilizationScore;
+use pageserver_api::models::PageserverUtilization;
 use serde::Serialize;
 use std::collections::HashMap;
 use utils::{http::error::ApiError, id::NodeId};
@@ -20,9 +20,9 @@ impl From<ScheduleError> for ApiError {
     }
 }
 
-#[derive(Serialize, Eq, PartialEq)]
+#[derive(Serialize)]
 pub enum MaySchedule {
-    Yes(UtilizationScore),
+    Yes(PageserverUtilization),
     No,
 }
 
@@ -363,7 +363,7 @@ impl Scheduler {
                 let may_schedule = self
                     .nodes
                     .get(node_id)
-                    .map(|n| n.may_schedule != MaySchedule::No)
+                    .map(|n| !matches!(n.may_schedule, MaySchedule::No))
                     .unwrap_or(false);
                 (*node_id, may_schedule)
             })
@@ -391,31 +391,28 @@ impl Scheduler {
             return Err(ScheduleError::NoPageservers);
         }
 
-        let mut scores: Vec<(NodeId, AffinityScore, usize, usize)> = self
+        let mut scores: Vec<(NodeId, AffinityScore, u64, usize)> = self
             .nodes
             .iter()
-            .filter_map(|(k, v)| {
-                if hard_exclude.contains(k) || v.may_schedule == MaySchedule::No {
-                    None
-                } else {
-                    Some((
-                        *k,
-                        context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
-                        v.shard_count,
-                        v.attached_shard_count,
-                    ))
-                }
+            .filter_map(|(k, v)| match &v.may_schedule {
+                MaySchedule::No => None,
+                MaySchedule::Yes(_) if hard_exclude.contains(k) => None,
+                MaySchedule::Yes(utilization) => Some((
+                    *k,
+                    context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
+                    utilization.score(),
+                    v.attached_shard_count,
+                )),
             })
             .collect();
 
         // Sort by, in order of precedence:
         //  1st: Affinity score.  We should never pick a higher-score node if a lower-score node is available
-        //  2nd: Attached shard count.  Within nodes with the same affinity, we always pick the node with
-        //  the least number of attached shards.
-        //  3rd: Total shard count.  Within nodes with the same affinity and attached shard count, use nodes
-        //  with the lower total shard count.
+        //  2nd: Utilization score (this combines shard count and disk utilization)
+        //  3rd: Attached shard count.  When nodes have identical utilization (e.g. when populating some
+        //       empty nodes), this acts as an anti-affinity between attached shards.
         //  4th: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
-        scores.sort_by_key(|i| (i.1, i.3, i.2, i.0));
+        scores.sort_by_key(|i| (i.1, i.2, i.3, i.0));
 
         if scores.is_empty() {
             // After applying constraints, no pageservers were left.
@@ -429,7 +426,7 @@ impl Scheduler {
                 for (node_id, node) in &self.nodes {
                     tracing::info!(
                         "Node {node_id}: may_schedule={} shards={}",
-                        node.may_schedule != MaySchedule::No,
+                        !matches!(node.may_schedule, MaySchedule::No),
                         node.shard_count
                     );
                 }
@@ -469,7 +466,7 @@ impl Scheduler {
 pub(crate) mod test_utils {
 
     use crate::node::Node;
-    use pageserver_api::controller_api::{NodeAvailability, UtilizationScore};
+    use pageserver_api::{controller_api::NodeAvailability, models::PageserverUtilization};
     use std::collections::HashMap;
     use utils::id::NodeId;
     /// Test helper: synthesize the requested number of nodes, all in active state.
@@ -486,7 +483,7 @@ pub(crate) mod test_utils {
                         format!("pghost-{i}"),
                         5432 + i as u16,
                     );
-                    node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+                    node.set_availability(NodeAvailability::Active(PageserverUtilization::full()));
                     assert!(node.is_available());
                     node
                 })

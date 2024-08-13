@@ -6,10 +6,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-use pageserver_api::{
-    controller_api::{NodeAvailability, UtilizationScore},
-    models::PageserverUtilization,
-};
+use pageserver_api::{controller_api::NodeAvailability, models::PageserverUtilization};
 
 use thiserror::Error;
 use utils::id::NodeId;
@@ -144,7 +141,8 @@ impl HeartbeaterTask {
                 // goes through to the pageserver even when the node is marked offline.
                 // This doesn't impact the availability observed by [`crate::service::Service`].
                 let mut node_clone = node.clone();
-                node_clone.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+                node_clone
+                    .set_availability(NodeAvailability::Active(PageserverUtilization::full()));
 
                 async move {
                     let response = node_clone
@@ -176,7 +174,7 @@ impl HeartbeaterTask {
                         node.get_availability()
                     {
                         PageserverState::WarmingUp {
-                            started_at: last_seen_at,
+                            started_at: *last_seen_at,
                         }
                     } else {
                         PageserverState::Offline
