@@ -16,9 +16,10 @@ use crate::{
     intern::ProjectIdInt,
     metrics::ApiLockMetrics,
     rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token},
-    scram, EndpointCacheKey,
+    EndpointCacheKey,
 };
 use dashmap::DashMap;
+use proxy_sasl::scram;
 use std::{hash::Hash, sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tracing::info;
@@ -469,15 +470,15 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         timeout: Duration,
         epoch: std::time::Duration,
         metrics: &'static ApiLockMetrics,
-    ) -> prometheus::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             name,
             node_locks: DashMap::with_shard_amount(shards),
             config,
             timeout,
             epoch,
             metrics,
-        })
+        }
     }
 
     pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {

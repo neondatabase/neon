@@ -7,9 +7,9 @@ use crate::{
     console::AuthSecret,
     context::RequestMonitoring,
     intern::EndpointIdInt,
-    sasl,
     stream::{self, Stream},
 };
+use proxy_sasl::sasl;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 

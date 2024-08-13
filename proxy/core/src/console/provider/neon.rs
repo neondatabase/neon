@@ -13,10 +13,11 @@ use crate::{
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::WakeComputeRateLimiter,
-    scram, EndpointCacheKey,
+    EndpointCacheKey,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
+use proxy_sasl::scram;
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;

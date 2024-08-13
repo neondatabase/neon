@@ -1,6 +1,7 @@
 //! Implementation of the SCRAM authentication algorithm.
 
 use std::convert::Infallible;
+use std::hash::Hash;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -13,8 +14,6 @@ use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
 use super::threadpool::ThreadPool;
 use super::ScramKey;
-use crate::config;
-use crate::intern::EndpointIdInt;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
 /// The only channel binding mode we currently support.
@@ -59,14 +58,14 @@ enum ExchangeState {
 pub struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
-    tls_server_end_point: config::TlsServerEndPoint,
+    tls_server_end_point: super::TlsServerEndPoint,
 }
 
 impl<'a> Exchange<'a> {
     pub fn new(
         secret: &'a ServerSecret,
         nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
-        tls_server_end_point: config::TlsServerEndPoint,
+        tls_server_end_point: super::TlsServerEndPoint,
     ) -> Self {
         Self {
             state: ExchangeState::Initial(SaslInitial { nonce }),
@@ -77,15 +76,15 @@ impl<'a> Exchange<'a> {
 }
 
 // copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L236-L248>
-async fn derive_client_key(
-    pool: &ThreadPool,
-    endpoint: EndpointIdInt,
+async fn derive_client_key<K: Hash + Send + 'static>(
+    pool: &ThreadPool<K>,
+    concurrency_key: K,
     password: &[u8],
     salt: &[u8],
     iterations: u32,
 ) -> ScramKey {
     let salted_password = pool
-        .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
+        .spawn_job(concurrency_key, Pbkdf2::start(password, salt, iterations))
         .await
         .expect("job should not be cancelled");
 
@@ -101,14 +100,15 @@ async fn derive_client_key(
     make_key(b"Client Key").into()
 }
 
-pub async fn exchange(
-    pool: &ThreadPool,
-    endpoint: EndpointIdInt,
+pub async fn exchange<K: Hash + Send + 'static>(
+    pool: &ThreadPool<K>,
+    concurrency_key: K,
     secret: &ServerSecret,
     password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
     let salt = base64::decode(&secret.salt_base64)?;
-    let client_key = derive_client_key(pool, endpoint, password, &salt, secret.iterations).await;
+    let client_key =
+        derive_client_key(pool, concurrency_key, password, &salt, secret.iterations).await;
 
     if secret.is_password_invalid(&client_key).into() {
         Ok(sasl::Outcome::Failure("password doesn't match"))
@@ -121,7 +121,7 @@ impl SaslInitial {
     fn transition(
         &self,
         secret: &ServerSecret,
-        tls_server_end_point: &config::TlsServerEndPoint,
+        tls_server_end_point: &super::TlsServerEndPoint,
         input: &str,
     ) -> sasl::Result<sasl::Step<SaslSentInner, Infallible>> {
         let client_first_message = ClientFirstMessage::parse(input)
@@ -156,7 +156,7 @@ impl SaslSentInner {
     fn transition(
         &self,
         secret: &ServerSecret,
-        tls_server_end_point: &config::TlsServerEndPoint,
+        tls_server_end_point: &super::TlsServerEndPoint,
         input: &str,
     ) -> sasl::Result<sasl::Step<Infallible, super::ScramKey>> {
         let Self {
@@ -169,8 +169,8 @@ impl SaslSentInner {
             .ok_or(SaslError::BadClientMessage("invalid client-final-message"))?;
 
         let channel_binding = cbind_flag.encode(|_| match tls_server_end_point {
-            config::TlsServerEndPoint::Sha256(x) => Ok(x),
-            config::TlsServerEndPoint::Undefined => Err(SaslError::MissingBinding),
+            super::TlsServerEndPoint::Sha256(x) => Ok(x),
+            super::TlsServerEndPoint::Undefined => Err(SaslError::MissingBinding),
         })?;
 
         // This might've been caused by a MITM attack

@@ -7,10 +7,11 @@ use std::{net::SocketAddr, sync::Arc};
 
 use futures::future::Either;
 use itertools::Itertools;
-use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
-use proxy::metrics::{Metrics, ThreadPoolMetrics};
+use proxy::metrics::Metrics;
 use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
+use proxy_sasl::scram::threadpool::ThreadPoolMetrics;
+use proxy_sasl::scram::TlsServerEndPoint;
 use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
 

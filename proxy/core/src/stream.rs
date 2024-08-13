@@ -1,10 +1,10 @@
-use crate::config::TlsServerEndPoint;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::Metrics;
 use bytes::BytesMut;
 
 use pq_proto::framed::{ConnectionError, Framed};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};
+use proxy_sasl::scram::TlsServerEndPoint;
 use rustls::ServerConfig;
 use std::pin::Pin;
 use std::sync::Arc;

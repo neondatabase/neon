@@ -16,9 +16,10 @@ use crate::console::messages::{ConsoleError, Details, MetricsAuxInfo, Status};
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
-use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
+use crate::{http, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
+use proxy_sasl::{sasl, scram};
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::pki_types;
@@ -137,7 +138,7 @@ struct Scram(scram::ServerSecret);
 
 impl Scram {
     async fn new(password: &str) -> anyhow::Result<Self> {
-        let secret = scram::ServerSecret::build(password)
+        let secret = scram::ServerSecret::build_test_secret(password)
             .await
             .context("failed to generate scram secret")?;
         Ok(Scram(secret))

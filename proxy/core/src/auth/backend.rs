@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use ipnet::{Ipv4Net, Ipv6Net};
 pub use link::LinkAuthError;
+use proxy_sasl::scram;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
 use tracing::{info, warn};
@@ -36,7 +37,7 @@ use crate::{
     },
     stream, url,
 };
-use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
+use crate::{EndpointCacheKey, EndpointId, RoleName};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -371,8 +372,8 @@ async fn authenticate_with_secret(
         let auth_outcome =
             validate_password_and_exchange(&config.thread_pool, ep, &password, secret).await?;
         let keys = match auth_outcome {
-            crate::sasl::Outcome::Success(key) => key,
-            crate::sasl::Outcome::Failure(reason) => {
+            proxy_sasl::sasl::Outcome::Success(key) => key,
+            proxy_sasl::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
                 return Err(auth::AuthError::auth_failed(&*info.user));
             }
@@ -558,9 +559,9 @@ mod tests {
         context::RequestMonitoring,
         proxy::NeonOptions,
         rate_limiter::{EndpointRateLimiter, RateBucketInfo},
-        scram::{threadpool::ThreadPool, ServerSecret},
         stream::{PqStream, Stream},
     };
+    use proxy_sasl::scram::{threadpool::ThreadPool, ServerSecret};
 
     use super::{auth_quirks, AuthRateLimiter};
 
@@ -669,7 +670,11 @@ mod tests {
         let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
-            secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
+            secret: AuthSecret::Scram(
+                ServerSecret::build_test_secret("my-secret-password")
+                    .await
+                    .unwrap(),
+            ),
         };
 
         let user_info = ComputeUserInfoMaybeEndpoint {
@@ -746,7 +751,11 @@ mod tests {
         let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
-            secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
+            secret: AuthSecret::Scram(
+                ServerSecret::build_test_secret("my-secret-password")
+                    .await
+                    .unwrap(),
+            ),
         };
 
         let user_info = ComputeUserInfoMaybeEndpoint {
@@ -798,7 +807,11 @@ mod tests {
         let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
-            secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
+            secret: AuthSecret::Scram(
+                ServerSecret::build_test_secret("my-secret-password")
+                    .await
+                    .unwrap(),
+            ),
         };
 
         let user_info = ComputeUserInfoMaybeEndpoint {

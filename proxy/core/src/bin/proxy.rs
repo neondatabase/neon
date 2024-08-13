@@ -30,7 +30,6 @@ use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
 use proxy::redis::notifications;
-use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
@@ -38,6 +37,7 @@ use proxy::usage_metrics;
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
 use proxy::serverless;
+use proxy_sasl::scram::threadpool::ThreadPool;
 use remote_storage::RemoteStorageConfig;
 use std::net::SocketAddr;
 use std::pin::pin;
@@ -607,7 +607,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 timeout,
                 epoch,
                 &Metrics::get().wake_compute_lock,
-            )?));
+            )));
             tokio::spawn(locks.garbage_collect_worker());
 
             let url = args.auth_endpoint.parse()?;
@@ -658,7 +658,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         timeout,
         epoch,
         &Metrics::get().proxy.connect_compute_lock,
-    )?;
+    );
 
     let http_config = HttpConfig {
         pool_options: GlobalConnPoolOptions {

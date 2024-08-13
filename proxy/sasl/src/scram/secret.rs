@@ -64,9 +64,7 @@ impl ServerSecret {
     }
 
     /// Build a new server secret from the prerequisites.
-    /// XXX: We only use this function in tests.
-    #[cfg(test)]
-    pub async fn build(password: &str) -> Option<Self> {
+    pub async fn build_test_secret(password: &str) -> Option<Self> {
         Self::parse(&postgres_protocol::password::scram_sha_256(password.as_bytes()).await)
     }
 }

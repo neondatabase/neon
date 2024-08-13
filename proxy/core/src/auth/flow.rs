@@ -2,16 +2,17 @@
 
 use super::{backend::ComputeCredentialKeys, AuthErrorImpl, PasswordHackPayload};
 use crate::{
-    config::TlsServerEndPoint,
     console::AuthSecret,
     context::RequestMonitoring,
     intern::EndpointIdInt,
-    sasl,
-    scram::{self, threadpool::ThreadPool},
     stream::{PqStream, Stream},
 };
 use postgres_protocol::authentication::sasl::{SCRAM_SHA_256, SCRAM_SHA_256_PLUS};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
+use proxy_sasl::{
+    sasl,
+    scram::{self, threadpool::ThreadPool, TlsServerEndPoint},
+};
 use std::{io, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
@@ -56,7 +57,7 @@ impl AuthMethod for PasswordHack {
 /// Use clear-text password auth called `password` in docs
 /// <https://www.postgresql.org/docs/current/auth-password.html>
 pub struct CleartextPassword {
-    pub pool: Arc<ThreadPool>,
+    pub pool: Arc<ThreadPool<EndpointIdInt>>,
     pub endpoint: EndpointIdInt,
     pub secret: AuthSecret,
 }
@@ -174,7 +175,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         }
         info!("client chooses {}", sasl.method);
 
-        let outcome = sasl::SaslStream::new(self.stream, sasl.message)
+        let outcome = sasl::SaslStream::new(&mut self.stream.framed, sasl.message)
             .authenticate(scram::Exchange::new(
                 secret,
                 rand::random,
@@ -191,7 +192,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
 }
 
 pub(crate) async fn validate_password_and_exchange(
-    pool: &ThreadPool,
+    pool: &ThreadPool<EndpointIdInt>,
     endpoint: EndpointIdInt,
     password: &[u8],
     secret: AuthSecret,
@@ -206,7 +207,8 @@ pub(crate) async fn validate_password_and_exchange(
         }
         // perform scram authentication as both client and server to validate the keys
         AuthSecret::Scram(scram_secret) => {
-            let outcome = crate::scram::exchange(pool, endpoint, &scram_secret, password).await?;
+            let outcome =
+                proxy_sasl::scram::exchange(pool, endpoint, &scram_secret, password).await?;
 
             let client_key = match outcome {
                 sasl::Outcome::Success(client_key) => client_key,

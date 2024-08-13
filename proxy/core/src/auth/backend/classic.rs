@@ -5,9 +5,9 @@ use crate::{
     config::AuthenticationConfig,
     console::AuthSecret,
     context::RequestMonitoring,
-    sasl,
     stream::{PqStream, Stream},
 };
+use proxy_sasl::sasl;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 

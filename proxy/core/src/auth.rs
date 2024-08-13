@@ -38,7 +38,7 @@ pub enum AuthErrorImpl {
 
     /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]
-    Sasl(#[from] crate::sasl::Error),
+    Sasl(#[from] proxy_sasl::sasl::Error),
 
     #[error("Unsupported authentication method: {0}")]
     BadAuthMethod(Box<str>),
@@ -145,6 +145,31 @@ impl ReportableError for AuthError {
             IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
             TooManyConnections => crate::error::ErrorKind::RateLimit,
             UserTimeout(_) => crate::error::ErrorKind::User,
+        }
+    }
+}
+
+impl UserFacingError for proxy_sasl::sasl::Error {
+    fn to_string_client(&self) -> String {
+        match self {
+            proxy_sasl::sasl::Error::ChannelBindingFailed(m) => m.to_string(),
+            proxy_sasl::sasl::Error::ChannelBindingBadMethod(m) => {
+                format!("unsupported channel binding method {m}")
+            }
+            _ => "authentication protocol violation".to_string(),
+        }
+    }
+}
+
+impl ReportableError for proxy_sasl::sasl::Error {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self {
+            proxy_sasl::sasl::Error::ChannelBindingFailed(_) => crate::error::ErrorKind::User,
+            proxy_sasl::sasl::Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
+            proxy_sasl::sasl::Error::BadClientMessage(_) => crate::error::ErrorKind::User,
+            proxy_sasl::sasl::Error::MissingBinding => crate::error::ErrorKind::Service,
+            proxy_sasl::sasl::Error::Base64(_) => crate::error::ErrorKind::ControlPlane,
+            proxy_sasl::sasl::Error::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }

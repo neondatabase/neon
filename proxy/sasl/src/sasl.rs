@@ -10,7 +10,7 @@ mod channel_binding;
 mod messages;
 mod stream;
 
-use crate::error::{ReportableError, UserFacingError};
+// use crate::error::{ReportableError, UserFacingError};
 use std::io;
 use thiserror::Error;
 
@@ -40,29 +40,29 @@ pub enum Error {
     Io(#[from] io::Error),
 }
 
-impl UserFacingError for Error {
-    fn to_string_client(&self) -> String {
-        use Error::*;
-        match self {
-            ChannelBindingFailed(m) => m.to_string(),
-            ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
-            _ => "authentication protocol violation".to_string(),
-        }
-    }
-}
+// impl UserFacingError for Error {
+//     fn to_string_client(&self) -> String {
+//         use Error::*;
+//         match self {
+//             ChannelBindingFailed(m) => m.to_string(),
+//             ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
+//             _ => "authentication protocol violation".to_string(),
+//         }
+//     }
+// }
 
-impl ReportableError for Error {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
-        match self {
-            Error::ChannelBindingFailed(_) => crate::error::ErrorKind::User,
-            Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
-            Error::BadClientMessage(_) => crate::error::ErrorKind::User,
-            Error::MissingBinding => crate::error::ErrorKind::Service,
-            Error::Base64(_) => crate::error::ErrorKind::ControlPlane,
-            Error::Io(_) => crate::error::ErrorKind::ClientDisconnect,
-        }
-    }
-}
+// impl ReportableError for Error {
+//     fn get_error_kind(&self) -> crate::error::ErrorKind {
+//         match self {
+//             Error::ChannelBindingFailed(_) => crate::error::ErrorKind::User,
+//             Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
+//             Error::BadClientMessage(_) => crate::error::ErrorKind::User,
+//             Error::MissingBinding => crate::error::ErrorKind::Service,
+//             Error::Base64(_) => crate::error::ErrorKind::ControlPlane,
+//             Error::Io(_) => crate::error::ErrorKind::ClientDisconnect,
+//         }
+//     }
+// }
 
 /// A convenient result type for SASL exchange.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,27 +1,26 @@
 use crate::{
     auth::{self, backend::AuthRateLimiter},
     console::locks::ApiLocks,
+    intern::EndpointIdInt,
     rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
-    scram::threadpool::ThreadPool,
     serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
     Host,
 };
+
 use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
+use proxy_sasl::scram::{threadpool::ThreadPool, TlsServerEndPoint};
 use remote_storage::RemoteStorageConfig;
 use rustls::{
     crypto::ring::sign,
     pki_types::{CertificateDer, PrivateKeyDer},
 };
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
     sync::Arc,
     time::Duration,
 };
-use tracing::{error, info};
-use x509_parser::oid_registry;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
@@ -58,7 +57,7 @@ pub struct HttpConfig {
 }
 
 pub struct AuthenticationConfig {
-    pub thread_pool: Arc<ThreadPool>,
+    pub thread_pool: Arc<ThreadPool<EndpointIdInt>>,
     pub scram_protocol_timeout: tokio::time::Duration,
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
@@ -124,66 +123,6 @@ pub fn configure_tls(
         common_names,
         cert_resolver,
     })
-}
-
-/// Channel binding parameter
-///
-/// <https://www.rfc-editor.org/rfc/rfc5929#section-4>
-/// Description: The hash of the TLS server's certificate as it
-/// appears, octet for octet, in the server's Certificate message.  Note
-/// that the Certificate message contains a certificate_list, in which
-/// the first element is the server's certificate.
-///
-/// The hash function is to be selected as follows:
-///
-/// * if the certificate's signatureAlgorithm uses a single hash
-///   function, and that hash function is either MD5 or SHA-1, then use SHA-256;
-///
-/// * if the certificate's signatureAlgorithm uses a single hash
-///   function and that hash function neither MD5 nor SHA-1, then use
-///   the hash function associated with the certificate's
-///   signatureAlgorithm;
-///
-/// * if the certificate's signatureAlgorithm uses no hash functions or
-///   uses multiple hash functions, then this channel binding type's
-///   channel bindings are undefined at this time (updates to is channel
-///   binding type may occur to address this issue if it ever arises).
-#[derive(Debug, Clone, Copy)]
-pub enum TlsServerEndPoint {
-    Sha256([u8; 32]),
-    Undefined,
-}
-
-impl TlsServerEndPoint {
-    pub fn new(cert: &CertificateDer) -> anyhow::Result<Self> {
-        let sha256_oids = [
-            // I'm explicitly not adding MD5 or SHA1 here... They're bad.
-            oid_registry::OID_SIG_ECDSA_WITH_SHA256,
-            oid_registry::OID_PKCS1_SHA256WITHRSA,
-        ];
-
-        let pem = x509_parser::parse_x509_certificate(cert)
-            .context("Failed to parse PEM object from cerficiate")?
-            .1;
-
-        info!(subject = %pem.subject, "parsing TLS certificate");
-
-        let reg = oid_registry::OidRegistry::default().with_all_crypto();
-        let oid = pem.signature_algorithm.oid();
-        let alg = reg.get(oid);
-        if sha256_oids.contains(oid) {
-            let tls_server_end_point: [u8; 32] = Sha256::new().chain_update(cert).finalize().into();
-            info!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
-            Ok(Self::Sha256(tls_server_end_point))
-        } else {
-            error!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), "unknown channel binding");
-            Ok(Self::Undefined)
-        }
-    }
-
-    pub fn supported(&self) -> bool {
-        !matches!(self, TlsServerEndPoint::Undefined)
-    }
 }
 
 #[derive(Default, Debug)]

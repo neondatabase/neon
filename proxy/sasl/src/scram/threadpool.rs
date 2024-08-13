@@ -4,29 +4,36 @@
 //! 1. Fairness per endpoint.
 //! 2. Yield support for high iteration counts.
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    hash::Hash,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use crossbeam_deque::{Injector, Stealer, Worker};
 use itertools::Itertools;
+use measured::{
+    label::{FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue},
+    CounterVec, Gauge, GaugeVec, LabelGroup, MetricGroup,
+};
 use parking_lot::{Condvar, Mutex};
 use rand::Rng;
 use rand::{rngs::SmallRng, SeedableRng};
 use tokio::sync::oneshot;
 
 use crate::{
-    intern::EndpointIdInt,
-    metrics::{ThreadPoolMetrics, ThreadPoolWorkerId},
+    // intern::EndpointIdInt,
+    // metrics::{ThreadPoolMetrics, ThreadPoolWorkerId},
     scram::countmin::CountMinSketch,
 };
 
 use super::pbkdf2::Pbkdf2;
 
-pub struct ThreadPool {
-    queue: Injector<JobSpec>,
-    stealers: Vec<Stealer<JobSpec>>,
+pub struct ThreadPool<K> {
+    queue: Injector<JobSpec<K>>,
+    stealers: Vec<Stealer<JobSpec<K>>>,
     parkers: Vec<(Condvar, Mutex<ThreadState>)>,
     /// bitpacked representation.
     /// lower 8 bits = number of sleeping threads
@@ -42,7 +49,7 @@ enum ThreadState {
     Active,
 }
 
-impl ThreadPool {
+impl<K: Hash + Send + 'static> ThreadPool<K> {
     pub fn new(n_workers: u8) -> Arc<Self> {
         let workers = (0..n_workers).map(|_| Worker::new_fifo()).collect_vec();
         let stealers = workers.iter().map(|w| w.stealer()).collect_vec();
@@ -68,11 +75,7 @@ impl ThreadPool {
         pool
     }
 
-    pub fn spawn_job(
-        &self,
-        endpoint: EndpointIdInt,
-        pbkdf2: Pbkdf2,
-    ) -> oneshot::Receiver<[u8; 32]> {
+    pub fn spawn_job(&self, key: K, pbkdf2: Pbkdf2) -> oneshot::Receiver<[u8; 32]> {
         let (tx, rx) = oneshot::channel();
 
         let queue_was_empty = self.queue.is_empty();
@@ -81,7 +84,7 @@ impl ThreadPool {
         self.queue.push(JobSpec {
             response: tx,
             pbkdf2,
-            endpoint,
+            key,
         });
 
         // inspired from <https://github.com/rayon-rs/rayon/blob/3e3962cb8f7b50773bcc360b48a7a674a53a2c77/rayon-core/src/sleep/mod.rs#L242>
@@ -139,7 +142,12 @@ impl ThreadPool {
         }
     }
 
-    fn steal(&self, rng: &mut impl Rng, skip: usize, worker: &Worker<JobSpec>) -> Option<JobSpec> {
+    fn steal(
+        &self,
+        rng: &mut impl Rng,
+        skip: usize,
+        worker: &Worker<JobSpec<K>>,
+    ) -> Option<JobSpec<K>> {
         // announce thread as idle
         self.counters.fetch_add(256, Ordering::SeqCst);
 
@@ -188,7 +196,11 @@ impl ThreadPool {
     }
 }
 
-fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
+fn thread_rt<K: Hash + Send + 'static>(
+    pool: Arc<ThreadPool<K>>,
+    worker: Worker<JobSpec<K>>,
+    index: usize,
+) {
     /// interval when we should steal from the global queue
     /// so that tail latencies are managed appropriately
     const STEAL_INTERVAL: usize = 61;
@@ -236,7 +248,7 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
 
             // receiver is closed, cancel the task
             if !job.response.is_closed() {
-                let rate = sketch.inc_and_return(&job.endpoint, job.pbkdf2.cost());
+                let rate = sketch.inc_and_return(&job.key, job.pbkdf2.cost());
 
                 const P: f64 = 2000.0;
                 // probability decreases as rate increases.
@@ -287,24 +299,96 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
     }
 }
 
-struct JobSpec {
+struct JobSpec<K> {
     response: oneshot::Sender<[u8; 32]>,
     pbkdf2: Pbkdf2,
-    endpoint: EndpointIdInt,
+    key: K,
+}
+
+pub struct ThreadPoolWorkers(usize);
+pub struct ThreadPoolWorkerId(pub usize);
+
+impl LabelValue for ThreadPoolWorkerId {
+    fn visit<V: measured::label::LabelVisitor>(&self, v: V) -> V::Output {
+        v.write_int(self.0 as i64)
+    }
+}
+
+impl LabelGroup for ThreadPoolWorkerId {
+    fn visit_values(&self, v: &mut impl measured::label::LabelGroupVisitor) {
+        v.write_value(LabelName::from_str("worker"), self);
+    }
+}
+
+impl LabelGroupSet for ThreadPoolWorkers {
+    type Group<'a> = ThreadPoolWorkerId;
+
+    fn cardinality(&self) -> Option<usize> {
+        Some(self.0)
+    }
+
+    fn encode_dense(&self, value: Self::Unique) -> Option<usize> {
+        Some(value)
+    }
+
+    fn decode_dense(&self, value: usize) -> Self::Group<'_> {
+        ThreadPoolWorkerId(value)
+    }
+
+    type Unique = usize;
+
+    fn encode(&self, value: Self::Group<'_>) -> Option<Self::Unique> {
+        Some(value.0)
+    }
+
+    fn decode(&self, value: &Self::Unique) -> Self::Group<'_> {
+        ThreadPoolWorkerId(*value)
+    }
+}
+
+impl LabelSet for ThreadPoolWorkers {
+    type Value<'a> = ThreadPoolWorkerId;
+
+    fn dynamic_cardinality(&self) -> Option<usize> {
+        Some(self.0)
+    }
+
+    fn encode(&self, value: Self::Value<'_>) -> Option<usize> {
+        (value.0 < self.0).then_some(value.0)
+    }
+
+    fn decode(&self, value: usize) -> Self::Value<'_> {
+        ThreadPoolWorkerId(value)
+    }
+}
+
+impl FixedCardinalitySet for ThreadPoolWorkers {
+    fn cardinality(&self) -> usize {
+        self.0
+    }
+}
+
+#[derive(MetricGroup)]
+#[metric(new(workers: usize))]
+pub struct ThreadPoolMetrics {
+    pub injector_queue_depth: Gauge,
+    #[metric(init = GaugeVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_queue_depth: GaugeVec<ThreadPoolWorkers>,
+    #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
+    #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::EndpointId;
-
     use super::*;
 
     #[tokio::test]
     async fn hash_is_correct() {
         let pool = ThreadPool::new(1);
 
-        let ep = EndpointId::from("foo");
-        let ep = EndpointIdInt::from(ep);
+        let ep = "foo";
 
         let salt = [0x55; 32];
         let actual = pool

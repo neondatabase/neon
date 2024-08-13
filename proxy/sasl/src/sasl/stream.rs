@@ -1,7 +1,10 @@
 //! Abstraction for the string-oriented SASL protocols.
 
 use super::{messages::ServerMessage, Mechanism};
-use crate::stream::PqStream;
+use pq_proto::{
+    framed::{ConnectionError, Framed},
+    FeMessage, ProtocolError,
+};
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
@@ -9,7 +12,7 @@ use tracing::info;
 /// Abstracts away all peculiarities of the libpq's protocol.
 pub struct SaslStream<'a, S> {
     /// The underlying stream.
-    stream: &'a mut PqStream<S>,
+    stream: &'a mut Framed<S>,
     /// Current password message we received from client.
     current: bytes::Bytes,
     /// First SASL message produced by client.
@@ -17,12 +20,33 @@ pub struct SaslStream<'a, S> {
 }
 
 impl<'a, S> SaslStream<'a, S> {
-    pub fn new(stream: &'a mut PqStream<S>, first: &'a str) -> Self {
+    pub fn new(stream: &'a mut Framed<S>, first: &'a str) -> Self {
         Self {
             stream,
             current: bytes::Bytes::new(),
             first: Some(first),
         }
+    }
+}
+
+fn err_connection() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, "connection is lost")
+}
+
+pub async fn read_password_message<S: AsyncRead + Unpin>(
+    framed: &mut Framed<S>,
+) -> io::Result<bytes::Bytes> {
+    let msg = framed
+        .read_message()
+        .await
+        .map_err(ConnectionError::into_io_error)?
+        .ok_or_else(err_connection)?;
+    match msg {
+        FeMessage::PasswordMessage(msg) => Ok(msg),
+        bad => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected message type: {:?}", bad),
+        )),
     }
 }
 
@@ -33,7 +57,7 @@ impl<S: AsyncRead + Unpin> SaslStream<'_, S> {
             return Ok(first);
         }
 
-        self.current = self.stream.read_password_message().await?;
+        self.current = read_password_message(self.stream).await?;
         let s = std::str::from_utf8(&self.current)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad encoding"))?;
 
@@ -44,7 +68,10 @@ impl<S: AsyncRead + Unpin> SaslStream<'_, S> {
 impl<S: AsyncWrite + Unpin> SaslStream<'_, S> {
     // Send a SASL message to the client.
     async fn send(&mut self, msg: &ServerMessage<&str>) -> io::Result<()> {
-        self.stream.write_message(&msg.to_reply()).await?;
+        self.stream
+            .write_message(&msg.to_reply())
+            .map_err(ProtocolError::into_io_error)?;
+        self.stream.flush().await?;
         Ok(())
     }
 }

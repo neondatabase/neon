@@ -2,13 +2,14 @@ use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
 use measured::{
-    label::{FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet},
+    label::StaticLabelSet,
     metric::{histogram::Thresholds, name::MetricName},
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
-    LabelGroup, MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
+    MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
+use proxy_sasl::scram::threadpool::ThreadPoolMetrics;
 use tokio::time::{self, Instant};
 
 use crate::console::messages::ColdStartInfo;
@@ -545,79 +546,4 @@ pub enum RedisEventsCount {
     CancelSession,
     PasswordUpdate,
     AllowedIpsUpdate,
-}
-
-pub struct ThreadPoolWorkers(usize);
-pub struct ThreadPoolWorkerId(pub usize);
-
-impl LabelValue for ThreadPoolWorkerId {
-    fn visit<V: measured::label::LabelVisitor>(&self, v: V) -> V::Output {
-        v.write_int(self.0 as i64)
-    }
-}
-
-impl LabelGroup for ThreadPoolWorkerId {
-    fn visit_values(&self, v: &mut impl measured::label::LabelGroupVisitor) {
-        v.write_value(LabelName::from_str("worker"), self);
-    }
-}
-
-impl LabelGroupSet for ThreadPoolWorkers {
-    type Group<'a> = ThreadPoolWorkerId;
-
-    fn cardinality(&self) -> Option<usize> {
-        Some(self.0)
-    }
-
-    fn encode_dense(&self, value: Self::Unique) -> Option<usize> {
-        Some(value)
-    }
-
-    fn decode_dense(&self, value: usize) -> Self::Group<'_> {
-        ThreadPoolWorkerId(value)
-    }
-
-    type Unique = usize;
-
-    fn encode(&self, value: Self::Group<'_>) -> Option<Self::Unique> {
-        Some(value.0)
-    }
-
-    fn decode(&self, value: &Self::Unique) -> Self::Group<'_> {
-        ThreadPoolWorkerId(*value)
-    }
-}
-
-impl LabelSet for ThreadPoolWorkers {
-    type Value<'a> = ThreadPoolWorkerId;
-
-    fn dynamic_cardinality(&self) -> Option<usize> {
-        Some(self.0)
-    }
-
-    fn encode(&self, value: Self::Value<'_>) -> Option<usize> {
-        (value.0 < self.0).then_some(value.0)
-    }
-
-    fn decode(&self, value: usize) -> Self::Value<'_> {
-        ThreadPoolWorkerId(value)
-    }
-}
-
-impl FixedCardinalitySet for ThreadPoolWorkers {
-    fn cardinality(&self) -> usize {
-        self.0
-    }
-}
-
-#[derive(MetricGroup)]
-#[metric(new(workers: usize))]
-pub struct ThreadPoolMetrics {
-    pub injector_queue_depth: Gauge,
-    #[metric(init = GaugeVec::with_label_set(ThreadPoolWorkers(workers)))]
-    pub worker_queue_depth: GaugeVec<ThreadPoolWorkers>,
-    #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
-    pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
-    #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
-    pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
 }

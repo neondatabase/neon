@@ -4472,7 +4472,7 @@ dependencies = [
  "postgres-protocol",
  "postgres_backend",
  "pq_proto",
- "prometheus",
+ "proxy-sasl",
  "rand 0.8.5",
  "rand_distr",
  "rcgen",
@@ -4521,6 +4521,35 @@ dependencies = [
  "utils",
  "uuid",
  "walkdir",
+ "workspace_hack",
+ "x509-parser",
+]
+
+[[package]]
+name = "proxy-sasl"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "base64 0.13.1",
+ "bytes",
+ "crossbeam-deque",
+ "hmac",
+ "itertools 0.10.5",
+ "lasso",
+ "measured",
+ "parking_lot 0.12.1",
+ "pbkdf2",
+ "postgres-protocol",
+ "pq_proto",
+ "rand 0.8.5",
+ "rustls 0.22.4",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
  "workspace_hack",
  "x509-parser",
 ]

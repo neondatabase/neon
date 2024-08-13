@@ -79,11 +79,11 @@ impl PoolingBackend {
         )
         .await?;
         let res = match auth_outcome {
-            crate::sasl::Outcome::Success(key) => {
+            proxy_sasl::sasl::Outcome::Success(key) => {
                 info!("user successfully authenticated");
                 Ok(key)
             }
-            crate::sasl::Outcome::Failure(reason) => {
+            proxy_sasl::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
                 Err(AuthError::auth_failed(&*conn_info.user_info.user))
             }

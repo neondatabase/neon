@@ -371,7 +371,8 @@ impl Cache for ProjectInfoCacheImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{scram::ServerSecret, ProjectId};
+    use crate::ProjectId;
+    use proxy_sasl::scram::ServerSecret;
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {

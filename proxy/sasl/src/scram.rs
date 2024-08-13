@@ -15,12 +15,16 @@ mod secret;
 mod signature;
 pub mod threadpool;
 
+use anyhow::Context;
 pub use exchange::{exchange, Exchange};
 pub use key::ScramKey;
+use rustls::pki_types::CertificateDer;
 pub use secret::ServerSecret;
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use tracing::{error, info};
+use x509_parser::oid_registry;
 
 const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
 const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
@@ -57,12 +61,71 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Channel binding parameter
+///
+/// <https://www.rfc-editor.org/rfc/rfc5929#section-4>
+/// Description: The hash of the TLS server's certificate as it
+/// appears, octet for octet, in the server's Certificate message.  Note
+/// that the Certificate message contains a certificate_list, in which
+/// the first element is the server's certificate.
+///
+/// The hash function is to be selected as follows:
+///
+/// * if the certificate's signatureAlgorithm uses a single hash
+///   function, and that hash function is either MD5 or SHA-1, then use SHA-256;
+///
+/// * if the certificate's signatureAlgorithm uses a single hash
+///   function and that hash function neither MD5 nor SHA-1, then use
+///   the hash function associated with the certificate's
+///   signatureAlgorithm;
+///
+/// * if the certificate's signatureAlgorithm uses no hash functions or
+///   uses multiple hash functions, then this channel binding type's
+///   channel bindings are undefined at this time (updates to is channel
+///   binding type may occur to address this issue if it ever arises).
+#[derive(Debug, Clone, Copy)]
+pub enum TlsServerEndPoint {
+    Sha256([u8; 32]),
+    Undefined,
+}
+
+impl TlsServerEndPoint {
+    pub fn new(cert: &CertificateDer) -> anyhow::Result<Self> {
+        let sha256_oids = [
+            // I'm explicitly not adding MD5 or SHA1 here... They're bad.
+            oid_registry::OID_SIG_ECDSA_WITH_SHA256,
+            oid_registry::OID_PKCS1_SHA256WITHRSA,
+        ];
+
+        let pem = x509_parser::parse_x509_certificate(cert)
+            .context("Failed to parse PEM object from cerficiate")?
+            .1;
+
+        info!(subject = %pem.subject, "parsing TLS certificate");
+
+        let reg = oid_registry::OidRegistry::default().with_all_crypto();
+        let oid = pem.signature_algorithm.oid();
+        let alg = reg.get(oid);
+        if sha256_oids.contains(oid) {
+            let tls_server_end_point: [u8; 32] = Sha256::new().chain_update(cert).finalize().into();
+            info!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), tls_server_end_point = %base64::encode(tls_server_end_point), "determined channel binding");
+            Ok(Self::Sha256(tls_server_end_point))
+        } else {
+            error!(subject = %pem.subject, signature_algorithm = alg.map(|a| a.description()), "unknown channel binding");
+            Ok(Self::Undefined)
+        }
+    }
+
+    pub fn supported(&self) -> bool {
+        !matches!(self, TlsServerEndPoint::Undefined)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
-        intern::EndpointIdInt,
         sasl::{Mechanism, Step},
-        EndpointId,
+        scram::TlsServerEndPoint,
     };
 
     use super::{threadpool::ThreadPool, Exchange, ServerSecret};
@@ -79,11 +142,7 @@ mod tests {
         const NONCE: [u8; 18] = [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
         ];
-        let mut exchange = Exchange::new(
-            &secret,
-            || NONCE,
-            crate::config::TlsServerEndPoint::Undefined,
-        );
+        let mut exchange = Exchange::new(&secret, || NONCE, TlsServerEndPoint::Undefined);
 
         let client_first = "n,,n=user,r=rOprNGfwEbeRWgbNEkqO";
         let client_final = "c=biws,r=rOprNGfwEbeRWgbNEkqOAQIDBAUGBwgJCgsMDQ4PEBES,p=rw1r5Kph5ThxmaUBC2GAQ6MfXbPnNkFiTIvdb/Rear0=";
@@ -120,11 +179,11 @@ mod tests {
 
     async fn run_round_trip_test(server_password: &str, client_password: &str) {
         let pool = ThreadPool::new(1);
+        let ep = "foo";
 
-        let ep = EndpointId::from("foo");
-        let ep = EndpointIdInt::from(ep);
-
-        let scram_secret = ServerSecret::build(server_password).await.unwrap();
+        let scram_secret = ServerSecret::build_test_secret(server_password)
+            .await
+            .unwrap();
         let outcome = super::exchange(&pool, ep, &scram_secret, client_password.as_bytes())
             .await
             .unwrap();

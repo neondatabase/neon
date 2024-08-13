@@ -5,7 +5,7 @@ use super::{
     AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
 };
 use crate::context::RequestMonitoring;
-use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
+use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, url::ApiUrl};
 use crate::{auth::IpPattern, cache::Cached};
 use crate::{
     console::{
@@ -15,6 +15,7 @@ use crate::{
     BranchId, EndpointId, ProjectId,
 };
 use futures::TryFutureExt;
+use proxy_sasl::scram;
 use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
 use tokio_postgres::{config::SslMode, Client};
