@@ -9,7 +9,7 @@ use crate::virtual_file::VirtualFile;
 use once_cell::sync::Lazy;
 use std::io::{self, ErrorKind};
 use std::ops::{Deref, Range};
-use tokio_epoll_uring::BoundedBuf;
+use tokio_epoll_uring::{BoundedBuf, Slice};
 use tracing::*;
 
 use super::zero_padded_read_write;

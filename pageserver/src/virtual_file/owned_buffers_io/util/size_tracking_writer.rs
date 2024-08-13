@@ -1,5 +1,5 @@
 use crate::{context::RequestContext, virtual_file::owned_buffers_io::write::OwnedAsyncWriter};
-use tokio_epoll_uring::{BoundedBuf, IoBuf};
+use tokio_epoll_uring::{IoBuf, Slice};
 
 pub struct Writer<W> {
     dst: W,

@@ -107,7 +107,7 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use super::{owned_buffers_io::slice::SliceExt, FileGuard, Metadata};
+use super::{owned_buffers_io::slice::SliceMutExt, FileGuard, Metadata};
 
 #[cfg(target_os = "linux")]
 fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {

@@ -50,6 +50,7 @@ pub(crate) mod owned_buffers_io {
     //! but for the time being we're proving out the primitives in the neon.git repo
     //! for faster iteration.
 
+    pub(crate) mod io_buf_ext;
     pub(crate) mod slice;
     pub(crate) mod write;
     pub(crate) mod util {
@@ -680,7 +681,7 @@ impl VirtualFile {
         buf: Slice<Buf>,
         ctx: &RequestContext,
     ) -> (Slice<Buf>, Result<usize, Error>) {
-        assert!(
+        assert_eq!(
             buf.bytes_init(),
             buf.bytes_total(),
             "caller likely meant to fill the buffer fully"
@@ -1165,7 +1166,8 @@ mod tests {
     use crate::task_mgr::TaskKind;
 
     use super::*;
-    use owned_buffers_io::slice::SliceExt;
+    use owned_buffers_io::io_buf_ext::IoBufExt;
+    use owned_buffers_io::slice::SliceMutExt;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
@@ -1225,23 +1227,18 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all<Buf: IoBuf + Send>(
             &mut self,
-            buf: B,
+            buf: Slice<Buf>,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
+            assert_eq!(buf.bytes_init(), buf.bytes_total());
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
                     let (_buf, res) = file.write_all(buf, ctx).await;
                     res.map(|_| ())
                 }
-                MaybeVirtualFile::File(file) => {
-                    let buf_len = buf.bytes_init();
-                    if buf_len == 0 {
-                        return Ok(());
-                    }
-                    file.write_all(&buf.slice(0..buf_len))
-                }
+                MaybeVirtualFile::File(file) => file.write_all(&buf[..]),
             }
         }
 
@@ -1353,7 +1350,9 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_a.write_all(b"foobar".to_vec(), &ctx).await?;
+        file_a
+            .write_all(b"foobar".to_vec().slice_len(), &ctx)
+            .await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string(&ctx).await.unwrap_err();
@@ -1362,7 +1361,10 @@ mod tests {
         let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
+        let _ = file_a
+            .write_all(b"bar".to_vec().slice_len(), &ctx)
+            .await
+            .unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string(&ctx).await?);

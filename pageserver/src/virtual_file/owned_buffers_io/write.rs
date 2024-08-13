@@ -81,7 +81,9 @@ where
         &mut self,
         chunk: Slice<S>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, S)> {
+    ) -> std::io::Result<(usize, Slice<S>)> {
+        assert_eq!(chunk.bytes_init(), chunk.bytes_total());
+
         let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
         if chunk.len() >= self.buf().cap() {
@@ -114,7 +116,7 @@ where
             }
         }
         assert!(slice.is_empty(), "by now we should have drained the chunk");
-        Ok((chunk_len, chunk.into_inner()))
+        Ok((chunk_len, chunk))
     }
 
     /// Strictly less performant variant of [`Self::write_buffered`] that allows writing borrowed data.
@@ -150,9 +152,10 @@ where
             self.buf = Some(buf);
             return Ok(());
         }
-        let (nwritten, io_buf) = self.writer.write_all(buf.flush(), ctx).await?;
+        let slice = buf.flush();
+        let (nwritten, slice) = self.writer.write_all(slice, ctx).await?;
         assert_eq!(nwritten, buf_len);
-        self.buf = Some(Buffer::reuse_after_flush(io_buf));
+        self.buf = Some(Buffer::reuse_after_flush(slice.into_inner()));
         Ok(())
     }
 }
