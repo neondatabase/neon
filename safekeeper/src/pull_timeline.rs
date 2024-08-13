@@ -17,7 +17,7 @@ use tokio::{
     sync::mpsc,
     task,
 };
-use tokio_tar::{Archive, Builder};
+use tokio_tar::{Archive, Builder, Header};
 use tokio_util::{
     io::{CopyToBytes, SinkWriter},
     sync::PollSender,
@@ -194,18 +194,14 @@ impl WalResidentTimeline {
             )
             .await?;
 
-            scopeguard::defer! {
-                if let Err(err) = control_file::FileStorage::remove_temp(self.get_timeline_dir()) {
-                    tracing::warn!("Failed to remove temp control file: {err}");
-                }
-            }
-
-            let mut control_temp =
-                control_file::FileStorage::write_temp(&control_store, self.get_timeline_dir())
-                    .await?;
-            ar.append_file(CONTROL_FILE_NAME, &mut control_temp)
+            let buf = control_store
+                .write_to_buf()
+                .with_context(|| "failed to serialize control store")?;
+            let mut header = Header::new_gnu();
+            header.set_size(buf.len().try_into().expect("never breaches u64"));
+            ar.append_data(&mut header, CONTROL_FILE_NAME, buf.as_slice())
                 .await
-                .with_context(|| "failed to append temp control file to archive")?;
+                .with_context(|| "failed to append to archive")?;
         } else {
             let cf_path = self.get_timeline_dir().join(CONTROL_FILE_NAME);
             let mut cf = File::open(cf_path).await?;
