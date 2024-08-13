@@ -2542,7 +2542,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 			#if PG_MAJORVERSION_NUM >= 17
-			mdreadv(reln, forkNum, blkno, buffer, 1);
+			mdreadv(reln, forkNum, blkno, &buffer, 1);
 			#else
 			mdread(reln, forkNum, blkno, buffer);
 			#endif
@@ -2569,7 +2569,11 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		char		mdbuf_masked[BLCKSZ];
 
 		# TODO add v17 support
+		#if PG_MAJORVERSION_NUM >= 17
+		mdreadv(reln, forkNum, blkno, &buffer, 1);
+		#else
 		mdread(reln, forkNum, blkno, mdbuf);
+		#endif
 
 		memcpy(pageserver_masked, buffer, BLCKSZ);
 		memcpy(mdbuf_masked, mdbuf, BLCKSZ);
