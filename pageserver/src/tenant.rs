@@ -1995,11 +1995,6 @@ impl Tenant {
             }
         };
 
-        // we don't want to trigger a new compaction if we flush on timeline shutdown the 10th
-        // layer file.
-        task_mgr::shutdown_tasks(Some(TaskKind::Compaction), Some(self.tenant_shard_id), None)
-            .await;
-
         let mut js = tokio::task::JoinSet::new();
         {
             let timelines = self.timelines.lock().unwrap();
