@@ -41,6 +41,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use upload_queue::NotInitialized;
 use utils::backoff;
 use utils::circuit_breaker::CircuitBreaker;
 use utils::completion;
@@ -597,6 +598,15 @@ impl From<PageReconstructError> for GcError {
         match value {
             PageReconstructError::Cancelled => Self::TimelineCancelled,
             other => Self::GcCutoffs(other),
+        }
+    }
+}
+
+impl From<NotInitialized> for GcError {
+    fn from(value: NotInitialized) -> Self {
+        match value {
+            NotInitialized::Uninitialized => GcError::Remote(value.into()),
+            NotInitialized::Stopped | NotInitialized::ShuttingDown => GcError::TimelineCancelled,
         }
     }
 }

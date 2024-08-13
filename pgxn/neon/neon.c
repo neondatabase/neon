@@ -68,10 +68,10 @@ InitLogicalReplicationMonitor(void)
 
 	DefineCustomIntVariable(
 							"neon.logical_replication_max_snap_files",
-							"Maximum allowed logical replication .snap files",
+							"Maximum allowed logical replication .snap files. When exceeded, slots are dropped until the limit is met. -1 disables the limit.",
 							NULL,
 							&logical_replication_max_snap_files,
-							300, 0, INT_MAX,
+							300, -1, INT_MAX,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
@@ -599,6 +599,7 @@ _PG_init(void)
 	pg_init_walproposer();
 	WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	SlotFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitLogicalReplicationMonitor();
 

@@ -963,7 +963,7 @@ class NeonEnvBuilder:
         if self.env:
             log.info("Cleaning up all storage and compute nodes")
             self.env.stop(
-                immediate=True,
+                immediate=False,
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
                 ps_assert_metric_no_errors=(exc_type is None),
@@ -4893,7 +4893,7 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -> Lsn:
+def logical_replication_sync(subscriber: PgProtocol, publisher: PgProtocol) -> Lsn:
     """Wait logical replication subscriber to sync with publisher."""
     publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     while True:
