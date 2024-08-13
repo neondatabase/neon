@@ -4359,7 +4359,8 @@ impl Timeline {
     /// method we cannot be deleted nor can any timeline be deleted. After this method returns
     /// successfully, tenant must be reloaded.
     ///
-    /// Final step will be to complete after optionally resetting the tenant.
+    /// Final step will be to [`Self::complete_detaching_timeline_ancestor`] after optionally
+    /// resetting the tenant.
     pub(crate) async fn detach_from_ancestor_and_reparent(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
@@ -4369,6 +4370,9 @@ impl Timeline {
         detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
     }
 
+    /// Final step which unblocks the GC.
+    ///
+    /// The tenant must've been reset if ancestry was modified previously (in tenant manager).
     pub(crate) async fn complete_detaching_timeline_ancestor(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
