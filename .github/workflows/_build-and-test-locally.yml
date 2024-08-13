@@ -95,10 +95,15 @@ jobs:
       # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
       # corresponding Cargo.toml files for their descriptions.
       - name: Set env variables
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           CARGO_FEATURES="--features testing"
-          if [[ $BUILD_TYPE == "debug" ]]; then
+          if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+            CARGO_FLAGS="--locked"
+          elif [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=""
             CARGO_FLAGS="--locked"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
@@ -159,6 +164,8 @@ jobs:
       # Do install *before* running rust tests because they might recompile the
       # binaries with different features/flags.
       - name: Install rust binaries
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           # Install target binaries
           mkdir -p /tmp/neon/bin/
@@ -173,7 +180,7 @@ jobs:
           done
 
           # Install test executables and write list of all binaries (for code coverage)
-          if [[ $BUILD_TYPE == "debug" ]]; then
+          if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             # Keep bloated coverage data files away from the rest of the artifact
             mkdir -p /tmp/coverage/
 
