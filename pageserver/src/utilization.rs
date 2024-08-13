@@ -58,11 +58,12 @@ pub(crate) fn regenerate(
         disk_usable_pct,
         shard_count,
         max_shard_count: MAX_SHARDS,
-        utilization_score: 0,
+        utilization_score: None,
         captured_at: utils::serde_system_time::SystemTime(captured_at),
     };
 
-    doc.refresh_score();
+    // Initialize `PageserverUtilization::utilization_score`
+    let _ = doc.cached_score();
 
     // TODO: make utilization_score into a metric
 

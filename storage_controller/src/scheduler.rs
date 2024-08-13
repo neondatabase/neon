@@ -282,6 +282,28 @@ impl Scheduler {
                 node.shard_count -= 1;
             }
         }
+
+        // Maybe update PageserverUtilization
+        match update {
+            RefCountUpdate::AddSecondary | RefCountUpdate::Attach => {
+                // Referencing the node: if this takes our shard_count above the utilzation structure's
+                // shard count, then artifically bump it: this ensures that the scheduler immediately
+                // recognizes that this node has more work on it, without waiting for the next heartbeat
+                // to update the utilization.
+                if let MaySchedule::Yes(utilization) = &mut node.may_schedule {
+                    utilization.adjust_shard_count_max(node.shard_count as u32);
+                }
+            }
+            RefCountUpdate::PromoteSecondary
+            | RefCountUpdate::Detach
+            | RefCountUpdate::RemoveSecondary
+            | RefCountUpdate::DemoteAttached => {
+                // De-referencing the node: leave the utilization's shard_count at a stale higher
+                // value until some future heartbeat after we have physically removed this shard
+                // from the node: this prevents the scheduler over-optimistically trying to schedule
+                // more work onto the node before earlier detaches are done.
+            }
+        }
     }
 
     // Check if the number of shards attached to a given node is lagging below
@@ -326,7 +348,18 @@ impl Scheduler {
         use std::collections::hash_map::Entry::*;
         match self.nodes.entry(node.get_id()) {
             Occupied(mut entry) => {
-                entry.get_mut().may_schedule = node.may_schedule();
+                // Updates to MaySchedule are how we receive updated PageserverUtilization: adjust these values
+                // to account for any shards scheduled on the controller but not yet visible to the pageserver.
+                let mut may_schedule = node.may_schedule();
+                match &mut may_schedule {
+                    MaySchedule::Yes(utilization) => {
+                        utilization.adjust_shard_count_max(entry.get().shard_count as u32);
+                    }
+                    MaySchedule::No => { // Nothing to tweak
+                    }
+                }
+
+                entry.get_mut().may_schedule = may_schedule;
             }
             Vacant(entry) => {
                 entry.insert(SchedulerNode {
@@ -383,7 +416,7 @@ impl Scheduler {
     /// the same tenant on the same node.  This is a soft constraint: the context will never
     /// cause us to fail to schedule a shard.
     pub(crate) fn schedule_shard(
-        &self,
+        &mut self,
         hard_exclude: &[NodeId],
         context: &ScheduleContext,
     ) -> Result<NodeId, ScheduleError> {
@@ -393,14 +426,14 @@ impl Scheduler {
 
         let mut scores: Vec<(NodeId, AffinityScore, u64, usize)> = self
             .nodes
-            .iter()
-            .filter_map(|(k, v)| match &v.may_schedule {
+            .iter_mut()
+            .filter_map(|(k, v)| match &mut v.may_schedule {
                 MaySchedule::No => None,
                 MaySchedule::Yes(_) if hard_exclude.contains(k) => None,
                 MaySchedule::Yes(utilization) => Some((
                     *k,
                     context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
-                    utilization.score(),
+                    utilization.cached_score(),
                     v.attached_shard_count,
                 )),
             })

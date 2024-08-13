@@ -38,7 +38,7 @@ pub struct PageserverUtilization {
     pub max_shard_count: u32,
 
     /// Cached result of [`Self::score`]
-    pub utilization_score: u64,
+    pub utilization_score: Option<u64>,
 
     /// When was this snapshot captured, pageserver local time.
     ///
@@ -74,8 +74,24 @@ impl PageserverUtilization {
         std::cmp::max(disk_utilization_score, shard_utilization_score)
     }
 
-    pub fn refresh_score(&mut self) {
-        self.utilization_score = self.score();
+    pub fn cached_score(&mut self) -> u64 {
+        match self.utilization_score {
+            None => {
+                let s = self.score();
+                self.utilization_score = Some(s);
+                s
+            }
+            Some(s) => s,
+        }
+    }
+
+    pub fn adjust_shard_count_max(&mut self, shard_count: u32) {
+        if self.shard_count < shard_count {
+            self.shard_count = shard_count;
+
+            // Dirty cache: this will be calculated next time someone retrives the score
+            self.utilization_score = None;
+        }
     }
 
     /// A utilization structure that has a full utilization score: use this as a placeholder when
@@ -88,7 +104,7 @@ impl PageserverUtilization {
             disk_usable_pct: Percent::new(100).unwrap(),
             shard_count: 1,
             max_shard_count: 1,
-            utilization_score: Self::UTILIZATION_FULL,
+            utilization_score: Some(Self::UTILIZATION_FULL),
             captured_at: serde_system_time::SystemTime(SystemTime::now()),
         }
     }
@@ -120,7 +136,7 @@ mod tests {
             disk_usage_bytes: u64::MAX,
             free_space_bytes: 0,
             disk_wanted_bytes: u64::MAX,
-            utilization_score: 13,
+            utilization_score: Some(13),
             disk_usable_pct: Percent::new(90).unwrap(),
             shard_count: 100,
             max_shard_count: 200,
