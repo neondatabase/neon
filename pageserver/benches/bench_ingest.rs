@@ -95,7 +95,7 @@ async fn ingest(
             }
         }
 
-        layer.put_value(key, lsn, &data, &ctx).await?;
+        layer.put_value(key.to_compact(), lsn, &data, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
 
