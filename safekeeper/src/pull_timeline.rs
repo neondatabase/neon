@@ -11,12 +11,7 @@ use std::{
     io::{self, ErrorKind},
     sync::Arc,
 };
-use tokio::{
-    fs::{File, OpenOptions},
-    io::AsyncWrite,
-    sync::mpsc,
-    task,
-};
+use tokio::{fs::OpenOptions, io::AsyncWrite, sync::mpsc, task};
 use tokio_tar::{Archive, Builder, Header};
 use tokio_util::{
     io::{CopyToBytes, SinkWriter},
@@ -32,6 +27,7 @@ use crate::{
         routes::TimelineStatus,
     },
     safekeeper::Term,
+    state::TimelinePersistentState,
     timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError, WalResidentTimeline},
     wal_backup,
     wal_storage::{self, open_wal_file, Storage},
@@ -172,9 +168,7 @@ impl WalResidentTimeline {
         let mut shared_state = self.write_shared_state().await;
         let wal_seg_size = shared_state.get_wal_seg_size();
 
-        let cf_path = self.get_timeline_dir().join(CONTROL_FILE_NAME);
-
-        let mut control_store = control_file::FileStorage::load_control_file(&cf_path)?;
+        let mut control_store = TimelinePersistentState::clone(shared_state.sk.state());
         let replace = control_store
             .partial_backup
             .replace_uploaded_segment(source, destination)?;
@@ -193,20 +187,16 @@ impl WalResidentTimeline {
                 &replace.current.remote_path(&remote_timeline_path),
             )
             .await?;
-
-            let buf = control_store
-                .write_to_buf()
-                .with_context(|| "failed to serialize control store")?;
-            let mut header = Header::new_gnu();
-            header.set_size(buf.len().try_into().expect("never breaches u64"));
-            ar.append_data(&mut header, CONTROL_FILE_NAME, buf.as_slice())
-                .await
-                .with_context(|| "failed to append to archive")?;
-        } else {
-            let cf_path = self.get_timeline_dir().join(CONTROL_FILE_NAME);
-            let mut cf = File::open(cf_path).await?;
-            ar.append_file(CONTROL_FILE_NAME, &mut cf).await?;
         }
+
+        let buf = control_store
+            .write_to_buf()
+            .with_context(|| "failed to serialize control store")?;
+        let mut header = Header::new_gnu();
+        header.set_size(buf.len().try_into().expect("never breaches u64"));
+        ar.append_data(&mut header, CONTROL_FILE_NAME, buf.as_slice())
+            .await
+            .with_context(|| "failed to append to archive")?;
 
         // We need to stream since the oldest segment someone (s3 or pageserver)
         // still needs. This duplicates calc_horizon_lsn logic.
