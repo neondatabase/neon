@@ -4017,6 +4017,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_sni_router"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "git-version",
+ "itertools 0.10.5",
+ "pq_proto",
+ "proxy-core",
+ "proxy-sasl",
+ "rustls 0.22.4",
+ "rustls-pemfile 2.1.1",
+ "socket2 0.5.5",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-utils",
+ "utils",
+ "uuid",
+]
+
+[[package]]
 name = "phf"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4412,6 +4435,34 @@ dependencies = [
 
 [[package]]
 name = "proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "clap",
+ "futures",
+ "git-version",
+ "humantime",
+ "itertools 0.10.5",
+ "metrics",
+ "pq_proto",
+ "proxy-core",
+ "proxy-sasl",
+ "remote_storage",
+ "rustls 0.22.4",
+ "rustls-pemfile 2.1.1",
+ "socket2 0.5.5",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-utils",
+ "utils",
+ "uuid",
+]
+
+[[package]]
+name = "proxy-core"
 version = "0.1.0"
 dependencies = [
  "ahash",

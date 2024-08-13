@@ -11,6 +11,8 @@ members = [
     "pageserver/pagebench",
     "proxy/core",
     "proxy/sasl",
+    "proxy/proxy",
+    "proxy/pg_sni_router",
     "safekeeper",
     "storage_broker",
     "storage_controller",

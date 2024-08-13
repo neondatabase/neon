@@ -7,9 +7,9 @@ use std::{net::SocketAddr, sync::Arc};
 
 use futures::future::Either;
 use itertools::Itertools;
-use proxy::context::RequestMonitoring;
-use proxy::metrics::Metrics;
-use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
+use proxy_core::context::RequestMonitoring;
+use proxy_core::metrics::Metrics;
+use proxy_core::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
 use proxy_sasl::scram::threadpool::ThreadPoolMetrics;
 use proxy_sasl::scram::TlsServerEndPoint;
 use rustls::pki_types::PrivateKeyDer;
@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 use anyhow::{anyhow, bail, ensure, Context};
 use clap::Arg;
 use futures::TryFutureExt;
-use proxy::stream::{PqStream, Stream};
+use proxy_core::stream::{PqStream, Stream};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
@@ -63,7 +63,7 @@ fn cli() -> clap::Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _logging_guard = proxy::logging::init().await?;
+    let _logging_guard = proxy_core::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
@@ -134,14 +134,14 @@ async fn main() -> anyhow::Result<()> {
         proxy_listener,
         cancellation_token.clone(),
     ));
-    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token));
+    let signals_task = tokio::spawn(proxy_core::handle_signals(cancellation_token));
 
     // the signal task cant ever succeed.
     // the main task can error, or can succeed on cancellation.
     // we want to immediately exit on either of these cases
     let signal = match futures::future::select(signals_task, main).await {
-        Either::Left((res, _)) => proxy::flatten_err(res)?,
-        Either::Right((res, _)) => return proxy::flatten_err(res),
+        Either::Left((res, _)) => proxy_core::flatten_err(res)?,
+        Either::Right((res, _)) => return proxy_core::flatten_err(res),
     };
 
     // maintenance tasks return `Infallible` success values, this is an impossible value
@@ -181,7 +181,7 @@ async fn task_main(
                 let ctx = RequestMonitoring::new(
                     session_id,
                     peer_addr.ip(),
-                    proxy::metrics::Protocol::SniRouter,
+                    proxy_core::metrics::Protocol::SniRouter,
                     "sni",
                 );
                 handle_client(ctx, dest_suffix, tls_config, tls_server_end_point, socket).await
@@ -250,7 +250,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 "unexpected startup packet, rejecting connection"
             );
             stream
-                .throw_error_str(ERR_INSECURE_CONNECTION, proxy::error::ErrorKind::User)
+                .throw_error_str(ERR_INSECURE_CONNECTION, proxy_core::error::ErrorKind::User)
                 .await?
         }
     }

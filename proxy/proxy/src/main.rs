@@ -7,36 +7,36 @@ use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_config::Region;
 use futures::future::Either;
-use proxy::auth;
-use proxy::auth::backend::AuthRateLimiter;
-use proxy::auth::backend::MaybeOwned;
-use proxy::cancellation::CancelMap;
-use proxy::cancellation::CancellationHandler;
-use proxy::config::remote_storage_from_toml;
-use proxy::config::AuthenticationConfig;
-use proxy::config::CacheOptions;
-use proxy::config::HttpConfig;
-use proxy::config::ProjectInfoCacheOptions;
-use proxy::console;
-use proxy::context::parquet::ParquetUploadArgs;
-use proxy::http;
-use proxy::http::health_server::AppMetrics;
-use proxy::metrics::Metrics;
-use proxy::rate_limiter::EndpointRateLimiter;
-use proxy::rate_limiter::LeakyBucketConfig;
-use proxy::rate_limiter::RateBucketInfo;
-use proxy::rate_limiter::WakeComputeRateLimiter;
-use proxy::redis::cancellation_publisher::RedisPublisherClient;
-use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
-use proxy::redis::elasticache;
-use proxy::redis::notifications;
-use proxy::serverless::cancel_set::CancelSet;
-use proxy::serverless::GlobalConnPoolOptions;
-use proxy::usage_metrics;
+use proxy_core::auth;
+use proxy_core::auth::backend::AuthRateLimiter;
+use proxy_core::auth::backend::MaybeOwned;
+use proxy_core::cancellation::CancelMap;
+use proxy_core::cancellation::CancellationHandler;
+use proxy_core::config::remote_storage_from_toml;
+use proxy_core::config::AuthenticationConfig;
+use proxy_core::config::CacheOptions;
+use proxy_core::config::HttpConfig;
+use proxy_core::config::ProjectInfoCacheOptions;
+use proxy_core::console;
+use proxy_core::context::parquet::ParquetUploadArgs;
+use proxy_core::http;
+use proxy_core::http::health_server::AppMetrics;
+use proxy_core::metrics::Metrics;
+use proxy_core::rate_limiter::EndpointRateLimiter;
+use proxy_core::rate_limiter::LeakyBucketConfig;
+use proxy_core::rate_limiter::RateBucketInfo;
+use proxy_core::rate_limiter::WakeComputeRateLimiter;
+use proxy_core::redis::cancellation_publisher::RedisPublisherClient;
+use proxy_core::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
+use proxy_core::redis::elasticache;
+use proxy_core::redis::notifications;
+use proxy_core::serverless::cancel_set::CancelSet;
+use proxy_core::serverless::GlobalConnPoolOptions;
+use proxy_core::usage_metrics;
 
 use anyhow::bail;
-use proxy::config::{self, ProxyConfig};
-use proxy::serverless;
+use proxy_core::config::{self, ProxyConfig};
+use proxy_core::serverless;
 use proxy_sasl::scram::threadpool::ThreadPool;
 use remote_storage::RemoteStorageConfig;
 use std::net::SocketAddr;
@@ -268,7 +268,7 @@ struct SqlOverHttpArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _logging_guard = proxy::logging::init().await?;
+    let _logging_guard = proxy_core::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
@@ -279,7 +279,7 @@ async fn main() -> anyhow::Result<()> {
         build_tag: BUILD_TAG,
     });
 
-    let jemalloc = match proxy::jemalloc::MetricRecorder::new() {
+    let jemalloc = match proxy_core::jemalloc::MetricRecorder::new() {
         Ok(t) => Some(t),
         Err(e) => {
             tracing::error!(error = ?e, "could not start jemalloc metrics loop");
@@ -394,7 +394,7 @@ async fn main() -> anyhow::Result<()> {
     >::new(
         cancel_map.clone(),
         redis_publisher,
-        proxy::metrics::CancellationSource::FromClient,
+        proxy_core::metrics::CancellationSource::FromClient,
     ));
 
     // bit of a hack - find the min rps and max rps supported and turn it into
@@ -419,7 +419,7 @@ async fn main() -> anyhow::Result<()> {
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
-    client_tasks.spawn(proxy::proxy::task_main(
+    client_tasks.spawn(proxy_core::proxy::task_main(
         config,
         proxy_listener,
         cancellation_token.clone(),
@@ -443,20 +443,20 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    client_tasks.spawn(proxy::context::parquet::worker(
+    client_tasks.spawn(proxy_core::context::parquet::worker(
         cancellation_token.clone(),
         args.parquet_upload,
     ));
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
+    maintenance_tasks.spawn(proxy_core::handle_signals(cancellation_token.clone()));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
             jemalloc,
             neon_metrics,
-            proxy: proxy::metrics::Metrics::get(),
+            proxy: proxy_core::metrics::Metrics::get(),
         },
     ));
     maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
@@ -471,7 +471,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
-        if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
+        if let proxy_core::console::provider::ConsoleBackend::Console(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -516,11 +516,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         {
             // exit immediately on maintenance task completion
-            Either::Left((Some(res), _)) => break proxy::flatten_err(res)?,
+            Either::Left((Some(res), _)) => break proxy_core::flatten_err(res)?,
             // exit with error immediately if all maintenance tasks have ceased (should be caught by branch above)
             Either::Left((None, _)) => bail!("no maintenance tasks running. invalid state"),
             // exit immediately on client task error
-            Either::Right((Some(res), _)) => proxy::flatten_err(res)?,
+            Either::Right((Some(res), _)) => proxy_core::flatten_err(res)?,
             // exit if all our client tasks have shutdown gracefully
             Either::Right((None, _)) => return Ok(()),
         }
@@ -707,7 +707,7 @@ mod tests {
     use std::time::Duration;
 
     use clap::Parser;
-    use proxy::rate_limiter::RateBucketInfo;
+    use proxy_core::rate_limiter::RateBucketInfo;
 
     #[test]
     fn parse_endpoint_rps_limit() {
