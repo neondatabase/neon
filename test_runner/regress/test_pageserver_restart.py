@@ -220,3 +220,10 @@ def test_pageserver_chaos(
         # Check that all the updates are visible
         num_updates = endpoint.safe_psql("SELECT sum(updates) FROM foo")[0][0]
         assert num_updates == i * 100000
+
+    # currently pageserver cannot tolerate the fact that "s3" goes away, and if
+    # we succeeded in a compaction before shutdown, there might be a lot of
+    # uploads pending, certainly more than what we can ingest with MOCK_S3
+    #
+    # so instead, do a fast shutdown for this one test.
+    env.stop(immediate=True)
