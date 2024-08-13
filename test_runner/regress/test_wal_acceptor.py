@@ -2369,9 +2369,20 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
     def source_partial_segment_uploaded():
         first_segment_name = "000000010000000000000001"
         segs = src_sk.list_uploaded_segments(tenant_id, timeline_id)
+
+        candidate_seg = None
         for seg in segs:
             if "partial" in seg and "sk1" in seg and not seg.startswith(first_segment_name):
-                return seg
+                candidate_seg = seg
+
+        if candidate_seg is not None:
+            # The term might change, causing the segment to be gc-ed shortly after,
+            # so give it a bit of time to make sure it's stable.
+            time.sleep(2)
+
+            segs = src_sk.list_uploaded_segments(tenant_id, timeline_id)
+            assert candidate_seg in segs
+            return candidate_seg
 
         raise Exception("Partial segment not uploaded yet")
 
