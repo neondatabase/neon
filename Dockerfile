@@ -5,6 +5,7 @@
 ARG REPOSITORY=neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
+ARG DEFAULT_PG_VERSION=17
 
 # Build Postgres
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
@@ -29,17 +30,19 @@ FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
+ARG DEFAULT_PG_VERSION
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v17/include/postgresql/server pg_install/v17/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v16/lib                       pg_install/v16/lib
+COPY --from=pg-build /home/nonroot/pg_install/v17/lib                       pg_install/v17/lib
 COPY --chown=nonroot . .
 
 ARG ADDITIONAL_RUSTFLAGS
 RUN set -e \
-    && PQ_LIB_DIR=$(pwd)/pg_install/v16/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
+    && PQ_LIB_DIR=$(pwd)/pg_install/v${DEFAULT_PG_VERSION}/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
@@ -54,6 +57,7 @@ RUN set -e \
 # Build final image
 #
 FROM debian:bullseye-slim
+ARG DEFAULT_PG_VERSION
 WORKDIR /data
 
 RUN set -e \
@@ -95,7 +99,7 @@ RUN mkdir -p /data/.neon/ && \
 
 # When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
 # that want a particular postgres version will select it explicitly: this is just a default.
-ENV LD_LIBRARY_PATH=/usr/local/v16/lib
+ENV LD_LIBRARY_PATH=/usr/local/v${DEFAULT_PG_VERSION}/lib
 
 
 VOLUME ["/data"]
