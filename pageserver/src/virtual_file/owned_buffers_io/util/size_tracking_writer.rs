@@ -35,11 +35,11 @@ where
     W: OwnedAsyncWriter,
 {
     #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: Slice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, B::Buf)> {
+    ) -> std::io::Result<(usize, Slice<Buf>)> {
         let (nwritten, buf) = self.dst.write_all(buf, ctx).await?;
         self.bytes_amount += u64::try_from(nwritten).unwrap();
         Ok((nwritten, buf))

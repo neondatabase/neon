@@ -436,19 +436,22 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let (_, res) = self
-            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init(), ctx)
+            .put_value_bytes(key, lsn, Value::ser(&val)?.slice(..), val.will_init(), ctx)
             .await;
         res
     }
 
-    async fn put_value_bytes(
+    async fn put_value_bytes<Buf>(
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: Vec<u8>,
+        val: Slice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (Vec<u8>, anyhow::Result<()>) {
+    ) -> (Buf, anyhow::Result<()>)
+    where
+        Buf: IoBufMut + Send,
+    {
         assert!(
             self.lsn_range.start <= lsn,
             "lsn_start={}, lsn={}",
@@ -646,14 +649,17 @@ impl DeltaLayerWriter {
             .await
     }
 
-    pub async fn put_value_bytes(
+    pub async fn put_value_bytes<Buf>(
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: Vec<u8>,
+        val: Slice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (Vec<u8>, anyhow::Result<()>) {
+    ) -> (Buf, anyhow::Result<()>)
+    where
+        Buf: IoBufMut + Send,
+    {
         self.inner
             .as_mut()
             .unwrap()

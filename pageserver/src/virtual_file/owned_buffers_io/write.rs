@@ -6,11 +6,11 @@ use crate::context::RequestContext;
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 pub trait OwnedAsyncWriter {
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: Slice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, B::Buf)>;
+    ) -> std::io::Result<(usize, Slice<Buf>)>;
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
@@ -213,18 +213,14 @@ impl Buffer for BytesMut {
 }
 
 impl OwnedAsyncWriter for Vec<u8> {
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: Slice<Buf>,
         _: &RequestContext,
-    ) -> std::io::Result<(usize, B::Buf)> {
-        let nbytes = buf.bytes_init();
-        if nbytes == 0 {
-            return Ok((0, Slice::into_inner(buf.slice_full())));
-        }
-        let buf = buf.slice(0..nbytes);
+    ) -> std::io::Result<(usize, Slice<Buf>)> {
+        assert_eq!(buf.bytes_init(), buf.bytes_total());
         self.extend_from_slice(&buf[..]);
-        Ok((buf.len(), Slice::into_inner(buf)))
+        Ok((buf.len(), buf))
     }
 }
 
@@ -241,19 +237,14 @@ mod tests {
         writes: Vec<Vec<u8>>,
     }
     impl OwnedAsyncWriter for RecorderWriter {
-        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all<Buf: IoBuf + Send>(
             &mut self,
-            buf: B,
+            buf: Slice<Buf>,
             _: &RequestContext,
-        ) -> std::io::Result<(usize, B::Buf)> {
-            let nbytes = buf.bytes_init();
-            if nbytes == 0 {
-                self.writes.push(vec![]);
-                return Ok((0, Slice::into_inner(buf.slice_full())));
-            }
-            let buf = buf.slice(0..nbytes);
+        ) -> std::io::Result<(usize, Slice<Buf>)> {
+            assert_eq!(buf.bytes_init(), buf.bytes_total());
             self.writes.push(Vec::from(&buf[..]));
-            Ok((buf.len(), Slice::into_inner(buf)))
+            Ok((buf.len(), buf))
         }
     }
 

@@ -672,27 +672,33 @@ impl VirtualFile {
         (Slice::into_inner(buf), Ok(()))
     }
 
-    /// Writes `buf.slice(0..buf.bytes_init())`.
-    /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
-    /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
-    /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
-    pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    /// Writes `buf` to the file at the current offset.
+    ///
+    /// Panics if there is an uninitialized range in `buf`, as that is most likely a bug in the caller.
+    pub async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: Slice<Buf>,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<usize, Error>) {
+    ) -> (Slice<Buf>, Result<usize, Error>) {
+        assert!(
+            buf.bytes_init(),
+            buf.bytes_total(),
+            "caller likely meant to fill the buffer fully"
+        );
+
         let nbytes = buf.bytes_init();
         if nbytes == 0 {
-            return (Slice::into_inner(buf.slice_full()), Ok(0));
+            return (buf, Ok(0));
         }
-        let mut buf = buf.slice(0..nbytes);
+        let bounds = buf.bounds();
+        let mut buf = buf;
         while !buf.is_empty() {
             let res;
             (buf, res) = self.write(buf, ctx).await;
             match res {
                 Ok(0) => {
                     return (
-                        Slice::into_inner(buf),
+                        Slice::from_buf_bounds(buf.into_inner(), bounds),
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -703,10 +709,10 @@ impl VirtualFile {
                     buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(buf), Err(e)),
+                Err(e) => return (Slice::from_buf_bounds(buf.into_inner(), bounds), Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(nbytes))
+        (Slice::from_buf_bounds(buf.into_inner(), bounds), Ok(nbytes))
     }
 
     async fn write<B: IoBuf + Send>(
@@ -1093,11 +1099,11 @@ impl Drop for VirtualFile {
 
 impl OwnedAsyncWriter for VirtualFile {
     #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: Slice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, B::Buf)> {
+    ) -> std::io::Result<(usize, Slice<Buf>)> {
         let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
         res.map(move |v| (v, buf))
     }
