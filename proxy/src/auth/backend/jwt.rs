@@ -67,35 +67,20 @@ pub struct JwkCacheEntry {
 }
 
 impl JwkCacheEntryLock {
-    async fn acquire_permit(&self) -> DetachedPermit {
-        match self.lookup.acquire().await {
-            Ok(permit) => {
-                permit.forget();
-                DetachedPermit
-            }
-            Err(_) => panic!("semaphore should not be closed"),
-        }
+    async fn acquire_permit<'a>(self: &'a Arc<Self>) -> JwkRenewalPermit<'a> {
+        JwkRenewalPermit::acquire_permit(self).await
     }
 
-    fn try_acquire_permit(&self) -> Option<DetachedPermit> {
-        match self.lookup.try_acquire() {
-            Ok(permit) => {
-                permit.forget();
-                Some(DetachedPermit)
-            }
-            Err(tokio::sync::TryAcquireError::NoPermits) => None,
-            Err(tokio::sync::TryAcquireError::Closed) => panic!("semaphore should not be closed"),
-        }
+    fn try_acquire_permit<'a>(self: &'a Arc<Self>) -> Option<JwkRenewalPermit<'a>> {
+        JwkRenewalPermit::try_acquire_permit(self)
     }
 
     async fn renew_jwks<F: FetchAuthRules>(
         &self,
-        permit: DetachedPermit,
+        _permit: JwkRenewalPermit<'_>,
         client: &reqwest::Client,
         auth_rules: &F,
     ) -> anyhow::Result<Arc<JwkCacheEntry>> {
-        let _permit = permit.attach(&self.lookup);
-
         // double check that no one beat us to updating the cache.
         let now = Instant::now();
         let guard = self.cached.load_full();
@@ -173,6 +158,7 @@ impl JwkCacheEntryLock {
         if last_update > AUTO_RENEW {
             if let Some(permit) = self.try_acquire_permit() {
                 tracing::debug!("JWKs should be renewed. Renewal permit acquired");
+                let permit = permit.into_owned();
                 let entry = self.clone();
                 let client = client.clone();
                 let fetch = fetch.clone();
@@ -336,20 +322,65 @@ struct JWTHeader<'a> {
     kid: Option<&'a str>,
 }
 
-// semaphore trickery
-struct DetachedPermit;
+struct JwkRenewalPermit<'a> {
+    inner: Option<JwkRenewalPermitInner<'a>>,
+}
 
-impl DetachedPermit {
-    fn attach(self, semaphore: &tokio::sync::Semaphore) -> AttachedPermit {
-        AttachedPermit(semaphore)
+enum JwkRenewalPermitInner<'a> {
+    Owned(Arc<JwkCacheEntryLock>),
+    Borrowed(&'a Arc<JwkCacheEntryLock>),
+}
+
+impl JwkRenewalPermit<'_> {
+    fn into_owned(mut self) -> JwkRenewalPermit<'static> {
+        JwkRenewalPermit {
+            inner: self.inner.take().map(JwkRenewalPermitInner::into_owned),
+        }
+    }
+
+    async fn acquire_permit(from: &Arc<JwkCacheEntryLock>) -> JwkRenewalPermit {
+        match from.lookup.acquire().await {
+            Ok(permit) => {
+                permit.forget();
+                JwkRenewalPermit {
+                    inner: Some(JwkRenewalPermitInner::Borrowed(from)),
+                }
+            }
+            Err(_) => panic!("semaphore should not be closed"),
+        }
+    }
+
+    fn try_acquire_permit(from: &Arc<JwkCacheEntryLock>) -> Option<JwkRenewalPermit> {
+        match from.lookup.try_acquire() {
+            Ok(permit) => {
+                permit.forget();
+                Some(JwkRenewalPermit {
+                    inner: Some(JwkRenewalPermitInner::Borrowed(from)),
+                })
+            }
+            Err(tokio::sync::TryAcquireError::NoPermits) => None,
+            Err(tokio::sync::TryAcquireError::Closed) => panic!("semaphore should not be closed"),
+        }
     }
 }
 
-struct AttachedPermit<'a>(&'a tokio::sync::Semaphore);
+impl JwkRenewalPermitInner<'_> {
+    fn into_owned(self) -> JwkRenewalPermitInner<'static> {
+        match self {
+            JwkRenewalPermitInner::Owned(p) => JwkRenewalPermitInner::Owned(p),
+            JwkRenewalPermitInner::Borrowed(p) => JwkRenewalPermitInner::Owned(Arc::clone(p)),
+        }
+    }
+}
 
-impl Drop for AttachedPermit<'_> {
+impl Drop for JwkRenewalPermit<'_> {
     fn drop(&mut self) {
-        self.0.add_permits(1);
+        let entry = match &self.inner {
+            None => return,
+            Some(JwkRenewalPermitInner::Owned(p)) => p,
+            Some(JwkRenewalPermitInner::Borrowed(p)) => *p,
+        };
+        entry.lookup.add_permits(1);
     }
 }
 
