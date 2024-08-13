@@ -2,46 +2,18 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
-use bytes::Bytes;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
-use serde::de::DeserializeOwned;
 use signature::Verifier;
 use tokio::time::Instant;
 
-use crate::intern::EndpointIdInt;
+use crate::{http::parse_json_body_with_limit, intern::EndpointIdInt};
 
-#[derive(Default)]
-pub struct JWKCache {
-    client: reqwest::Client,
-
-    map: DashMap<EndpointIdInt, Arc<JWKCacheEntryLock>>,
-}
-
-pub struct JWKCacheEntryLock {
-    cached: ArcSwapOption<JWKCacheEntry>,
-    lookup: tokio::sync::Semaphore,
-}
-
-impl Default for JWKCacheEntryLock {
-    fn default() -> Self {
-        JWKCacheEntryLock {
-            cached: ArcSwapOption::empty(),
-            lookup: tokio::sync::Semaphore::new(1),
-        }
-    }
-}
-
-pub struct JWKCacheEntry {
-    /// Should refetch at least every hour to verify when old keys have been removed.
-    /// Should refetch when new key IDs are seen only every 5 minutes or so
-    last_retrieved: Instant,
-
-    // /// jwks urls
-    // urls: Vec<url::Url>,
-    /// cplane will return multiple JWKs urls that we need to scrape.
-    key_sets: ahash::HashMap<url::Url, jose_jwk::JwkSet>,
-}
+// TODO(conrad): make these configurable.
+const MIN_RENEW: Duration = Duration::from_secs(30);
+const AUTO_RENEW: Duration = Duration::from_secs(300);
+const MAX_RENEW: Duration = Duration::from_secs(3600);
+const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
 
 /// How to get the JWT auth rules
 pub trait FetchAuthRules: Clone + Send + Sync + 'static {
@@ -49,12 +21,12 @@ pub trait FetchAuthRules: Clone + Send + Sync + 'static {
 }
 
 #[derive(Clone)]
-struct FetchAuthFromCplane {
+struct FetchAuthRulesFromCplane {
     #[allow(dead_code)]
     endpoint: EndpointIdInt,
 }
 
-impl FetchAuthRules for FetchAuthFromCplane {
+impl FetchAuthRules for FetchAuthRulesFromCplane {
     async fn fetch_auth_rules(&self) -> anyhow::Result<AuthRules> {
         Err(anyhow::anyhow!("not yet implemented"))
     }
@@ -64,7 +36,37 @@ pub struct AuthRules {
     jwks_urls: Vec<url::Url>,
 }
 
-impl JWKCacheEntryLock {
+#[derive(Default)]
+pub struct JwkCache {
+    client: reqwest::Client,
+
+    map: DashMap<EndpointIdInt, Arc<JwkCacheEntryLock>>,
+}
+
+pub struct JwkCacheEntryLock {
+    cached: ArcSwapOption<JwkCacheEntry>,
+    lookup: tokio::sync::Semaphore,
+}
+
+impl Default for JwkCacheEntryLock {
+    fn default() -> Self {
+        JwkCacheEntryLock {
+            cached: ArcSwapOption::empty(),
+            lookup: tokio::sync::Semaphore::new(1),
+        }
+    }
+}
+
+pub struct JwkCacheEntry {
+    /// Should refetch at least every hour to verify when old keys have been removed.
+    /// Should refetch when new key IDs are seen only every 5 minutes or so
+    last_retrieved: Instant,
+
+    /// cplane will return multiple JWKs urls that we need to scrape.
+    key_sets: ahash::HashMap<url::Url, jose_jwk::JwkSet>,
+}
+
+impl JwkCacheEntryLock {
     async fn acquire_permit(&self) -> DetachedPermit {
         match self.lookup.acquire().await {
             Ok(permit) => {
@@ -91,7 +93,7 @@ impl JWKCacheEntryLock {
         permit: DetachedPermit,
         client: &reqwest::Client,
         auth_rules: &F,
-    ) -> anyhow::Result<Arc<JWKCacheEntry>> {
+    ) -> anyhow::Result<Arc<JwkCacheEntry>> {
         let _permit = permit.attach(&self.lookup);
 
         // double check that no one beat us to updating the cache.
@@ -109,26 +111,21 @@ impl JWKCacheEntryLock {
             rules.jwks_urls.len(),
             ahash::RandomState::new(),
         );
+        // TODO(conrad): run concurrently
         for url in rules.jwks_urls {
             let req = client.get(url.clone());
+            // TODO(conrad): eventually switch to using reqwest_middleware/`new_client_with_timeout`.
             match req.send().await.and_then(|r| r.error_for_status()) {
                 // todo: should we re-insert JWKs if we want to keep this JWKs URL?
                 // I expect these failures would be quite sparse.
                 Err(e) => tracing::warn!(?url, error=?e, "could not fetch JWKs"),
                 Ok(r) => {
-                    if r.content_length()
-                        .is_some_and(|l| l > MAX_JWK_BODY_SIZE as u64)
-                    {
-                        tracing::warn!(
-                            ?url,
-                            error = "JWKs response too large",
-                            "could not decode JWKs"
-                        );
-                        continue;
-                    }
-
                     let resp: http::Response<reqwest::Body> = r.into();
-                    match parse_json::<jose_jwk::JwkSet>(resp.into_body(), MAX_JWK_BODY_SIZE).await
+                    match parse_json_body_with_limit::<jose_jwk::JwkSet>(
+                        resp.into_body(),
+                        MAX_JWK_BODY_SIZE,
+                    )
+                    .await
                     {
                         Err(e) => tracing::warn!(?url, error=?e, "could not decode JWKs"),
                         Ok(jwks) => {
@@ -139,20 +136,20 @@ impl JWKCacheEntryLock {
             }
         }
 
-        let x = Arc::new(JWKCacheEntry {
+        let entry = Arc::new(JwkCacheEntry {
             last_retrieved: now,
             key_sets,
         });
-        self.cached.swap(Some(x.clone()));
+        self.cached.swap(Some(Arc::clone(&entry)));
 
-        Ok(x)
+        Ok(entry)
     }
 
     async fn get_or_update_jwk_cache<F: FetchAuthRules>(
         self: &Arc<Self>,
         client: &reqwest::Client,
         fetch: &F,
-    ) -> Result<Arc<JWKCacheEntry>, anyhow::Error> {
+    ) -> Result<Arc<JwkCacheEntry>, anyhow::Error> {
         let now = Instant::now();
         let guard = self.cached.load_full();
 
@@ -175,6 +172,7 @@ impl JWKCacheEntryLock {
         // every 5 minutes we should spawn a job to eagerly update the token.
         if last_update > AUTO_RENEW {
             if let Some(permit) = self.try_acquire_permit() {
+                tracing::debug!("JWKs should be renewed. Renewal permit acquired");
                 let entry = self.clone();
                 let client = client.clone();
                 let fetch = fetch.clone();
@@ -183,6 +181,8 @@ impl JWKCacheEntryLock {
                         tracing::warn!(error=?e, "could not fetch JWKs in background job");
                     }
                 });
+            } else {
+                tracing::debug!("JWKs should be renewed. Renewal permit already taken, skipping");
             }
         }
 
@@ -253,17 +253,13 @@ impl JWKCacheEntryLock {
             key => bail!("unsupported key type {key:?}"),
         };
 
-        // TODO: verify iss, exp, nbf, etc...
+        // TODO(conrad): verify iss, exp, nbf, etc...
 
         Ok(())
     }
 }
 
-const MIN_RENEW: Duration = Duration::from_secs(30);
-const AUTO_RENEW: Duration = Duration::from_secs(300);
-const MAX_RENEW: Duration = Duration::from_secs(3600);
-
-impl JWKCache {
+impl JwkCache {
     pub async fn check_jwt(
         &self,
         endpoint: EndpointIdInt,
@@ -280,7 +276,7 @@ impl JWKCache {
             }
         };
 
-        let fetch = FetchAuthFromCplane { endpoint };
+        let fetch = FetchAuthRulesFromCplane { endpoint };
         entry.check_jwt(jwt, &self.client, &fetch).await
     }
 }
@@ -355,28 +351,6 @@ impl Drop for AttachedPermit<'_> {
     fn drop(&mut self) {
         self.0.add_permits(1);
     }
-}
-
-const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
-pub async fn parse_json<D>(
-    mut b: impl hyper1::body::Body<Data = Bytes, Error = reqwest::Error> + Unpin,
-    limit: usize,
-) -> anyhow::Result<D>
-where
-    D: DeserializeOwned,
-{
-    use http_body_util::BodyExt;
-    let mut bytes = vec![];
-    while let Some(frame) = b.frame().await.transpose()? {
-        if let Ok(data) = frame.into_data() {
-            if bytes.len() + data.len() > limit {
-                bail!("overflow")
-            }
-            bytes.extend_from_slice(&data);
-        }
-    }
-
-    Ok(serde_json::from_slice::<D>(&bytes)?)
 }
 
 #[cfg(test)]
@@ -527,7 +501,7 @@ mod tests {
             }
         }
 
-        let jwk_cache = Arc::new(JWKCacheEntryLock::default());
+        let jwk_cache = Arc::new(JwkCacheEntryLock::default());
 
         jwk_cache
             .check_jwt(jwt1, &client, &Fetch(addr))
