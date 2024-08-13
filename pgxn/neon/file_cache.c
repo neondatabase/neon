@@ -41,6 +41,8 @@
 
 #include "hll.h"
 
+#define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "Assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
+
 /*
  * Local file cache is used to temporary store relations pages in local file system.
  * All blocks of all relations are stored inside one file and addressed using shared hash map.
@@ -69,7 +71,7 @@
  * hole, and all other fields are zero. Holes are never looked up in the hash
  * table, we only enter them there to have a FileCacheEntry that we can keep
  * in the linked list. If the soft limit is raised again, we reuse the holes
- * before extending the nominal size of file.
+ * before extending the nominal size of the file.
  */
 
 /* Local file storage allocation chunk.
@@ -109,7 +111,7 @@ typedef struct FileCacheControl
 	uint64		hits;
 	uint64		misses;
 	uint64		writes;
- 	dlist_head	lru;			/* double linked list for LRU replacement
+	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	dlist_head  holes;          /* double linked list of punched holes */
 	HyperLogLogState wss_estimation; /* estimation of working set size */
@@ -149,7 +151,6 @@ lfc_disable(char const *op)
 	{
 		HASH_SEQ_STATUS status;
 		FileCacheEntry *entry;
-		size_t n_chunks = SIZE_MB_TO_CHUNKS(lfc_max_size);
 
 		hash_seq_init(&status, lfc_hash);
 		while ((entry = hash_seq_search(&status)) != NULL)
@@ -345,7 +346,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		bool		found;
 		BufferTag	holetag;
 
-		Assert(victim->access_count == 0);
+		CriticalAssert(victim->access_count == 0);
 #ifdef FALLOC_FL_PUNCH_HOLE
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0)
 			neon_log(LOG, "Failed to punch hole in file: %m");
@@ -360,7 +361,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		hole->hash = hash;
 		hole->offset = offset;
 		hole->access_count = 0;
-		Assert(!found);
+		CriticalAssert(!found);
 		dlist_push_tail(&lfc_ctl->holes, &hole->list_node);
 
 		lfc_ctl->used -= 1;
@@ -455,7 +456,7 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 
-	Assert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
@@ -487,7 +488,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	tag.forkNum = forkNum;
 	tag.blockNum = (blkno & ~(BLOCKS_PER_CHUNK - 1));
 
-	Assert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -574,7 +575,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 
-	Assert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -619,10 +620,10 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	if (lfc_ctl->generation == generation)
 	{
-		Assert(LFC_ENABLED());
+		CriticalAssert(LFC_ENABLED());
 		lfc_ctl->hits += 1;
 		pgBufferUsage.file_cache.hits += 1;
-		Assert(entry->access_count > 0);
+		CriticalAssert(entry->access_count > 0);
 		if (--entry->access_count == 0)
 			dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
 	}
@@ -664,7 +665,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 
-	Assert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -709,20 +710,20 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 			/* Cache overflow: evict least recently used chunk */
 			FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
 
-			Assert(victim->access_count == 0);
+			CriticalAssert(victim->access_count == 0);
 			entry->offset = victim->offset; /* grab victim's chunk */
 			hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 			neon_log(DEBUG2, "Swap file cache page");
 		}
 		else if (!dlist_is_empty(&lfc_ctl->holes))
 		{
-			/* We can reuse a hole that was left behind when the LFC was shrink previously */
+			/* We can reuse a hole that was left behind when the LFC was shrunk previously */
 			FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
 			uint32		offset = hole->offset;
 			bool		found;
 
 			hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &found);
-			Assert(found);
+			CriticalAssert(found);
 
 			lfc_ctl->used += 1;
 			entry->offset = offset;	/* reuse the hole */
@@ -754,9 +755,9 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 
 		if (lfc_ctl->generation == generation)
 		{
-			Assert(LFC_ENABLED());
+			CriticalAssert(LFC_ENABLED());
 			/* Place entry to the head of LRU list */
-			Assert(entry->access_count > 0);
+			CriticalAssert(entry->access_count > 0);
 			if (--entry->access_count == 0)
 				dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
 
