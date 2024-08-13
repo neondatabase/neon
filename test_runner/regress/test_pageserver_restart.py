@@ -159,6 +159,8 @@ def test_pageserver_chaos(
     if build_type == "debug":
         pytest.skip("times out in debug builds")
 
+    # same rationale as with the immediate stop; we might leave orphan layers behind.
+    neon_env_builder.disable_scrub_on_exit()
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
@@ -226,4 +228,5 @@ def test_pageserver_chaos(
     # uploads pending, certainly more than what we can ingest with MOCK_S3
     #
     # so instead, do a fast shutdown for this one test.
+    # See https://github.com/neondatabase/neon/issues/8709
     env.stop(immediate=True)
