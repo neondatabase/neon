@@ -2937,11 +2937,7 @@ impl Timeline {
                 LayerVisibilityHint::Visible => {
                     // Layer is visible to one or more read LSNs: elegible for inclusion in layer map
                     let last_activity_ts = layer.latest_activity();
-                    Some(HeatMapLayer::new(
-                        layer.layer_desc().layer_name(),
-                        layer.metadata(),
-                        last_activity_ts,
-                    ))
+                    Some((layer.layer_desc(), layer.metadata(), last_activity_ts))
                 }
                 LayerVisibilityHint::Covered => {
                     // Layer is resident but unlikely to be read: not elegible for inclusion in heatmap.
@@ -2950,7 +2946,23 @@ impl Timeline {
             }
         });
 
-        let layers = resident.collect();
+        let mut layers = resident.collect::<Vec<_>>();
+
+        // Sort layers in order of which to download first.  For a large set of layers to download, we
+        // want to prioritize those layers which are most likely to still be in the resident many minutes
+        // or hours later:
+        // - Download L0s last, because they churn the fastest: L0s on a fast-writing tenant might
+        //   only exist for a few minutes before being compacted into L1s.
+        // - For L1 & image layers, download most recent LSNs first: the older the LSN, the sooner
+        //   the layer is likely to be covered by an image layer during compaction.
+        layers.sort_by_key(|(desc, _meta, _atime)| {
+            std::cmp::Reverse((!LayerMap::is_l0(&desc.key_range), desc.lsn_range.end))
+        });
+
+        let layers = layers
+            .into_iter()
+            .map(|(desc, meta, atime)| HeatMapLayer::new(desc.layer_name(), meta, atime))
+            .collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
