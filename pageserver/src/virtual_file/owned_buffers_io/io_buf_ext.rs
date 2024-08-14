@@ -1,3 +1,5 @@
+//! See [`FullSlice`].
+
 use bytes::{Bytes, BytesMut};
 use std::ops::{Deref, Range};
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
@@ -41,10 +43,7 @@ where
 }
 
 pub(crate) trait IoBufExt {
-    /// Get a [`Slice`] covering the range `[0..self.len()]`.
-    /// It is guaranteed that the resulting slice has [`Slice::bytes_init`] equal to [`Slice::bytes_total`].
-    ///
-    /// This is for use on the write path.
+    /// Get a [`FullSlice`] for the entire buffer, i.e., `self[..]` or `self[0..self.len()]`.
     fn slice_len(self) -> FullSlice<Self>
     where
         Self: Sized;
@@ -57,12 +56,13 @@ macro_rules! impl_io_buf_ext {
             fn slice_len(self) -> FullSlice<Self> {
                 let len = self.len();
                 let s = if len == 0 {
-                    // paper over the incorrect assertion
-                    // https://github.com/neondatabase/tokio-epoll-uring/issues/46
+                    // `BoundedBuf::slice(0..len)` or `BoundedBuf::slice(..)` has an incorrect assertion,
+                    // causing a panic if len == 0.
+                    // The Slice::from_buf_bounds has the correct assertion (<= instead of <).
+                    // => https://github.com/neondatabase/tokio-epoll-uring/issues/46
                     let slice = self.slice_full();
                     let mut bounds: Range<_> = slice.bounds();
                     bounds.end = bounds.start;
-                    // from_buf_bounds has the correct assertion
                     Slice::from_buf_bounds(slice.into_inner(), bounds)
                 } else {
                     self.slice(0..len)
