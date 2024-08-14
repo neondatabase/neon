@@ -1111,10 +1111,12 @@ jobs:
     # Format `needs` differently to make the list more readable.
     # Usually we do `needs: [...]`
     needs:
+      - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
-      - build-and-test-locally
+      - promote-images
       - test-images
+      - trigger-custom-extensions-build-and-wait
     runs-on: ubuntu-22.04
     steps:
       # The list of possible results:
