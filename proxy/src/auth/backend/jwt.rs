@@ -97,6 +97,7 @@ impl JwkCacheEntryLock {
             ahash::RandomState::new(),
         );
         // TODO(conrad): run concurrently
+        // TODO(conrad): strip the JWKs urls (should be checked by cplane as well - cloud#16284)
         for url in rules.jwks_urls {
             let req = client.get(url.clone());
             // TODO(conrad): eventually switch to using reqwest_middleware/`new_client_with_timeout`.
@@ -187,15 +188,18 @@ impl JwkCacheEntryLock {
 
         let (header_payload, signature) = jwt
             .rsplit_once(".")
-            .context("not a valid compact JWT encoding")?;
+            .context("Provided authentication token is not a valid JWT encoding")?;
         let (header, _payload) = header_payload
             .split_once(".")
-            .context("not a valid compact JWT encoding")?;
+            .context("Provided authentication token is not a valid JWT encoding")?;
 
         let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)
-            .context("not a valid compact JWT encoding")?;
+            .context("Provided authentication token is not a valid JWT encoding")?;
         let header = serde_json::from_slice::<JWTHeader>(&header)
-            .context("not a valid compact JWT encoding")?;
+            .context("Provided authentication token is not a valid JWT encoding")?;
+
+        let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
+            .context("Provided authentication token is not a valid JWT encoding")?;
 
         ensure!(header.typ == "JWT");
         let kid = header.kid.context("missing key id")?;
@@ -227,8 +231,6 @@ impl JwkCacheEntryLock {
             "signature algorithm not supported"
         );
 
-        let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
-            .context("not a valid compact JWT encoding")?;
         match &jwk.key {
             jose_jwk::Key::Ec(key) => {
                 verify_ec_signature(header_payload.as_bytes(), &sig, key)?;

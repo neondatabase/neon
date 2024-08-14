@@ -113,14 +113,14 @@ pub async fn parse_json_body_with_limit<D: DeserializeOwned>(
     // in reqwest, this value is influenced by the Content-Length header.
     let lower_bound = match usize::try_from(b.size_hint().lower()) {
         Ok(bound) if bound <= limit => bound,
-        _ => bail!("content length exceeds limit"),
+        _ => bail!("Content length exceeds limit of {limit} bytes"),
     };
     let mut bytes = Vec::with_capacity(lower_bound);
 
     while let Some(frame) = b.frame().await.transpose()? {
         if let Ok(data) = frame.into_data() {
             if bytes.len() + data.len() > limit {
-                bail!("content length exceeds limit")
+                bail!("Content length exceeds limit of {limit} bytes")
             }
             bytes.extend_from_slice(&data);
         }
