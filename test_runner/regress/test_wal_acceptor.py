@@ -2400,11 +2400,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
         src_flush_lsn, tenant_id, timeline_id, env.pageserver, pageserver_conn_options
     )
 
-    pt_handle = PropagatingThread(
-        target=dst_sk.pull_timeline, args=([src_sk], tenant_id, timeline_id)
-    )
-    pt_handle.start()
-    pt_handle.join()
+    dst_sk.pull_timeline([src_sk], tenant_id, timeline_id)
 
     def evicted():
         evictions = src_sk.http_client().get_metric_value(
