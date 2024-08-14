@@ -39,7 +39,7 @@ RUN cd postgres && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install && \
     # Install tests
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/test/regress install && \
-    cp src/test/regress/regress.so /local/pgsql/lib && \
+    cp src/test/regress/regress.so /usr/local/pgsql/lib && \
     # Enable some of contrib extensions
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
