@@ -354,7 +354,7 @@ impl InMemoryLayer {
     }
 }
 
-pub(crate) struct SerializedBatch {
+pub struct SerializedBatch {
     /// Blobs serialized in EphemeralFile's native format, ready for passing to [`EphemeralFile::write_raw`].
     pub(crate) raw: Vec<u8>,
 
@@ -386,7 +386,7 @@ impl SerializedBatch {
         }
     }
 
-    pub(crate) fn from_values(batch: Vec<(CompactKey, Lsn, Value)>) -> Self {
+    pub fn from_values(batch: Vec<(CompactKey, Lsn, Value)>) -> Self {
         // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
         // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
         let buffer_size = batch
@@ -478,7 +478,7 @@ impl InMemoryLayer {
     }
 
     // Write path.
-    pub(crate) async fn put_batch(
+    pub async fn put_batch(
         &self,
         serialized_batch: SerializedBatch,
         ctx: &RequestContext,

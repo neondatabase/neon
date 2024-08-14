@@ -10,14 +10,12 @@ use pageserver::{
     page_cache,
     repository::Value,
     task_mgr::TaskKind,
+    tenant::storage_layer::inmemory_layer::SerializedBatch,
     tenant::storage_layer::InMemoryLayer,
     virtual_file,
 };
 use pageserver_api::{key::Key, shard::TenantShardId};
-use utils::{
-    bin_ser::BeSer,
-    id::{TenantId, TimelineId},
-};
+use utils::id::{TenantId, TimelineId};
 
 // A very cheap hash for generating non-sequential keys.
 fn murmurhash32(mut h: u32) -> u32 {
@@ -67,11 +65,14 @@ async fn ingest(
     let layer =
         InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, entered, &ctx).await?;
 
-    let data = Value::Image(Bytes::from(vec![0u8; put_size])).ser()?;
+    let data = Value::Image(Bytes::from(vec![0u8; put_size]));
     let ctx = RequestContext::new(
         pageserver::task_mgr::TaskKind::WalReceiverConnectionHandler,
         pageserver::context::DownloadBehavior::Download,
     );
+
+    const BATCH_SIZE: usize = 16;
+    let mut batch = Vec::new();
 
     for i in 0..put_count {
         lsn += put_size as u64;
@@ -95,7 +96,17 @@ async fn ingest(
             }
         }
 
-        layer.put_value(key.to_compact(), lsn, &data, &ctx).await?;
+        batch.push((key.to_compact(), lsn, data.clone()));
+        if batch.len() >= BATCH_SIZE {
+            let this_batch = std::mem::take(&mut batch);
+            let serialized = SerializedBatch::from_values(this_batch);
+            layer.put_batch(serialized, &ctx).await?;
+        }
+    }
+    if !batch.is_empty() {
+        let this_batch = std::mem::take(&mut batch);
+        let serialized = SerializedBatch::from_values(this_batch);
+        layer.put_batch(serialized, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
 
