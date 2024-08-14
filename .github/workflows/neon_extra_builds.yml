@@ -142,7 +142,7 @@ jobs:
         run: make walproposer-lib -j$(sysctl -n hw.ncpu)
 
       - name: Run cargo build
-        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v17/lib cargo build --all --release
 
       - name: Check that no warnings are produced
         run: ./run_clippy.sh
@@ -181,7 +181,7 @@ jobs:
         run: make walproposer-lib -j$(nproc)
 
       - name: Produce the build stats
-        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release --timings -j$(nproc)
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v17/lib cargo build --all --release --timings -j$(nproc)
 
       - name: Upload the build stats
         id: upload-stats
