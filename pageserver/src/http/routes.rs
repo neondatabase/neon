@@ -1900,8 +1900,7 @@ async fn timeline_detach_ancestor_handler(
                         attempt,
                         ctx,
                     )
-                    .await
-                    .map_err(ApiError::InternalServerError)?;
+                    .await?;
 
                 AncestorDetached {
                     reparented_timelines,

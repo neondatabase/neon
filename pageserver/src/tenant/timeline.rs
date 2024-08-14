@@ -4342,7 +4342,7 @@ impl Timeline {
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<detach_ancestor::DetachingAndReparenting, anyhow::Error> {
+    ) -> Result<detach_ancestor::DetachingAndReparenting, detach_ancestor::Error> {
         detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
     }
 
