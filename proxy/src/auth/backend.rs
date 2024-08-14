@@ -1,5 +1,6 @@
 mod classic;
 mod hacks;
+pub mod jwt;
 mod link;
 
 use std::net::IpAddr;
