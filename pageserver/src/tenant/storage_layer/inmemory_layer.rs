@@ -6,9 +6,7 @@
 //!
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
-use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, Value};
-use crate::tenant::ephemeral_file::page_caching::PageBuf;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
@@ -24,6 +22,7 @@ use pageserver_api::shard::TenantShardId;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+use tokio_epoll_uring::BoundedBuf;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // avoid binding to Write (conflicts with std::io::Write)
@@ -318,40 +317,45 @@ impl InMemoryLayer {
             }
         }
 
+        const DIO_CHUNK_SIZE: usize = 512;
+
         // Plan which parts of which pages need to be appended to which value_buf
-        struct PageReadDestination<'a> {
+        struct ChunkReadDestination<'a> {
             value_read: &'a ValueRead,
-            offset_in_page: u32,
+            offset_in_chunk: u32,
             len: u32,
         }
         // use of BTreeMap's sorted iterator is critical to esnure value_buf is filled in order
-        let mut page_reads: BTreeMap<u32, Vec<PageReadDestination>> = BTreeMap::new();
+        let mut chunk_reads: BTreeMap<u32, Vec<ChunkReadDestination>> = BTreeMap::new();
         for value_read in reads.iter().flat_map(|(_, v)| v.iter()) {
             let ValueRead { pos, len, .. } = value_read;
             let mut remaining = usize::try_from(*len).unwrap();
-            let mut page_no = *pos / (PAGE_SZ as u32);
-            let mut offset_in_page = usize::try_from(*pos % (PAGE_SZ as u32)).unwrap();
+            let mut chunk_no = *pos / (DIO_CHUNK_SIZE as u32);
+            let mut offset_in_chunk = usize::try_from(*pos % (DIO_CHUNK_SIZE as u32)).unwrap();
             while remaining > 0 {
-                let remaining_in_page = std::cmp::min(remaining, PAGE_SZ - offset_in_page);
-                page_reads
-                    .entry(page_no)
+                let remaining_in_chunk = std::cmp::min(remaining, DIO_CHUNK_SIZE - offset_in_chunk);
+                chunk_reads
+                    .entry(chunk_no)
                     .or_default()
-                    .push(PageReadDestination {
+                    .push(ChunkReadDestination {
                         value_read,
-                        offset_in_page: offset_in_page as u32,
-                        len: remaining_in_page as u32,
+                        offset_in_chunk: offset_in_chunk as u32,
+                        len: remaining_in_chunk as u32,
                     });
-                offset_in_page = 0;
-                page_no += 1;
-                remaining -= remaining_in_page;
+                offset_in_chunk = 0;
+                chunk_no += 1;
+                remaining -= remaining_in_chunk;
             }
         }
 
+        // TODO: merge adjacent chunk reads (merging pass on the BTreeMap iterator)
+
         // Execute reads and fill the destination
         // TODO: prefetch
-        let mut page_buf = PageBuf::from(Box::new([0u8; PAGE_SZ]));
-        for (page_no, dsts) in page_reads.into_iter() {
-            let all_done = dsts.iter().all(|PageReadDestination { value_read, .. }| {
+        let get_chunk_buf = || Vec::with_capacity(DIO_CHUNK_SIZE);
+        let mut chunk_buf = get_chunk_buf();
+        for (chunk_no, dsts) in chunk_reads.into_iter() {
+            let all_done = dsts.iter().all(|ChunkReadDestination { value_read, .. }| {
                 let value_buf = value_read.value_buf.lock().unwrap();
                 let Ok(buf) = &*value_buf else {
                     return true; // on Err() there's no need to read more
@@ -361,34 +365,42 @@ impl InMemoryLayer {
             if all_done {
                 continue;
             }
-            let read_result = match inner.file.read_page(page_no, page_buf, &ctx).await {
-                Ok(read_result) => read_result,
+            let (tmp, nread) = match inner
+                .file
+                .read_at_to_end(
+                    chunk_no * DIO_CHUNK_SIZE as u32,
+                    chunk_buf.slice_full(),
+                    &ctx,
+                )
+                .await
+            {
+                Ok(t) => t,
                 Err(e) => {
                     let e = Arc::new(e);
-                    for PageReadDestination { value_read, .. } in dsts {
+                    for ChunkReadDestination { value_read, .. } in dsts {
                         *value_read.value_buf.lock().unwrap() = Err(Arc::clone(&e));
                         // this will make later reads short-circuit, see top of loop body
                     }
-                    page_buf = PageBuf::from(Box::new([0u8; PAGE_SZ])); // TODO: change read_page API to return the buffer
+                    chunk_buf = get_chunk_buf(); // TODO: change API to return the buffer back on error
                     continue;
                 }
             };
-            let page_contents = read_result.contents();
-            for PageReadDestination {
+            chunk_buf = tmp.into_inner();
+            let contents = &chunk_buf[..nread];
+            for ChunkReadDestination {
                 value_read,
-                offset_in_page,
+                offset_in_chunk,
                 len,
             } in dsts
             {
                 if let Ok(buf) = &mut *value_read.value_buf.lock().unwrap() {
                     buf.extend_from_slice(
-                        &page_contents[offset_in_page as usize..(offset_in_page + len) as usize],
+                        &contents[offset_in_chunk as usize..(offset_in_chunk + len) as usize],
                     );
                 }
             }
-            page_buf = read_result.into_page_buf();
         }
-        drop(page_buf);
+        drop(chunk_buf);
 
         // Process results into the reconstruct state
         'next_key: for (key, value_reads) in reads {
@@ -651,19 +663,6 @@ impl InMemoryLayer {
         match l0_flush_global_state {
             l0_flush::Inner::Direct { .. } => {
                 let file_contents: Vec<u8> = inner.file.load_to_vec(ctx).await?;
-                assert_eq!(
-                    file_contents.len() % PAGE_SZ,
-                    0,
-                    "needed by BlockReaderRef::Slice"
-                );
-                assert_eq!(file_contents.len(), {
-                    let written = usize::try_from(inner.file.len()).unwrap();
-                    if written % PAGE_SZ == 0 {
-                        written
-                    } else {
-                        written.checked_add(PAGE_SZ - (written % PAGE_SZ)).unwrap()
-                    }
-                });
 
                 let file_contents = Bytes::from(file_contents);
 
@@ -675,7 +674,8 @@ impl InMemoryLayer {
                             len,
                             will_init,
                         } = entry;
-                        let buf = file_contents.slice(*pos as usize..(*pos + *len) as usize);
+                        let buf =
+                            Bytes::slice(&file_contents, *pos as usize..(*pos + *len) as usize);
                         let (_buf, res) = delta_layer_writer
                             .put_value_bytes(
                                 Key::from_compact(*key),
