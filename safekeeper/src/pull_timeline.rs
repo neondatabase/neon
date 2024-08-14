@@ -169,6 +169,8 @@ impl WalResidentTimeline {
         let wal_seg_size = shared_state.get_wal_seg_size();
 
         let mut control_store = TimelinePersistentState::clone(shared_state.sk.state());
+        // Modify the partial segment of the in-memory copy for the control file to
+        // point to the destination safekeeper.
         let replace = control_store
             .partial_backup
             .replace_uploaded_segment(source, destination)?;
