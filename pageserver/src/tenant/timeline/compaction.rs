@@ -2325,7 +2325,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
                 key_range,
             ))
         } else {
-            // The current compaction implementatin only ever requests the key space
+            // The current compaction implementation only ever requests the key space
             // at the compaction end LSN.
             anyhow::bail!("keyspace not available for requested lsn");
         }

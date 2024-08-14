@@ -178,10 +178,8 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 impl From<PageReconstructError> for ApiError {
     fn from(pre: PageReconstructError) -> ApiError {
         match pre {
-            PageReconstructError::Other(pre) => ApiError::InternalServerError(pre),
-            PageReconstructError::MissingKey(e) => {
-                ApiError::InternalServerError(anyhow::anyhow!("{e}"))
-            }
+            PageReconstructError::Other(other) => ApiError::InternalServerError(other),
+            PageReconstructError::MissingKey(e) => ApiError::InternalServerError(e.into()),
             PageReconstructError::Cancelled => ApiError::Cancelled,
             PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
