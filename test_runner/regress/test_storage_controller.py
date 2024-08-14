@@ -2091,3 +2091,44 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
         )
         == 0
     )
+
+def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvBuilder):
+    # single unsharded tenant, two locations
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_start()
+
+    # make sure there is no secondary, so we will have something to drain
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
+    env.storage_controller.reconcile_until_idle()
+
+    first, _ = env.pageservers
+
+    # attached_at = int(env.storage_controller.locate(env.initial_tenant)[0]["node_id"])
+    # secondary_at = next(filter(lambda ps: ps.id != attached_at, env.pageservers))
+
+    def first_is(state):
+        details = env.storage_controller.node_status(first.id)
+        log.info(f"{details}")
+        assert details["scheduling"] == state
+
+    def first_is_draining():
+        return first_is("Draining")
+
+    env.storage_controller.configure_failpoints(("sleepy-drain-loop", "return(10000)"))
+    env.storage_controller.node_drain(first.id)
+
+    wait_until(10, 0.5, first_is_draining)
+
+    # restarting or the re-attach request from ps does not cancel drain
+    # but it makes it so that it cannot be cancelled from the api, bug?
+    first.restart()
+
+    # we are unable to reconfigure node while the operation is still ongoing
+    with pytest.raises(StorageControllerApiException, match="Precondition failed: Ongoing background operation forbids configuring: drain.*"):
+        env.storage_controller.node_configure(first.id, {"scheduling": "Pause"})
+    with pytest.raises(StorageControllerApiException, match="Precondition failed: Ongoing background operation forbids configuring: drain.*"):
+        env.storage_controller.node_configure(first.id, {"availability": "Offline"})
+
+    # fails, because the check for schedulingpolicy happens before the operation check
+    # env.storage_controller.cancel_node_drain(first.id)
