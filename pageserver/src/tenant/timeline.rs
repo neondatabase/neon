@@ -4540,7 +4540,12 @@ impl Timeline {
         new_images: &[ResidentLayer],
         layers_to_remove: &[Layer],
     ) -> Result<(), CompactionError> {
-        let mut guard = self.layers.write().await;
+        let mut guard = tokio::select! {
+            guard = self.layers.write() => guard,
+            _ = self.cancel.cancelled() => {
+                return Err(CompactionError::ShuttingDown);
+            }
+        };
 
         let mut duplicated_layers = HashSet::new();
 
