@@ -1787,9 +1787,11 @@ async fn timeline_checkpoint_handler(
         }
 
         if wait_until_uploaded {
+            tracing::info!("Waiting for uploads to complete...");
             timeline.remote_client.wait_completion().await
             // XXX map to correct ApiError for the cases where it's due to shutdown
             .context("wait completion").map_err(ApiError::InternalServerError)?;
+            tracing::info!("Uploads completed up to {}", timeline.get_remote_consistent_lsn_projected().unwrap_or(Lsn(0)));
         }
 
         json_response(StatusCode::OK, ())
