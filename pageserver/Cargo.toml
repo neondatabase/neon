@@ -11,6 +11,7 @@ default = []
 testing = ["fail/failpoints"]
 
 [dependencies]
+aligned-vec = "0.6.1"
 anyhow.workspace = true
 arc-swap.workspace = true
 async-compression.workspace = true
