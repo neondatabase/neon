@@ -975,7 +975,7 @@ impl DeltaLayerInner {
                 .blobs_at
                 .as_slice()
                 .iter()
-                .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                .map(|(_, (_, blob_meta))| format!("{}@{}", blob_meta.key, blob_meta.lsn))
                 .join(", ");
             tracing::warn!(
                 "Oversized vectored read ({} > {}) for keys {}",
@@ -1017,7 +1017,7 @@ impl DeltaLayerInner {
                 Ok(blobs_buf) => blobs_buf,
                 Err(err) => {
                     let kind = err.kind();
-                    for (_, blob_meta) in read.blobs_at.as_slice() {
+                    for (_, (_, blob_meta)) in read.blobs_at.as_slice() {
                         reconstruct_state.on_key_error(
                             blob_meta.key,
                             PageReconstructError::from(anyhow!(
@@ -1678,7 +1678,7 @@ pub(crate) mod test {
 
         let mut planned_blobs = Vec::new();
         for read in vectored_reads {
-            for (at, meta) in read.blobs_at.as_slice() {
+            for (at, (_, meta)) in read.blobs_at.as_slice() {
                 planned_blobs.push(BlobSpec {
                     key: meta.key,
                     lsn: meta.lsn,

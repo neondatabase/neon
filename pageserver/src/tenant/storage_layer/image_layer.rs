@@ -602,7 +602,7 @@ impl ImageLayerInner {
                     .blobs_at
                     .as_slice()
                     .iter()
-                    .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                    .map(|(_, (_, blob_meta))| format!("{}@{}", blob_meta.key, blob_meta.lsn))
                     .join(", ");
                 tracing::warn!(
                     "Oversized vectored read ({} > {}) for keys {}",
@@ -630,7 +630,7 @@ impl ImageLayerInner {
                 }
                 Err(err) => {
                     let kind = err.kind();
-                    for (_, blob_meta) in read.blobs_at.as_slice() {
+                    for (_, (_, blob_meta)) in read.blobs_at.as_slice() {
                         reconstruct_state.on_key_error(
                             blob_meta.key,
                             PageReconstructError::from(anyhow!(
