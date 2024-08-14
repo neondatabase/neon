@@ -285,12 +285,15 @@ impl TimelineMetadata {
     }
 
     /// When reparenting, the `ancestor_lsn` does not change.
+    ///
+    /// Returns true if anything was changed.
     pub fn reparent(&mut self, timeline: &TimelineId) {
         assert!(self.body.ancestor_timeline.is_some());
         // no assertion for redoing this: it's fine, we may have to repeat this multiple times over
         self.body.ancestor_timeline = Some(*timeline);
     }
 
+    /// Returns true if anything was changed
     pub fn detach_from_ancestor(&mut self, branchpoint: &(TimelineId, Lsn)) {
         if let Some(ancestor) = self.body.ancestor_timeline {
             assert_eq!(ancestor, branchpoint.0);

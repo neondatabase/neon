@@ -1787,9 +1787,11 @@ async fn timeline_checkpoint_handler(
         }
 
         if wait_until_uploaded {
+            tracing::info!("Waiting for uploads to complete...");
             timeline.remote_client.wait_completion().await
             // XXX map to correct ApiError for the cases where it's due to shutdown
             .context("wait completion").map_err(ApiError::InternalServerError)?;
+            tracing::info!("Uploads completed up to {}", timeline.get_remote_consistent_lsn_projected().unwrap_or(Lsn(0)));
         }
 
         json_response(StatusCode::OK, ())
@@ -1887,7 +1889,7 @@ async fn timeline_detach_ancestor_handler(
         // drop(tenant);
 
         let resp = match progress {
-            detach_ancestor::Progress::Prepared(_guard, prepared) => {
+            detach_ancestor::Progress::Prepared(attempt, prepared) => {
                 // it would be great to tag the guard on to the tenant activation future
                 let reparented_timelines = state
                     .tenant_manager
@@ -1895,10 +1897,10 @@ async fn timeline_detach_ancestor_handler(
                         tenant_shard_id,
                         timeline_id,
                         prepared,
+                        attempt,
                         ctx,
                     )
                     .await
-                    .context("timeline detach ancestor completion")
                     .map_err(ApiError::InternalServerError)?;
 
                 AncestorDetached {
@@ -2357,8 +2359,9 @@ async fn get_utilization(
     // regenerate at most 1Hz to allow polling at any rate.
     if !still_valid {
         let path = state.conf.tenants_path();
-        let doc = crate::utilization::regenerate(path.as_std_path())
-            .map_err(ApiError::InternalServerError)?;
+        let doc =
+            crate::utilization::regenerate(state.conf, path.as_std_path(), &state.tenant_manager)
+                .map_err(ApiError::InternalServerError)?;
 
         let mut buf = Vec::new();
         serde_json::to_writer(&mut buf, &doc)

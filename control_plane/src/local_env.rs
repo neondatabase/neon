@@ -158,6 +158,8 @@ pub struct NeonStorageControllerConf {
 
     /// Threshold for auto-splitting a tenant into shards
     pub split_threshold: Option<u64>,
+
+    pub max_secondary_lag_bytes: Option<u64>,
 }
 
 impl NeonStorageControllerConf {
@@ -173,6 +175,7 @@ impl Default for NeonStorageControllerConf {
             max_offline: Self::DEFAULT_MAX_OFFLINE_INTERVAL,
             max_warming_up: Self::DEFAULT_MAX_WARMING_UP_INTERVAL,
             split_threshold: None,
+            max_secondary_lag_bytes: None,
         }
     }
 }

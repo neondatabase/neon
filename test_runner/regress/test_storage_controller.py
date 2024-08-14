@@ -17,6 +17,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     StorageControllerApiException,
     TokenScope,
+    last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -1597,6 +1598,8 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
 
     # Perform a graceful rolling restart
     for ps in env.pageservers:
+        env.storage_controller.warm_up_all_secondaries()
+
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
         )
@@ -1645,6 +1648,115 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
     assert_shard_counts_balanced(env, shard_counts, total_shards)
 
 
+def test_skip_drain_on_secondary_lag(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    """
+    Artificially make a tenant shard's secondary location lag behind the primary
+    and check that storage controller driven node drains skip the lagging tenant shard.
+    Finally, validate that the tenant shard is migrated when a new drain request comes
+    in and it's no longer lagging.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.storage_controller_config = {
+        "max_secondary_lag_bytes": 1 * 1024 * 1024,
+    }
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tid, timeline_id = env.neon_cli.create_tenant(placement_policy='{"Attached":1}')
+
+    # Give things a chance to settle.
+    env.storage_controller.reconcile_until_idle(timeout_secs=30)
+
+    locations = env.storage_controller.locate(tid)
+    assert len(locations) == 1
+    primary: int = locations[0]["node_id"]
+    not_primary = [ps.id for ps in env.pageservers if ps.id != primary]
+    assert len(not_primary) == 1
+    secondary = not_primary[0]
+
+    log.info(f"Paused secondary downloads on {secondary}")
+    env.get_pageserver(secondary).http_client().configure_failpoints(
+        ("secondary-layer-download-pausable", "pause")
+    )
+
+    log.info(f"Ingesting some data for {tid}")
+
+    with env.endpoints.create_start("main", tenant_id=tid) as endpoint:
+        run_pg_bench_small(pg_bin, endpoint.connstr())
+        endpoint.safe_psql("CREATE TABLE created_foo(id integer);")
+        last_flush_lsn_upload(env, endpoint, tid, timeline_id)
+
+    log.info(f"Uploading heatmap from {primary} and requesting download from {secondary}")
+
+    env.get_pageserver(primary).http_client().tenant_heatmap_upload(tid)
+    env.get_pageserver(secondary).http_client().tenant_secondary_download(tid, wait_ms=100)
+
+    def secondary_is_lagging():
+        resp = env.get_pageserver(secondary).http_client().tenant_secondary_status(tid)
+        lag = resp["bytes_total"] - resp["bytes_downloaded"]
+
+        if lag <= 1 * 1024 * 1024:
+            raise Exception(f"Secondary lag not big enough: {lag}")
+
+    log.info(f"Looking for lag to develop on the secondary {secondary}")
+    wait_until(10, 1, secondary_is_lagging)
+
+    log.info(f"Starting drain of primary {primary} with laggy secondary {secondary}")
+    env.storage_controller.retryable_node_operation(
+        lambda ps_id: env.storage_controller.node_drain(ps_id), primary, max_attempts=3, backoff=2
+    )
+
+    env.storage_controller.poll_node_status(
+        primary,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
+        max_attempts=6,
+        backoff=5,
+    )
+
+    locations = env.storage_controller.locate(tid)
+    assert len(locations) == 1
+    assert locations[0]["node_id"] == primary
+
+    log.info(f"Unpausing secondary downloads on {secondary}")
+    env.get_pageserver(secondary).http_client().configure_failpoints(
+        ("secondary-layer-download-pausable", "off")
+    )
+    env.get_pageserver(secondary).http_client().tenant_secondary_download(tid, wait_ms=100)
+
+    log.info(f"Waiting for lag to reduce on {secondary}")
+
+    def lag_is_acceptable():
+        resp = env.get_pageserver(secondary).http_client().tenant_secondary_status(tid)
+        lag = resp["bytes_total"] - resp["bytes_downloaded"]
+
+        if lag > 1 * 1024 * 1024:
+            raise Exception(f"Secondary lag not big enough: {lag}")
+
+    wait_until(10, 1, lag_is_acceptable)
+
+    env.storage_controller.node_configure(primary, {"scheduling": "Active"})
+
+    log.info(f"Starting drain of primary {primary} with non-laggy secondary {secondary}")
+
+    env.storage_controller.retryable_node_operation(
+        lambda ps_id: env.storage_controller.node_drain(ps_id), primary, max_attempts=3, backoff=2
+    )
+
+    env.storage_controller.poll_node_status(
+        primary,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
+        max_attempts=6,
+        backoff=5,
+    )
+
+    locations = env.storage_controller.locate(tid)
+    assert len(locations) == 1
+    assert locations[0]["node_id"] == secondary
+
+
 def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
@@ -1671,6 +1783,7 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
 
     ps_id_to_drain = env.pageservers[0].id
 
+    env.storage_controller.warm_up_all_secondaries()
     env.storage_controller.retryable_node_operation(
         lambda ps_id: env.storage_controller.node_drain(ps_id),
         ps_id_to_drain,

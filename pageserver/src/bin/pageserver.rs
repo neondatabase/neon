@@ -124,8 +124,6 @@ fn main() -> anyhow::Result<()> {
     // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
-    info!(?conf.get_impl, "starting with get page implementation");
-    info!(?conf.get_vectored_impl, "starting with vectored get page implementation");
     info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
 
     let tenants_path = conf.tenants_path();

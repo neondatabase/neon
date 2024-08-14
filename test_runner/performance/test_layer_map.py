@@ -36,3 +36,6 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     with zenbenchmark.record_duration("test_query"):
         cur.execute("SELECT count(*) from t")
         assert cur.fetchone() == (n_iters * n_records,)
+
+    # see https://github.com/neondatabase/neon/issues/8712
+    env.stop(immediate=True)

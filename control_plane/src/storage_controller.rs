@@ -383,6 +383,10 @@ impl StorageController {
             args.push(format!("--split-threshold={split_threshold}"))
         }
 
+        if let Some(lag) = self.config.max_secondary_lag_bytes.as_ref() {
+            args.push(format!("--max-secondary-lag-bytes={lag}"))
+        }
+
         args.push(format!(
             "--neon-local-repo-dir={}",
             self.env.base_data_dir.display()

@@ -211,6 +211,11 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             } else {
                 // Run compaction
                 match tenant.compaction_iteration(&cancel, &ctx).await {
+                    Ok(has_pending_task) => {
+                        error_run_count = 0;
+                        // schedule the next compaction immediately in case there is a pending compaction task
+                        if has_pending_task { Duration::ZERO } else { period }
+                    }
                     Err(e) => {
                         let wait_duration = backoff::exponential_backoff_duration_seconds(
                             error_run_count + 1,
@@ -226,11 +231,6 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                             cancel.is_cancelled(),
                         );
                         wait_duration
-                    }
-                    Ok(has_pending_task) => {
-                        error_run_count = 0;
-                        // schedule the next compaction immediately in case there is a pending compaction task
-                        if has_pending_task { Duration::from_secs(0) } else { period }
                     }
                 }
             };
@@ -265,7 +265,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     count_throttled,
                     sum_throttled_usecs,
                     allowed_rps=%format_args!("{allowed_rps:.0}"),
-                    "shard was throttled in the last n_seconds")
+                    "shard was throttled in the last n_seconds"
+                );
             });
 
             // Sleep
@@ -365,14 +366,13 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             if first {
                 first = false;
 
-                if delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
+                let delays = async {
+                    delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel).await?;
+                    random_init_delay(period, &cancel).await?;
+                    Ok::<_, Cancelled>(())
+                };
 
-                if random_init_delay(period, &cancel).await.is_err() {
+                if delays.await.is_err() {
                     break;
                 }
             }
@@ -424,7 +424,6 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
 
-            // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
                 .await
                 .is_ok()

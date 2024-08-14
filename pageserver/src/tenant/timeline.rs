@@ -802,40 +802,6 @@ impl From<GetReadyAncestorError> for PageReconstructError {
     }
 }
 
-#[derive(
-    Eq,
-    PartialEq,
-    Debug,
-    Copy,
-    Clone,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum GetVectoredImpl {
-    Sequential,
-    Vectored,
-}
-
-#[derive(
-    Eq,
-    PartialEq,
-    Debug,
-    Copy,
-    Clone,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum GetImpl {
-    Legacy,
-    Vectored,
-}
-
 pub(crate) enum WaitLsnWaiter<'a> {
     Timeline(&'a Timeline),
     Tenant,
@@ -995,11 +961,10 @@ impl Timeline {
         }
 
         trace!(
-            "get vectored request for {:?}@{} from task kind {:?} will use {} implementation",
+            "get vectored request for {:?}@{} from task kind {:?}",
             keyspace,
             lsn,
             ctx.task_kind(),
-            self.conf.get_vectored_impl
         );
 
         let start = crate::metrics::GET_VECTORED_LATENCY
@@ -3952,6 +3917,10 @@ impl Timeline {
                         .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
                         .await?;
 
+                    if self.cancel.is_cancelled() {
+                        return Err(CreateImageLayersError::Cancelled);
+                    }
+
                     for (img_key, img) in results {
                         let img = match img {
                             Ok(img) => img,
@@ -4058,6 +4027,9 @@ impl Timeline {
                 image: None,
                 next_start_key: img_range.end,
             });
+        }
+        if self.cancel.is_cancelled() {
+            return Err(CreateImageLayersError::Cancelled);
         }
         let mut wrote_any_image = false;
         for (k, v) in data {
@@ -4173,6 +4145,10 @@ impl Timeline {
         let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
 
         for partition in partitioning.parts.iter() {
+            if self.cancel.is_cancelled() {
+                return Err(CreateImageLayersError::Cancelled);
+            }
+
             let img_range = start..partition.ranges.last().unwrap().end;
             let compact_metadata = partition.overlaps(&Key::metadata_key_range());
             if compact_metadata {
@@ -4352,18 +4328,34 @@ impl Timeline {
         detach_ancestor::prepare(self, tenant, options, ctx).await
     }
 
-    /// Completes the ancestor detach. This method is to be called while holding the
-    /// TenantManager's tenant slot, so during this method we cannot be deleted nor can any
-    /// timeline be deleted. After this method returns successfully, tenant must be reloaded.
+    /// Second step of detach from ancestor; detaches the `self` from it's current ancestor and
+    /// reparents any reparentable children of previous ancestor.
     ///
-    /// Pageserver receiving a SIGKILL during this operation is not supported (yet).
-    pub(crate) async fn complete_detaching_timeline_ancestor(
+    /// This method is to be called while holding the TenantManager's tenant slot, so during this
+    /// method we cannot be deleted nor can any timeline be deleted. After this method returns
+    /// successfully, tenant must be reloaded.
+    ///
+    /// Final step will be to [`Self::complete_detaching_timeline_ancestor`] after optionally
+    /// resetting the tenant.
+    pub(crate) async fn detach_from_ancestor_and_reparent(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
-        detach_ancestor::complete(self, tenant, prepared, ctx).await
+    ) -> Result<detach_ancestor::DetachingAndReparenting, anyhow::Error> {
+        detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
+    }
+
+    /// Final step which unblocks the GC.
+    ///
+    /// The tenant must've been reset if ancestry was modified previously (in tenant manager).
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        attempt: detach_ancestor::Attempt,
+        ctx: &RequestContext,
+    ) -> Result<(), detach_ancestor::Error> {
+        detach_ancestor::complete(self, tenant, attempt, ctx).await
     }
 
     /// Switch aux file policy and schedule upload to the index part.
@@ -4412,31 +4404,33 @@ impl From<CollectKeySpaceError> for CompactionError {
 impl From<super::upload_queue::NotInitialized> for CompactionError {
     fn from(value: super::upload_queue::NotInitialized) -> Self {
         match value {
-            super::upload_queue::NotInitialized::Uninitialized
-            | super::upload_queue::NotInitialized::Stopped => {
+            super::upload_queue::NotInitialized::Uninitialized => {
                 CompactionError::Other(anyhow::anyhow!(value))
             }
-            super::upload_queue::NotInitialized::ShuttingDown => CompactionError::ShuttingDown,
+            super::upload_queue::NotInitialized::ShuttingDown
+            | super::upload_queue::NotInitialized::Stopped => CompactionError::ShuttingDown,
         }
     }
 }
 
-impl CompactionError {
-    /// We cannot do compaction because we could not download a layer that is input to the compaction.
-    pub(crate) fn input_layer_download_failed(
-        e: super::storage_layer::layer::DownloadError,
-    ) -> Self {
+impl From<super::storage_layer::layer::DownloadError> for CompactionError {
+    fn from(e: super::storage_layer::layer::DownloadError) -> Self {
         match e {
-            super::storage_layer::layer::DownloadError::TimelineShutdown |
-            /* TODO DownloadCancelled correct here? */
-            super::storage_layer::layer::DownloadError::DownloadCancelled  => CompactionError::ShuttingDown,
-            super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads |
-            super::storage_layer::layer::DownloadError::DownloadRequired |
-            super::storage_layer::layer::DownloadError::NotFile(_) |
-            super::storage_layer::layer::DownloadError::DownloadFailed |
-            super::storage_layer::layer::DownloadError::PreStatFailed(_)=>CompactionError::Other(anyhow::anyhow!(e)),
+            super::storage_layer::layer::DownloadError::TimelineShutdown
+            | super::storage_layer::layer::DownloadError::DownloadCancelled => {
+                CompactionError::ShuttingDown
+            }
+            super::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads
+            | super::storage_layer::layer::DownloadError::DownloadRequired
+            | super::storage_layer::layer::DownloadError::NotFile(_)
+            | super::storage_layer::layer::DownloadError::DownloadFailed
+            | super::storage_layer::layer::DownloadError::PreStatFailed(_) => {
+                CompactionError::Other(anyhow::anyhow!(e))
+            }
             #[cfg(test)]
-            super::storage_layer::layer::DownloadError::Failpoint(_) =>  CompactionError::Other(anyhow::anyhow!(e)),
+            super::storage_layer::layer::DownloadError::Failpoint(_) => {
+                CompactionError::Other(anyhow::anyhow!(e))
+            }
         }
     }
 }
@@ -4990,15 +4984,7 @@ impl Timeline {
 
             result.layers_removed = gc_layers.len() as u64;
 
-            self.remote_client
-                .schedule_gc_update(&gc_layers)
-                .map_err(|e| {
-                    if self.cancel.is_cancelled() {
-                        GcError::TimelineCancelled
-                    } else {
-                        GcError::Remote(e)
-                    }
-                })?;
+            self.remote_client.schedule_gc_update(&gc_layers)?;
 
             guard.open_mut()?.finish_gc_timeline(&gc_layers);
 
@@ -5559,7 +5545,7 @@ impl<'a> TimelineWriter<'a> {
 
         let action = self.get_open_layer_action(lsn, buf_size);
         let layer = self.handle_open_layer_action(lsn, action, ctx).await?;
-        let res = layer.put_value(key, lsn, &buf, ctx).await;
+        let res = layer.put_value(key.to_compact(), lsn, &buf, ctx).await;
 
         if res.is_ok() {
             // Update the current size only when the entire write was ok.

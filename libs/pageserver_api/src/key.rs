@@ -22,6 +22,11 @@ pub struct Key {
     pub field6: u32,
 }
 
+/// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
+/// a struct of fields.
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd)]
+pub struct CompactKey(i128);
+
 /// The storage key size.
 pub const KEY_SIZE: usize = 18;
 
@@ -130,6 +135,14 @@ impl Key {
         }
     }
 
+    pub fn to_compact(&self) -> CompactKey {
+        CompactKey(self.to_i128())
+    }
+
+    pub fn from_compact(k: CompactKey) -> Self {
+        Self::from_i128(k.0)
+    }
+
     pub const fn next(&self) -> Key {
         self.add(1)
     }
@@ -196,6 +209,13 @@ impl fmt::Display for Key {
             "{:02X}{:08X}{:08X}{:08X}{:02X}{:08X}",
             self.field1, self.field2, self.field3, self.field4, self.field5, self.field6
         )
+    }
+}
+
+impl fmt::Display for CompactKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let k = Key::from_compact(*self);
+        k.fmt(f)
     }
 }
 
