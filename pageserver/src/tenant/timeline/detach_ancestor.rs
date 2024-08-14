@@ -81,12 +81,9 @@ impl From<Error> for ApiError {
             Error::NoAncestor => ApiError::Conflict(value.to_string()),
             Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{}", value)),
             Error::ShuttingDown => ApiError::ShuttingDown,
-            Error::OtherTimelineDetachOngoing(_) => {
-                ApiError::ResourceUnavailable("other timeline detach is already ongoing".into())
+            Error::OtherTimelineDetachOngoing(_) | Error::FailedToReparentAll => {
+                ApiError::ResourceUnavailable(value.to_string().into())
             }
-            Error::FailedToReparentAll => ApiError::ResourceUnavailable(
-                "failed to reparent all candidate timelines, please retry".into(),
-            ),
             Error::NotFound(e) => ApiError::from(e),
             // these variants should have no cancellation errors because of Error::launder
             Error::Prepare(_)
