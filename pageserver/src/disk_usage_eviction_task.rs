@@ -899,8 +899,10 @@ async fn collect_eviction_candidates(
             max_layer_size
         };
 
-        // Sort layers most-recently-used first, then partition by
-        // cumsum above/below min_resident_size.
+        // Sort layers most-recently-used first, then calculate [`EvictionPartition`] for each layer,
+        // where the inputs are:
+        //  - whether the layer is visible
+        //  - whether the layer is above/below the min_resident_size cutline
         tenant_candidates
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
@@ -923,6 +925,8 @@ async fn collect_eviction_candidates(
                             EvictionPartition::EvictNow
                         }
                         LayerVisibilityHint::Visible => {
+                            cumsum += i128::from(candidate.layer.get_file_size());
+
                             if cumsum > min_resident_size as i128 {
                                 EvictionPartition::Above
                             } else {
@@ -932,8 +936,6 @@ async fn collect_eviction_candidates(
                             }
                         }
                     };
-
-                    cumsum += i128::from(candidate.layer.get_file_size());
 
                     (partition, candidate)
                 });
