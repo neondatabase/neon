@@ -70,7 +70,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
@@ -263,7 +262,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
