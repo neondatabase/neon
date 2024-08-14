@@ -116,6 +116,11 @@ jobs:
             echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
           } >> $GITHUB_ENV
 
+      # See https://github.com/aws/aws-graviton-getting-started/blob/57dc813626d0266f1cc12ef83474745bb1f31fb4/rust.md
+      - name: Set RUSTFLAGS for ARM
+        if: inputs.arch == 'arm64'
+        run: echo "RUSTFLAGS=-Ctarget-feature=+lse -Ctarget-cpu=neoverse-n1" >> $GITHUB_ENV
+
       - name: Cache postgres v14 build
         id: cache_pg_14
         uses: actions/cache@v4
