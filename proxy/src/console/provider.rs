@@ -292,7 +292,7 @@ pub struct NodeInfo {
 impl NodeInfo {
     pub async fn connect(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         timeout: Duration,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
         self.config
@@ -330,20 +330,20 @@ pub(crate) trait Api {
     /// We still have to mock the scram to avoid leaking information that user doesn't exist.
     async fn get_role_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
@@ -363,7 +363,7 @@ pub enum ConsoleBackend {
 impl Api for ConsoleBackend {
     async fn get_role_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
         use ConsoleBackend::*;
@@ -378,7 +378,7 @@ impl Api for ConsoleBackend {
 
     async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
         use ConsoleBackend::*;
@@ -393,7 +393,7 @@ impl Api for ConsoleBackend {
 
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
         use ConsoleBackend::*;

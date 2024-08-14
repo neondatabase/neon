@@ -57,7 +57,7 @@ pub fn new_psql_session_id() -> String {
 }
 
 pub(super) async fn authenticate(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {

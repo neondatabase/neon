@@ -7,12 +7,20 @@ on:
         description: 'Source tag'
         required: true
         type: string
+      force:
+        description: 'Force the image to be pinned'
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       from-tag:
         description: 'Source tag'
         required: true
         type: string
+      force:
+        description: 'Force the image to be pinned'
+        default: false
+        type: boolean
 
 defaults:
   run:
@@ -22,15 +30,18 @@ concurrency:
   group: pin-build-tools-image-${{ inputs.from-tag }}
   cancel-in-progress: false
 
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
 
-jobs:
-  tag-image:
-    runs-on: ubuntu-22.04
+env:
+  FROM_TAG: ${{ inputs.from-tag }}
+  TO_TAG: pinned
 
-    env:
-      FROM_TAG: ${{ inputs.from-tag }}
-      TO_TAG: pinned
+jobs:
+  check-manifests:
+    runs-on: ubuntu-22.04
+    outputs:
+      skip: ${{ steps.check-manifests.outputs.skip }}
 
     steps:
       - name: Check if we really need to pin the image
@@ -47,27 +58,44 @@ jobs:
 
           echo "skip=${skip}" | tee -a $GITHUB_OUTPUT
 
+  tag-image:
+    needs: check-manifests
+
+    # use format(..) to catch both inputs.force = true AND inputs.force = 'true'
+    if: needs.check-manifests.outputs.skip == 'false' || format('{0}', inputs.force) == 'true'
+
+    runs-on: ubuntu-22.04
+
+    permissions:
+      id-token: write # for `azure/login`
+
+    steps:
       - uses: docker/login-action@v3
-        if: steps.check-manifests.outputs.skip == 'false'
+
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - name: Tag build-tools with `${{ env.TO_TAG }}` in Docker Hub
-        if: steps.check-manifests.outputs.skip == 'false'
-        run: |
-          docker buildx imagetools create -t neondatabase/build-tools:${TO_TAG} \
-                                             neondatabase/build-tools:${FROM_TAG}
-
       - uses: docker/login-action@v3
-        if: steps.check-manifests.outputs.skip == 'false'
         with:
           registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
           username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      - name: Tag build-tools with `${{ env.TO_TAG }}` in ECR
-        if: steps.check-manifests.outputs.skip == 'false'
+      - name: Azure login
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name=neoneastus2
+
+      - name: Tag build-tools with `${{ env.TO_TAG }}` in Docker Hub, ECR, and ACR
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG} \
+                                          -t neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG} \
+                                          -t neondatabase/build-tools:${TO_TAG} \
                                              neondatabase/build-tools:${FROM_TAG}

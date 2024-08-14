@@ -39,7 +39,7 @@ async fn smoke_test() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.likely_resident_layers().collect::<Vec<_>>()
+            layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -176,7 +176,7 @@ async fn smoke_test() {
     {
         let layers = &[layer];
         let mut g = timeline.layers.write().await;
-        g.finish_gc_timeline(layers);
+        g.open_mut().unwrap().finish_gc_timeline(layers);
         // this just updates the remote_physical_size for demonstration purposes
         rtc.schedule_gc_update(layers).unwrap();
     }
@@ -216,7 +216,7 @@ async fn evict_and_wait_on_wanted_deleted() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.likely_resident_layers().collect::<Vec<_>>()
+            layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -260,7 +260,7 @@ async fn evict_and_wait_on_wanted_deleted() {
     // the deletion of the layer in remote_storage happens.
     {
         let mut layers = timeline.layers.write().await;
-        layers.finish_gc_timeline(&[layer]);
+        layers.open_mut().unwrap().finish_gc_timeline(&[layer]);
     }
 
     SpawnBlockingPoolHelper::consume_and_release_all_of_spawn_blocking_threads(&handle).await;
@@ -301,7 +301,7 @@ fn read_wins_pending_eviction() {
         let layer = {
             let mut layers = {
                 let layers = timeline.layers.read().await;
-                layers.likely_resident_layers().collect::<Vec<_>>()
+                layers.likely_resident_layers().cloned().collect::<Vec<_>>()
             };
 
             assert_eq!(layers.len(), 1);
@@ -433,7 +433,7 @@ fn multiple_pending_evictions_scenario(name: &'static str, in_order: bool) {
         let layer = {
             let mut layers = {
                 let layers = timeline.layers.read().await;
-                layers.likely_resident_layers().collect::<Vec<_>>()
+                layers.likely_resident_layers().cloned().collect::<Vec<_>>()
             };
 
             assert_eq!(layers.len(), 1);
@@ -602,7 +602,7 @@ async fn cancelled_get_or_maybe_download_does_not_cancel_eviction() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.likely_resident_layers().collect::<Vec<_>>()
+            layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -682,7 +682,7 @@ async fn evict_and_wait_does_not_wait_for_download() {
     let layer = {
         let mut layers = {
             let layers = timeline.layers.read().await;
-            layers.likely_resident_layers().collect::<Vec<_>>()
+            layers.likely_resident_layers().cloned().collect::<Vec<_>>()
         };
 
         assert_eq!(layers.len(), 1);
@@ -801,9 +801,9 @@ async fn eviction_cancellation_on_drop() {
     let (evicted_layer, not_evicted) = {
         let mut layers = {
             let mut guard = timeline.layers.write().await;
-            let layers = guard.likely_resident_layers().collect::<Vec<_>>();
+            let layers = guard.likely_resident_layers().cloned().collect::<Vec<_>>();
             // remove the layers from layermap
-            guard.finish_gc_timeline(&layers);
+            guard.open_mut().unwrap().finish_gc_timeline(&layers);
 
             layers
         };

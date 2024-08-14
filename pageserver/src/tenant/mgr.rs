@@ -13,7 +13,7 @@ use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +54,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
-use super::timeline::detach_ancestor::PreparedTimelineDetach;
+use super::timeline::detach_ancestor::{self, PreparedTimelineDetach};
 use super::{GlobalShutDown, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
@@ -224,21 +224,8 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
 }
 
 /// See [`Self::spawn`].
-#[derive(Clone)]
-pub struct BackgroundPurges(Arc<std::sync::Mutex<BackgroundPurgesInner>>);
-enum BackgroundPurgesInner {
-    Open(tokio::task::JoinSet<()>),
-    // we use the async mutex for coalescing
-    ShuttingDown(Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>),
-}
-
-impl Default for BackgroundPurges {
-    fn default() -> Self {
-        Self(Arc::new(std::sync::Mutex::new(
-            BackgroundPurgesInner::Open(JoinSet::new()),
-        )))
-    }
-}
+#[derive(Clone, Default)]
+pub struct BackgroundPurges(tokio_util::task::TaskTracker);
 
 impl BackgroundPurges {
     /// When we have moved a tenant's content to a temporary directory, we may delete it lazily in
@@ -247,24 +234,32 @@ impl BackgroundPurges {
     /// Although we are cleaning up the tenant, this task is not meant to be bound by the lifetime of the tenant in memory.
     /// Thus the [`BackgroundPurges`] type to keep track of these tasks.
     pub fn spawn(&self, tmp_path: Utf8PathBuf) {
-        let mut guard = self.0.lock().unwrap();
-        let jset = match &mut *guard {
-            BackgroundPurgesInner::Open(ref mut jset) => jset,
-            BackgroundPurgesInner::ShuttingDown(_) => {
-                warn!("trying to spawn background purge during shutdown, ignoring");
-                return;
+        // because on shutdown we close and wait, we are misusing TaskTracker a bit.
+        //
+        // so first acquire a token, then check if the tracker has been closed. the tracker might get closed
+        // right after, but at least the shutdown will wait for what we are spawning next.
+        let token = self.0.token();
+
+        if self.0.is_closed() {
+            warn!(
+                %tmp_path,
+                "trying to spawn background purge during shutdown, ignoring"
+            );
+            return;
+        }
+
+        let span = info_span!(parent: None, "background_purge", %tmp_path);
+
+        let task = move || {
+            let _token = token;
+            let _entered = span.entered();
+            if let Err(error) = std::fs::remove_dir_all(tmp_path.as_path()) {
+                // should we fatal_io_error here?
+                warn!(%error, "failed to purge tenant directory");
             }
         };
-        jset.spawn_on(
-            async move {
-                if let Err(error) = fs::remove_dir_all(tmp_path.as_path()).await {
-                    // should we fatal_io_error here?
-                    warn!(%error, path=%tmp_path, "failed to purge tenant directory");
-                }
-            }
-            .instrument(info_span!(parent: None, "background_purge")),
-            BACKGROUND_RUNTIME.handle(),
-        );
+
+        BACKGROUND_RUNTIME.spawn_blocking(task);
     }
 
     /// When this future completes, all background purges have completed.
@@ -278,42 +273,9 @@ impl BackgroundPurges {
     /// instances of this future will continue to be correct.
     #[instrument(skip_all)]
     pub async fn shutdown(&self) {
-        let jset = {
-            let mut guard = self.0.lock().unwrap();
-            match &mut *guard {
-                BackgroundPurgesInner::Open(jset) => {
-                    *guard = BackgroundPurgesInner::ShuttingDown(Arc::new(tokio::sync::Mutex::new(
-                        std::mem::take(jset),
-                    )))
-                }
-                BackgroundPurgesInner::ShuttingDown(_) => {
-                    // calling shutdown multiple times is most likely a bug in pageserver shutdown code
-                    warn!("already shutting down");
-                }
-            };
-            match &mut *guard {
-                BackgroundPurgesInner::ShuttingDown(ref mut jset) => jset.clone(),
-                BackgroundPurgesInner::Open(_) => {
-                    unreachable!("above code transitions into shut down state");
-                }
-            }
-        };
-        let mut jset = jset.lock().await; // concurrent callers coalesce here
-        while let Some(res) = jset.join_next().await {
-            match res {
-                Ok(()) => {}
-                Err(e) if e.is_panic() => {
-                    // If it panicked, the error is already logged by the panic hook.
-                }
-                Err(e) if e.is_cancelled() => {
-                    unreachable!("we don't cancel the joinset or runtime")
-                }
-                Err(e) => {
-                    // No idea when this can happen, but let's log it.
-                    warn!(%e, "background purge task failed or panicked");
-                }
-            }
-        }
+        // forbid new tasks (can be called many times)
+        self.0.close();
+        self.0.wait().await;
     }
 }
 
@@ -1767,14 +1729,9 @@ impl TenantManager {
             let parent_timelines = timelines.keys().cloned().collect::<Vec<_>>();
             for timeline in timelines.values() {
                 tracing::info!(timeline_id=%timeline.timeline_id, "Loading list of layers to hardlink");
-                let timeline_layers = timeline
-                    .layers
-                    .read()
-                    .await
-                    .likely_resident_layers()
-                    .collect::<Vec<_>>();
+                let layers = timeline.layers.read().await;
 
-                for layer in timeline_layers {
+                for layer in layers.likely_resident_layers() {
                     let relative_path = layer
                         .local_path()
                         .strip_prefix(&parent_path)
@@ -1970,8 +1927,11 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
-    ) -> Result<Vec<TimelineId>, anyhow::Error> {
+    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
+        use crate::tenant::timeline::detach_ancestor::Error;
+        // FIXME: this is unnecessary, slotguard already has these semantics
         struct RevertOnDropSlot(Option<SlotGuard>);
 
         impl Drop for RevertOnDropSlot {
@@ -2019,43 +1979,98 @@ impl TenantManager {
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
-        let reparented = timeline
-            .complete_detaching_timeline_ancestor(&tenant, prepared, ctx)
+        let resp = timeline
+            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
             .await?;
 
         let mut slot_guard = slot_guard.into_inner();
 
-        let (_guard, progress) = utils::completion::channel();
-        match tenant.shutdown(progress, ShutdownMode::Hard).await {
-            Ok(()) => {
-                slot_guard.drop_old_value()?;
+        let tenant = if resp.reset_tenant_required() {
+            attempt.before_reset_tenant();
+
+            let (_guard, progress) = utils::completion::channel();
+            match tenant.shutdown(progress, ShutdownMode::Hard).await {
+                Ok(()) => {
+                    slot_guard.drop_old_value()?;
+                }
+                Err(_barrier) => {
+                    slot_guard.revert();
+                    // this really should not happen, at all, unless shutdown was already going?
+                    anyhow::bail!("Cannot restart Tenant, already shutting down");
+                }
             }
-            Err(_barrier) => {
-                slot_guard.revert();
-                // this really should not happen, at all, unless shutdown was already going?
-                anyhow::bail!("Cannot restart Tenant, already shutting down");
+
+            let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+            let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+
+            let shard_identity = config.shard;
+            let tenant = tenant_spawn(
+                self.conf,
+                tenant_shard_id,
+                &tenant_path,
+                self.resources.clone(),
+                AttachedTenantConf::try_from(config)?,
+                shard_identity,
+                None,
+                SpawnMode::Eager,
+                ctx,
+            )?;
+
+            {
+                let mut g = tenant.ongoing_timeline_detach.lock().unwrap();
+                assert!(
+                    g.is_none(),
+                    "there cannot be any new timeline detach ancestor on newly created tenant"
+                );
+                *g = Some((attempt.timeline_id, attempt.new_barrier()));
             }
+
+            slot_guard.upsert(TenantSlot::Attached(tenant.clone()))?;
+            tenant
+        } else {
+            tracing::info!("skipping tenant_reset as no changes made required it");
+            tenant
+        };
+
+        if let Some(reparented) = resp.completed() {
+            // finally ask the restarted tenant to complete the detach
+            //
+            // rationale for 9999s: we don't really have a timetable here; if retried, the caller
+            // will get an 503.
+            tenant
+                .wait_to_become_active(std::time::Duration::from_secs(9999))
+                .await
+                .map_err(|e| {
+                    use pageserver_api::models::TenantState;
+                    use GetActiveTenantError::{Cancelled, WillNotBecomeActive};
+                    match e {
+                        Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                            Error::ShuttingDown
+                        }
+                        other => Error::Unexpected(other.into()),
+                    }
+                })?;
+
+            utils::pausable_failpoint!(
+                "timeline-detach-ancestor::after_activating_before_finding-pausable"
+            );
+
+            let timeline = tenant
+                .get_timeline(attempt.timeline_id, true)
+                .map_err(|_| Error::DetachedNotFoundAfterRestart)?;
+
+            timeline
+                .complete_detaching_timeline_ancestor(&tenant, attempt, ctx)
+                .await
+                .map(|()| reparented)
+                .map_err(|e| e.into())
+        } else {
+            // at least the latest versions have now been downloaded and refreshed; be ready to
+            // retry another time.
+            Err(anyhow::anyhow!(
+                "failed to reparent all candidate timelines, please retry"
+            ))
         }
-
-        let tenant_path = self.conf.tenant_path(&tenant_shard_id);
-        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
-
-        let shard_identity = config.shard;
-        let tenant = tenant_spawn(
-            self.conf,
-            tenant_shard_id,
-            &tenant_path,
-            self.resources.clone(),
-            AttachedTenantConf::try_from(config)?,
-            shard_identity,
-            None,
-            SpawnMode::Eager,
-            ctx,
-        )?;
-
-        slot_guard.upsert(TenantSlot::Attached(tenant))?;
-
-        Ok(reparented)
     }
 
     /// A page service client sends a TenantId, and to look up the correct Tenant we must
@@ -2126,6 +2141,57 @@ impl TenantManager {
                 }
             }
         }
+    }
+
+    /// Calculate the tenant shards' contributions to this pageserver's utilization metrics.  The
+    /// returned values are:
+    ///  - the number of bytes of local disk space this pageserver's shards are requesting, i.e.
+    ///    how much space they would use if not impacted by disk usage eviction.
+    ///  - the number of tenant shards currently on this pageserver, including attached
+    ///    and secondary.
+    ///
+    /// This function is quite expensive: callers are expected to cache the result and
+    /// limit how often they call it.
+    pub(crate) fn calculate_utilization(&self) -> Result<(u64, u32), TenantMapListError> {
+        let tenants = self.tenants.read().unwrap();
+        let m = match &*tenants {
+            TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
+        };
+        let shard_count = m.len();
+        let mut wanted_bytes = 0;
+
+        for tenant_slot in m.values() {
+            match tenant_slot {
+                TenantSlot::InProgress(_barrier) => {
+                    // While a slot is being changed, we can't know how much storage it wants.  This
+                    // means this function's output can fluctuate if a lot of changes are going on
+                    // (such as transitions from secondary to attached).
+                    //
+                    // We could wait for the barrier and retry, but it's important that the utilization
+                    // API is responsive, and the data quality impact is not very significant.
+                    continue;
+                }
+                TenantSlot::Attached(tenant) => {
+                    wanted_bytes += tenant.local_storage_wanted();
+                }
+                TenantSlot::Secondary(secondary) => {
+                    let progress = secondary.progress.lock().unwrap();
+                    wanted_bytes += if progress.heatmap_mtime.is_some() {
+                        // If we have heatmap info, then we will 'want' the sum
+                        // of the size of layers in the heatmap: this is how much space
+                        // we would use if not doing any eviction.
+                        progress.bytes_total
+                    } else {
+                        // In the absence of heatmap info, assume that the secondary location simply
+                        // needs as much space as it is currently using.
+                        secondary.resident_size_metric.get()
+                    }
+                }
+            }
+        }
+
+        Ok((wanted_bytes, shard_count as u32))
     }
 }
 

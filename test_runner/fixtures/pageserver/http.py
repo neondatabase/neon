@@ -361,6 +361,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         return (res.status_code, res.json())
 
+    def tenant_secondary_status(self, tenant_id: Union[TenantId, TenantShardId]):
+        url = f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/status"
+        res = self.get(url)
+        self.verbose_error(res)
+        return res.json()
+
     def set_tenant_config(self, tenant_id: Union[TenantId, TenantShardId], config: dict[str, Any]):
         assert "tenant_id" not in config.keys()
         res = self.put(
@@ -857,7 +863,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         batch_size: int | None = None,
         **kwargs,
-    ) -> List[TimelineId]:
+    ) -> Set[TimelineId]:
         params = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
@@ -868,7 +874,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         json = res.json()
-        return list(map(TimelineId, json["reparented_timelines"]))
+        return set(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

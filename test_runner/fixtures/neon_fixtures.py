@@ -14,6 +14,7 @@ import textwrap
 import threading
 import time
 import uuid
+from collections import defaultdict
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,7 +24,7 @@ from functools import cached_property, partial
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import quote, urlparse
 
 import asyncpg
@@ -387,7 +388,7 @@ class PgProtocol:
         return self.safe_psql_many([query], **kwargs)[0]
 
     def safe_psql_many(
-        self, queries: List[str], log_query=True, **kwargs: Any
+        self, queries: Iterable[str], log_query=True, **kwargs: Any
     ) -> List[List[Tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
@@ -962,7 +963,7 @@ class NeonEnvBuilder:
         if self.env:
             log.info("Cleaning up all storage and compute nodes")
             self.env.stop(
-                immediate=True,
+                immediate=False,
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
                 ps_assert_metric_no_errors=(exc_type is None),
@@ -1250,20 +1251,56 @@ class NeonEnv:
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.
+
+        Unless of course, some stopping failed, in that case, all remaining child processes are leaked.
         """
-        self.endpoints.stop_all(fail_on_endpoint_errors)
+
+        # the commonly failing components have special try-except behavior,
+        # trying to get us to actually shutdown all processes over easier error
+        # reporting.
+
+        raise_later = None
+        try:
+            self.endpoints.stop_all(fail_on_endpoint_errors)
+        except Exception as e:
+            raise_later = e
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
         self.storage_controller.stop(immediate=immediate)
 
+        stop_later = []
+        metric_errors = []
+
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
         for pageserver in self.pageservers:
             if ps_assert_metric_no_errors:
-                pageserver.assert_no_metric_errors()
-            pageserver.stop(immediate=immediate)
+                try:
+                    pageserver.assert_no_metric_errors()
+                except Exception as e:
+                    metric_errors.append(e)
+                    log.error(f"metric validation failed on {pageserver.id}: {e}")
+            try:
+                pageserver.stop(immediate=immediate)
+            except RuntimeError:
+                stop_later.append(pageserver)
         self.broker.stop(immediate=immediate)
+
+        # TODO: for nice logging we need python 3.11 ExceptionGroup
+        for ps in stop_later:
+            ps.stop(immediate=True)
+
+        if raise_later is not None:
+            raise raise_later
+
+        for error in metric_errors:
+            raise error
+
+        if len(stop_later) > 0:
+            raise RuntimeError(
+                f"{len(stop_later)} out of {len(self.pageservers)} pageservers failed to stop gracefully"
+            )
 
     @property
     def pageserver(self) -> NeonPageserver:
@@ -2667,6 +2704,69 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"Got failpoints request response code {res.status_code}")
         res.raise_for_status()
 
+    def get_tenants_placement(self) -> defaultdict[str, Dict[str, Any]]:
+        """
+        Get the intent and observed placements of all tenants known to the storage controller.
+        """
+        tenants = self.tenant_list()
+
+        tenant_placement: defaultdict[str, Dict[str, Any]] = defaultdict(
+            lambda: {
+                "observed": {"attached": None, "secondary": []},
+                "intent": {"attached": None, "secondary": []},
+            }
+        )
+
+        for t in tenants:
+            for node_id, loc_state in t["observed"]["locations"].items():
+                if (
+                    loc_state is not None
+                    and "conf" in loc_state
+                    and loc_state["conf"] is not None
+                    and loc_state["conf"]["mode"]
+                    in set(["AttachedSingle", "AttachedMulti", "AttachedStale"])
+                ):
+                    tenant_placement[t["tenant_shard_id"]]["observed"]["attached"] = int(node_id)
+
+                if (
+                    loc_state is not None
+                    and "conf" in loc_state
+                    and loc_state["conf"] is not None
+                    and loc_state["conf"]["mode"] == "Secondary"
+                ):
+                    tenant_placement[t["tenant_shard_id"]]["observed"]["secondary"].append(
+                        int(node_id)
+                    )
+
+            if "attached" in t["intent"]:
+                tenant_placement[t["tenant_shard_id"]]["intent"]["attached"] = t["intent"][
+                    "attached"
+                ]
+
+            if "secondary" in t["intent"]:
+                tenant_placement[t["tenant_shard_id"]]["intent"]["secondary"] += t["intent"][
+                    "secondary"
+                ]
+
+        return tenant_placement
+
+    def warm_up_all_secondaries(self):
+        log.info("Warming up all secondary locations")
+
+        tenant_placement = self.get_tenants_placement()
+        for tid, placement in tenant_placement.items():
+            assert placement["observed"]["attached"] is not None
+            primary_id = placement["observed"]["attached"]
+
+            assert len(placement["observed"]["secondary"]) == 1
+            secondary_id = placement["observed"]["secondary"][0]
+
+            parsed_tid = TenantShardId.parse(tid)
+            self.env.get_pageserver(primary_id).http_client().tenant_heatmap_upload(parsed_tid)
+            self.env.get_pageserver(secondary_id).http_client().tenant_secondary_download(
+                parsed_tid, wait_ms=250
+            )
+
     @property
     def workdir(self) -> Path:
         return self.env.repo_dir
@@ -4034,6 +4134,17 @@ class Endpoint(PgProtocol, LogUtils):
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(os.path.join(self.pgdata_dir, "pg_wal")) / 1024 / 1024
 
+    def clear_shared_buffers(self, cursor: Optional[Any] = None):
+        """
+        Best-effort way to clear postgres buffers. Pinned buffers will not be 'cleared.'
+
+        Might also clear LFC.
+        """
+        if cursor is not None:
+            cursor.execute("select clear_buffer_cache()")
+        else:
+            self.safe_psql("select clear_buffer_cache()")
+
 
 class EndpointFactory:
     """An object representing multiple compute endpoints."""
@@ -4829,7 +4940,7 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -> Lsn:
+def logical_replication_sync(subscriber: PgProtocol, publisher: PgProtocol) -> Lsn:
     """Wait logical replication subscriber to sync with publisher."""
     publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     while True:

@@ -184,6 +184,7 @@ tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.21.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+try-lock = "0.2.5"
 twox-hash = { version = "1.6.3", default-features = false }
 typed-json = "0.1"
 url = "2.2"
