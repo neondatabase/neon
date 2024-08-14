@@ -5261,6 +5261,7 @@ impl Timeline {
                     layer: layer.to_owned().into(),
                     last_activity_ts,
                     relative_last_activity: finite_f32::FiniteF32::ZERO,
+                    visibility: layer.visibility(),
                 }
             })
             .collect();
