@@ -586,7 +586,7 @@ impl InMemoryLayer {
                             .put_value_bytes(
                                 Key::from_compact(*key),
                                 *lsn,
-                                std::mem::take(&mut buf).slice_len(),
+                                buf.slice_len(),
                                 will_init,
                                 &ctx,
                             )
@@ -631,7 +631,7 @@ impl InMemoryLayer {
                             .put_value_bytes(
                                 Key::from_compact(*key),
                                 *lsn,
-                                std::mem::take(&mut buf).slice_len(),
+                                buf.slice_len(),
                                 will_init,
                                 ctx,
                             )
