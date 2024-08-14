@@ -686,7 +686,7 @@ pub(crate) enum GetVectoredError {
     #[error("requested key not found: {0}")]
     MissingKey(MissingKeyError),
 
-    #[error("ancestory walk")]
+    #[error("ancestry walk")]
     GetReadyAncestorError(#[source] GetReadyAncestorError),
 
     #[error(transparent)]
