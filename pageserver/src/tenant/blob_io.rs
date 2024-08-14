@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
-use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
@@ -189,9 +189,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     #[inline(always)]
     async fn write_all_unbuffered<Buf: IoBuf + Send>(
         &mut self,
-        src_buf: Slice<Buf>,
+        src_buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (Slice<Buf>, Result<(), Error>) {
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
         let (src_buf, res) = self.inner.write_all(src_buf, ctx).await;
         let nbytes = match res {
             Ok(nbytes) => nbytes,
@@ -207,7 +207,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         let buf = std::mem::take(&mut self.buf);
         let (slice, res) = self.inner.write_all(buf.slice_len(), ctx).await;
         res?;
-        let mut buf = Slice::into_inner(slice);
+        let mut buf = slice.into_raw_slice().into_inner();
         buf.clear();
         self.buf = buf;
         Ok(())
@@ -226,22 +226,23 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// Internal, possibly buffered, write function
     async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        src_buf: Slice<Buf>,
+        src_buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (Slice<Buf>, Result<(), Error>) {
-        assert_eq!(
-            src_buf.bytes_init(),
-            src_buf.bytes_total(),
-            "caller likely meant to fill the buffer fully"
-        );
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
+        let src_buf = src_buf.into_raw_slice();
         let src_buf_bounds = src_buf.bounds();
         let restore = move |src_buf_slice: Slice<_>| {
-            Slice::from_buf_bounds(src_buf_slice.into_inner(), src_buf_bounds)
+            FullSlice::must_new(Slice::from_buf_bounds(
+                src_buf_slice.into_inner(),
+                src_buf_bounds,
+            ))
         };
 
         if !BUFFERED {
             assert!(self.buf.is_empty());
-            return self.write_all_unbuffered(src_buf, ctx).await;
+            return self
+                .write_all_unbuffered(FullSlice::must_new(src_buf), ctx)
+                .await;
         }
         let remaining = Self::CAPACITY - self.buf.len();
         let src_buf_len = src_buf.bytes_init();
@@ -272,7 +273,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 assert_eq!(copied, src_buf.len());
                 restore(src_buf)
             } else {
-                let (src_buf, res) = self.write_all_unbuffered(src_buf, ctx).await;
+                let (src_buf, res) = self
+                    .write_all_unbuffered(FullSlice::must_new(src_buf), ctx)
+                    .await;
                 if let Err(e) = res {
                     return (src_buf, Err(e));
                 }
@@ -288,9 +291,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// which can be used to retrieve the data later.
     pub async fn write_blob<Buf: IoBuf + Send>(
         &mut self,
-        srcbuf: Slice<Buf>,
+        srcbuf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (Slice<Buf>, Result<u64, Error>) {
+    ) -> (FullSlice<Buf>, Result<u64, Error>) {
         let (buf, res) = self
             .write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
             .await;
@@ -299,24 +302,19 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
 
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
-    pub async fn write_blob_maybe_compressed<Buf: IoBuf + Send>(
+    pub(crate) async fn write_blob_maybe_compressed<Buf: IoBuf + Send>(
         &mut self,
-        srcbuf: Slice<Buf>,
+        srcbuf: FullSlice<Buf>,
         ctx: &RequestContext,
         algorithm: ImageCompressionAlgorithm,
-    ) -> (Slice<Buf>, Result<(u64, CompressionInfo), Error>) {
+    ) -> (FullSlice<Buf>, Result<(u64, CompressionInfo), Error>) {
         let offset = self.offset;
         let mut compression_info = CompressionInfo {
             written_compressed: false,
             compressed_size: None,
         };
 
-        assert_eq!(
-            srcbuf.bytes_init(),
-            srcbuf.bytes_total(),
-            "caller likely meant to fill the buffer fully"
-        );
-        let len = srcbuf.bytes_init();
+        let len = srcbuf.len();
 
         let mut io_buf = self.io_buf.take().expect("we always put it back below");
         io_buf.clear();
@@ -373,7 +371,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
             }
         }
         .await;
-        self.io_buf = Some(io_buf_slice.into_inner());
+        self.io_buf = Some(io_buf_slice.into_raw_slice().into_inner());
         match hdr_res {
             Ok(_) => (),
             Err(e) => return (srcbuf, Err(e)),

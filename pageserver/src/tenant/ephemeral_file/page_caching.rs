@@ -4,12 +4,13 @@
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::BlockLease;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 use crate::virtual_file::VirtualFile;
 
 use once_cell::sync::Lazy;
 use std::io::{self, ErrorKind};
 use std::ops::{Deref, Range};
-use tokio_epoll_uring::{BoundedBuf, Slice};
+use tokio_epoll_uring::BoundedBuf;
 use tracing::*;
 
 use super::zero_padded_read_write;
@@ -210,11 +211,9 @@ impl PreWarmingWriter {
 impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmingWriter {
     async fn write_all<Buf: tokio_epoll_uring::IoBuf + Send>(
         &mut self,
-        buf: Slice<Buf>,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, Slice<Buf>)> {
-        assert_eq!(buf.bytes_init(), buf.bytes_total());
-
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let buflen = buf.len();
         assert_eq!(
             buflen % PAGE_SZ,

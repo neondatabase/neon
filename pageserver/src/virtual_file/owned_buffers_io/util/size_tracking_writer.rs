@@ -1,5 +1,8 @@
-use crate::{context::RequestContext, virtual_file::owned_buffers_io::write::OwnedAsyncWriter};
-use tokio_epoll_uring::{IoBuf, Slice};
+use crate::{
+    context::RequestContext,
+    virtual_file::owned_buffers_io::{io_buf_ext::FullSlice, write::OwnedAsyncWriter},
+};
+use tokio_epoll_uring::IoBuf;
 
 pub struct Writer<W> {
     dst: W,
@@ -37,9 +40,9 @@ where
     #[inline(always)]
     async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: Slice<Buf>,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, Slice<Buf>)> {
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let (nwritten, buf) = self.dst.write_all(buf, ctx).await?;
         self.bytes_amount += u64::try_from(nwritten).unwrap();
         Ok((nwritten, buf))

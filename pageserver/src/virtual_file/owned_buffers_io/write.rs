@@ -1,16 +1,18 @@
 use bytes::BytesMut;
-use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
+use tokio_epoll_uring::IoBuf;
 
 use crate::context::RequestContext;
+
+use super::io_buf_ext::{FullSlice, IoBufExt};
 
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 pub trait OwnedAsyncWriter {
     async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: Slice<Buf>,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, Slice<Buf>)>;
+    ) -> std::io::Result<(usize, FullSlice<Buf>)>;
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
@@ -79,10 +81,10 @@ where
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn write_buffered<S: IoBuf + Send>(
         &mut self,
-        chunk: Slice<S>,
+        chunk: FullSlice<S>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, Slice<S>)> {
-        assert_eq!(chunk.bytes_init(), chunk.bytes_total());
+    ) -> std::io::Result<(usize, FullSlice<S>)> {
+        let chunk = chunk.into_raw_slice();
 
         let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
@@ -96,7 +98,10 @@ where
                     .pending(),
                 0
             );
-            let (nwritten, chunk) = self.writer.write_all(chunk, ctx).await?;
+            let (nwritten, chunk) = self
+                .writer
+                .write_all(FullSlice::must_new(chunk), ctx)
+                .await?;
             assert_eq!(nwritten, chunk_len);
             return Ok((nwritten, chunk));
         }
@@ -116,7 +121,7 @@ where
             }
         }
         assert!(slice.is_empty(), "by now we should have drained the chunk");
-        Ok((chunk_len, chunk))
+        Ok((chunk_len, FullSlice::must_new(chunk)))
     }
 
     /// Strictly less performant variant of [`Self::write_buffered`] that allows writing borrowed data.
@@ -155,7 +160,9 @@ where
         let slice = buf.flush();
         let (nwritten, slice) = self.writer.write_all(slice, ctx).await?;
         assert_eq!(nwritten, buf_len);
-        self.buf = Some(Buffer::reuse_after_flush(slice.into_inner()));
+        self.buf = Some(Buffer::reuse_after_flush(
+            slice.into_raw_slice().into_inner(),
+        ));
         Ok(())
     }
 }
@@ -175,9 +182,9 @@ pub trait Buffer {
     /// Number of bytes in the buffer.
     fn pending(&self) -> usize;
 
-    /// Turns `self` into a [`tokio_epoll_uring::Slice`] of the pending data
+    /// Turns `self` into a [`FullSlice`] of the pending data
     /// so we can use [`tokio_epoll_uring`] to write it to disk.
-    fn flush(self) -> Slice<Self::IoBuf>;
+    fn flush(self) -> FullSlice<Self::IoBuf>;
 
     /// After the write to disk is done and we have gotten back the slice,
     /// [`BufferedWriter`] uses this method to re-use the io buffer.
@@ -201,12 +208,8 @@ impl Buffer for BytesMut {
         self.len()
     }
 
-    fn flush(self) -> Slice<BytesMut> {
-        if self.is_empty() {
-            return self.slice_full();
-        }
-        let len = self.len();
-        self.slice(0..len)
+    fn flush(self) -> FullSlice<BytesMut> {
+        self.slice_len()
     }
 
     fn reuse_after_flush(mut iobuf: BytesMut) -> Self {
@@ -218,10 +221,9 @@ impl Buffer for BytesMut {
 impl OwnedAsyncWriter for Vec<u8> {
     async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: Slice<Buf>,
+        buf: FullSlice<Buf>,
         _: &RequestContext,
-    ) -> std::io::Result<(usize, Slice<Buf>)> {
-        assert_eq!(buf.bytes_init(), buf.bytes_total());
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         self.extend_from_slice(&buf[..]);
         Ok((buf.len(), buf))
     }
@@ -242,10 +244,9 @@ mod tests {
     impl OwnedAsyncWriter for RecorderWriter {
         async fn write_all<Buf: IoBuf + Send>(
             &mut self,
-            buf: Slice<Buf>,
+            buf: FullSlice<Buf>,
             _: &RequestContext,
-        ) -> std::io::Result<(usize, Slice<Buf>)> {
-            assert_eq!(buf.bytes_init(), buf.bytes_total());
+        ) -> std::io::Result<(usize, FullSlice<Buf>)> {
             self.writes.push(Vec::from(&buf[..]));
             Ok((buf.len(), buf))
         }
@@ -258,7 +259,7 @@ mod tests {
     macro_rules! write {
         ($writer:ident, $data:literal) => {{
             $writer
-                .write_buffered(::bytes::Bytes::from_static($data).slice_full(), &test_ctx())
+                .write_buffered(::bytes::Bytes::from_static($data).slice_len(), &test_ctx())
                 .await?;
         }};
     }

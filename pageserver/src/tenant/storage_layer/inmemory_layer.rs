@@ -592,7 +592,7 @@ impl InMemoryLayer {
                             )
                             .await;
                         res?;
-                        buf = tmp.into_inner();
+                        buf = tmp.into_raw_slice().into_inner();
                     }
                 }
             }
@@ -637,7 +637,7 @@ impl InMemoryLayer {
                             )
                             .await;
                         res?;
-                        buf = tmp.into_inner();
+                        buf = tmp.into_raw_slice().into_inner();
                     }
                 }
             }

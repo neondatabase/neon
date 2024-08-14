@@ -42,7 +42,7 @@ use crate::tenant::vectored_blob_io::{
     VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
-use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
@@ -64,7 +64,7 @@ use std::os::unix::fs::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tokio_epoll_uring::{IoBufMut, Slice};
+use tokio_epoll_uring::IoBufMut;
 use tracing::*;
 
 use utils::{
@@ -453,10 +453,10 @@ impl DeltaLayerWriterInner {
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: Slice<Buf>,
+        val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (Slice<Buf>, anyhow::Result<()>)
+    ) -> (FullSlice<Buf>, anyhow::Result<()>)
     where
         Buf: IoBufMut + Send,
     {
@@ -661,10 +661,10 @@ impl DeltaLayerWriter {
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: Slice<Buf>,
+        val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (Slice<Buf>, anyhow::Result<()>)
+    ) -> (FullSlice<Buf>, anyhow::Result<()>)
     where
         Buf: IoBufMut + Send,
     {
@@ -1310,7 +1310,7 @@ impl DeltaLayerInner {
                             ctx,
                         )
                         .await;
-                    per_blob_copy = tmp.into_inner();
+                    per_blob_copy = tmp.into_raw_slice().into_inner();
 
                     res?;
 

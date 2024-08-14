@@ -17,6 +17,7 @@ use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
+use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
@@ -640,17 +641,18 @@ impl VirtualFile {
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
     pub async fn write_all_at<Buf: IoBuf + Send>(
         &self,
-        buf: Slice<Buf>,
+        buf: FullSlice<Buf>,
         mut offset: u64,
         ctx: &RequestContext,
-    ) -> (Slice<Buf>, Result<(), Error>) {
-        assert_eq!(buf.bytes_init(), buf.bytes_total());
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
+        let buf = buf.into_raw_slice();
         let bounds = buf.bounds();
-        let restore = |buf: Slice<_>| Slice::from_buf_bounds(buf.into_inner(), bounds);
+        let restore =
+            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
         let mut buf = buf;
         while !buf.is_empty() {
-            let res;
-            (buf, res) = self.write_at(buf, offset, ctx).await;
+            let (tmp, res) = self.write_at(FullSlice::must_new(buf), offset, ctx).await;
+            buf = tmp.into_raw_slice();
             match res {
                 Ok(0) => {
                     return (
@@ -677,28 +679,22 @@ impl VirtualFile {
     /// Panics if there is an uninitialized range in `buf`, as that is most likely a bug in the caller.
     pub async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: Slice<Buf>,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (Slice<Buf>, Result<usize, Error>) {
-        assert_eq!(
-            buf.bytes_init(),
-            buf.bytes_total(),
-            "caller likely meant to fill the buffer fully"
-        );
-
-        let nbytes = buf.bytes_init();
-        if nbytes == 0 {
-            return (buf, Ok(0));
-        }
+    ) -> (FullSlice<Buf>, Result<usize, Error>) {
+        let buf = buf.into_raw_slice();
         let bounds = buf.bounds();
+        let restore =
+            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
+        let nbytes = buf.len();
         let mut buf = buf;
         while !buf.is_empty() {
-            let res;
-            (buf, res) = self.write(buf, ctx).await;
+            let (tmp, res) = self.write(FullSlice::must_new(buf), ctx).await;
+            buf = tmp.into_raw_slice();
             match res {
                 Ok(0) => {
                     return (
-                        Slice::from_buf_bounds(buf.into_inner(), bounds),
+                        restore(buf),
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -709,17 +705,17 @@ impl VirtualFile {
                     buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::from_buf_bounds(buf.into_inner(), bounds), Err(e)),
+                Err(e) => return (restore(buf), Err(e)),
             }
         }
-        (Slice::from_buf_bounds(buf.into_inner(), bounds), Ok(nbytes))
+        (restore(buf), Ok(nbytes))
     }
 
     async fn write<B: IoBuf + Send>(
         &mut self,
-        buf: Slice<B>,
+        buf: FullSlice<B>,
         ctx: &RequestContext,
-    ) -> (Slice<B>, Result<usize, std::io::Error>) {
+    ) -> (FullSlice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
         let (buf, res) = self.write_at(buf, pos, ctx).await;
         let n = match res {
@@ -762,10 +758,10 @@ impl VirtualFile {
 
     async fn write_at<B: IoBuf + Send>(
         &self,
-        buf: Slice<B>,
+        buf: FullSlice<B>,
         offset: u64,
         _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
-    ) -> (Slice<B>, Result<usize, Error>) {
+    ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
             Err(e) => return (buf, Err(e)),
@@ -1101,9 +1097,9 @@ impl OwnedAsyncWriter for VirtualFile {
     #[inline(always)]
     async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: Slice<Buf>,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, Slice<Buf>)> {
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
         res.map(move |v| (v, buf))
     }
@@ -1202,11 +1198,10 @@ mod tests {
         }
         async fn write_all_at<Buf: IoBuf + Send>(
             &self,
-            buf: Slice<Buf>,
+            buf: FullSlice<Buf>,
             offset: u64,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
-            assert_eq!(buf.bytes_init(), buf.bytes_total());
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
                     let (_buf, res) = file.write_all_at(buf, offset, ctx).await;
@@ -1223,10 +1218,9 @@ mod tests {
         }
         async fn write_all<Buf: IoBuf + Send>(
             &mut self,
-            buf: Slice<Buf>,
+            buf: FullSlice<Buf>,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
-            assert_eq!(buf.bytes_init(), buf.bytes_total());
             match self {
                 MaybeVirtualFile::VirtualFile(file) => {
                     let (_buf, res) = file.write_all(buf, ctx).await;
