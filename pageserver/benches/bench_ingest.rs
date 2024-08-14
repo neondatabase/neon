@@ -67,7 +67,8 @@ async fn ingest(
     let layer =
         InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, entered, &ctx).await?;
 
-    let data = Value::Image(Bytes::from(vec![0u8; put_size])).ser()?;
+    let value = Value::Image(Bytes::from(vec![0u8; put_size]));
+    let data = value.ser()?;
     let ctx = RequestContext::new(
         pageserver::task_mgr::TaskKind::WalReceiverConnectionHandler,
         pageserver::context::DownloadBehavior::Download,
@@ -95,7 +96,9 @@ async fn ingest(
             }
         }
 
-        layer.put_value(key.to_compact(), lsn, &data, &ctx).await?;
+        layer
+            .put_value(key.to_compact(), lsn, &data, value.will_init(), &ctx)
+            .await?;
     }
     layer.freeze(lsn + 1).await;
 

@@ -84,6 +84,7 @@ impl EphemeralFile {
     pub(crate) async fn write_blob(
         &mut self,
         buf: &[u8],
+        will_init: bool,
         ctx: &RequestContext,
     ) -> Result<InMemoryLayerIndexValue, io::Error> {
         let pos = self.rw.bytes_written();
@@ -105,7 +106,11 @@ impl EphemeralFile {
 
         self.rw.write_all_borrowed(buf, ctx).await?;
 
-        Ok(InMemoryLayerIndexValue { pos, len })
+        Ok(InMemoryLayerIndexValue {
+            pos,
+            len,
+            will_init,
+        })
     }
 }
 
