@@ -4,6 +4,7 @@ self-hosted-runner:
     - gen3
     - large
     - large-arm64
+    - large-arm64-metal
     - small
     - small-arm64
     - us-east-2

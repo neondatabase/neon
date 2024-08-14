@@ -36,7 +36,7 @@ env:
 
 jobs:
   build-neon:
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64-metal' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
@@ -259,7 +259,7 @@ jobs:
     # Don't run regression tests on debug arm64 builds
     if: inputs.build-type != 'debug' || inputs.arch != 'arm64'
     needs: [ build-neon ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64-metal' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
