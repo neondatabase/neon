@@ -275,8 +275,7 @@ impl VectoredReadPlanner {
     pub fn finish_v2(self) -> Vec<VectoredRead> {
         const STX_ALIGN: usize = 4096;
 
-        let x = self
-            .blobs
+        self.blobs
             .into_iter()
             .flat_map(|(key, blobs_for_key)| {
                 blobs_for_key
@@ -304,23 +303,9 @@ impl VectoredReadPlanner {
                     }
                 }
                 Err((x, y))
-            });
-
-        // for (key, blobs_for_key) in  {
-
-        //     // blobs_for_key
-        //     //     .into_iter()
-        //     //     .map(|(lsn, start_offset, end_offset)| {
-        //     //         VectoredReadBuilder::new(
-        //     //             start_offset,
-        //     //             end_offset,
-        //     //             BlobMeta { key, lsn },
-        //     //             self.max_read_size,
-        //     //         )
-        //     //     }),
-        //     // );
-        // }
-        todo!()
+            })
+            .map(|x| x.build())
+            .collect()
     }
 }
 
@@ -365,18 +350,6 @@ impl<'a> VectoredBlobReader<'a> {
         let start_offset = blobs_at.first().expect("VectoredRead is never empty").0;
 
         let mut metas = Vec::with_capacity(blobs_at.len());
-
-        // Blobs in `read` only provide their starting offset. The end offset
-        // of a blob is implicit: the start of the next blob if one exists
-        // or the end of the read.
-
-        // let pairs = blobs_at.iter().zip(
-        //     blobs_at
-        //         .iter()
-        //         .map(Some)
-        //         .skip(1)
-        //         .chain(std::iter::once(None)),
-        // );
 
         // Some scratch space, put here for reusing the allocation
         let mut decompressed_vec = Vec::new();
