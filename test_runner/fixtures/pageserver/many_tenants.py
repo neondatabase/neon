@@ -65,7 +65,7 @@ def single_timeline(
             override_storage_controller_generation=True,
         )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=22) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         executor.map(attach, tenants)
 
     # Benchmarks will start the pageserver explicitly themselves
