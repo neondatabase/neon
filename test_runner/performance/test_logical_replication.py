@@ -284,11 +284,28 @@ def test_snap_files(
     connstr = benchmark_project_pub.connstr
     pg_bin.run_capture(["pgbench", "-i", "-s100"], env=env)
 
+    with psycopg2.connect(connstr) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'neondb_owner'")
+            is_super = cur.fetchall()[0]
+            assert is_super, "This benchmark won't work if we don't have superuser"
+
     conn = psycopg2.connect(connstr)
     conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
+    cur = conn.cursor()
+    cur.execute("ALTER SYSTEM SET neon.logical_replication_max_snap_files = -1")
+
+    with psycopg2.connect(connstr) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_reload_conf()")
+
+    with psycopg2.connect(connstr) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                """
                 DO $$
                     BEGIN
                     IF EXISTS (
@@ -300,9 +317,8 @@ def test_snap_files(
                     END IF;
                 END $$;
             """
-        )
-        cur.execute(f"SELECT pg_create_logical_replication_slot('slotter', 'test_decoding')")
-    conn.close()
+            )
+            cur.execute("SELECT pg_create_logical_replication_slot('slotter', 'test_decoding')")
 
     workload = pg_bin.run_nonblocking(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env=env)
     try:
@@ -311,14 +327,20 @@ def test_snap_files(
         while time.time() - start < test_duration_min * 60:
             with psycopg2.connect(connstr) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT count(*) FROM (SELECT pg_log_standby_snapshot() FROM generate_series(1, 10000) g) s")
+                    cur.execute(
+                        "SELECT count(*) FROM (SELECT pg_log_standby_snapshot() FROM generate_series(1, 10000) g) s"
+                    )
                     check_pgbench_still_running(workload)
-                    cur.execute("SELECT pg_replication_slot_advance('slotter', pg_current_wal_lsn())")
+                    cur.execute(
+                        "SELECT pg_replication_slot_advance('slotter', pg_current_wal_lsn())"
+                    )
 
             # Measure storage
             if time.time() - prev_measurement > test_interval_min * 60:
                 storage = benchmark_project_pub.get_synthetic_storage_size()
                 zenbenchmark.record("storage", storage, "B", MetricReport.LOWER_IS_BETTER)
                 prev_measurement = time.time()
+            time.sleep(test_interval_min * 60 / 3)
+
     finally:
         workload.terminate()
