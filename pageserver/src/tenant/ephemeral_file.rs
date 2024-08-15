@@ -83,7 +83,7 @@ impl EphemeralFile {
     }
 
     #[cfg(test)]
-    // This is a test helper: outside of tests, we are always written do via a pre-serialized batch.
+    // This is a test helper: outside of tests, we are always written to via a pre-serialized batch.
     pub(crate) async fn write_blob(
         &mut self,
         srcbuf: &[u8],
@@ -107,6 +107,8 @@ impl EphemeralFile {
         Ok(pos)
     }
 
+    /// Returns the offset at which the first byte of the input was written, for use
+    /// in constructing indices over the written value.
     pub(crate) async fn write_raw(
         &mut self,
         srcbuf: &[u8],
