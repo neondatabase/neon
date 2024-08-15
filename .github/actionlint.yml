@@ -3,10 +3,11 @@ self-hosted-runner:
     - arm64
     - large
     - large-arm64
-    - large-arm64-metal
     - small
     - small-arm64
     - us-east-2
+    - neon-arm64-16core
+    - neon-arm64-80core
 config-variables:
   - BENCHMARK_PROJECT_ID_PUB
   - BENCHMARK_PROJECT_ID_SUB
