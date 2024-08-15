@@ -5,6 +5,7 @@ use tracing::{field::display, info};
 
 use crate::{
     auth::{backend::ComputeCredentials, check_peer_addr_is_in_list, AuthError},
+    cancellation::CancelClosure,
     compute::{self, ConnectionError},
     config::{AuthenticationConfig, ProxyConfig},
     console::{
@@ -229,13 +230,16 @@ impl ConnectMechanism for TokioMechanism {
         let host = node_info.config.get_host()?;
         let permit = self.locks.get_permit(&host).await?;
 
-        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = node_info
-            .config
-            .connect2(ctx, timeout, &mut tokio_postgres::NoTls)
-            .await;
-        drop(pause);
-        let (_, client, connection) = permit.release_result(res)?;
+        let (socket_addr, client, connection) = permit.release_result(
+            node_info
+                .config
+                .connect2(ctx, timeout, &mut tokio_postgres::NoTls)
+                .await,
+        )?;
+
+        // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
+        // Yet another reason to rework the connection establishing code.
+        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
 
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
         Ok(poll_client(
@@ -246,6 +250,7 @@ impl ConnectMechanism for TokioMechanism {
             connection,
             self.conn_id,
             node_info.aux.clone(),
+            cancel_closure,
         ))
     }
 
