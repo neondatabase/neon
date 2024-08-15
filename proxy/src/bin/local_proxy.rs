@@ -1,7 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
 use proxy::{
+    auth::backend::local::LocalBackend,
     cancellation::CancellationHandlerMain,
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
     console::locks::ApiLocks,
@@ -76,6 +77,9 @@ struct LocalProxyCliArgs {
     /// Whether to retry the connection to the compute node
     #[clap(long, default_value = config::RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES)]
     connect_to_compute_retry: String,
+    /// Address of the postgres server
+    #[clap(long, default_value = "127.0.0.1:5432")]
+    compute: SocketAddr,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -124,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
     let _ctl_listener = TcpListener::bind(args.ctl).await?;
     let shutdown = CancellationToken::new();
 
+    // todo: should scale with CU
     let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
         LeakyBucketConfig {
             rps: 10.0,
@@ -200,7 +205,9 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
 
     Ok(Box::leak(Box::new(ProxyConfig {
         tls_config: None,
-        auth_backend: proxy::auth::BackendType::Local,
+        auth_backend: proxy::auth::BackendType::Local(proxy::auth::backend::MaybeOwned::Owned(
+            LocalBackend::new(args.compute),
+        )),
         metric_collection: None,
         allow_self_signed_compute: false,
         http_config,
