@@ -52,6 +52,7 @@ pub(crate) mod owned_buffers_io {
     //! but for the time being we're proving out the primitives in the neon.git repo
     //! for faster iteration.
 
+    pub(crate) mod io_buf_aligned;
     pub(crate) mod io_buf_ext;
     pub(crate) mod slice;
     pub(crate) mod write;
