@@ -34,6 +34,7 @@ use tracing::error;
 use tracing::info;
 use typed_json::json;
 use url::Url;
+use urlencoding;
 use utils::http::error::ApiError;
 
 use crate::auth::backend::ComputeUserInfo;
@@ -168,7 +169,8 @@ fn get_conn_info(
         .path_segments()
         .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname: DbName = url_path.next().ok_or(ConnInfoError::InvalidDbName)?.into();
+    let dbname: DbName =
+        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
     ctx.set_dbname(dbname.clone());
 
     let username = RoleName::from(urlencoding::decode(connection_url.username())?);

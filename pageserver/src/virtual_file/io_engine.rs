@@ -12,7 +12,7 @@
 #[cfg(target_os = "linux")]
 pub(super) mod tokio_epoll_uring_ext;
 
-use tokio_epoll_uring::{IoBuf, Slice};
+use tokio_epoll_uring::IoBuf;
 use tracing::Instrument;
 
 pub(crate) use super::api::IoEngineKind;
@@ -107,7 +107,10 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use super::{owned_buffers_io::slice::SliceExt, FileGuard, Metadata};
+use super::{
+    owned_buffers_io::{io_buf_ext::FullSlice, slice::SliceMutExt},
+    FileGuard, Metadata,
+};
 
 #[cfg(target_os = "linux")]
 fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
@@ -206,8 +209,8 @@ impl IoEngine {
         &self,
         file_guard: FileGuard,
         offset: u64,
-        buf: Slice<B>,
-    ) -> ((FileGuard, Slice<B>), std::io::Result<usize>) {
+        buf: FullSlice<B>,
+    ) -> ((FileGuard, FullSlice<B>), std::io::Result<usize>) {
         match self {
             IoEngine::NotSet => panic!("not initialized"),
             IoEngine::StdFs => {
@@ -217,8 +220,12 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.write(file_guard, offset, buf).await;
-                (resources, res.map_err(epoll_uring_error_to_std))
+                let ((file_guard, slice), res) =
+                    system.write(file_guard, offset, buf.into_raw_slice()).await;
+                (
+                    (file_guard, FullSlice::must_new(slice)),
+                    res.map_err(epoll_uring_error_to_std),
+                )
             }
         }
     }

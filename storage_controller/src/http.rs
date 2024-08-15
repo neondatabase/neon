@@ -500,7 +500,7 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
         StatusCode::OK,
         state
             .service
-            .node_configure(
+            .external_node_configure(
                 config_req.node_id,
                 config_req.availability.map(NodeAvailability::from),
                 config_req.scheduling,

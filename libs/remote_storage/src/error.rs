@@ -42,6 +42,10 @@ impl DownloadError {
             Timeout | Other(_) => false,
         }
     }
+
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, DownloadError::Cancelled)
+    }
 }
 
 impl From<std::io::Error> for DownloadError {

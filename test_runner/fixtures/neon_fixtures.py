@@ -24,7 +24,7 @@ from functools import cached_property, partial
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import quote, urlparse
 
 import asyncpg
@@ -67,6 +67,7 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
+    LocalFsStorage,
     MockS3Server,
     RemoteStorage,
     RemoteStorageKind,
@@ -388,7 +389,7 @@ class PgProtocol:
         return self.safe_psql_many([query], **kwargs)[0]
 
     def safe_psql_many(
-        self, queries: List[str], log_query=True, **kwargs: Any
+        self, queries: Iterable[str], log_query=True, **kwargs: Any
     ) -> List[List[Tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
@@ -1269,20 +1270,56 @@ class NeonEnv:
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.
+
+        Unless of course, some stopping failed, in that case, all remaining child processes are leaked.
         """
-        self.endpoints.stop_all(fail_on_endpoint_errors)
+
+        # the commonly failing components have special try-except behavior,
+        # trying to get us to actually shutdown all processes over easier error
+        # reporting.
+
+        raise_later = None
+        try:
+            self.endpoints.stop_all(fail_on_endpoint_errors)
+        except Exception as e:
+            raise_later = e
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
         self.storage_controller.stop(immediate=immediate)
 
+        stop_later = []
+        metric_errors = []
+
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
         for pageserver in self.pageservers:
             if ps_assert_metric_no_errors:
-                pageserver.assert_no_metric_errors()
-            pageserver.stop(immediate=immediate)
+                try:
+                    pageserver.assert_no_metric_errors()
+                except Exception as e:
+                    metric_errors.append(e)
+                    log.error(f"metric validation failed on {pageserver.id}: {e}")
+            try:
+                pageserver.stop(immediate=immediate)
+            except RuntimeError:
+                stop_later.append(pageserver)
         self.broker.stop(immediate=immediate)
+
+        # TODO: for nice logging we need python 3.11 ExceptionGroup
+        for ps in stop_later:
+            ps.stop(immediate=True)
+
+        if raise_later is not None:
+            raise raise_later
+
+        for error in metric_errors:
+            raise error
+
+        if len(stop_later) > 0:
+            raise RuntimeError(
+                f"{len(stop_later)} out of {len(self.pageservers)} pageservers failed to stop gracefully"
+            )
 
     @property
     def pageserver(self) -> NeonPageserver:
@@ -4218,6 +4255,17 @@ class Endpoint(PgProtocol, LogUtils):
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(os.path.join(self.pgdata_dir, "pg_wal")) / 1024 / 1024
 
+    def clear_shared_buffers(self, cursor: Optional[Any] = None):
+        """
+        Best-effort way to clear postgres buffers. Pinned buffers will not be 'cleared.'
+
+        Might also clear LFC.
+        """
+        if cursor is not None:
+            cursor.execute("select clear_buffer_cache()")
+        else:
+            self.safe_psql("select clear_buffer_cache()")
+
 
 class EndpointFactory:
     """An object representing multiple compute endpoints."""
@@ -4498,14 +4546,32 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
+    def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
+        tline_path = (
+            self.env.repo_dir
+            / "local_fs_remote_storage"
+            / "safekeeper"
+            / str(tenant_id)
+            / str(timeline_id)
+        )
+        assert isinstance(self.env.safekeepers_remote_storage, LocalFsStorage)
+        return self._list_segments_in_dir(
+            tline_path, lambda name: ".metadata" not in name and ".___temp" not in name
+        )
+
     def list_segments(self, tenant_id, timeline_id) -> List[str]:
         """
         Get list of segment names of the given timeline.
         """
         tli_dir = self.timeline_dir(tenant_id, timeline_id)
+        return self._list_segments_in_dir(
+            tli_dir, lambda name: not name.startswith("safekeeper.control")
+        )
+
+    def _list_segments_in_dir(self, path: Path, keep_filter: Callable[[str], bool]) -> list[str]:
         segments = []
-        for _, _, filenames in os.walk(tli_dir):
-            segments.extend([f for f in filenames if not f.startswith("safekeeper.control")])
+        for _, _, filenames in os.walk(path):
+            segments.extend([f for f in filenames if keep_filter(f)])
         segments.sort()
         return segments
 

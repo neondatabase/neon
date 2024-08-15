@@ -2220,3 +2220,47 @@ def test_storage_controller_leadership_transfer(
                 ".*Send step down request still failed.*",
             ]
         )
+
+
+def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvBuilder):
+    # single unsharded tenant, two locations
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_start()
+
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
+    env.storage_controller.reconcile_until_idle()
+
+    attached_id = int(env.storage_controller.locate(env.initial_tenant)[0]["node_id"])
+    attached = next((ps for ps in env.pageservers if ps.id == attached_id))
+
+    def attached_is_draining():
+        details = env.storage_controller.node_status(attached.id)
+        assert details["scheduling"] == "Draining"
+
+    env.storage_controller.configure_failpoints(("sleepy-drain-loop", "return(10000)"))
+    env.storage_controller.node_drain(attached.id)
+
+    wait_until(10, 0.5, attached_is_draining)
+
+    attached.restart()
+
+    # we are unable to reconfigure node while the operation is still ongoing
+    with pytest.raises(
+        StorageControllerApiException,
+        match="Precondition failed: Ongoing background operation forbids configuring: drain.*",
+    ):
+        env.storage_controller.node_configure(attached.id, {"scheduling": "Pause"})
+    with pytest.raises(
+        StorageControllerApiException,
+        match="Precondition failed: Ongoing background operation forbids configuring: drain.*",
+    ):
+        env.storage_controller.node_configure(attached.id, {"availability": "Offline"})
+
+    env.storage_controller.cancel_node_drain(attached.id)
+
+    def reconfigure_node_again():
+        env.storage_controller.node_configure(attached.id, {"scheduling": "Pause"})
+
+    # allow for small delay between actually having cancelled and being able reconfigure again
+    wait_until(4, 0.5, reconfigure_node_again)

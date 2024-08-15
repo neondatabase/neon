@@ -3,14 +3,14 @@ use tokio_epoll_uring::BoundedBufMut;
 use tokio_epoll_uring::IoBufMut;
 use tokio_epoll_uring::Slice;
 
-pub(crate) trait SliceExt {
+pub(crate) trait SliceMutExt {
     /// Get a `&mut[0..self.bytes_total()`] slice, for when you need to do borrow-based IO.
     ///
     /// See the test case `test_slice_full_zeroed` for the difference to just doing `&slice[..]`
     fn as_mut_rust_slice_full_zeroed(&mut self) -> &mut [u8];
 }
 
-impl<B> SliceExt for Slice<B>
+impl<B> SliceMutExt for Slice<B>
 where
     B: IoBufMut,
 {

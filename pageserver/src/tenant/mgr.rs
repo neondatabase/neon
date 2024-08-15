@@ -54,7 +54,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
-use super::timeline::detach_ancestor::PreparedTimelineDetach;
+use super::timeline::detach_ancestor::{self, PreparedTimelineDetach};
 use super::{GlobalShutDown, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
@@ -1927,93 +1927,149 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
-    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
-        // FIXME: this is unnecessary, slotguard already has these semantics
-        struct RevertOnDropSlot(Option<SlotGuard>);
+    ) -> Result<HashSet<TimelineId>, detach_ancestor::Error> {
+        use detach_ancestor::Error;
 
-        impl Drop for RevertOnDropSlot {
-            fn drop(&mut self) {
-                if let Some(taken) = self.0.take() {
-                    taken.revert();
-                }
-            }
-        }
+        let slot_guard =
+            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist).map_err(
+                |e| {
+                    use TenantSlotError::*;
 
-        impl RevertOnDropSlot {
-            fn into_inner(mut self) -> SlotGuard {
-                self.0.take().unwrap()
-            }
-        }
-
-        impl std::ops::Deref for RevertOnDropSlot {
-            type Target = SlotGuard;
-
-            fn deref(&self) -> &Self::Target {
-                self.0.as_ref().unwrap()
-            }
-        }
-
-        let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
-        let slot_guard = RevertOnDropSlot(Some(slot_guard));
+                    match e {
+                        MapState(TenantMapError::ShuttingDown) => Error::ShuttingDown,
+                        NotFound(_) | InProgress | MapState(_) => Error::DetachReparent(e.into()),
+                    }
+                },
+            )?;
 
         let tenant = {
-            let Some(old_slot) = slot_guard.get_old_value() else {
-                anyhow::bail!(
-                    "Tenant not found when trying to complete detaching timeline ancestor"
-                );
-            };
+            let old_slot = slot_guard
+                .get_old_value()
+                .as_ref()
+                .expect("requested MustExist");
 
             let Some(tenant) = old_slot.get_attached() else {
-                anyhow::bail!("Tenant is not in attached state");
+                return Err(Error::DetachReparent(anyhow::anyhow!(
+                    "Tenant is not in attached state"
+                )));
             };
 
             if !tenant.is_active() {
-                anyhow::bail!("Tenant is not active");
+                return Err(Error::DetachReparent(anyhow::anyhow!(
+                    "Tenant is not active"
+                )));
             }
 
             tenant.clone()
         };
 
-        let timeline = tenant.get_timeline(timeline_id, true)?;
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(Error::NotFound)?;
 
-        let reparented = timeline
-            .complete_detaching_timeline_ancestor(&tenant, prepared, ctx)
+        let resp = timeline
+            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
             .await?;
 
-        let mut slot_guard = slot_guard.into_inner();
+        let mut slot_guard = slot_guard;
 
-        let (_guard, progress) = utils::completion::channel();
-        match tenant.shutdown(progress, ShutdownMode::Hard).await {
-            Ok(()) => {
-                slot_guard.drop_old_value()?;
+        let tenant = if resp.reset_tenant_required() {
+            attempt.before_reset_tenant();
+
+            let (_guard, progress) = utils::completion::channel();
+            match tenant.shutdown(progress, ShutdownMode::Hard).await {
+                Ok(()) => {
+                    slot_guard.drop_old_value().expect("it was just shutdown");
+                }
+                Err(_barrier) => {
+                    slot_guard.revert();
+                    // this really should not happen, at all, unless a shutdown without acquiring
+                    // tenant slot was already going? regardless, on restart the attempt tracking
+                    // will reset to retryable.
+                    return Err(Error::ShuttingDown);
+                }
             }
-            Err(_barrier) => {
-                slot_guard.revert();
-                // this really should not happen, at all, unless shutdown was already going?
-                anyhow::bail!("Cannot restart Tenant, already shutting down");
+
+            let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+            let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)
+                .map_err(|e| Error::DetachReparent(e.into()))?;
+
+            let shard_identity = config.shard;
+            let tenant = tenant_spawn(
+                self.conf,
+                tenant_shard_id,
+                &tenant_path,
+                self.resources.clone(),
+                AttachedTenantConf::try_from(config).map_err(Error::DetachReparent)?,
+                shard_identity,
+                None,
+                SpawnMode::Eager,
+                ctx,
+            )
+            .map_err(|_| Error::ShuttingDown)?;
+
+            {
+                let mut g = tenant.ongoing_timeline_detach.lock().unwrap();
+                assert!(
+                    g.is_none(),
+                    "there cannot be any new timeline detach ancestor on newly created tenant"
+                );
+                *g = Some((attempt.timeline_id, attempt.new_barrier()));
             }
+
+            // if we bail out here, we will not allow a new attempt, which should be fine.
+            // pageserver should be shutting down regardless? tenant_reset would help, unless it
+            // runs into the same problem.
+            slot_guard
+                .upsert(TenantSlot::Attached(tenant.clone()))
+                .map_err(|e| match e {
+                    TenantSlotUpsertError::ShuttingDown(_) => Error::ShuttingDown,
+                    other => Error::DetachReparent(other.into()),
+                })?;
+            tenant
+        } else {
+            tracing::info!("skipping tenant_reset as no changes made required it");
+            tenant
+        };
+
+        if let Some(reparented) = resp.completed() {
+            // finally ask the restarted tenant to complete the detach
+            //
+            // rationale for 9999s: we don't really have a timetable here; if retried, the caller
+            // will get an 503.
+            tenant
+                .wait_to_become_active(std::time::Duration::from_secs(9999))
+                .await
+                .map_err(|e| {
+                    use pageserver_api::models::TenantState;
+                    use GetActiveTenantError::{Cancelled, WillNotBecomeActive};
+                    match e {
+                        Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                            Error::ShuttingDown
+                        }
+                        other => Error::Complete(other.into()),
+                    }
+                })?;
+
+            utils::pausable_failpoint!(
+                "timeline-detach-ancestor::after_activating_before_finding-pausable"
+            );
+
+            let timeline = tenant
+                .get_timeline(attempt.timeline_id, true)
+                .map_err(Error::NotFound)?;
+
+            timeline
+                .complete_detaching_timeline_ancestor(&tenant, attempt, ctx)
+                .await
+                .map(|()| reparented)
+        } else {
+            // at least the latest versions have now been downloaded and refreshed; be ready to
+            // retry another time.
+            Err(Error::FailedToReparentAll)
         }
-
-        let tenant_path = self.conf.tenant_path(&tenant_shard_id);
-        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
-
-        let shard_identity = config.shard;
-        let tenant = tenant_spawn(
-            self.conf,
-            tenant_shard_id,
-            &tenant_path,
-            self.resources.clone(),
-            AttachedTenantConf::try_from(config)?,
-            shard_identity,
-            None,
-            SpawnMode::Eager,
-            ctx,
-        )?;
-
-        slot_guard.upsert(TenantSlot::Attached(tenant))?;
-
-        Ok(reparented)
     }
 
     /// A page service client sends a TenantId, and to look up the correct Tenant we must
@@ -2084,6 +2140,57 @@ impl TenantManager {
                 }
             }
         }
+    }
+
+    /// Calculate the tenant shards' contributions to this pageserver's utilization metrics.  The
+    /// returned values are:
+    ///  - the number of bytes of local disk space this pageserver's shards are requesting, i.e.
+    ///    how much space they would use if not impacted by disk usage eviction.
+    ///  - the number of tenant shards currently on this pageserver, including attached
+    ///    and secondary.
+    ///
+    /// This function is quite expensive: callers are expected to cache the result and
+    /// limit how often they call it.
+    pub(crate) fn calculate_utilization(&self) -> Result<(u64, u32), TenantMapListError> {
+        let tenants = self.tenants.read().unwrap();
+        let m = match &*tenants {
+            TenantsMap::Initializing => return Err(TenantMapListError::Initializing),
+            TenantsMap::Open(m) | TenantsMap::ShuttingDown(m) => m,
+        };
+        let shard_count = m.len();
+        let mut wanted_bytes = 0;
+
+        for tenant_slot in m.values() {
+            match tenant_slot {
+                TenantSlot::InProgress(_barrier) => {
+                    // While a slot is being changed, we can't know how much storage it wants.  This
+                    // means this function's output can fluctuate if a lot of changes are going on
+                    // (such as transitions from secondary to attached).
+                    //
+                    // We could wait for the barrier and retry, but it's important that the utilization
+                    // API is responsive, and the data quality impact is not very significant.
+                    continue;
+                }
+                TenantSlot::Attached(tenant) => {
+                    wanted_bytes += tenant.local_storage_wanted();
+                }
+                TenantSlot::Secondary(secondary) => {
+                    let progress = secondary.progress.lock().unwrap();
+                    wanted_bytes += if progress.heatmap_mtime.is_some() {
+                        // If we have heatmap info, then we will 'want' the sum
+                        // of the size of layers in the heatmap: this is how much space
+                        // we would use if not doing any eviction.
+                        progress.bytes_total
+                    } else {
+                        // In the absence of heatmap info, assume that the secondary location simply
+                        // needs as much space as it is currently using.
+                        secondary.resident_size_metric.get()
+                    }
+                }
+            }
+        }
+
+        Ok((wanted_bytes, shard_count as u32))
     }
 }
 
@@ -2284,6 +2391,9 @@ impl SlotGuard {
 
     /// Get any value that was present in the slot before we acquired ownership
     /// of it: in state transitions, this will be the old state.
+    ///
+    // FIXME: get_ prefix
+    // FIXME: this should be .as_ref() -- unsure why no clippy
     fn get_old_value(&self) -> &Option<TenantSlot> {
         &self.old_value
     }
