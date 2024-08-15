@@ -40,6 +40,7 @@ pub(crate) use api::DirectIoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
+pub(crate) mod dio;
 
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
