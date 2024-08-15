@@ -4489,6 +4489,7 @@ impl DurationRecorder {
 /// the layer descriptor requires the user to provide the ranges, which should cover all
 /// keys specified in the `data` field.
 #[cfg(test)]
+#[derive(Clone)]
 pub struct DeltaLayerTestDesc {
     pub lsn_range: Range<Lsn>,
     pub key_range: Range<Key>,
@@ -4517,6 +4518,13 @@ impl DeltaLayerTestDesc {
             lsn_range,
             data,
         }
+    }
+
+    pub(crate) fn layer_name(&self) -> LayerName {
+        LayerName::Delta(super::storage_layer::DeltaLayerName {
+            key_range: self.key_range.clone(),
+            lsn_range: self.lsn_range.clone(),
+        })
     }
 }
 
@@ -5735,11 +5743,109 @@ fn is_send() {
 
 #[cfg(test)]
 mod tests {
+    use pageserver_api::key::Key;
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::tenant::{
-        harness::TenantHarness, storage_layer::Layer, timeline::EvictionError, Timeline,
+    use crate::{
+        repository::Value,
+        tenant::{
+            harness::{test_img, TenantHarness},
+            layer_map::LayerMap,
+            storage_layer::{Layer, LayerName},
+            timeline::{DeltaLayerTestDesc, EvictionError},
+            Timeline,
+        },
     };
+
+    #[tokio::test]
+    async fn test_heatmap_generation() {
+        let harness = TenantHarness::create("heatmap_generation").await.unwrap();
+
+        let covered_delta = DeltaLayerTestDesc::new_with_inferred_key_range(
+            Lsn(0x10)..Lsn(0x20),
+            vec![(
+                Key::from_hex("620000000033333333444444445500000000").unwrap(),
+                Lsn(0x11),
+                Value::Image(test_img("foo")),
+            )],
+        );
+        let visible_delta = DeltaLayerTestDesc::new_with_inferred_key_range(
+            Lsn(0x10)..Lsn(0x20),
+            vec![(
+                Key::from_hex("720000000033333333444444445500000000").unwrap(),
+                Lsn(0x11),
+                Value::Image(test_img("foo")),
+            )],
+        );
+        let l0_delta = DeltaLayerTestDesc::new(
+            Lsn(0x20)..Lsn(0x30),
+            Key::from_hex("000000000000000000000000000000000000").unwrap()
+                ..Key::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap(),
+            vec![(
+                Key::from_hex("720000000033333333444444445500000000").unwrap(),
+                Lsn(0x25),
+                Value::Image(test_img("foo")),
+            )],
+        );
+        let delta_layers = vec![
+            covered_delta.clone(),
+            visible_delta.clone(),
+            l0_delta.clone(),
+        ];
+
+        let image_layer = (
+            Lsn(0x40),
+            vec![(
+                Key::from_hex("620000000033333333444444445500000000").unwrap(),
+                test_img("bar"),
+            )],
+        );
+        let image_layers = vec![image_layer];
+
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline_with_layers(
+                TimelineId::generate(),
+                Lsn(0x10),
+                14,
+                &ctx,
+                delta_layers,
+                image_layers,
+                Lsn(0x100),
+            )
+            .await
+            .unwrap();
+
+        // Layer visibility is an input to heatmap generation, so refresh it first
+        timeline.update_layer_visibility().await.unwrap();
+
+        let heatmap = timeline
+            .generate_heatmap()
+            .await
+            .expect("Infallible while timeline is not shut down");
+
+        assert_eq!(heatmap.timeline_id, timeline.timeline_id);
+
+        // L0 should come last
+        assert_eq!(heatmap.layers.last().unwrap().name, l0_delta.layer_name());
+
+        let mut last_lsn = Lsn::MAX;
+        for layer in heatmap.layers {
+            // Covered layer should be omitted
+            assert!(layer.name != covered_delta.layer_name());
+
+            let layer_lsn = match &layer.name {
+                LayerName::Delta(d) => d.lsn_range.end,
+                LayerName::Image(i) => i.lsn,
+            };
+
+            // Apart from L0s, newest Layers should come first
+            if !LayerMap::is_l0(layer.name.key_range()) {
+                assert!(layer_lsn <= last_lsn);
+                last_lsn = layer_lsn;
+            }
+        }
+    }
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {
