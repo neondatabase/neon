@@ -2120,8 +2120,6 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
 
     wait_until(10, 0.5, first_is_draining)
 
-    # restarting or the re-attach request from ps does not cancel drain
-    # but it makes it so that it cannot be cancelled from the api, bug?
     first.restart()
 
     # we are unable to reconfigure node while the operation is still ongoing
