@@ -196,13 +196,25 @@ async fn migration_run(database_url: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
+    logging::init(
+        LogFormat::Plain,
+        logging::TracingErrorLayerEnablement::Disabled,
+        logging::Output::Stdout,
+    )?;
+
+    // log using tracing so we don't get confused output by default hook writing to stderr
+    utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
 
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
+
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // let sentry send a message (and flush)
+        // and trace the error
+        hook(info);
+
+        std::process::exit(1);
+    }));
 
     tokio::runtime::Builder::new_current_thread()
         // We use spawn_blocking for database operations, so require approximately
@@ -216,12 +228,6 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main() -> anyhow::Result<()> {
     let launch_ts = Box::leak(Box::new(LaunchTimestamp::generate()));
-
-    logging::init(
-        LogFormat::Plain,
-        logging::TracingErrorLayerEnablement::Disabled,
-        logging::Output::Stdout,
-    )?;
 
     preinitialize_metrics();
 
