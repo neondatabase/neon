@@ -1619,6 +1619,20 @@ impl Timeline {
         self.last_record_lsn.shutdown();
 
         if try_freeze_and_flush {
+            if let Some((open, frozen)) = self
+                .layers
+                .read()
+                .await
+                .layer_map()
+                .map(|lm| (lm.open_layer.is_some(), lm.frozen_layers.len()))
+                .ok()
+                .filter(|(open, frozen)| *open || *frozen > 0)
+            {
+                tracing::info!(?open, frozen, "flushing and freezing on shutdown");
+            } else {
+                // this is double-shutdown, ignore it
+            }
+
             // we shut down walreceiver above, so, we won't add anything more
             // to the InMemoryLayer; freeze it and wait for all frozen layers
             // to reach the disk & upload queue, then shut the upload queue and
