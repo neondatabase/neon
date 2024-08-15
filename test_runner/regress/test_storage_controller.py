@@ -2092,6 +2092,7 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
         == 0
     )
 
+
 def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvBuilder):
     # single unsharded tenant, two locations
     neon_env_builder.num_pageservers = 2
@@ -2125,9 +2126,15 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
     first.restart()
 
     # we are unable to reconfigure node while the operation is still ongoing
-    with pytest.raises(StorageControllerApiException, match="Precondition failed: Ongoing background operation forbids configuring: drain.*"):
+    with pytest.raises(
+        StorageControllerApiException,
+        match="Precondition failed: Ongoing background operation forbids configuring: drain.*",
+    ):
         env.storage_controller.node_configure(first.id, {"scheduling": "Pause"})
-    with pytest.raises(StorageControllerApiException, match="Precondition failed: Ongoing background operation forbids configuring: drain.*"):
+    with pytest.raises(
+        StorageControllerApiException,
+        match="Precondition failed: Ongoing background operation forbids configuring: drain.*",
+    ):
         env.storage_controller.node_configure(first.id, {"availability": "Offline"})
 
     env.storage_controller.cancel_node_drain(first.id)
