@@ -524,7 +524,11 @@ async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiErro
     check_permissions(&req, Scope::Admin)?;
 
     let state = get_state(&req);
-    let leader = state.service.get_leader().await?;
+    let leader = state.service.get_leader().await.map_err(|err| {
+        ApiError::InternalServerError(anyhow::anyhow!(
+            "Failed to read leader from database: {err}"
+        ))
+    })?;
 
     json_response(StatusCode::OK, leader)
 }
