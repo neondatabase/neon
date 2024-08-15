@@ -2099,7 +2099,6 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
 
     env = neon_env_builder.init_start()
 
-    # make sure there is no secondary, so we will have something to drain
     env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
     env.storage_controller.reconcile_until_idle()
 
