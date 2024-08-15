@@ -48,7 +48,7 @@ jobs:
 
   tag:
     needs: [ check-permissions ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -90,7 +90,7 @@ jobs:
 
   check-codestyle-python:
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -101,9 +101,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: false
-          fetch-depth: 1
 
       - name: Cache poetry deps
         uses: actions/cache@v4
@@ -142,7 +139,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
 #      Disabled for now
 #      - name: Restore cargo deps cache
@@ -204,7 +200,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
         # Do not build or run tests in debug for release branches
-        build-type: ${{ fromJson((startsWith(github.ref_name, 'release' && github.event_name == 'push')) && '["release"]' || '["debug", "release"]') }}
+        build-type: ${{ fromJson((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
         include:
           - build-type: release
             arch: arm64
@@ -224,7 +220,7 @@ jobs:
     outputs:
       json: ${{ steps.get-benchmark-durations.outputs.json }}
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -257,7 +253,7 @@ jobs:
   benchmarks:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     needs: [ check-permissions, build-and-test-locally, build-build-tools-image, get-benchmarks-durations ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -302,9 +298,8 @@ jobs:
       with:
         channel-id: C060CNA47S9 # on-call-staging-storage-stream
         slack-message: |
-          Benchmarks failed on main: ${{ github.event.head_commit.url }}
-
-          Allure report: ${{ needs.create-test-report.outputs.report-url }}
+          Benchmarks failed on main <${{ github.event.head_commit.url }}|${{ github.sha }}>
+          <${{ needs.create-test-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -314,7 +309,7 @@ jobs:
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -361,7 +356,7 @@ jobs:
 
   coverage-report:
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -475,7 +470,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -503,7 +498,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          # ARM-specific flags are recommended for Graviton ≥ 2, these flags are also supported by Ampere Altra (Azure)
+          # https://github.com/aws/aws-graviton-getting-started/blob/57dc813626d0266f1cc12ef83474745bb1f31fb4/rust.md
           build-args: |
+            ADDITIONAL_RUSTFLAGS=${{ matrix.arch == 'arm64' && '-Ctarget-feature=+lse -Ctarget-cpu=neoverse-n1' || '' }}
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
@@ -551,7 +549,7 @@ jobs:
         version: [ v14, v15, v16 ]
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -696,7 +694,7 @@ jobs:
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, large ]
     strategy:
       fail-fast: false
       matrix:
@@ -745,7 +743,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
       - name: Checkout
@@ -960,7 +958,7 @@ jobs:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
     if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
       - name: Fix git ownership
@@ -980,7 +978,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: false
           fetch-depth: 0
 
       - name: Trigger deploy workflow
@@ -1061,7 +1058,7 @@ jobs:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally ]
     if: github.ref_name == 'release'
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -1117,10 +1114,12 @@ jobs:
     # Format `needs` differently to make the list more readable.
     # Usually we do `needs: [...]`
     needs:
+      - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
-      - build-and-test-locally
+      - promote-images
       - test-images
+      - trigger-custom-extensions-build-and-wait
     runs-on: ubuntu-22.04
     steps:
       # The list of possible results:

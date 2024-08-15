@@ -4,6 +4,7 @@
 use crate::context::RequestContext;
 use crate::page_cache::{self, PAGE_SZ};
 use crate::tenant::block_io::BlockLease;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
 use crate::virtual_file::VirtualFile;
 
 use once_cell::sync::Lazy;
@@ -208,21 +209,11 @@ impl PreWarmingWriter {
 }
 
 impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmingWriter {
-    async fn write_all<
-        B: tokio_epoll_uring::BoundedBuf<Buf = Buf>,
-        Buf: tokio_epoll_uring::IoBuf + Send,
-    >(
+    async fn write_all<Buf: tokio_epoll_uring::IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, B::Buf)> {
-        let buf = buf.slice(..);
-        let saved_bounds = buf.bounds(); // save for reconstructing the Slice from iobuf after the IO is done
-        let check_bounds_stuff_works = if cfg!(test) && cfg!(debug_assertions) {
-            Some(buf.to_vec())
-        } else {
-            None
-        };
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let buflen = buf.len();
         assert_eq!(
             buflen % PAGE_SZ,
@@ -231,10 +222,10 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
         );
 
         // Do the IO.
-        let iobuf = match self.file.write_all(buf, ctx).await {
-            (iobuf, Ok(nwritten)) => {
+        let buf = match self.file.write_all(buf, ctx).await {
+            (buf, Ok(nwritten)) => {
                 assert_eq!(nwritten, buflen);
-                iobuf
+                buf
             }
             (_, Err(e)) => {
                 return Err(std::io::Error::new(
@@ -247,12 +238,6 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
                 ));
             }
         };
-
-        // Reconstruct the Slice (the write path consumed the Slice and returned us the underlying IoBuf)
-        let buf = tokio_epoll_uring::Slice::from_buf_bounds(iobuf, saved_bounds);
-        if let Some(check_bounds_stuff_works) = check_bounds_stuff_works {
-            assert_eq!(&check_bounds_stuff_works, &*buf);
-        }
 
         let nblocks = buflen / PAGE_SZ;
         let nblocks32 = u32::try_from(nblocks).unwrap();
@@ -300,6 +285,6 @@ impl crate::virtual_file::owned_buffers_io::write::OwnedAsyncWriter for PreWarmi
         }
 
         self.nwritten_blocks = self.nwritten_blocks.checked_add(nblocks32).unwrap();
-        Ok((buflen, buf.into_inner()))
+        Ok((buflen, buf))
     }
 }
