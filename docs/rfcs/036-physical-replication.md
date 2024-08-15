@@ -168,7 +168,8 @@ bug, and follow-up PRs https://github.com/neondatabase/neon/pull/8323
 and https://github.com/neondatabase/neon/pull/8484 to try to claw back
 the cases that started to cause trouble as fixing it. As of this
 writing, there are still cases where a replica might not immediately
-start up, causing the control plane operation to fail.
+start up, causing the control plane operation to fail, the remaining
+issues are tracked in https://github.com/neondatabase/neon/issues/6211.
 
 One long-term fix for this is to switch to using so-called CSN
 snapshots in read replica. That would make it unnecessary to have the
