@@ -4912,6 +4912,26 @@ impl Service {
         Ok(())
     }
 
+    /// Wrapper around [`Self::node_configure`] which only allows changes while there is no ongoing
+    /// operation for HTTP api.
+    pub(crate) async fn external_node_configure(
+        &self,
+        node_id: NodeId,
+        availability: Option<NodeAvailability>,
+        scheduling: Option<NodeSchedulingPolicy>,
+    ) -> Result<(), ApiError> {
+        {
+            let locked = self.inner.read().unwrap();
+            if let Some(op) = locked.ongoing_operation.as_ref().map(|op| op.operation) {
+                return Err(ApiError::PreconditionFailed(
+                    format!("Ongoing background operation forbids configuring: {op}").into(),
+                ));
+            }
+        }
+
+        self.node_configure(node_id, availability, scheduling).await
+    }
+
     pub(crate) async fn start_node_drain(
         self: &Arc<Self>,
         node_id: NodeId,
@@ -5017,25 +5037,19 @@ impl Service {
     }
 
     pub(crate) async fn cancel_node_drain(&self, node_id: NodeId) -> Result<(), ApiError> {
-        let (node_available, node_policy) = {
+        let node_available = {
             let locked = self.inner.read().unwrap();
             let nodes = &locked.nodes;
             let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
                 anyhow::anyhow!("Node {} not registered", node_id).into(),
             ))?;
 
-            (node.is_available(), node.get_scheduling())
+            node.is_available()
         };
 
         if !node_available {
             return Err(ApiError::ResourceUnavailable(
                 format!("Node {node_id} is currently unavailable").into(),
-            ));
-        }
-
-        if !matches!(node_policy, NodeSchedulingPolicy::Draining) {
-            return Err(ApiError::PreconditionFailed(
-                format!("Node {node_id} has no drain in progress").into(),
             ));
         }
 
@@ -5152,25 +5166,19 @@ impl Service {
     }
 
     pub(crate) async fn cancel_node_fill(&self, node_id: NodeId) -> Result<(), ApiError> {
-        let (node_available, node_policy) = {
+        let node_available = {
             let locked = self.inner.read().unwrap();
             let nodes = &locked.nodes;
             let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
                 anyhow::anyhow!("Node {} not registered", node_id).into(),
             ))?;
 
-            (node.is_available(), node.get_scheduling())
+            node.is_available()
         };
 
         if !node_available {
             return Err(ApiError::ResourceUnavailable(
                 format!("Node {node_id} is currently unavailable").into(),
-            ));
-        }
-
-        if !matches!(node_policy, NodeSchedulingPolicy::Filling) {
-            return Err(ApiError::PreconditionFailed(
-                format!("Node {node_id} has no fill in progress").into(),
             ));
         }
 
@@ -5982,7 +5990,7 @@ impl Service {
                 .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
                 .await;
 
-            failpoint_support::sleep_millis_async!("sleepy-drain-loop");
+            failpoint_support::sleep_millis_async!("sleepy-drain-loop", &cancel);
         }
 
         while !waiters.is_empty() {
