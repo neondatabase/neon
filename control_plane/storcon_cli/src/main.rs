@@ -622,6 +622,7 @@ async fn main() -> anyhow::Result<()> {
                                 threshold: threshold.into(),
                             },
                         )),
+                        heatmap_period: Some("300s".to_string()),
                         ..Default::default()
                     },
                 })

@@ -312,7 +312,9 @@ impl Layer {
             .get_or_maybe_download(true, Some(ctx))
             .await
             .map_err(|err| match err {
-                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
+                    GetVectoredError::Cancelled
+                }
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
 

@@ -512,7 +512,7 @@ pub(crate) struct TimelineVisitOutcome {
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum PageReconstructError {
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 
     #[error("Ancestor LSN wait error: {0}")]
     AncestorLsnTimeout(WaitLsnError),
@@ -526,6 +526,22 @@ pub(crate) enum PageReconstructError {
 
     #[error("{0}")]
     MissingKey(MissingKeyError),
+}
+
+impl From<anyhow::Error> for PageReconstructError {
+    fn from(value: anyhow::Error) -> Self {
+        // with walingest.rs many PageReconstructError are wrapped in as anyhow::Error
+        match value.downcast::<PageReconstructError>() {
+            Ok(pre) => pre,
+            Err(other) => PageReconstructError::Other(other),
+        }
+    }
+}
+
+impl From<utils::bin_ser::DeserializeError> for PageReconstructError {
+    fn from(value: utils::bin_ser::DeserializeError) -> Self {
+        PageReconstructError::Other(anyhow::Error::new(value).context("deserialization failure"))
+    }
 }
 
 impl From<layer_manager::Shutdown> for PageReconstructError {
@@ -547,6 +563,7 @@ impl From<layer_manager::Shutdown> for GetVectoredError {
     }
 }
 
+#[derive(thiserror::Error)]
 pub struct MissingKeyError {
     key: Key,
     shard: ShardNumber,
@@ -586,11 +603,8 @@ impl PageReconstructError {
     pub(crate) fn is_stopping(&self) -> bool {
         use PageReconstructError::*;
         match self {
-            Other(_) => false,
-            AncestorLsnTimeout(_) => false,
             Cancelled => true,
-            WalRedo(_) => false,
-            MissingKey { .. } => false,
+            Other(_) | AncestorLsnTimeout(_) | WalRedo(_) | MissingKey(_) => false,
         }
     }
 }
@@ -600,11 +614,11 @@ pub(crate) enum CreateImageLayersError {
     #[error("timeline shutting down")]
     Cancelled,
 
-    #[error(transparent)]
-    GetVectoredError(GetVectoredError),
+    #[error("read failed")]
+    GetVectoredError(#[source] GetVectoredError),
 
-    #[error(transparent)]
-    PageReconstructError(PageReconstructError),
+    #[error("reconstruction failed")]
+    PageReconstructError(#[source] PageReconstructError),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -628,10 +642,10 @@ pub(crate) enum FlushLayerError {
 
     // Arc<> the following non-clonable error types: we must be Clone-able because the flush error is propagated from the flush
     // loop via a watch channel, where we can only borrow it.
-    #[error(transparent)]
+    #[error("create image layers (shared)")]
     CreateImageLayersError(Arc<CreateImageLayersError>),
 
-    #[error(transparent)]
+    #[error("other (shared)")]
     Other(#[from] Arc<anyhow::Error>),
 }
 
@@ -664,34 +678,46 @@ pub(crate) enum GetVectoredError {
     #[error("timeline shutting down")]
     Cancelled,
 
-    #[error("Requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
+    #[error("requested too many keys: {0} > {}", Timeline::MAX_GET_VECTORED_KEYS)]
     Oversized(u64),
 
-    #[error("Requested at invalid LSN: {0}")]
+    #[error("requested at invalid LSN: {0}")]
     InvalidLsn(Lsn),
 
-    #[error("Requested key not found: {0}")]
+    #[error("requested key not found: {0}")]
     MissingKey(MissingKeyError),
 
-    #[error(transparent)]
-    GetReadyAncestorError(GetReadyAncestorError),
+    #[error("ancestry walk")]
+    GetReadyAncestorError(#[source] GetReadyAncestorError),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
+impl From<GetReadyAncestorError> for GetVectoredError {
+    fn from(value: GetReadyAncestorError) -> Self {
+        use GetReadyAncestorError::*;
+        match value {
+            Cancelled => GetVectoredError::Cancelled,
+            AncestorLsnTimeout(_) | BadState { .. } => {
+                GetVectoredError::GetReadyAncestorError(value)
+            }
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum GetReadyAncestorError {
-    #[error("Ancestor LSN wait error: {0}")]
+    #[error("ancestor LSN wait error")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
-    #[error("Bad state on timeline {timeline_id}: {state:?}")]
+    #[error("bad state on timeline {timeline_id}: {state:?}")]
     BadState {
         timeline_id: TimelineId,
         state: TimelineState,
     },
 
-    #[error("Cancelled")]
+    #[error("cancelled")]
     Cancelled,
 }
 
@@ -3047,8 +3073,7 @@ impl Timeline {
             cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
             timeline_owned = timeline
                 .get_ready_ancestor_timeline(ancestor_timeline, ctx)
-                .await
-                .map_err(GetVectoredError::GetReadyAncestorError)?;
+                .await?;
             timeline = &*timeline_owned;
         };
 
@@ -3945,7 +3970,7 @@ impl Timeline {
                                     warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
                                     ZERO_PAGE.clone()
                                 } else {
-                                    return Err(CreateImageLayersError::PageReconstructError(err));
+                                    return Err(CreateImageLayersError::from(err));
                                 }
                             }
                         };
@@ -4005,7 +4030,7 @@ impl Timeline {
             let mut total_kb_retrieved = 0;
             let mut total_keys_retrieved = 0;
             for (k, v) in data {
-                let v = v.map_err(CreateImageLayersError::PageReconstructError)?;
+                let v = v?;
                 total_kb_retrieved += KEY_SIZE + v.len();
                 total_keys_retrieved += 1;
                 new_data.insert(k, v);
@@ -4516,7 +4541,12 @@ impl Timeline {
         new_images: &[ResidentLayer],
         layers_to_remove: &[Layer],
     ) -> Result<(), CompactionError> {
-        let mut guard = self.layers.write().await;
+        let mut guard = tokio::select! {
+            guard = self.layers.write() => guard,
+            _ = self.cancel.cancelled() => {
+                return Err(CompactionError::ShuttingDown);
+            }
+        };
 
         let mut duplicated_layers = HashSet::new();
 
@@ -5262,6 +5292,7 @@ impl Timeline {
                     layer: layer.to_owned().into(),
                     last_activity_ts,
                     relative_last_activity: finite_f32::FiniteF32::ZERO,
+                    visibility: layer.visibility(),
                 }
             })
             .collect();

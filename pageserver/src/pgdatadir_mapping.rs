@@ -286,10 +286,7 @@ impl Timeline {
         // then check if the database was already initialized.
         // get_rel_exists can be called before dbdir is created.
         let buf = version.get(self, DBDIR_KEY, ctx).await?;
-        let dbdirs = match DbDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.dbdirs),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }?;
+        let dbdirs = DbDirectory::des(&buf)?.dbdirs;
         if !dbdirs.contains_key(&(tag.spcnode, tag.dbnode)) {
             return Ok(false);
         }
@@ -297,13 +294,8 @@ impl Timeline {
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = version.get(self, key, ctx).await?;
 
-        match RelDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let exists = dir.rels.contains(&(tag.relnode, tag.forknum));
-                Ok(exists)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        let dir = RelDirectory::des(&buf)?;
+        Ok(dir.rels.contains(&(tag.relnode, tag.forknum)))
     }
 
     /// Get a list of all existing relations in given tablespace and database.
@@ -322,20 +314,16 @@ impl Timeline {
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = version.get(self, key, ctx).await?;
 
-        match RelDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let rels: HashSet<RelTag> =
-                    HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
-                        spcnode,
-                        dbnode,
-                        relnode: *relnode,
-                        forknum: *forknum,
-                    }));
+        let dir = RelDirectory::des(&buf)?;
+        let rels: HashSet<RelTag> =
+            HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
+                spcnode,
+                dbnode,
+                relnode: *relnode,
+                forknum: *forknum,
+            }));
 
-                Ok(rels)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(rels)
     }
 
     /// Get the whole SLRU segment
@@ -397,13 +385,8 @@ impl Timeline {
         let key = slru_dir_to_key(kind);
         let buf = version.get(self, key, ctx).await?;
 
-        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let exists = dir.segments.contains(&segno);
-                Ok(exists)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        let dir = SlruSegmentDirectory::des(&buf)?;
+        Ok(dir.segments.contains(&segno))
     }
 
     /// Locate LSN, such that all transactions that committed before
@@ -619,10 +602,7 @@ impl Timeline {
         let key = slru_dir_to_key(kind);
 
         let buf = version.get(self, key, ctx).await?;
-        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.segments),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(SlruSegmentDirectory::des(&buf)?.segments)
     }
 
     pub(crate) async fn get_relmap_file(
@@ -646,10 +626,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
 
-        match DbDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.dbdirs),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(DbDirectory::des(&buf)?.dbdirs)
     }
 
     pub(crate) async fn get_twophase_file(
@@ -671,10 +648,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
 
-        match TwoPhaseDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.xids),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(TwoPhaseDirectory::des(&buf)?.xids)
     }
 
     pub(crate) async fn get_control_file(
@@ -699,10 +673,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         match self.get(AUX_FILES_KEY, lsn, ctx).await {
-            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
-                Ok(dir) => Ok(dir.files),
-                Err(e) => Err(PageReconstructError::from(e)),
-            },
+            Ok(buf) => Ok(AuxFilesDirectory::des(&buf)?.files),
             Err(e) => {
                 // This is expected: historical databases do not have the key.
                 debug!("Failed to get info about AUX files: {}", e);
@@ -718,13 +689,14 @@ impl Timeline {
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let kv = self
             .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
-            .await
-            .context("scan")?;
+            .await?;
         let mut result = HashMap::new();
         let mut sz = 0;
         for (_, v) in kv {
-            let v = v.context("get value")?;
-            let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
+            let v = v?;
+            let v = aux_file::decode_file_value_bytes(&v)
+                .context("value decode")
+                .map_err(PageReconstructError::Other)?;
             for (fname, content) in v {
                 sz += fname.len();
                 sz += content.len();
@@ -792,11 +764,10 @@ impl Timeline {
     ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
         let kv = self
             .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
-            .await
-            .context("scan")?;
+            .await?;
         let mut result = HashMap::new();
         for (k, v) in kv {
-            let v = v.context("get value")?;
+            let v = v?;
             let origin_id = k.field6 as RepOriginId;
             let origin_lsn = Lsn::des(&v).unwrap();
             if origin_lsn != Lsn::INVALID {
@@ -1744,11 +1715,16 @@ impl<'a> DatadirModification<'a> {
                     // the original code assumes all other errors are missing keys. Therefore, we keep the code path
                     // the same for now, though in theory, we should only match the `MissingKey` variant.
                     Err(
-                        PageReconstructError::Other(_)
+                        e @ (PageReconstructError::Other(_)
                         | PageReconstructError::WalRedo(_)
-                        | PageReconstructError::MissingKey { .. },
+                        | PageReconstructError::MissingKey(_)),
                     ) => {
                         // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                        if !matches!(e, PageReconstructError::MissingKey(_)) {
+                            let e = utils::error::report_compact_sources(&e);
+                            tracing::warn!("treating error as if it was a missing key: {}", e);
+                        }
 
                         let mut dir = AuxFilesDirectory {
                             files: HashMap::new(),
@@ -1912,7 +1888,7 @@ impl<'a> DatadirModification<'a> {
                     // work directly with Images, and we never need to read actual
                     // data pages. We could handle this if we had to, by calling
                     // the walredo manager, but let's keep it simple for now.
-                    Err(PageReconstructError::from(anyhow::anyhow!(
+                    Err(PageReconstructError::Other(anyhow::anyhow!(
                         "unexpected pending WAL record"
                     )))
                 };

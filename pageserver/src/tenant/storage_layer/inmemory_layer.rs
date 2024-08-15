@@ -12,6 +12,7 @@ use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache, walrecord};
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
@@ -630,11 +631,17 @@ impl InMemoryLayer {
                     for (lsn, pos) in vec_map.as_slice() {
                         cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
                         let will_init = Value::des(&buf)?.will_init();
-                        let res;
-                        (buf, res) = delta_layer_writer
-                            .put_value_bytes(Key::from_compact(*key), *lsn, buf, will_init, &ctx)
+                        let (tmp, res) = delta_layer_writer
+                            .put_value_bytes(
+                                Key::from_compact(*key),
+                                *lsn,
+                                buf.slice_len(),
+                                will_init,
+                                &ctx,
+                            )
                             .await;
                         res?;
+                        buf = tmp.into_raw_slice().into_inner();
                     }
                 }
             }
@@ -669,11 +676,17 @@ impl InMemoryLayer {
                         // => https://github.com/neondatabase/neon/issues/8183
                         cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
                         let will_init = Value::des(&buf)?.will_init();
-                        let res;
-                        (buf, res) = delta_layer_writer
-                            .put_value_bytes(Key::from_compact(*key), *lsn, buf, will_init, ctx)
+                        let (tmp, res) = delta_layer_writer
+                            .put_value_bytes(
+                                Key::from_compact(*key),
+                                *lsn,
+                                buf.slice_len(),
+                                will_init,
+                                ctx,
+                            )
                             .await;
                         res?;
+                        buf = tmp.into_raw_slice().into_inner();
                     }
                 }
             }
