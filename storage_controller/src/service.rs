@@ -4969,6 +4969,8 @@ impl Service {
                     cancel: cancel.clone(),
                 });
 
+                let span = tracing::info_span!(parent: None, "drain_node", %node_id);
+
                 tokio::task::spawn({
                     let service = self.clone();
                     let cancel = cancel.clone();
@@ -4985,21 +4987,21 @@ impl Service {
                             }
                         }
 
-                        tracing::info!(%node_id, "Drain background operation starting");
+                        tracing::info!("Drain background operation starting");
                         let res = service.drain_node(node_id, cancel).await;
                         match res {
                             Ok(()) => {
-                                tracing::info!(%node_id, "Drain background operation completed successfully");
+                                tracing::info!("Drain background operation completed successfully");
                             }
                             Err(OperationError::Cancelled) => {
-                                tracing::info!(%node_id, "Drain background operation was cancelled");
+                                tracing::info!("Drain background operation was cancelled");
                             }
                             Err(err) => {
-                                tracing::error!(%node_id, "Drain background operation encountered: {err}")
+                                tracing::error!("Drain background operation encountered: {err}")
                             }
                         }
                     }
-                });
+                }.instrument(span));
             }
             NodeSchedulingPolicy::Draining => {
                 return Err(ApiError::Conflict(format!(
@@ -5104,6 +5106,8 @@ impl Service {
                     cancel: cancel.clone(),
                 });
 
+                let span = tracing::info_span!(parent: None, "fill_node", %node_id);
+
                 tokio::task::spawn({
                     let service = self.clone();
                     let cancel = cancel.clone();
@@ -5120,21 +5124,21 @@ impl Service {
                             }
                         }
 
-                        tracing::info!(%node_id, "Fill background operation starting");
+                        tracing::info!("Fill background operation starting");
                         let res = service.fill_node(node_id, cancel).await;
                         match res {
                             Ok(()) => {
-                                tracing::info!(%node_id, "Fill background operation completed successfully");
+                                tracing::info!("Fill background operation completed successfully");
                             }
                             Err(OperationError::Cancelled) => {
-                                tracing::info!(%node_id, "Fill background operation was cancelled");
+                                tracing::info!("Fill background operation was cancelled");
                             }
                             Err(err) => {
-                                tracing::error!(%node_id, "Fill background operation encountered: {err}")
+                                tracing::error!("Fill background operation encountered: {err}")
                             }
                         }
                     }
-                });
+                }.instrument(span));
             }
             NodeSchedulingPolicy::Filling => {
                 return Err(ApiError::Conflict(format!(
