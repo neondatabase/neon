@@ -67,6 +67,7 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
+    LocalFsStorage,
     MockS3Server,
     RemoteStorage,
     RemoteStorageKind,
@@ -4425,14 +4426,32 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
+    def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
+        tline_path = (
+            self.env.repo_dir
+            / "local_fs_remote_storage"
+            / "safekeeper"
+            / str(tenant_id)
+            / str(timeline_id)
+        )
+        assert isinstance(self.env.safekeepers_remote_storage, LocalFsStorage)
+        return self._list_segments_in_dir(
+            tline_path, lambda name: ".metadata" not in name and ".___temp" not in name
+        )
+
     def list_segments(self, tenant_id, timeline_id) -> List[str]:
         """
         Get list of segment names of the given timeline.
         """
         tli_dir = self.timeline_dir(tenant_id, timeline_id)
+        return self._list_segments_in_dir(
+            tli_dir, lambda name: not name.startswith("safekeeper.control")
+        )
+
+    def _list_segments_in_dir(self, path: Path, keep_filter: Callable[[str], bool]) -> list[str]:
         segments = []
-        for _, _, filenames in os.walk(tli_dir):
-            segments.extend([f for f in filenames if not f.startswith("safekeeper.control")])
+        for _, _, filenames in os.walk(path):
+            segments.extend([f for f in filenames if keep_filter(f)])
         segments.sort()
         return segments
 

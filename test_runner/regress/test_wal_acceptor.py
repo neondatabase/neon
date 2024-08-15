@@ -49,7 +49,13 @@ from fixtures.remote_storage import (
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
-from fixtures.utils import PropagatingThread, get_dir_size, query_scalar, start_in_background
+from fixtures.utils import (
+    PropagatingThread,
+    get_dir_size,
+    query_scalar,
+    start_in_background,
+    wait_until,
+)
 
 
 def wait_lsn_force_checkpoint(
@@ -62,6 +68,18 @@ def wait_lsn_force_checkpoint(
     pageserver_conn_options = pageserver_conn_options or {}
     lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     log.info(f"pg_current_wal_flush_lsn is {lsn}, waiting for it on pageserver")
+
+    wait_lsn_force_checkpoint_at(lsn, tenant_id, timeline_id, ps, pageserver_conn_options)
+
+
+def wait_lsn_force_checkpoint_at(
+    lsn: Lsn,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    ps: NeonPageserver,
+    pageserver_conn_options=None,
+):
+    pageserver_conn_options = pageserver_conn_options or {}
 
     auth_token = None
     if "password" in pageserver_conn_options:
@@ -2304,3 +2322,138 @@ def test_s3_eviction(
     )
 
     assert event_metrics_seen
+
+
+def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilder):
+    """
+    Verify that pulling timeline from a SK with an uploaded partial segment
+    does not lead to consistency issues:
+    1. Start 3 SKs - only use two
+    2. Ingest a bit of WAL
+    3. Wait for partial to be uploaded
+    4. Pull timeline to the third SK
+    6. Replace source with destination SK and start compute
+    5. Wait for source SK to evict timeline
+    6. Go back to initial compute SK config and validate that
+    source SK can unevict the timeline (S3 state is consistent)
+    """
+    neon_env_builder.auth_enabled = True
+    neon_env_builder.num_safekeepers = 3
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
+
+    neon_env_builder.safekeeper_extra_opts = [
+        "--enable-offload",
+        "--delete-offloaded-wal",
+        "--partial-backup-timeout",
+        "500ms",
+        "--control-file-save-interval",
+        "500ms",
+        "--eviction-min-resident=500ms",
+    ]
+
+    env = neon_env_builder.init_start(initial_tenant_conf={"checkpoint_timeout": "100ms"})
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    (src_sk, dst_sk) = (env.safekeepers[0], env.safekeepers[2])
+
+    log.info("use only first 2 safekeepers, 3rd will be seeded")
+    endpoint = env.endpoints.create("main")
+    endpoint.active_safekeepers = [1, 2]
+    endpoint.start()
+    endpoint.safe_psql("create table t(key int, value text)")
+    endpoint.safe_psql("insert into t select generate_series(1, 180000), 'papaya'")
+
+    endpoint.stop()
+
+    def source_partial_segment_uploaded():
+        first_segment_name = "000000010000000000000001"
+        segs = src_sk.list_uploaded_segments(tenant_id, timeline_id)
+
+        candidate_seg = None
+        for seg in segs:
+            if "partial" in seg and "sk1" in seg and not seg.startswith(first_segment_name):
+                candidate_seg = seg
+
+        if candidate_seg is not None:
+            # The term might change, causing the segment to be gc-ed shortly after,
+            # so give it a bit of time to make sure it's stable.
+            time.sleep(2)
+
+            segs = src_sk.list_uploaded_segments(tenant_id, timeline_id)
+            assert candidate_seg in segs
+            return candidate_seg
+
+        raise Exception("Partial segment not uploaded yet")
+
+    source_partial_segment = wait_until(15, 1, source_partial_segment_uploaded)
+    log.info(
+        f"Uploaded segments before pull are {src_sk.list_uploaded_segments(tenant_id, timeline_id)}"
+    )
+    log.info(f"Tracking source partial segment: {source_partial_segment}")
+
+    src_flush_lsn = src_sk.get_flush_lsn(tenant_id, timeline_id)
+    log.info(f"flush_lsn on src before pull_timeline: {src_flush_lsn}")
+
+    pageserver_conn_options = {"password": env.auth_keys.generate_tenant_token(tenant_id)}
+    wait_lsn_force_checkpoint_at(
+        src_flush_lsn, tenant_id, timeline_id, env.pageserver, pageserver_conn_options
+    )
+
+    dst_sk.pull_timeline([src_sk], tenant_id, timeline_id)
+
+    def evicted():
+        evictions = src_sk.http_client().get_metric_value(
+            "safekeeper_eviction_events_completed_total", {"kind": "evict"}
+        )
+
+        if evictions is None or evictions == 0:
+            raise Exception("Eviction did not happen on source safekeeper yet")
+
+    wait_until(30, 1, evicted)
+
+    endpoint.start(safekeepers=[2, 3])
+
+    def new_partial_segment_uploaded():
+        segs = src_sk.list_uploaded_segments(tenant_id, timeline_id)
+        for seg in segs:
+            if "partial" in seg and "sk3" in seg:
+                return seg
+
+        raise Exception("Partial segment not uploaded yet")
+
+    log.info(
+        f"Uploaded segments before post-pull ingest are {src_sk.list_uploaded_segments(tenant_id, timeline_id)}"
+    )
+
+    endpoint.safe_psql("insert into t select generate_series(1, 1000), 'pear'")
+    wait_until(15, 1, new_partial_segment_uploaded)
+
+    log.info(
+        f"Uploaded segments after post-pull ingest are {src_sk.list_uploaded_segments(tenant_id, timeline_id)}"
+    )
+
+    # Allow for some gc iterations to happen and assert that the original
+    # uploaded partial segment remains in place.
+    time.sleep(5)
+    segs = src_sk.list_uploaded_segments(tenant_id, timeline_id)
+    assert source_partial_segment in segs
+
+    log.info(
+        f"Uploaded segments at the end are {src_sk.list_uploaded_segments(tenant_id, timeline_id)}"
+    )
+
+    # Restart the endpoint in order to check that the source safekeeper
+    # can unevict the timeline
+    endpoint.stop()
+    endpoint.start(safekeepers=[1, 2])
+
+    def unevicted():
+        unevictions = src_sk.http_client().get_metric_value(
+            "safekeeper_eviction_events_completed_total", {"kind": "restore"}
+        )
+
+        if unevictions is None or unevictions == 0:
+            raise Exception("Uneviction did not happen on source safekeeper yet")
+
+    wait_until(10, 1, unevicted)
