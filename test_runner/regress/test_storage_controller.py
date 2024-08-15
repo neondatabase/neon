@@ -2130,5 +2130,4 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
     with pytest.raises(StorageControllerApiException, match="Precondition failed: Ongoing background operation forbids configuring: drain.*"):
         env.storage_controller.node_configure(first.id, {"availability": "Offline"})
 
-    # fails, because the check for schedulingpolicy happens before the operation check
-    # env.storage_controller.cancel_node_drain(first.id)
+    env.storage_controller.cancel_node_drain(first.id)
