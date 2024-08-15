@@ -200,7 +200,8 @@ option. When it is enabled, the primary will refrain from vacuuming
 tuples that are still needed in the primary. That means potentially
 bloating the primary, which violates the usual rule that read replicas
 don't affect the operations on the primary, which is why it's off by
-default.
+default. We leave it to users to decide if they want to turn it on,
+same as PostgreSQL.
 
 Neon supports `hot_standby_feedback` by passing the feedback messages
 from the replica to the safekeepers, and from safekeepers to the
