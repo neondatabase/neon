@@ -5990,7 +5990,7 @@ impl Service {
                 .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
                 .await;
 
-            failpoint_support::sleep_millis_async!("sleepy-drain-loop");
+            failpoint_support::sleep_millis_async!("sleepy-drain-loop", &cancel);
         }
 
         while !waiters.is_empty() {

@@ -2129,3 +2129,9 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
         env.storage_controller.node_configure(attached.id, {"availability": "Offline"})
 
     env.storage_controller.cancel_node_drain(attached.id)
+
+    def reconfigure_node_again():
+        env.storage_controller.node_configure(attached.id, {"scheduling": "Pause"})
+
+    # allow for small delay between actually having cancelled and being able reconfigure again
+    wait_until(4, 0.5, reconfigure_node_again)
