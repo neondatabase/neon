@@ -246,6 +246,35 @@ index f8a7dac9607..64dcaf171c5 100644
  -- Strings.
  SELECT '""'::jsonb;				-- OK.
   jsonb 
+diff --git a/src/test/regress/expected/largeobject.out b/src/test/regress/expected/largeobject.out
+index 4921dd79aee..8732c2cb67a 100644
+--- a/src/test/regress/expected/largeobject.out
++++ b/src/test/regress/expected/largeobject.out
+@@ -346,7 +346,8 @@ SELECT lo_unlink(loid) from lotest_stash_values;
+ 
+ TRUNCATE lotest_stash_values;
+ \set filename :abs_srcdir '/data/tenk.data'
+-INSERT INTO lotest_stash_values (loid) SELECT lo_import(:'filename');
++\lo_import :filename
++INSERT INTO lotest_stash_values (loid) VALUES (:LASTOID);
+ BEGIN;
+ UPDATE lotest_stash_values SET fd=lo_open(loid, CAST(x'20000' | x'40000' AS integer));
+ -- verify length of large object
+@@ -410,12 +411,8 @@ SELECT lo_close(fd) FROM lotest_stash_values;
+ 
+ END;
+ \set filename :abs_builddir '/results/lotest.txt'
+-SELECT lo_export(loid, :'filename') FROM lotest_stash_values;
+- lo_export 
+------------
+-         1
+-(1 row)
+-
++SELECT loid FROM lotest_stash_values \gset
++\lo_export :loid, :filename
+ \lo_import :filename
+ \set newloid :LASTOID
+ -- just make sure \lo_export does not barf
 diff --git a/src/test/regress/expected/misc.out b/src/test/regress/expected/misc.out
 index 6e816c57f1f..6ef45b468e9 100644
 --- a/src/test/regress/expected/misc.out
@@ -278,6 +307,76 @@ index 6e816c57f1f..6ef45b468e9 100644
  SELECT * FROM stud_emp_copy;
   name  | age |  location  | salary | manager | gpa | percent 
  -------+-----+------------+--------+---------+-----+---------
+diff --git a/src/test/regress/expected/security_label.out b/src/test/regress/expected/security_label.out
+index a8e01a6220a..10c500d6a7d 100644
+--- a/src/test/regress/expected/security_label.out
++++ b/src/test/regress/expected/security_label.out
+@@ -19,21 +19,21 @@ ALTER TABLE seclabel_tbl2 OWNER TO regress_seclabel_user2;
+ -- Test of SECURITY LABEL statement without a plugin
+ --
+ SECURITY LABEL ON TABLE seclabel_tbl1 IS 'classified';			-- fail
+-ERROR:  no security label providers have been loaded
++ERROR:  must specify provider when multiple security label providers have been loaded
+ SECURITY LABEL FOR 'dummy' ON TABLE seclabel_tbl1 IS 'classified';		-- fail
+ ERROR:  security label provider "dummy" is not loaded
+ SECURITY LABEL ON TABLE seclabel_tbl1 IS '...invalid label...';		-- fail
+-ERROR:  no security label providers have been loaded
++ERROR:  must specify provider when multiple security label providers have been loaded
+ SECURITY LABEL ON TABLE seclabel_tbl3 IS 'unclassified';			-- fail
+-ERROR:  no security label providers have been loaded
++ERROR:  must specify provider when multiple security label providers have been loaded
+ SECURITY LABEL ON ROLE regress_seclabel_user1 IS 'classified';			-- fail
+-ERROR:  no security label providers have been loaded
++ERROR:  must specify provider when multiple security label providers have been loaded
+ SECURITY LABEL FOR 'dummy' ON ROLE regress_seclabel_user1 IS 'classified';		-- fail
+ ERROR:  security label provider "dummy" is not loaded
+ SECURITY LABEL ON ROLE regress_seclabel_user1 IS '...invalid label...';		-- fail
+-ERROR:  no security label providers have been loaded
++ERROR:  must specify provider when multiple security label providers have been loaded
+ SECURITY LABEL ON ROLE regress_seclabel_user3 IS 'unclassified';			-- fail
+-ERROR:  no security label providers have been loaded
++ERROR:  must specify provider when multiple security label providers have been loaded
+ -- clean up objects
+ DROP FUNCTION seclabel_four();
+ DROP DOMAIN seclabel_domain;
+diff --git a/src/test/regress/expected/stats.out b/src/test/regress/expected/stats.out
+index 94187e59cfb..97189594579 100644
+--- a/src/test/regress/expected/stats.out
++++ b/src/test/regress/expected/stats.out
+@@ -1291,14 +1291,11 @@ SELECT sum(reads) AS io_sum_shared_before_reads
+ -- rewritten table, e.g. by autovacuum.
+ BEGIN;
+ ALTER TABLE test_io_shared SET TABLESPACE regress_tblspace;
++ERROR:  tablespace "regress_tblspace" does not exist
+ -- SELECT from the table so that the data is read into shared buffers and
+ -- context 'normal', object 'relation' reads are counted.
+ SELECT COUNT(*) FROM test_io_shared;
+- count 
+--------
+-   100
+-(1 row)
+-
++ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ COMMIT;
+ SELECT pg_stat_force_next_flush();
+  pg_stat_force_next_flush 
+@@ -1415,6 +1412,7 @@ SELECT :io_sum_local_after_evictions > :io_sum_local_before_evictions,
+ -- local buffers, exercising a different codepath than standard local buffer
+ -- writes.
+ ALTER TABLE test_io_local SET TABLESPACE regress_tblspace;
++ERROR:  tablespace "regress_tblspace" does not exist
+ SELECT pg_stat_force_next_flush();
+  pg_stat_force_next_flush 
+ --------------------------
+@@ -1426,7 +1424,7 @@ SELECT sum(writes) AS io_sum_local_new_tblspc_writes
+ SELECT :io_sum_local_new_tblspc_writes > :io_sum_local_after_writes;
+  ?column? 
+ ----------
+- t
++ f
+ (1 row)
+ 
+ RESET temp_buffers;
 diff --git a/src/test/regress/expected/test_setup.out b/src/test/regress/expected/test_setup.out
 index 5d9e6bf12bc..c5fddfdca65 100644
 --- a/src/test/regress/expected/test_setup.out
@@ -632,6 +731,31 @@ index 6dae715afd8..aa320ba7be1 100644
  
  -- Strings.
  SELECT '""'::jsonb;				-- OK.
+diff --git a/src/test/regress/sql/largeobject.sql b/src/test/regress/sql/largeobject.sql
+index a4aee02e3a4..721057c98c8 100644
+--- a/src/test/regress/sql/largeobject.sql
++++ b/src/test/regress/sql/largeobject.sql
+@@ -189,7 +189,8 @@ SELECT lo_unlink(loid) from lotest_stash_values;
+ TRUNCATE lotest_stash_values;
+ 
+ \set filename :abs_srcdir '/data/tenk.data'
+-INSERT INTO lotest_stash_values (loid) SELECT lo_import(:'filename');
++\lo_import :filename
++INSERT INTO lotest_stash_values (loid) VALUES (:LASTOID);
+ 
+ BEGIN;
+ UPDATE lotest_stash_values SET fd=lo_open(loid, CAST(x'20000' | x'40000' AS integer));
+@@ -219,8 +220,8 @@ SELECT lo_close(fd) FROM lotest_stash_values;
+ END;
+ 
+ \set filename :abs_builddir '/results/lotest.txt'
+-SELECT lo_export(loid, :'filename') FROM lotest_stash_values;
+-
++SELECT loid FROM lotest_stash_values \gset
++\lo_export :loid, :filename
+ \lo_import :filename
+ 
+ \set newloid :LASTOID
 diff --git a/src/test/regress/sql/misc.sql b/src/test/regress/sql/misc.sql
 index 165a2e175fb..08d7096e2cd 100644
 --- a/src/test/regress/sql/misc.sql
@@ -668,7 +792,7 @@ index 165a2e175fb..08d7096e2cd 100644
  SELECT * FROM stud_emp_copy;
  
 diff --git a/src/test/regress/sql/psql.sql b/src/test/regress/sql/psql.sql
-index f3bc6cd07e8..e9db7377a0e 100644
+index f3bc6cd07e8..5cfc7122978 100644
 --- a/src/test/regress/sql/psql.sql
 +++ b/src/test/regress/sql/psql.sql
 @@ -1431,11 +1431,14 @@ CREATE TEMPORARY TABLE reload_output(
@@ -689,7 +813,7 @@ index f3bc6cd07e8..e9db7377a0e 100644
  
  SELECT line FROM reload_output ORDER BY lineno;
  TRUNCATE TABLE reload_output;
-@@ -1452,17 +1455,20 @@ SELECT 1 AS a\; SELECT 2 AS b\; SELECT 3 AS c;
+@@ -1452,17 +1455,22 @@ SELECT 1 AS a\; SELECT 2 AS b\; SELECT 3 AS c;
  -- COPY TO file
  -- The data goes to :g_out_file and the status to :o_out_file
  \set QUIET false
@@ -705,6 +829,8 @@ index f3bc6cd07e8..e9db7377a0e 100644
 -COPY reload_output(line) FROM :'g_out_file';
 +\set command '\\copy reload_output(line) FROM ' :'g_out_file';
 +:command
++-- Remove me
++SELECT * from reload_output;
  SELECT line FROM reload_output ORDER BY lineno;
  TRUNCATE TABLE reload_output;
 -COPY reload_output(line) FROM :'o_out_file';
@@ -713,7 +839,7 @@ index f3bc6cd07e8..e9db7377a0e 100644
  SELECT line FROM reload_output ORDER BY lineno;
  TRUNCATE TABLE reload_output;
  
-@@ -1475,10 +1481,12 @@ COPY (SELECT 'foo2') TO STDOUT \; COPY (SELECT 'bar2') TO STDOUT \g :g_out_file
+@@ -1475,10 +1483,12 @@ COPY (SELECT 'foo2') TO STDOUT \; COPY (SELECT 'bar2') TO STDOUT \g :g_out_file
  \o
  
  -- Check the contents of the files generated.
