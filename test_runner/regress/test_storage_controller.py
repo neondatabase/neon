@@ -2102,36 +2102,30 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
     env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
     env.storage_controller.reconcile_until_idle()
 
-    first, _ = env.pageservers
+    attached_id = int(env.storage_controller.locate(env.initial_tenant)[0]["node_id"])
+    attached = next((ps for ps in env.pageservers if ps.id == attached_id))
 
-    # attached_at = int(env.storage_controller.locate(env.initial_tenant)[0]["node_id"])
-    # secondary_at = next(filter(lambda ps: ps.id != attached_at, env.pageservers))
-
-    def first_is(state):
-        details = env.storage_controller.node_status(first.id)
-        log.info(f"{details}")
-        assert details["scheduling"] == state
-
-    def first_is_draining():
-        return first_is("Draining")
+    def attached_is_draining():
+        details = env.storage_controller.node_status(attached.id)
+        assert details["scheduling"] == "Draining"
 
     env.storage_controller.configure_failpoints(("sleepy-drain-loop", "return(10000)"))
-    env.storage_controller.node_drain(first.id)
+    env.storage_controller.node_drain(attached.id)
 
-    wait_until(10, 0.5, first_is_draining)
+    wait_until(10, 0.5, attached_is_draining)
 
-    first.restart()
+    attached.restart()
 
     # we are unable to reconfigure node while the operation is still ongoing
     with pytest.raises(
         StorageControllerApiException,
         match="Precondition failed: Ongoing background operation forbids configuring: drain.*",
     ):
-        env.storage_controller.node_configure(first.id, {"scheduling": "Pause"})
+        env.storage_controller.node_configure(attached.id, {"scheduling": "Pause"})
     with pytest.raises(
         StorageControllerApiException,
         match="Precondition failed: Ongoing background operation forbids configuring: drain.*",
     ):
-        env.storage_controller.node_configure(first.id, {"availability": "Offline"})
+        env.storage_controller.node_configure(attached.id, {"availability": "Offline"})
 
-    env.storage_controller.cancel_node_drain(first.id)
+    env.storage_controller.cancel_node_drain(attached.id)
