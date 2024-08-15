@@ -387,22 +387,18 @@ impl SerializedBatch {
         }
     }
 
-    pub fn from_values(batch: Vec<(CompactKey, Lsn, Value)>) -> Self {
+    pub fn from_values(batch: Vec<(CompactKey, Lsn, usize, Value)>) -> Self {
         // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
         // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
-        let buffer_size = batch
-            .iter()
-            .map(|i| i.2.serialized_size().unwrap() as usize)
-            .sum::<usize>()
-            + 4 * batch.len();
+        let buffer_size = batch.iter().map(|i| i.2).sum::<usize>() + 4 * batch.len();
         let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
 
         let mut offsets: Vec<(CompactKey, Lsn, u64)> = Vec::with_capacity(batch.len());
         let mut max_lsn: Lsn = Lsn(0);
-        for (key, lsn, val) in batch {
+        for (key, lsn, val_ser_size, val) in batch {
             let relative_off = cursor.position();
 
-            Self::write_blob_length(val.serialized_size().unwrap() as usize, &mut cursor);
+            Self::write_blob_length(val_ser_size, &mut cursor);
             val.ser_into(&mut cursor)
                 .expect("Writing into in-memory buffer is infallible");
 
@@ -410,8 +406,13 @@ impl SerializedBatch {
             max_lsn = std::cmp::max(max_lsn, lsn);
         }
 
+        let buffer = cursor.into_inner();
+
+        // Assert that we didn't do any extra allocations while building buffer.
+        debug_assert!(buffer.len() <= buffer_size);
+
         Self {
-            raw: cursor.into_inner(),
+            raw: buffer,
             offsets,
             max_lsn,
         }

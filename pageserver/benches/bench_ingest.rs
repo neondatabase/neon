@@ -15,7 +15,10 @@ use pageserver::{
     virtual_file,
 };
 use pageserver_api::{key::Key, shard::TenantShardId};
-use utils::id::{TenantId, TimelineId};
+use utils::{
+    bin_ser::BeSer,
+    id::{TenantId, TimelineId},
+};
 
 // A very cheap hash for generating non-sequential keys.
 fn murmurhash32(mut h: u32) -> u32 {
@@ -66,6 +69,7 @@ async fn ingest(
         InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, entered, &ctx).await?;
 
     let data = Value::Image(Bytes::from(vec![0u8; put_size]));
+    let data_ser_size = data.serialized_size().unwrap() as usize;
     let ctx = RequestContext::new(
         pageserver::task_mgr::TaskKind::WalReceiverConnectionHandler,
         pageserver::context::DownloadBehavior::Download,
@@ -96,7 +100,7 @@ async fn ingest(
             }
         }
 
-        batch.push((key.to_compact(), lsn, data.clone()));
+        batch.push((key.to_compact(), lsn, data_ser_size, data.clone()));
         if batch.len() >= BATCH_SIZE {
             let this_batch = std::mem::take(&mut batch);
             let serialized = SerializedBatch::from_values(this_batch);

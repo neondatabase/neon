@@ -5664,7 +5664,7 @@ impl<'a> TimelineWriter<'a> {
     /// Put a batch of keys at the specified Lsns.
     pub(crate) async fn put_batch(
         &mut self,
-        batch: Vec<(CompactKey, Lsn, Value)>,
+        batch: Vec<(CompactKey, Lsn, usize, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         if batch.is_empty() {
@@ -5707,8 +5707,13 @@ impl<'a> TimelineWriter<'a> {
         value: &Value,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.put_batch(vec![(key.to_compact(), lsn, value.clone())], ctx)
-            .await
+        use utils::bin_ser::BeSer;
+        let val_ser_size = value.serialized_size().unwrap() as usize;
+        self.put_batch(
+            vec![(key.to_compact(), lsn, val_ser_size, value.clone())],
+            ctx,
+        )
+        .await
     }
 
     pub(crate) async fn delete_batch(

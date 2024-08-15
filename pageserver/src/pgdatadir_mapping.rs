@@ -1021,7 +1021,7 @@ pub struct DatadirModification<'a> {
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_lsns: Vec<Lsn>,
-    pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
+    pending_updates: HashMap<Key, Vec<(Lsn, usize, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
 
@@ -1781,16 +1781,17 @@ impl<'a> DatadirModification<'a> {
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
             let mut write_batch = Vec::new();
-            for (lsn, value) in values {
+            for (lsn, value_ser_size, value) in values {
                 if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
-                    write_batch.push((key.to_compact(), lsn, value));
+                    write_batch.push((key.to_compact(), lsn, value_ser_size, value));
                 } else {
-                    retained_pending_updates
-                        .entry(key)
-                        .or_default()
-                        .push((lsn, value));
+                    retained_pending_updates.entry(key).or_default().push((
+                        lsn,
+                        value_ser_size,
+                        value,
+                    ));
                 }
             }
             writer.put_batch(write_batch, ctx).await?;
@@ -1826,13 +1827,13 @@ impl<'a> DatadirModification<'a> {
             // Ordering: the items in this batch do not need to be in any global order, but values for
             // a particular Key must be in Lsn order relative to one another.  InMemoryLayer relies on
             // this to do efficient updates to its index.
-            let batch: Vec<(CompactKey, Lsn, Value)> = self
+            let batch: Vec<(CompactKey, Lsn, usize, Value)> = self
                 .pending_updates
                 .drain()
                 .flat_map(|(key, values)| {
-                    values
-                        .into_iter()
-                        .map(move |(lsn, value)| (key.to_compact(), lsn, value))
+                    values.into_iter().map(move |(lsn, val_ser_size, value)| {
+                        (key.to_compact(), lsn, val_ser_size, value)
+                    })
                 })
                 .collect::<Vec<_>>();
 
@@ -1879,7 +1880,7 @@ impl<'a> DatadirModification<'a> {
         // Note: we don't check pending_deletions. It is an error to request a
         // value that has been removed, deletion only avoids leaking storage.
         if let Some(values) = self.pending_updates.get(&key) {
-            if let Some((_, value)) = values.last() {
+            if let Some((_, _, value)) = values.last() {
                 return if let Value::Image(img) = value {
                     Ok(img.clone())
                 } else {
@@ -1907,17 +1908,17 @@ impl<'a> DatadirModification<'a> {
     fn put(&mut self, key: Key, val: Value) {
         let values = self.pending_updates.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
-        if let Some((last_lsn, last_value)) = values.last_mut() {
+        if let Some((last_lsn, last_value_ser_size, last_value)) = values.last_mut() {
             if *last_lsn == self.lsn {
+                *last_value_ser_size = val.serialized_size().unwrap() as usize;
                 *last_value = val;
                 return;
             }
         }
-        self.pending_bytes += match &val {
-            Value::Image(inner) => inner.len(),
-            Value::WalRecord(_) => 100, // Rough approximation of typical serialized WalRecord size.
-        };
-        values.push((self.lsn, val));
+
+        let val_serialized_size = val.serialized_size().unwrap() as usize;
+        self.pending_bytes += val_serialized_size;
+        values.push((self.lsn, val_serialized_size, val));
     }
 
     fn delete(&mut self, key_range: Range<Key>) {
