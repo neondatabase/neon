@@ -4,6 +4,7 @@ use crate::{
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use hyper::Uri;
+use nix::unistd::Pid;
 use pageserver_api::{
     controller_api::{
         NodeConfigureRequest, NodeDescribeResponse, NodeRegisterRequest, TenantCreateRequest,
@@ -523,14 +524,7 @@ impl StorageController {
                 .parse::<i32>()
                 .expect("pid is valid i32");
 
-            let other_proc_alive = match procfs::process::Process::new(pid) {
-                Ok(proc) => proc.is_alive(),
-                Err(procfs::ProcError::NotFound(_)) => false,
-                Err(_) => {
-                    anyhow::bail!("Failed to inspect storage controller proc {pid}")
-                }
-            };
-
+            let other_proc_alive = !background_process::process_has_stopped(Pid::from_raw(pid))?;
             if other_proc_alive {
                 // There is another storage controller instance running, so we return
                 // and leave the database running.

@@ -379,7 +379,7 @@ where
     }
 }
 
-fn process_has_stopped(pid: Pid) -> anyhow::Result<bool> {
+pub(crate) fn process_has_stopped(pid: Pid) -> anyhow::Result<bool> {
     match kill(pid, None) {
         // Process exists, keep waiting
         Ok(_) => Ok(false),
