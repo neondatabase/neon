@@ -5,7 +5,6 @@
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
 use std::collections::{BinaryHeap, HashSet};
-use std::future::Future;
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -27,7 +26,6 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
-use utils::sync::gate::GateGuard;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
@@ -866,54 +864,10 @@ impl Timeline {
         enum ValidationIoConcurrency {
             Sequential,
             Concurrent,
-            Parallel,
         }
         enum ValidationWhat {
             KeyLsn,
             KeyLsnValue,
-        }
-        type IterItem = anyhow::Result<Option<(Key, Lsn, Value)>>;
-        enum MaybeSpawnedMergeIterator<'a> {
-            NotSpawned(MergeIterator<'a>),
-            Spawned {
-                rx: tokio::sync::mpsc::Receiver<IterItem>,
-            },
-        }
-        impl MaybeSpawnedMergeIterator<'a> {
-            pub fn not_spawned(deltas: &[ResidentDeltaLayer], ctx: &RequestContext) -> Self {
-                Self::NotSpawned(MergeIterator::create(&deltas, &[], ctx))
-            }
-            pub fn spawned(
-                timeline_gate_guard: GateGuard,
-                timeline_cancel: &CancellationToken,
-                deltas: Vec<ResidentDeltaLayer>,
-                ctx: &RequestContext,
-            ) -> Self {
-                let ctx = ctx.attached_child();
-                let (tx, rx) = tokio::sync::mpsc::channel(1);
-                // this task gets cancelled when the MaybeSpawnedMergeIterator is dropped, courtesy of the `tx.closed()` check
-                tokio::spawn(async move {
-                    let iter = MergeIterator::create(&deltas, &[], &ctx);
-                    loop {
-                        let item = tokio::select! {
-                            res = iter.next() => res,
-                            _ = tx.closed() => break,
-                        };
-                        let res = tx.send(item).await;
-                        if res.is_err() {
-                            break;
-                        }
-                    }
-                    drop(timeline_gate_guard);
-                });
-                Self::Spawned { rx }
-            }
-            pub async fn next(&mut self) -> IterItem {
-                match self {
-                    Self::NotSpawned(iter) => iter.next().await,
-                    Self::Spawned { rx, .. } => rx.recv().await.expect("the sender doesn't drop before the receiver and calling next() after receiving Ok(None) is an error"),
-                }
-            }
         }
         type VecIter<'a> = std::slice::Iter<'a, DeltaEntry<'a>>; // TODO: distinguished lifetimes
         impl AllValuesIter<'_> {
@@ -944,39 +898,14 @@ impl Timeline {
                     AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter } => merge_iter.next().await,
                     AllValuesIter::ValidatingStreamingKmergeBypassingPageCache { what, concurrency, merge_iter, all_keys_iter } => async {
                         // advance both iterators. Use concurrency but no parallelism.
-                        let mut all_keys_iter_item_fut = Self::next_all_keys_iter(all_keys_iter, ctx);
-                        let mut merge_iter_item_fut = merge_iter.next();
+                        let all_keys_iter_item_fut = Self::next_all_keys_iter(all_keys_iter, ctx);
+                        let merge_iter_item_fut = merge_iter.next();
                         let (all_keys_iter_item, merge_iter_item) = match concurrency {
                             ValidationIoConcurrency::Sequential => {
                                 (all_keys_iter_item_fut.await, merge_iter_item_fut.await)
                             },
                             ValidationIoConcurrency::Concurrent => {
                                 futures::future::join(all_keys_iter_item_fut, merge_iter_item_fut).await
-                            },
-                            ValidationIoConcurrency::Parallel => {
-                                use std::task::Poll::*;
-                                let all_keys_iter_item_fut = std::pin::pin!(all_keys_iter_item_fut);
-                                let merge_iter_item_fut = std::pin::pin!(merge_iter_item_fut);
-                                match (futures::poll!(&mut all_keys_iter_item_fut), futures::poll!(&mut merge_iter_item_fut)) {
-                                    (Ready(a),Ready(b)) => (a, b),
-                                    (Ready(a),Pending) => {
-                                        let b = merge_iter_item_fut.await;
-                                        (a, b)
-                                    },
-                                    (Pending,Ready(b)) => {
-                                        let a = all_keys_iter_item_fut.await;
-                                        (a, b)
-                                    }
-                                    (Pending,Pending) => {
-                                        let a = tokio::spawn(all_keys_iter_item_fut);
-                                        let b = tokio::spawn(merge_iter_item_fut);
-                                        let (a, b) = futures::future::join(a, b).await;
-                                        (
-                                            a.map_err(anyhow::Error::new).and_then(|r| r),
-                                            b.map_err(anyhow::Error::new).and_then(|r| r),
-                                        )
-                                    },
-                                }
                             },
                         };
                         // compare results & log warnings as needed
@@ -1052,7 +981,7 @@ impl Timeline {
                         let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
                         deltas.push(l);
                     }
-                    MergeIterator::create(deltas, &[], ctx)
+                    MergeIterator::create(&deltas, &[], ctx)
                 };
                 match validate {
                     None => AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter },
