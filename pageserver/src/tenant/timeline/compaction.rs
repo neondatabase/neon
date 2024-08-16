@@ -866,6 +866,7 @@ impl Timeline {
             Concurrent,
         }
         enum ValidationWhat {
+            Nothing,
             KeyLsn,
             KeyLsnValue,
         }
@@ -946,6 +947,7 @@ impl Timeline {
                             }
                             (Ok(Some((all_keys_key, all_keys_lsn, all_keys_value))), Ok(Some((merge_key, merge_lsn, merge_value)))) => {
                                 match what {
+                                    ValidationWhat::Nothing => { }
                                     // TODO: in this mode, we still load the value from disk for both iterators, even though we only need the all_keys_iter one
                                     ValidationWhat::KeyLsn => {
                                         let all_keys = (all_keys_key, all_keys_lsn);
@@ -987,6 +989,10 @@ impl Timeline {
                     None => AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter },
                     Some(validate) => AllValuesIter::ValidatingStreamingKmergeBypassingPageCache {
                         what: match &validate {
+                            CompactL0BypassPageCacheValidation::JustReadBoth
+                            | CompactL0BypassPageCacheValidation::JustReadBothConcurrentIo => {
+                                ValidationWhat::Nothing
+                            }
                             CompactL0BypassPageCacheValidation::KeyLsn
                             | CompactL0BypassPageCacheValidation::KeyLsnConcurrentIo => {
                                 ValidationWhat::KeyLsn
@@ -997,11 +1003,13 @@ impl Timeline {
                             }
                         },
                         concurrency: match validate {
-                            CompactL0BypassPageCacheValidation::KeyLsnConcurrentIo
+                            CompactL0BypassPageCacheValidation::JustReadBothConcurrentIo
+                            | CompactL0BypassPageCacheValidation::KeyLsnConcurrentIo
                             | CompactL0BypassPageCacheValidation::KeyLsnValueConcurrentIo => {
                                 ValidationIoConcurrency::Concurrent
                             }
-                            CompactL0BypassPageCacheValidation::KeyLsn
+                            CompactL0BypassPageCacheValidation::JustReadBoth
+                            | CompactL0BypassPageCacheValidation::KeyLsn
                             | CompactL0BypassPageCacheValidation::KeyLsnValue => {
                                 ValidationIoConcurrency::Sequential
                             }
@@ -1427,6 +1435,8 @@ pub enum CompactL0Phase1ValueAccess {
 #[serde(rename_all = "kebab-case")]
 #[allow(clippy::enum_variant_names)]
 pub enum CompactL0BypassPageCacheValidation {
+    JustReadBoth,
+    JustReadBothConcurrentIo,
     /// Validate that the series of (key, lsn) pairs are the same.
     KeyLsn,
     // Like [`KeyLsn`], but perform the IO concurrently.
