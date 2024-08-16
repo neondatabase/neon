@@ -141,6 +141,7 @@ rpds = "0.13"
 rustc-hash = "1.1.0"
 rustls = "0.22"
 rustls-pemfile = "2"
+rustls-split = "0.3"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
 sd-notify = "0.4.1"
@@ -223,6 +224,7 @@ storage_controller_client = { path = "./storage_controller/client" }
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
+vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
 walproposer = { version = "0.1", path = "./libs/walproposer/" }
 
 ## Common library dependency
