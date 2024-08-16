@@ -192,6 +192,13 @@ LogicalSlotsMonitorMain(Datum main_arg)
 	{
 		XLogRecPtr	cutoff_lsn;
 
+		/* In case of a SIGHUP, just reload the configuration. */
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+
 		/*
 		 * If there are too many .snap files, just drop all logical slots to
 		 * prevent aux files bloat.
