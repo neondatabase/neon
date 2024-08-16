@@ -36,7 +36,7 @@ env:
 
 jobs:
   build-neon:
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'neon-arm64-16core' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
@@ -46,7 +46,7 @@ jobs:
       # On 5.10 LTS kernels < 5.10.162 (and generally mainline kernels < 5.12),
       # io_uring will account the memory of the CQ and SQ as locked.
       # More details: https://github.com/neondatabase/neon/issues/6373#issuecomment-1905814391
-      options: --init --shm-size=512mb --ulimit memlock=33554432:33554432 # 32Gb, was 67108864:67108864
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     env:
       BUILD_TYPE: ${{ inputs.build-type }}
       GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -258,14 +258,14 @@ jobs:
     # Don't run regression tests on debug arm64 builds
     if: inputs.build-type != 'debug' || inputs.arch != 'arm64'
     needs: [ build-neon ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'neon-arm64-16core' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       # for changed limits, see comments on `options:` earlier in this file
-      options: --init --shm-size=512mb --ulimit memlock=33554432:33554432 # 32Gb, was 67108864:67108864
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
       matrix:
