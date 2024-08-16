@@ -1054,7 +1054,7 @@ fn get_start_timeout(args: &ArgMatches) -> &Duration {
     humantime_duration.as_ref()
 }
 
-fn get_storage_controller_start_args(args: &ArgMatches) -> NeonStorageControllerStartArgs {
+fn storage_controller_start_args(args: &ArgMatches) -> NeonStorageControllerStartArgs {
     let maybe_instance_id = args.get_one::<u8>("instance-id");
 
     let base_port = args.get_one::<u16>("base-port");
@@ -1074,7 +1074,7 @@ fn get_storage_controller_start_args(args: &ArgMatches) -> NeonStorageController
     }
 }
 
-fn get_storage_controller_stop_args(args: &ArgMatches) -> NeonStorageControllerStopArgs {
+fn storage_controller_stop_args(args: &ArgMatches) -> NeonStorageControllerStopArgs {
     let maybe_instance_id = args.get_one::<u8>("instance-id");
     let immediate = args.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
 
@@ -1145,17 +1145,14 @@ async fn handle_storage_controller(
     let svc = StorageController::from_env(env);
     match sub_match.subcommand() {
         Some(("start", start_match)) => {
-            if let Err(e) = svc
-                .start(get_storage_controller_start_args(start_match))
-                .await
-            {
+            if let Err(e) = svc.start(storage_controller_start_args(start_match)).await {
                 eprintln!("start failed: {e}");
                 exit(1);
             }
         }
 
         Some(("stop", stop_match)) => {
-            if let Err(e) = svc.stop(get_storage_controller_stop_args(stop_match)).await {
+            if let Err(e) = svc.stop(storage_controller_stop_args(stop_match)).await {
                 eprintln!("stop failed: {}", e);
                 exit(1);
             }
@@ -1396,7 +1393,7 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     // Stop all storage controller instances. In the most common case there's only one,
     // but iterate though the base data directory in order to discover the instances.
     let storcon_instances = env
-        .get_storage_controller_instances()
+        .storage_controller_instances()
         .await
         .expect("Must inspect data dir");
     for (instance_id, _instance_dir_path) in storcon_instances {

@@ -401,7 +401,7 @@ impl LocalEnv {
 
     /// Inspect the base data directory and extract the instance id and instance directory path
     /// for all storage controller instances
-    pub async fn get_storage_controller_instances(&self) -> std::io::Result<Vec<(u8, PathBuf)>> {
+    pub async fn storage_controller_instances(&self) -> std::io::Result<Vec<(u8, PathBuf)>> {
         let mut instances = Vec::default();
 
         let dir = std::fs::read_dir(self.base_data_dir.clone())?;

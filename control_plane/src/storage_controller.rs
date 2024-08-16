@@ -509,7 +509,7 @@ impl StorageController {
             &self.pid_file(stop_args.instance_id),
         )?;
 
-        let storcon_instances = self.env.get_storage_controller_instances().await?;
+        let storcon_instances = self.env.storage_controller_instances().await?;
         for (instance_id, instanced_dir_path) in storcon_instances {
             if instance_id == stop_args.instance_id {
                 continue;
