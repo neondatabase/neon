@@ -371,7 +371,7 @@ impl Timeline {
         );
 
         let layers = self.layers.read().await;
-        for layer_desc in layers.layer_map().iter_historic_layers() {
+        for layer_desc in layers.layer_map()?.iter_historic_layers() {
             let layer = layers.get_from_desc(&layer_desc);
             if layer.metadata().shard.shard_count == self.shard_identity.count {
                 // This layer does not belong to a historic ancestor, no need to re-image it.
@@ -489,10 +489,7 @@ impl Timeline {
             // - We do not run concurrently with other kinds of compaction, so the only layer map writes we race with are:
             //    - GC, which at worst witnesses us "undelete" a layer that they just deleted.
             //    - ingestion, which only inserts layers, therefore cannot collide with us.
-            let resident = layer
-                .download_and_keep_resident()
-                .await
-                .map_err(CompactionError::input_layer_download_failed)?;
+            let resident = layer.download_and_keep_resident().await?;
 
             let keys_written = resident
                 .filter(&self.shard_identity, &mut image_layer_writer, ctx)
@@ -549,7 +546,9 @@ impl Timeline {
     ///
     /// The result may be used as an input to eviction and secondary downloads to de-prioritize layers
     /// that we know won't be needed for reads.
-    pub(super) async fn update_layer_visibility(&self) {
+    pub(super) async fn update_layer_visibility(
+        &self,
+    ) -> Result<(), super::layer_manager::Shutdown> {
         let head_lsn = self.get_last_record_lsn();
 
         // We will sweep through layers in reverse-LSN order.  We only do historic layers.  L0 deltas
@@ -557,7 +556,7 @@ impl Timeline {
         // Note that L0 deltas _can_ be covered by image layers, but we consider them 'visible' because we anticipate that
         // they will be subject to L0->L1 compaction in the near future.
         let layer_manager = self.layers.read().await;
-        let layer_map = layer_manager.layer_map();
+        let layer_map = layer_manager.layer_map()?;
 
         let readable_points = {
             let children = self.gc_info.read().unwrap().retain_lsns.clone();
@@ -580,6 +579,7 @@ impl Timeline {
         // TODO: publish our covered KeySpace to our parent, so that when they update their visibility, they can
         // avoid assuming that everything at a branch point is visible.
         drop(covered);
+        Ok(())
     }
 
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
@@ -633,12 +633,8 @@ impl Timeline {
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         stats.read_lock_held_spawn_blocking_startup_micros =
             stats.read_lock_acquisition_micros.till_now(); // set by caller
-        let layers = guard.layer_map();
-        let level0_deltas = layers.get_level0_deltas();
-        let mut level0_deltas = level0_deltas
-            .into_iter()
-            .map(|x| guard.get_from_desc(&x))
-            .collect_vec();
+        let layers = guard.layer_map()?;
+        let level0_deltas = layers.level0_deltas();
         stats.level0_deltas_count = Some(level0_deltas.len());
 
         // Only compact if enough layers have accumulated.
@@ -650,6 +646,11 @@ impl Timeline {
             );
             return Ok(CompactLevel0Phase1Result::default());
         }
+
+        let mut level0_deltas = level0_deltas
+            .iter()
+            .map(|x| guard.get_from_desc(x))
+            .collect::<Vec<_>>();
 
         // Gather the files to compact in this iteration.
         //
@@ -689,23 +690,14 @@ impl Timeline {
 
         let mut fully_compacted = true;
 
-        deltas_to_compact.push(
-            first_level0_delta
-                .download_and_keep_resident()
-                .await
-                .map_err(CompactionError::input_layer_download_failed)?,
-        );
+        deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
 
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            deltas_to_compact.push(
-                l.download_and_keep_resident()
-                    .await
-                    .map_err(CompactionError::input_layer_download_failed)?,
-            );
+            deltas_to_compact.push(l.download_and_keep_resident().await?);
             deltas_to_compact_bytes += l.metadata().file_size;
             prev_lsn_end = lsn_range.end;
 
@@ -756,6 +748,9 @@ impl Timeline {
         let all_keys = {
             let mut all_keys = Vec::new();
             for l in deltas_to_compact.iter() {
+                if self.cancel.is_cancelled() {
+                    return Err(CompactionError::ShuttingDown);
+                }
                 all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
             }
             // The current stdlib sorting implementation is designed in a way where it is
@@ -838,6 +833,11 @@ impl Timeline {
         };
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
         drop_rlock(guard);
+
+        if self.cancel.is_cancelled() {
+            return Err(CompactionError::ShuttingDown);
+        }
+
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
 
         // This iterator walks through all key-value pairs from all the layers
@@ -1048,11 +1048,22 @@ impl Timeline {
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
         let mut next_hole = 0; // index of next hole in holes vector
 
+        let mut keys = 0;
+
         while let Some((key, lsn, value)) = all_values_iter
             .next(ctx)
             .await
             .map_err(CompactionError::Other)?
         {
+            keys += 1;
+
+            if keys % 32_768 == 0 && self.cancel.is_cancelled() {
+                // avoid hitting the cancellation token on every key. in benches, we end up
+                // shuffling an order of million keys per layer, this means we'll check it
+                // around tens of times per layer.
+                return Err(CompactionError::ShuttingDown);
+            }
+
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -1133,6 +1144,10 @@ impl Timeline {
 
             if !self.shard_identity.is_key_disposable(&key) {
                 if writer.is_none() {
+                    if self.cancel.is_cancelled() {
+                        // to be somewhat responsive to cancellation, check for each new layer
+                        return Err(CompactionError::ShuttingDown);
+                    }
                     // Create writer if not initiaized yet
                     writer = Some(
                         DeltaLayerWriter::new(
@@ -1153,6 +1168,8 @@ impl Timeline {
                         .await
                         .map_err(CompactionError::Other)?,
                     );
+
+                    keys = 0;
                 }
 
                 writer
@@ -1407,10 +1424,9 @@ impl Timeline {
         // Find the top of the historical layers
         let end_lsn = {
             let guard = self.layers.read().await;
-            let layers = guard.layer_map();
+            let layers = guard.layer_map()?;
 
-            let l0_deltas = layers.get_level0_deltas();
-            drop(guard);
+            let l0_deltas = layers.level0_deltas();
 
             // As an optimization, if we find that there are too few L0 layers,
             // bail out early. We know that the compaction algorithm would do
@@ -1782,7 +1798,7 @@ impl Timeline {
         // 2. Inferred from (1), for each key in the layer selection, the value can be reconstructed only with the layers in the layer selection.
         let (layer_selection, gc_cutoff, retain_lsns_below_horizon) = {
             let guard = self.layers.read().await;
-            let layers = guard.layer_map();
+            let layers = guard.layer_map()?;
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = gc_info.cutoffs.select_min();
@@ -2216,7 +2232,9 @@ impl Timeline {
         // Step 3: Place back to the layer map.
         {
             let mut guard = self.layers.write().await;
-            guard.finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
+            guard
+                .open_mut()?
+                .finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
         };
         self.remote_client
             .schedule_compaction_update(&layer_selection, &compact_to)?;
@@ -2296,7 +2314,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         self.flush_updates().await?;
 
         let guard = self.timeline.layers.read().await;
-        let layer_map = guard.layer_map();
+        let layer_map = guard.layer_map()?;
 
         let result = layer_map
             .iter_historic_layers()
@@ -2320,7 +2338,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
                 key_range,
             ))
         } else {
-            // The current compaction implementatin only ever requests the key space
+            // The current compaction implementation only ever requests the key space
             // at the compaction end LSN.
             anyhow::bail!("keyspace not available for requested lsn");
         }

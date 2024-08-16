@@ -42,6 +42,7 @@ use crate::tenant::vectored_blob_io::{
     VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
@@ -63,6 +64,7 @@ use std::os::unix::fs::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use tokio_epoll_uring::IoBufMut;
 use tracing::*;
 
 use utils::{
@@ -436,19 +438,28 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let (_, res) = self
-            .put_value_bytes(key, lsn, Value::ser(&val)?, val.will_init(), ctx)
+            .put_value_bytes(
+                key,
+                lsn,
+                Value::ser(&val)?.slice_len(),
+                val.will_init(),
+                ctx,
+            )
             .await;
         res
     }
 
-    async fn put_value_bytes(
+    async fn put_value_bytes<Buf>(
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: Vec<u8>,
+        val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (Vec<u8>, anyhow::Result<()>) {
+    ) -> (FullSlice<Buf>, anyhow::Result<()>)
+    where
+        Buf: IoBufMut + Send,
+    {
         assert!(
             self.lsn_range.start <= lsn,
             "lsn_start={}, lsn={}",
@@ -514,7 +525,7 @@ impl DeltaLayerWriterInner {
         file.seek(SeekFrom::Start(index_start_blk as u64 * PAGE_SZ as u64))
             .await?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf, ctx).await;
+            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
             res?;
         }
         assert!(self.lsn_range.start < self.lsn_range.end);
@@ -534,7 +545,7 @@ impl DeltaLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf, ctx).await;
+        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
         res?;
 
         let metadata = file
@@ -646,14 +657,17 @@ impl DeltaLayerWriter {
             .await
     }
 
-    pub async fn put_value_bytes(
+    pub async fn put_value_bytes<Buf>(
         &mut self,
         key: Key,
         lsn: Lsn,
-        val: Vec<u8>,
+        val: FullSlice<Buf>,
         will_init: bool,
         ctx: &RequestContext,
-    ) -> (Vec<u8>, anyhow::Result<()>) {
+    ) -> (FullSlice<Buf>, anyhow::Result<()>)
+    where
+        Buf: IoBufMut + Send,
+    {
         self.inner
             .as_mut()
             .unwrap()
@@ -743,7 +757,7 @@ impl DeltaLayer {
         // TODO: could use smallvec here, but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf, ctx).await;
+        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
         res?;
         Ok(())
     }
@@ -1020,7 +1034,7 @@ impl DeltaLayerInner {
                     for (_, blob_meta) in read.blobs_at.as_slice() {
                         reconstruct_state.on_key_error(
                             blob_meta.key,
-                            PageReconstructError::from(anyhow!(
+                            PageReconstructError::Other(anyhow!(
                                 "Failed to read blobs from virtual file {}: {}",
                                 self.file.path,
                                 kind
@@ -1047,7 +1061,7 @@ impl DeltaLayerInner {
                     Err(e) => {
                         reconstruct_state.on_key_error(
                             meta.meta.key,
-                            PageReconstructError::from(anyhow!(e).context(format!(
+                            PageReconstructError::Other(anyhow!(e).context(format!(
                                 "Failed to deserialize blob from virtual file {}",
                                 self.file.path,
                             ))),
@@ -1291,12 +1305,12 @@ impl DeltaLayerInner {
                         .put_value_bytes(
                             key,
                             lsn,
-                            std::mem::take(&mut per_blob_copy),
+                            std::mem::take(&mut per_blob_copy).slice_len(),
                             will_init,
                             ctx,
                         )
                         .await;
-                    per_blob_copy = tmp;
+                    per_blob_copy = tmp.into_raw_slice().into_inner();
 
                     res?;
 
@@ -1871,7 +1885,7 @@ pub(crate) mod test {
 
         for entry in entries {
             let (_, res) = writer
-                .put_value_bytes(entry.key, entry.lsn, entry.value, false, &ctx)
+                .put_value_bytes(entry.key, entry.lsn, entry.value.slice_len(), false, &ctx)
                 .await;
             res?;
         }
@@ -1957,6 +1971,7 @@ pub(crate) mod test {
             .await
             .likely_resident_layers()
             .next()
+            .cloned()
             .unwrap();
 
         {
@@ -2031,7 +2046,8 @@ pub(crate) mod test {
             .read()
             .await
             .likely_resident_layers()
-            .find(|x| x != &initdb_layer)
+            .find(|&x| x != &initdb_layer)
+            .cloned()
             .unwrap();
 
         // create a copy for the timeline, so we don't overwrite the file

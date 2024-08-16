@@ -56,6 +56,10 @@ concurrency:
 jobs:
   bench:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # Required for OIDC authentication in azure runners
     strategy:
       fail-fast: false
       matrix:
@@ -63,9 +67,13 @@ jobs:
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+            RUNNER: [ self-hosted, us-east-2, x64 ]
+            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
+            RUNNER: [ self-hosted, eastus2, x64 ]
+            IMAGE: neondatabase/build-tools:pinned
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
@@ -76,13 +84,20 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
-    runs-on: [ self-hosted, us-east-2, x64 ]
+    runs-on: ${{ matrix.RUNNER }}
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ matrix.IMAGE }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials # necessary on Azure runners
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -131,6 +146,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -139,7 +155,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic perf testing: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -160,6 +179,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -199,15 +219,23 @@ jobs:
         NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        store-test-results-into-db: true
+      env:
+        REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic replication testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        channel-id: "C06T9AMNDQQ" # on-call-compute-staging-stream
+        slack-message: |
+          Periodic replication testing: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -237,6 +265,9 @@ jobs:
       id: pgbench-compare-matrix
       run: |
         region_id_default=${{ env.DEFAULT_REGION_ID }}
+        runner_default='["self-hosted", "us-east-2", "x64"]'
+        runner_azure='["self-hosted", "eastus2", "x64"]'
+        image_default="369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned"
         matrix='{
           "pg_version" : [
             16
@@ -250,16 +281,20 @@ jobs:
             "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb"  },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb"  },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb" },
-                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb" }]
+          "runner": ['"$runner_default"'],
+          "image": [ "'"$image_default"'" ],
+          "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]
         }'
 
-        if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb"}]')
+        if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
+                                                     { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "rds-aurora", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -299,9 +334,17 @@ jobs:
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
+  prepare_AWS_RDS_databases:
+    uses: ./.github/workflows/_benchmarking_preparation.yml
+    secrets: inherit
+
   pgbench-compare:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
-    needs: [ generate-matrices ]
+    needs: [ generate-matrices, prepare_AWS_RDS_databases ]
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # Required for OIDC authentication in azure runners
 
     strategy:
       fail-fast: false
@@ -317,9 +360,9 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    runs-on: [ self-hosted, us-east-2, x64 ]
+    runs-on: ${{ matrix.runner }}
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ matrix.image }}
       options: --init
 
     # Increase timeout to 8h, default timeout is 6h
@@ -327,6 +370,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials # necessary on Azure runners
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -422,6 +472,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -430,17 +481,28 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic perf testing on ${{ matrix.platform }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   pgbench-pgvector:
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # Required for OIDC authentication in azure runners
     strategy:
       fail-fast: false
       matrix:
         include:
           - PLATFORM: "neonvm-captest-pgvector"
+            RUNNER: [ self-hosted, us-east-2, x64 ]
+            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - PLATFORM: "azure-captest-pgvector"
+            RUNNER: [ self-hosted, eastus2, x64 ]
+            IMAGE: neondatabase/build-tools:pinned
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
@@ -453,9 +515,9 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
-    runs-on: [ self-hosted, us-east-2, x64 ]
+    runs-on: ${{ matrix.RUNNER }}
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: ${{ matrix.IMAGE }}
       options: --init
 
     steps:
@@ -466,12 +528,12 @@ jobs:
     - name: Install postgresql-16 where pytest expects it
       run: |
         cd /home/nonroot
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/libpq5_16.3-1.pgdg110%2B1_amd64.deb
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.3-1.pgdg110%2B1_amd64.deb
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.3-1.pgdg110%2B1_amd64.deb 
-        dpkg -x libpq5_16.3-1.pgdg110+1_amd64.deb pg
-        dpkg -x postgresql-client-16_16.3-1.pgdg110+1_amd64.deb pg
-        dpkg -x postgresql-16_16.3-1.pgdg110+1_amd64.deb pg
+        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/libpq5_16.4-1.pgdg110%2B1_amd64.deb
+        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110%2B1_amd64.deb
+        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110%2B1_amd64.deb 
+        dpkg -x libpq5_16.4-1.pgdg110+1_amd64.deb pg
+        dpkg -x postgresql-client-16_16.4-1.pgdg110+1_amd64.deb pg
+        dpkg -x postgresql-16_16.4-1.pgdg110+1_amd64.deb pg
         mkdir -p /tmp/neon/pg_install/v16/bin
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench  
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql /tmp/neon/pg_install/v16/bin/psql  
@@ -496,6 +558,13 @@ jobs:
         esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+
+    - name: Configure AWS credentials # necessary on Azure runners to read/write from/to S3
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Benchmark pgvector hnsw indexing
       uses: ./.github/actions/run-python-test-set
@@ -526,6 +595,7 @@ jobs:
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -534,7 +604,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing ${PLATFORM}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic perf testing on ${{ env.PLATFORM }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -547,7 +620,7 @@ jobs:
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, pgbench-compare ]
+    needs: [ generate-matrices, pgbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
@@ -555,7 +628,7 @@ jobs:
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
       TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
@@ -607,6 +680,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -616,6 +690,7 @@ jobs:
         TEST_OLAP_SCALE: 10
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -624,7 +699,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic OLAP perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic OLAP perf testing on ${{ matrix.platform }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -636,7 +714,7 @@ jobs:
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, clickbench-compare ]
+    needs: [ generate-matrices, clickbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
@@ -644,7 +722,7 @@ jobs:
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
@@ -676,7 +754,7 @@ jobs:
             ENV_PLATFORM=RDS_AURORA_TPCH
             ;;
           rds-postgres)
-            ENV_PLATFORM=RDS_AURORA_TPCH
+            ENV_PLATFORM=RDS_POSTGRES_TPCH
             ;;
           *)
             echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neonvm-captest-reuse', 'rds-aurora', or 'rds-postgres'"
@@ -702,6 +780,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_tpch
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -709,6 +788,7 @@ jobs:
         TEST_OLAP_SCALE: ${{ matrix.scale }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -717,13 +797,16 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic TPC-H perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   user-examples-compare:
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, tpch-compare ]
+    needs: [ generate-matrices, tpch-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
@@ -731,7 +814,7 @@ jobs:
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
@@ -788,6 +871,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -796,6 +880,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic User example perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
+
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

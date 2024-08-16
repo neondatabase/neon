@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -115,7 +115,7 @@ use refs::AncestorRefs;
 // - Are there any refs to ancestor shards' layers?
 #[derive(Default)]
 struct TenantRefAccumulator {
-    shards_seen: HashMap<TenantId, Vec<ShardIndex>>,
+    shards_seen: HashMap<TenantId, BTreeSet<ShardIndex>>,
 
     // For each shard that has refs to an ancestor's layers, the set of ancestor layers referred to
     ancestor_ref_shards: AncestorRefs,
@@ -128,7 +128,7 @@ impl TenantRefAccumulator {
             .shards_seen
             .entry(ttid.tenant_shard_id.tenant_id)
             .or_default())
-        .push(this_shard_idx);
+        .insert(this_shard_idx);
 
         let mut ancestor_refs = Vec::new();
         for (layer_name, layer_metadata) in &index_part.layer_metadata {
@@ -152,7 +152,7 @@ impl TenantRefAccumulator {
         summary: &mut GcSummary,
     ) -> (Vec<TenantShardId>, AncestorRefs) {
         let mut ancestors_to_gc = Vec::new();
-        for (tenant_id, mut shard_indices) in self.shards_seen {
+        for (tenant_id, shard_indices) in self.shards_seen {
             // Find the highest shard count
             let latest_count = shard_indices
                 .iter()
@@ -160,6 +160,7 @@ impl TenantRefAccumulator {
                 .max()
                 .expect("Always at least one shard");
 
+            let mut shard_indices = shard_indices.iter().collect::<Vec<_>>();
             let (mut latest_shards, ancestor_shards) = {
                 let at =
                     itertools::partition(&mut shard_indices, |i| i.shard_count == latest_count);
@@ -172,7 +173,7 @@ impl TenantRefAccumulator {
             // to scan the S3 bucket halfway through a shard split.
             if latest_shards.len() != latest_count.count() as usize {
                 // This should be extremely rare, so we warn on it.
-                tracing::warn!(%tenant_id, "Missed some shards at count {:?}", latest_count);
+                tracing::warn!(%tenant_id, "Missed some shards at count {:?}: {latest_shards:?}", latest_count);
                 continue;
             }
 
@@ -210,7 +211,7 @@ impl TenantRefAccumulator {
                         .iter()
                         .map(|s| s.tenant_shard_id.to_index())
                         .collect();
-                    if controller_indices != latest_shards {
+                    if !controller_indices.iter().eq(latest_shards.iter().copied()) {
                         tracing::info!(%tenant_id, "Latest shards seen in S3 ({latest_shards:?}) don't match controller state ({controller_indices:?})");
                         continue;
                     }

@@ -23,6 +23,8 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
+#[cfg_attr(target_os = "macos", allow(unused_imports))]
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
@@ -219,9 +221,7 @@ async fn download_object<'a>(
                             Ok(chunk) => chunk,
                             Err(e) => return Err(e),
                         };
-                        buffered
-                            .write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(chunk), ctx)
-                            .await?;
+                        buffered.write_buffered(chunk.slice_len(), ctx).await?;
                     }
                     let size_tracking = buffered.flush_and_into_inner(ctx).await?;
                     Ok(size_tracking.into_inner())

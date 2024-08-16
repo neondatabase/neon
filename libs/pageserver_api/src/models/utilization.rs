@@ -1,4 +1,5 @@
-use utils::serde_system_time::SystemTime;
+use std::time::SystemTime;
+use utils::{serde_percent::Percent, serde_system_time};
 
 /// Pageserver current utilization and scoring for how good candidate the pageserver would be for
 /// the next tenant.
@@ -9,19 +10,88 @@ use utils::serde_system_time::SystemTime;
 /// not handle full u64 values properly.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct PageserverUtilization {
-    /// Used disk space
+    /// Used disk space (physical, ground truth from statfs())
     #[serde(serialize_with = "ser_saturating_u63")]
     pub disk_usage_bytes: u64,
     /// Free disk space
     #[serde(serialize_with = "ser_saturating_u63")]
     pub free_space_bytes: u64,
-    /// Lower is better score for how good candidate for a next tenant would this pageserver be.
-    #[serde(serialize_with = "ser_saturating_u63")]
+
+    /// Wanted disk space, based on the tenant shards currently present on this pageserver: this
+    /// is like disk_usage_bytes, but it is stable and does not change with the cache state of
+    /// tenants, whereas disk_usage_bytes may reach the disk eviction `max_usage_pct` and stay
+    /// there, or may be unrealistically low if the pageserver has attached tenants which haven't
+    /// downloaded layers yet.
+    #[serde(serialize_with = "ser_saturating_u63", default)]
+    pub disk_wanted_bytes: u64,
+
+    // What proportion of total disk space will this pageserver use before it starts evicting data?
+    #[serde(default = "unity_percent")]
+    pub disk_usable_pct: Percent,
+
+    // How many shards are currently on this node?
+    #[serde(default)]
+    pub shard_count: u32,
+
+    // How many shards should this node be able to handle at most?
+    #[serde(default)]
+    pub max_shard_count: u32,
+
+    /// Cached result of [`Self::score`]
     pub utilization_score: u64,
+
     /// When was this snapshot captured, pageserver local time.
     ///
     /// Use millis to give confidence that the value is regenerated often enough.
-    pub captured_at: SystemTime,
+    pub captured_at: serde_system_time::SystemTime,
+}
+
+fn unity_percent() -> Percent {
+    Percent::new(0).unwrap()
+}
+
+impl PageserverUtilization {
+    const UTILIZATION_FULL: u64 = 1000000;
+
+    /// Calculate a utilization score.  The result is to be inrepreted as a fraction of
+    /// Self::UTILIZATION_FULL.
+    ///
+    /// Lower values are more affine to scheduling more work on this node.
+    /// - UTILIZATION_FULL represents an ideal node which is fully utilized but should not receive any more work.
+    /// - 0.0 represents an empty node.
+    /// - Negative values are forbidden
+    /// - Values over UTILIZATION_FULL indicate an overloaded node, which may show degraded performance due to
+    ///   layer eviction.
+    pub fn score(&self) -> u64 {
+        let disk_usable_capacity = ((self.disk_usage_bytes + self.free_space_bytes)
+            * self.disk_usable_pct.get() as u64)
+            / 100;
+        let disk_utilization_score =
+            self.disk_wanted_bytes * Self::UTILIZATION_FULL / disk_usable_capacity;
+
+        let shard_utilization_score =
+            self.shard_count as u64 * Self::UTILIZATION_FULL / self.max_shard_count as u64;
+        std::cmp::max(disk_utilization_score, shard_utilization_score)
+    }
+
+    pub fn refresh_score(&mut self) {
+        self.utilization_score = self.score();
+    }
+
+    /// A utilization structure that has a full utilization score: use this as a placeholder when
+    /// you need a utilization but don't have real values yet.
+    pub fn full() -> Self {
+        Self {
+            disk_usage_bytes: 1,
+            free_space_bytes: 0,
+            disk_wanted_bytes: 1,
+            disk_usable_pct: Percent::new(100).unwrap(),
+            shard_count: 1,
+            max_shard_count: 1,
+            utilization_score: Self::UTILIZATION_FULL,
+            captured_at: serde_system_time::SystemTime(SystemTime::now()),
+        }
+    }
 }
 
 /// openapi knows only `format: int64`, so avoid outputting a non-parseable value by generated clients.
@@ -49,15 +119,19 @@ mod tests {
         let doc = PageserverUtilization {
             disk_usage_bytes: u64::MAX,
             free_space_bytes: 0,
-            utilization_score: u64::MAX,
-            captured_at: SystemTime(
+            disk_wanted_bytes: u64::MAX,
+            utilization_score: 13,
+            disk_usable_pct: Percent::new(90).unwrap(),
+            shard_count: 100,
+            max_shard_count: 200,
+            captured_at: serde_system_time::SystemTime(
                 std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1708509779),
             ),
         };
 
         let s = serde_json::to_string(&doc).unwrap();
 
-        let expected = r#"{"disk_usage_bytes":9223372036854775807,"free_space_bytes":0,"utilization_score":9223372036854775807,"captured_at":"2024-02-21T10:02:59.000Z"}"#;
+        let expected = "{\"disk_usage_bytes\":9223372036854775807,\"free_space_bytes\":0,\"disk_wanted_bytes\":9223372036854775807,\"disk_usable_pct\":90,\"shard_count\":100,\"max_shard_count\":200,\"utilization_score\":13,\"captured_at\":\"2024-02-21T10:02:59.000Z\"}";
 
         assert_eq!(s, expected);
     }

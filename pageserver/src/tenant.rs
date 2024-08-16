@@ -41,6 +41,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use upload_queue::NotInitialized;
 use utils::backoff;
 use utils::circuit_breaker::CircuitBreaker;
 use utils::completion;
@@ -301,7 +302,11 @@ pub struct Tenant {
     pub(crate) timeline_get_throttle:
         Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
 
-    /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
+    /// An ongoing timeline detach concurrency limiter.
+    ///
+    /// As a tenant will likely be restarted as part of timeline detach ancestor it makes no sense
+    /// to have two running at the same time. A different one can be started if an earlier one
+    /// has failed for whatever reason.
     ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
 
     /// `index_part.json` based gc blocking reason tracking.
@@ -601,6 +606,21 @@ impl From<PageReconstructError> for GcError {
     }
 }
 
+impl From<NotInitialized> for GcError {
+    fn from(value: NotInitialized) -> Self {
+        match value {
+            NotInitialized::Uninitialized => GcError::Remote(value.into()),
+            NotInitialized::Stopped | NotInitialized::ShuttingDown => GcError::TimelineCancelled,
+        }
+    }
+}
+
+impl From<timeline::layer_manager::Shutdown> for GcError {
+    fn from(_: timeline::layer_manager::Shutdown) -> Self {
+        GcError::TimelineCancelled
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum LoadConfigError {
     #[error("TOML deserialization error: '{0}'")]
@@ -710,6 +730,7 @@ impl Tenant {
                     .read()
                     .await
                     .layer_map()
+                    .expect("currently loading, layer manager cannot be shutdown already")
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -816,9 +837,9 @@ impl Tenant {
                             // The Stopping case is for when we have passed control on to DeleteTenantFlow:
                             // if it errors, we will call make_broken when tenant is already in Stopping.
                             assert!(
-                            matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
-                            "the attach task owns the tenant state until activation is complete"
-                        );
+                                matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
+                                "the attach task owns the tenant state until activation is complete"
+                            );
 
                             *state = TenantState::broken_from_reason(err.to_string());
                         });
@@ -3005,54 +3026,6 @@ impl Tenant {
         // because that will stall branch creation.
         let gc_cs = self.gc_cs.lock().await;
 
-        // Paranoia check: it is critical that GcInfo's list of child timelines is correct, to avoid incorrectly GC'ing data they
-        // depend on.  So although GcInfo is updated continuously by Timeline::new and Timeline::drop, we also calculate it here
-        // and fail out if it's inaccurate.
-        // (this can be removed later, it's a risk mitigation for https://github.com/neondatabase/neon/pull/8427)
-        {
-            let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> =
-                BTreeMap::new();
-            timelines.iter().for_each(|timeline| {
-                if let Some(ancestor_timeline_id) = &timeline.get_ancestor_timeline_id() {
-                    let ancestor_children =
-                        all_branchpoints.entry(*ancestor_timeline_id).or_default();
-                    ancestor_children.push((timeline.get_ancestor_lsn(), timeline.timeline_id));
-                }
-            });
-
-            for timeline in &timelines {
-                let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
-                    .remove(&timeline.timeline_id)
-                    .unwrap_or_default();
-
-                branchpoints.sort_by_key(|b| b.0);
-
-                let target = timeline.gc_info.read().unwrap();
-
-                // We require that retain_lsns contains everything in `branchpoints`, but not that
-                // they are exactly equal: timeline deletions can race with us, so retain_lsns
-                // may contain some extra stuff.  It is safe to have extra timelines in there, because it
-                // just means that we retain slightly more data than we otherwise might.
-                let have_branchpoints = target.retain_lsns.iter().copied().collect::<HashSet<_>>();
-                for b in &branchpoints {
-                    if !have_branchpoints.contains(b) {
-                        tracing::error!(
-                            "Bug: `retain_lsns` is set incorrectly.  Expected be {:?}, but found {:?}",
-                            branchpoints,
-                            target.retain_lsns
-                        );
-                        debug_assert!(false);
-                        // Do not GC based on bad information!
-                        // (ab-use an existing GcError type rather than adding a new one, since this is a
-                        // "should never happen" check that will be removed soon).
-                        return Err(GcError::Remote(anyhow::anyhow!(
-                            "retain_lsns failed validation!"
-                        )));
-                    }
-                }
-            }
-        }
-
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
         let mut gc_timelines = Vec::with_capacity(timelines.len());
@@ -3762,6 +3735,19 @@ impl Tenant {
 
     pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
         self.tenant_conf.load().tenant_conf.clone()
+    }
+
+    /// How much local storage would this tenant like to have?  It can cope with
+    /// less than this (via eviction and on-demand downloads), but this function enables
+    /// the Tenant to advertise how much storage it would prefer to have to provide fast I/O
+    /// by keeping important things on local disk.
+    pub(crate) fn local_storage_wanted(&self) -> u64 {
+        let mut wanted = 0;
+        let timelines = self.timelines.lock().unwrap();
+        for timeline in timelines.values() {
+            wanted += timeline.metrics.visible_physical_size_gauge.get();
+        }
+        wanted
     }
 }
 
@@ -4505,10 +4491,13 @@ mod tests {
 
         // This needs to traverse to the parent, and fails.
         let err = newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await.unwrap_err();
-        assert!(err.to_string().starts_with(&format!(
-            "Bad state on timeline {}: Broken",
-            tline.timeline_id
-        )));
+        assert!(
+            err.to_string().starts_with(&format!(
+                "bad state on timeline {}: Broken",
+                tline.timeline_id
+            )),
+            "{err}"
+        );
 
         Ok(())
     }
@@ -4674,10 +4663,10 @@ mod tests {
 
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map
-            .layer_map()
-            .get_level0_deltas()
-            .into_iter()
-            .map(|desc| layer_map.get_from_desc(&desc))
+            .layer_map()?
+            .level0_deltas()
+            .iter()
+            .map(|desc| layer_map.get_from_desc(desc))
             .collect::<Vec<_>>();
 
         assert!(!level0_deltas.is_empty());
@@ -4908,11 +4897,13 @@ mod tests {
         let inserted = bulk_insert_compact_gc(&tenant, &tline, &ctx, lsn, 50, 10000).await?;
 
         let guard = tline.layers.read().await;
-        guard.layer_map().dump(true, &ctx).await?;
+        let lm = guard.layer_map()?;
+
+        lm.dump(true, &ctx).await?;
 
         let mut reads = Vec::new();
         let mut prev = None;
-        guard.layer_map().iter_historic_layers().for_each(|desc| {
+        lm.iter_historic_layers().for_each(|desc| {
             if !desc.is_delta() {
                 prev = Some(desc.clone());
                 return;
@@ -5918,23 +5909,12 @@ mod tests {
             tline.freeze_and_flush().await?; // force create a delta layer
         }
 
-        let before_num_l0_delta_files = tline
-            .layers
-            .read()
-            .await
-            .layer_map()
-            .get_level0_deltas()
-            .len();
+        let before_num_l0_delta_files =
+            tline.layers.read().await.layer_map()?.level0_deltas().len();
 
         tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
 
-        let after_num_l0_delta_files = tline
-            .layers
-            .read()
-            .await
-            .layer_map()
-            .get_level0_deltas()
-            .len();
+        let after_num_l0_delta_files = tline.layers.read().await.layer_map()?.level0_deltas().len();
 
         assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
 

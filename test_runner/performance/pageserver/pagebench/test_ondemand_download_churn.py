@@ -62,6 +62,9 @@ def test_download_churn(
 
     run_benchmark(env, pg_bin, record, io_engine, concurrency_per_target, duration)
 
+    # see https://github.com/neondatabase/neon/issues/8712
+    env.stop(immediate=True)
+
 
 def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     remote_storage_kind = s3_storage()

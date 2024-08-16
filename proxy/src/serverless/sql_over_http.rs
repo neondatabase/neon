@@ -34,6 +34,7 @@ use tracing::error;
 use tracing::info;
 use typed_json::json;
 use url::Url;
+use urlencoding;
 use utils::http::error::ApiError;
 
 use crate::auth::backend::ComputeUserInfo;
@@ -144,7 +145,7 @@ impl UserFacingError for ConnInfoError {
 }
 
 fn get_conn_info(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     headers: &HeaderMap,
     tls: &TlsConfig,
 ) -> Result<ConnInfo, ConnInfoError> {
@@ -168,7 +169,8 @@ fn get_conn_info(
         .path_segments()
         .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname: DbName = url_path.next().ok_or(ConnInfoError::InvalidDbName)?.into();
+    let dbname: DbName =
+        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
     ctx.set_dbname(dbname.clone());
 
     let username = RoleName::from(urlencoding::decode(connection_url.username())?);
@@ -203,7 +205,6 @@ fn get_conn_info(
             options = Some(NeonOptions::parse_options_raw(&value));
         }
     }
-    ctx.set_db_options(params.freeze());
 
     let user_info = ComputeUserInfo {
         endpoint,
@@ -224,12 +225,12 @@ fn get_conn_info(
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
-    let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
+    let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
         Ok(r) => {
@@ -482,13 +483,16 @@ fn map_isolation_level_to_headers(level: IsolationLevel) -> Option<HeaderValue> 
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
-    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
+    let _requeset_gauge = Metrics::get()
+        .proxy
+        .connection_requests
+        .guard(ctx.protocol());
     info!(
-        protocol = %ctx.protocol,
+        protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
 
@@ -544,7 +548,7 @@ async fn handle_inner(
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
-            ctx.latency_timer.success();
+            ctx.success();
             Ok::<_, HttpConnError>(client)
         }
         .map_err(SqlOverHttpError::from),

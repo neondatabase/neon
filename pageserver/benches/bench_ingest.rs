@@ -11,7 +11,7 @@ use pageserver::{
     repository::Value,
     task_mgr::TaskKind,
     tenant::storage_layer::InMemoryLayer,
-    virtual_file::{self, api::IoEngineKind},
+    virtual_file,
 };
 use pageserver_api::{key::Key, shard::TenantShardId};
 use utils::{
@@ -61,7 +61,11 @@ async fn ingest(
 
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
-    let layer = InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, &ctx).await?;
+    let gate = utils::sync::gate::Gate::default();
+    let entered = gate.enter().unwrap();
+
+    let layer =
+        InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, entered, &ctx).await?;
 
     let data = Value::Image(Bytes::from(vec![0u8; put_size])).ser()?;
     let ctx = RequestContext::new(
@@ -91,7 +95,7 @@ async fn ingest(
             }
         }
 
-        layer.put_value(key, lsn, &data, &ctx).await?;
+        layer.put_value(key.to_compact(), lsn, &data, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
 
@@ -145,7 +149,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     let conf: &'static PageServerConf = Box::leak(Box::new(
         pageserver::config::PageServerConf::dummy_conf(temp_dir.path().to_path_buf()),
     ));
-    virtual_file::init(16384, IoEngineKind::TokioEpollUring);
+    virtual_file::init(16384, virtual_file::io_engine_for_bench());
     page_cache::init(conf.page_cache_size);
 
     {

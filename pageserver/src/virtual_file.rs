@@ -17,6 +17,7 @@ use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
+use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
@@ -30,10 +31,12 @@ use tokio::time::Instant;
 pub use pageserver_api::models::virtual_file as api;
 pub(crate) mod io_engine;
 pub use io_engine::feature_test as io_engine_feature_test;
+pub use io_engine::io_engine_for_bench;
 pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
 use self::owned_buffers_io::write::OwnedAsyncWriter;
+pub(crate) use api::DirectIoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
@@ -48,6 +51,7 @@ pub(crate) mod owned_buffers_io {
     //! but for the time being we're proving out the primitives in the neon.git repo
     //! for faster iteration.
 
+    pub(crate) mod io_buf_ext;
     pub(crate) mod slice;
     pub(crate) mod write;
     pub(crate) mod util {
@@ -635,24 +639,24 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
-    pub async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    pub async fn write_all_at<Buf: IoBuf + Send>(
         &self,
-        buf: B,
+        buf: FullSlice<Buf>,
         mut offset: u64,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<(), Error>) {
-        let buf_len = buf.bytes_init();
-        if buf_len == 0 {
-            return (Slice::into_inner(buf.slice_full()), Ok(()));
-        }
-        let mut buf = buf.slice(0..buf_len);
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
+        let buf = buf.into_raw_slice();
+        let bounds = buf.bounds();
+        let restore =
+            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
+        let mut buf = buf;
         while !buf.is_empty() {
-            let res;
-            (buf, res) = self.write_at(buf, offset, ctx).await;
+            let (tmp, res) = self.write_at(FullSlice::must_new(buf), offset, ctx).await;
+            buf = tmp.into_raw_slice();
             match res {
                 Ok(0) => {
                     return (
-                        Slice::into_inner(buf),
+                        restore(buf),
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -664,33 +668,33 @@ impl VirtualFile {
                     offset += n as u64;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(buf), Err(e)),
+                Err(e) => return (restore(buf), Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(()))
+        (restore(buf), Ok(()))
     }
 
-    /// Writes `buf.slice(0..buf.bytes_init())`.
-    /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
-    /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
-    /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
-    pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    /// Writes `buf` to the file at the current offset.
+    ///
+    /// Panics if there is an uninitialized range in `buf`, as that is most likely a bug in the caller.
+    pub async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<usize, Error>) {
-        let nbytes = buf.bytes_init();
-        if nbytes == 0 {
-            return (Slice::into_inner(buf.slice_full()), Ok(0));
-        }
-        let mut buf = buf.slice(0..nbytes);
+    ) -> (FullSlice<Buf>, Result<usize, Error>) {
+        let buf = buf.into_raw_slice();
+        let bounds = buf.bounds();
+        let restore =
+            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
+        let nbytes = buf.len();
+        let mut buf = buf;
         while !buf.is_empty() {
-            let res;
-            (buf, res) = self.write(buf, ctx).await;
+            let (tmp, res) = self.write(FullSlice::must_new(buf), ctx).await;
+            buf = tmp.into_raw_slice();
             match res {
                 Ok(0) => {
                     return (
-                        Slice::into_inner(buf),
+                        restore(buf),
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -701,17 +705,17 @@ impl VirtualFile {
                     buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(buf), Err(e)),
+                Err(e) => return (restore(buf), Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(nbytes))
+        (restore(buf), Ok(nbytes))
     }
 
     async fn write<B: IoBuf + Send>(
         &mut self,
-        buf: Slice<B>,
+        buf: FullSlice<B>,
         ctx: &RequestContext,
-    ) -> (Slice<B>, Result<usize, std::io::Error>) {
+    ) -> (FullSlice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
         let (buf, res) = self.write_at(buf, pos, ctx).await;
         let n = match res {
@@ -754,10 +758,10 @@ impl VirtualFile {
 
     async fn write_at<B: IoBuf + Send>(
         &self,
-        buf: Slice<B>,
+        buf: FullSlice<B>,
         offset: u64,
         _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
-    ) -> (Slice<B>, Result<usize, Error>) {
+    ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
             Err(e) => return (buf, Err(e)),
@@ -1091,11 +1095,11 @@ impl Drop for VirtualFile {
 
 impl OwnedAsyncWriter for VirtualFile {
     #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, B::Buf)> {
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
         res.map(move |v| (v, buf))
     }
@@ -1157,7 +1161,8 @@ mod tests {
     use crate::task_mgr::TaskKind;
 
     use super::*;
-    use owned_buffers_io::slice::SliceExt;
+    use owned_buffers_io::io_buf_ext::IoBufExt;
+    use owned_buffers_io::slice::SliceMutExt;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
@@ -1191,9 +1196,9 @@ mod tests {
                 }
             }
         }
-        async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all_at<Buf: IoBuf + Send>(
             &self,
-            buf: B,
+            buf: FullSlice<Buf>,
             offset: u64,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
@@ -1202,13 +1207,7 @@ mod tests {
                     let (_buf, res) = file.write_all_at(buf, offset, ctx).await;
                     res
                 }
-                MaybeVirtualFile::File(file) => {
-                    let buf_len = buf.bytes_init();
-                    if buf_len == 0 {
-                        return Ok(());
-                    }
-                    file.write_all_at(&buf.slice(0..buf_len), offset)
-                }
+                MaybeVirtualFile::File(file) => file.write_all_at(&buf[..], offset),
             }
         }
         async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
@@ -1217,9 +1216,9 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all<Buf: IoBuf + Send>(
             &mut self,
-            buf: B,
+            buf: FullSlice<Buf>,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
             match self {
@@ -1227,13 +1226,7 @@ mod tests {
                     let (_buf, res) = file.write_all(buf, ctx).await;
                     res.map(|_| ())
                 }
-                MaybeVirtualFile::File(file) => {
-                    let buf_len = buf.bytes_init();
-                    if buf_len == 0 {
-                        return Ok(());
-                    }
-                    file.write_all(&buf.slice(0..buf_len))
-                }
+                MaybeVirtualFile::File(file) => file.write_all(&buf[..]),
             }
         }
 
@@ -1345,7 +1338,9 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_a.write_all(b"foobar".to_vec(), &ctx).await?;
+        file_a
+            .write_all(b"foobar".to_vec().slice_len(), &ctx)
+            .await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string(&ctx).await.unwrap_err();
@@ -1354,7 +1349,10 @@ mod tests {
         let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
+        let _ = file_a
+            .write_all(b"bar".to_vec().slice_len(), &ctx)
+            .await
+            .unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string(&ctx).await?);
@@ -1397,8 +1395,12 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_b.write_all_at(b"BAR".to_vec(), 3, &ctx).await?;
-        file_b.write_all_at(b"FOO".to_vec(), 0, &ctx).await?;
+        file_b
+            .write_all_at(b"BAR".to_vec().slice_len(), 3, &ctx)
+            .await?;
+        file_b
+            .write_all_at(b"FOO".to_vec().slice_len(), 0, &ctx)
+            .await?;
 
         assert_eq!(file_b.read_string_at(2, 3, &ctx).await?, "OBA");
 

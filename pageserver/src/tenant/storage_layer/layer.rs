@@ -312,7 +312,9 @@ impl Layer {
             .get_or_maybe_download(true, Some(ctx))
             .await
             .map_err(|err| match err {
-                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
+                    GetVectoredError::Cancelled
+                }
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
 
@@ -1612,6 +1614,12 @@ pub(crate) enum DownloadError {
     Failpoint(failpoints::FailpointKind),
 }
 
+impl DownloadError {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self, DownloadError::DownloadCancelled)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum NeedsDownload {
     NotFound,
@@ -1848,8 +1856,8 @@ impl ResidentLayer {
     /// Read all they keys in this layer which match the ShardIdentity, and write them all to
     /// the provided writer.  Return the number of keys written.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
-    pub(crate) async fn filter<'a>(
-        &'a self,
+    pub(crate) async fn filter(
+        &self,
         shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
         ctx: &RequestContext,

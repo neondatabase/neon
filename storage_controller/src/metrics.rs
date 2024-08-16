@@ -12,6 +12,7 @@ use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, Metr
 use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use strum::IntoEnumIterator;
 
 use crate::{
     persistence::{DatabaseError, DatabaseOperation},
@@ -238,6 +239,21 @@ impl DatabaseError {
             Self::Connection(_) => DatabaseErrorLabel::Connection,
             Self::ConnectionPool(_) => DatabaseErrorLabel::ConnectionPool,
             Self::Logical(_) => DatabaseErrorLabel::Logical,
+        }
+    }
+}
+
+/// Update the leadership status metric gauges to reflect the requested status
+pub(crate) fn update_leadership_status(status: LeadershipStatus) {
+    let status_metric = &METRICS_REGISTRY
+        .metrics_group
+        .storage_controller_leadership_status;
+
+    for s in LeadershipStatus::iter() {
+        if s == status {
+            status_metric.set(LeadershipStatusGroup { status: s }, 1);
+        } else {
+            status_metric.set(LeadershipStatusGroup { status: s }, 0);
         }
     }
 }
