@@ -272,6 +272,19 @@ files:
               else (pg_current_wal_lsn() - '0/0')::FLOAT8
             end as lsn;
 
+      - metric_name: compute_receive_lsn
+        type: gauge
+        help: 'Returns the last write-ahead log location that has been received and synced to disk by streaming replication'
+        key_labels:
+        values: [lsn]
+        query: |
+          SELECT
+            CASE
+              WHEN pg_catalog.pg_is_in_recovery()
+              THEN (pg_last_wal_receive_lsn() - '0/0')::FLOAT8
+              ELSE 0
+            END AS lsn;
+
       - metric_name: replication_delay_bytes
         type: gauge
         help: 'Bytes between received and replayed LSN'
