@@ -84,6 +84,6 @@ mod tests {
         };
 
         let expected = pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 600000);
-        assert_eq!(hash, expected)
+        assert_eq!(hash, expected);
     }
 }

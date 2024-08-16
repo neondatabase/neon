@@ -184,7 +184,7 @@ impl CopyBuffer {
                 }
                 Poll::Pending
             }
-            res => res.map_err(ErrorDirection::Write),
+            res @ Poll::Ready(_) => res.map_err(ErrorDirection::Write),
         }
     }
 

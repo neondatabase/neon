@@ -36,7 +36,7 @@ impl<T> Default for Waiters<T> {
 }
 
 impl<T> Waiters<T> {
-    pub fn register(&self, key: String) -> Result<Waiter<T>, RegisterError> {
+    pub fn register(&self, key: String) -> Result<Waiter<'_, T>, RegisterError> {
         let (tx, rx) = oneshot::channel();
 
         self.0
