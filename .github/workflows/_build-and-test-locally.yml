@@ -36,7 +36,7 @@ env:
 
 jobs:
   build-neon:
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'neon-arm64-80core' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'neon-arm64-16core' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
@@ -163,7 +163,7 @@ jobs:
         run: |
           PQ_LIB_DIR=$(pwd)/pg_install/v16/lib
           export PQ_LIB_DIR
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests -j$(nproc)
 
       # Do install *before* running rust tests because they might recompile the
       # binaries with different features/flags.
@@ -212,6 +212,7 @@ jobs:
       - name: Run rust tests
         env:
           NEXTEST_RETRIES: 3
+          NEXTEST_TEST_THREADS: num-cpus
         run: |
           PQ_LIB_DIR=$(pwd)/pg_install/v16/lib
           export PQ_LIB_DIR
@@ -258,7 +259,7 @@ jobs:
     # Don't run regression tests on debug arm64 builds
     if: inputs.build-type != 'debug' || inputs.arch != 'arm64'
     needs: [ build-neon ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'neon-arm64-80core' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'neon-arm64-16core' || 'large')) }}
     container:
       image: ${{ inputs.build-tools-image }}
       credentials:
