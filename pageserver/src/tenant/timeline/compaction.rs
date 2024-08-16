@@ -968,7 +968,7 @@ impl Timeline {
                         }
                         // in case of mismatch, trust the legacy all_keys_iter_item
                         all_keys_iter_item
-                    }.instrument(info_span!("next")).await
+                    }.await
                 }
             }
         }
