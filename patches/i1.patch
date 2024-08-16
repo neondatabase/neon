@@ -307,6 +307,76 @@ index 6e816c57f1f..6ef45b468e9 100644
  SELECT * FROM stud_emp_copy;
   name  | age |  location  | salary | manager | gpa | percent 
  -------+-----+------------+--------+---------+-----+---------
+diff --git a/src/test/regress/expected/psql.out b/src/test/regress/expected/psql.out
+index 7cd0c27cca8..e85353d2aa1 100644
+--- a/src/test/regress/expected/psql.out
++++ b/src/test/regress/expected/psql.out
+@@ -5544,11 +5544,14 @@ CREATE TEMPORARY TABLE reload_output(
+   line text
+ );
+ SELECT 1 AS a \g :g_out_file
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
++:command
+ SELECT 2 AS b\; SELECT 3 AS c\; SELECT 4 AS d \g :g_out_file
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
++:command
+ COPY (SELECT 'foo') TO STDOUT \; COPY (SELECT 'bar') TO STDOUT \g :g_out_file
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+   line   
+ ---------
+@@ -5587,13 +5590,15 @@ SELECT 1 AS a\; SELECT 2 AS b\; SELECT 3 AS c;
+ -- COPY TO file
+ -- The data goes to :g_out_file and the status to :o_out_file
+ \set QUIET false
+-COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO :'g_out_file';
++\set command '\\COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO ' :'g_out_file';
++:command 
+ -- DML command status
+ UPDATE onek SET unique1 = unique1 WHERE false;
+ \set QUIET true
+ \o
+ -- Check the contents of the files generated.
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+  line 
+ ------
+@@ -5610,7 +5615,8 @@ SELECT line FROM reload_output ORDER BY lineno;
+ (10 rows)
+ 
+ TRUNCATE TABLE reload_output;
+-COPY reload_output(line) FROM :'o_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'o_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+    line   
+ ----------
+@@ -5647,7 +5653,8 @@ COPY (SELECT 'foo1') TO STDOUT \; COPY (SELECT 'bar1') TO STDOUT;
+ COPY (SELECT 'foo2') TO STDOUT \; COPY (SELECT 'bar2') TO STDOUT \g :g_out_file
+ \o
+ -- Check the contents of the files generated.
+-COPY reload_output(line) FROM :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+  line 
+ ------
+@@ -5656,7 +5663,8 @@ SELECT line FROM reload_output ORDER BY lineno;
+ (2 rows)
+ 
+ TRUNCATE TABLE reload_output;
+-COPY reload_output(line) FROM :'o_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'o_out_file';
++:command
+ SELECT line FROM reload_output ORDER BY lineno;
+  line 
+ ------
 diff --git a/src/test/regress/expected/security_label.out b/src/test/regress/expected/security_label.out
 index a8e01a6220a..10c500d6a7d 100644
 --- a/src/test/regress/expected/security_label.out
@@ -792,7 +862,7 @@ index 165a2e175fb..08d7096e2cd 100644
  SELECT * FROM stud_emp_copy;
  
 diff --git a/src/test/regress/sql/psql.sql b/src/test/regress/sql/psql.sql
-index f3bc6cd07e8..5cfc7122978 100644
+index f3bc6cd07e8..9d49aaa9000 100644
 --- a/src/test/regress/sql/psql.sql
 +++ b/src/test/regress/sql/psql.sql
 @@ -1431,11 +1431,14 @@ CREATE TEMPORARY TABLE reload_output(
@@ -800,26 +870,26 @@ index f3bc6cd07e8..5cfc7122978 100644
  
  SELECT 1 AS a \g :g_out_file
 -COPY reload_output(line) FROM :'g_out_file';
-+\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
 +:command
  SELECT 2 AS b\; SELECT 3 AS c\; SELECT 4 AS d \g :g_out_file
 -COPY reload_output(line) FROM :'g_out_file';
-+\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
 +:command
  COPY (SELECT 'foo') TO STDOUT \; COPY (SELECT 'bar') TO STDOUT \g :g_out_file
 -COPY reload_output(line) FROM :'g_out_file';
-+\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
 +:command
  
  SELECT line FROM reload_output ORDER BY lineno;
  TRUNCATE TABLE reload_output;
-@@ -1452,17 +1455,22 @@ SELECT 1 AS a\; SELECT 2 AS b\; SELECT 3 AS c;
+@@ -1452,17 +1455,20 @@ SELECT 1 AS a\; SELECT 2 AS b\; SELECT 3 AS c;
  -- COPY TO file
  -- The data goes to :g_out_file and the status to :o_out_file
  \set QUIET false
 -COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO :'g_out_file';
-+\set command '\\COPY (SELECT unique2 FROM onek ORDER BY unique1 LIMIT 10) TO ' :'g_out_file';
-+:command
++\set command '\\COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO ' :'g_out_file';
++:command 
  -- DML command status
  UPDATE onek SET unique1 = unique1 WHERE false;
  \set QUIET true
@@ -827,29 +897,27 @@ index f3bc6cd07e8..5cfc7122978 100644
  
  -- Check the contents of the files generated.
 -COPY reload_output(line) FROM :'g_out_file';
-+\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
 +:command
-+-- Remove me
-+SELECT * from reload_output;
  SELECT line FROM reload_output ORDER BY lineno;
  TRUNCATE TABLE reload_output;
 -COPY reload_output(line) FROM :'o_out_file';
-+\set command '\\copy reload_output(line) FROM ' :'o_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'o_out_file';
 +:command
  SELECT line FROM reload_output ORDER BY lineno;
  TRUNCATE TABLE reload_output;
  
-@@ -1475,10 +1483,12 @@ COPY (SELECT 'foo2') TO STDOUT \; COPY (SELECT 'bar2') TO STDOUT \g :g_out_file
+@@ -1475,10 +1481,12 @@ COPY (SELECT 'foo2') TO STDOUT \; COPY (SELECT 'bar2') TO STDOUT \g :g_out_file
  \o
  
  -- Check the contents of the files generated.
 -COPY reload_output(line) FROM :'g_out_file';
-+\set command '\\copy reload_output(line) FROM ' :'g_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'g_out_file';
 +:command
  SELECT line FROM reload_output ORDER BY lineno;
  TRUNCATE TABLE reload_output;
 -COPY reload_output(line) FROM :'o_out_file';
-+\set command '\\copy reload_output(line) FROM ' :'o_out_file';
++\set command '\\COPY reload_output(line) FROM ' :'o_out_file';
 +:command
  SELECT line FROM reload_output ORDER BY lineno;
  
