@@ -52,7 +52,7 @@ class PgVersion(str, enum.Enum):
         return None
 
 
-DEFAULT_VERSION: PgVersion = PgVersion.V15
+DEFAULT_VERSION: PgVersion = PgVersion.V16
 
 
 def skip_on_postgres(version: PgVersion, reason: str):
