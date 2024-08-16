@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use hyper::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
+use hyper::{body::to_bytes, header::CONTENT_TYPE, Body, Request, Response, StatusCode};
 use measured::{text::BufferedTextEncoder, MetricGroup};
 use metrics::NeonMetrics;
 use std::{
@@ -15,7 +15,7 @@ use utils::http::{
     RouterBuilder, RouterService,
 };
 
-use crate::jemalloc;
+use crate::{auth::backend::local::JWKS_ROLE_MAP, console::messages::JwksRoleMapping, jemalloc};
 
 async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, "")
@@ -33,6 +33,7 @@ fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper::Body, ApiError> {
             request_span(r, move |b| prometheus_metrics_handler(b, state))
         })
         .get("/v1/status", status_handler)
+        .post("/v1/jwks", update_jwks)
 }
 
 pub async fn task_main(
@@ -104,4 +105,16 @@ async fn prometheus_metrics_handler(
         .unwrap();
 
     Ok(response)
+}
+
+async fn update_jwks(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let bytes = to_bytes(req.into_body())
+        .await
+        .map_err(|e| ApiError::BadRequest(e.into()))?;
+    let data: JwksRoleMapping =
+        serde_json::from_slice(&bytes).map_err(|e| ApiError::BadRequest(e.into()))?;
+
+    JWKS_ROLE_MAP.store(Some(Arc::new(data)));
+
+    json_response(StatusCode::OK, ())
 }
