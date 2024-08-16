@@ -282,7 +282,7 @@ pub struct PostgresConnection {
 
 impl ConnCfg {
     /// Connect to a corresponding compute node.
-    pub async fn connect2<M: MakeTlsConnect<tokio::net::TcpStream>>(
+    pub async fn managed_connect<M: MakeTlsConnect<tokio::net::TcpStream>>(
         &self,
         ctx: &RequestMonitoring,
         timeout: Duration,
@@ -327,7 +327,8 @@ impl ConnCfg {
 
         let mut mk_tls = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
 
-        let (socket_addr, client, connection) = self.connect2(ctx, timeout, &mut mk_tls).await?;
+        let (socket_addr, client, connection) =
+            self.managed_connect(ctx, timeout, &mut mk_tls).await?;
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 

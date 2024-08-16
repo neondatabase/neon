@@ -233,7 +233,7 @@ impl ConnectMechanism for TokioMechanism {
         let (socket_addr, client, connection) = permit.release_result(
             node_info
                 .config
-                .connect2(ctx, timeout, &mut tokio_postgres::NoTls)
+                .managed_connect(ctx, timeout, &mut tokio_postgres::NoTls)
                 .await,
         )?;
 
