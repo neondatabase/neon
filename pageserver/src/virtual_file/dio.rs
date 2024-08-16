@@ -36,6 +36,7 @@ impl IoBufferMut {
     pub fn with_capacity_aligned(capacity: usize, align: usize) -> Self {
         let layout = Layout::from_size_align(capacity, align).expect("Invalid layout");
 
+        // SAFETY:  Making an allocation and construct a `Vec` from raw ptr. The memory is manually freed with the same layout.
         let buf = unsafe {
             let ptr = alloc::alloc(layout);
             if ptr.is_null() {
@@ -75,7 +76,7 @@ impl IoBufferMut {
 
 impl Drop for IoBufferMut {
     fn drop(&mut self) {
-        // SAFETY: memory was allocated with std::alloc::alloc
+        // SAFETY: memory was allocated with std::alloc::alloc with the same layout.
         unsafe {
             alloc::dealloc(
                 self.buf.as_ptr() as *mut u8,
@@ -99,6 +100,7 @@ impl DerefMut for IoBufferMut {
     }
 }
 
+// SAFETY: See [`IoBufferMut::advance_mut`]
 unsafe impl bytes::BufMut for IoBufferMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
@@ -107,6 +109,7 @@ unsafe impl bytes::BufMut for IoBufferMut {
         self.capacity() - self.len()
     }
 
+    // SAFETY: Caller needs to make sure the bytes being advanced past have been initialized.
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
         let len = self.len();
@@ -142,6 +145,8 @@ fn panic_advance(idx: usize, len: usize) -> ! {
     );
 }
 
+// Safety: [`IoBufferMut`] has exclusive ownership of the io buffer,
+// and the location remains stable even if [`Self`] is moved.
 unsafe impl tokio_epoll_uring::IoBuf for IoBufferMut {
     fn stable_ptr(&self) -> *const u8 {
         self.buf.as_ptr()
@@ -156,6 +161,7 @@ unsafe impl tokio_epoll_uring::IoBuf for IoBufferMut {
     }
 }
 
+// SAFETY: See above.
 unsafe impl tokio_epoll_uring::IoBufMut for IoBufferMut {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
         self.buf.as_mut_ptr()
