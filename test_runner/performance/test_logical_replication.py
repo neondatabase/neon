@@ -282,14 +282,15 @@ def test_snap_files(
 
     env = benchmark_project_pub.pgbench_env
     connstr = benchmark_project_pub.connstr
-    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=env)
 
     with psycopg2.connect(connstr) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'neondb_owner'")
-            is_super = cur.fetchall()[0]
+            is_super = cur.fetchall()[0][0]
             assert is_super, "This benchmark won't work if we don't have superuser"
+
+    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=env)
 
     conn = psycopg2.connect(connstr)
     conn.autocommit = True
