@@ -558,6 +558,9 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
                 failpoints_handler(r, cancel).await
             })
         })
+        .delete("/v1/tenant/:tenant_id", |r| {
+            request_span(r, tenant_delete_handler)
+        })
         // Will be used in the future instead of implicit timeline creation
         .post("/v1/tenant/timeline", |r| {
             request_span(r, timeline_create_handler)
@@ -568,19 +571,9 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             request_span(r, timeline_delete_handler)
         })
-        .delete("/v1/tenant/:tenant_id", |r| {
-            request_span(r, tenant_delete_handler)
-        })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/snapshot/:destination_id",
             |r| request_span(r, timeline_snapshot_handler),
-        )
-        .post("/v1/pull_timeline", |r| {
-            request_span(r, timeline_pull_handler)
-        })
-        .post(
-            "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",
-            |r| request_span(r, timeline_copy_handler),
         )
         .patch(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/control_file",
@@ -589,6 +582,13 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
             |r| request_span(r, timeline_checkpoint_handler),
+        )
+        .post("/v1/pull_timeline", |r| {
+            request_span(r, timeline_pull_handler)
+        })
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",
+            |r| request_span(r, timeline_copy_handler),
         )
         // for tests
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {
