@@ -6,6 +6,7 @@ self-hosted-runner:
     - small
     - small-arm64
     - us-east-2
+    - aws-arm64-8core
     - aws-arm64-16core
     - aws-arm64-32core
 config-variables:
