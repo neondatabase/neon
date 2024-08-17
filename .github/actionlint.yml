@@ -8,6 +8,7 @@ self-hosted-runner:
     - us-east-2
     - neon-arm64-16core
     - neon-arm64-80core
+    - neon-arm64-32core-aws
 config-variables:
   - BENCHMARK_PROJECT_ID_PUB
   - BENCHMARK_PROJECT_ID_SUB
