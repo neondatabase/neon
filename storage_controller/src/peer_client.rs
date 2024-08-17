@@ -1,7 +1,7 @@
 use crate::tenant_shard::ObservedState;
 use pageserver_api::shard::TenantShardId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 use hyper::Uri;
@@ -68,6 +68,8 @@ impl PeerClient {
         } else {
             req
         };
+
+        let req = req.timeout(Duration::from_secs(2));
 
         let res = req
             .send()
