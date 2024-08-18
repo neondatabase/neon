@@ -500,7 +500,7 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
         StatusCode::OK,
         state
             .service
-            .node_configure(
+            .external_node_configure(
                 config_req.node_id,
                 config_req.availability.map(NodeAvailability::from),
                 config_req.scheduling,
@@ -518,6 +518,19 @@ async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let node_status = state.service.get_node(node_id).await?;
 
     json_response(StatusCode::OK, node_status)
+}
+
+async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let leader = state.service.get_leader().await.map_err(|err| {
+        ApiError::InternalServerError(anyhow::anyhow!(
+            "Failed to read leader from database: {err}"
+        ))
+    })?;
+
+    json_response(StatusCode::OK, leader)
 }
 
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -1015,6 +1028,9 @@ pub fn make_router(
         })
         .get("/control/v1/node/:node_id", |r| {
             named_request_span(r, handle_node_status, RequestName("control_v1_node_status"))
+        })
+        .get("/control/v1/leader", |r| {
+            named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))
         })
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))

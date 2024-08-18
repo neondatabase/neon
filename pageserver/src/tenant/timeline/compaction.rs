@@ -748,6 +748,9 @@ impl Timeline {
         let all_keys = {
             let mut all_keys = Vec::new();
             for l in deltas_to_compact.iter() {
+                if self.cancel.is_cancelled() {
+                    return Err(CompactionError::ShuttingDown);
+                }
                 all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
             }
             // The current stdlib sorting implementation is designed in a way where it is
@@ -830,6 +833,11 @@ impl Timeline {
         };
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
         drop_rlock(guard);
+
+        if self.cancel.is_cancelled() {
+            return Err(CompactionError::ShuttingDown);
+        }
+
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
 
         // This iterator walks through all key-value pairs from all the layers
@@ -1040,11 +1048,22 @@ impl Timeline {
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
         let mut next_hole = 0; // index of next hole in holes vector
 
+        let mut keys = 0;
+
         while let Some((key, lsn, value)) = all_values_iter
             .next(ctx)
             .await
             .map_err(CompactionError::Other)?
         {
+            keys += 1;
+
+            if keys % 32_768 == 0 && self.cancel.is_cancelled() {
+                // avoid hitting the cancellation token on every key. in benches, we end up
+                // shuffling an order of million keys per layer, this means we'll check it
+                // around tens of times per layer.
+                return Err(CompactionError::ShuttingDown);
+            }
+
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -1149,6 +1168,8 @@ impl Timeline {
                         .await
                         .map_err(CompactionError::Other)?,
                     );
+
+                    keys = 0;
                 }
 
                 writer
@@ -2317,7 +2338,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
                 key_range,
             ))
         } else {
-            // The current compaction implementatin only ever requests the key space
+            // The current compaction implementation only ever requests the key space
             // at the compaction end LSN.
             anyhow::bail!("keyspace not available for requested lsn");
         }
