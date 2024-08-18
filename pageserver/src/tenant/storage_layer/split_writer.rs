@@ -208,6 +208,8 @@ impl SplitDeltaLayerWriter {
 
 #[cfg(test)]
 mod tests {
+    use rand::{RngCore, SeedableRng};
+
     use crate::{
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
@@ -229,7 +231,10 @@ mod tests {
     }
 
     fn get_large_img() -> Bytes {
-        vec![0; 8192].into()
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
+        let mut data = vec![0; 8192];
+        rng.fill_bytes(&mut data);
+        data.into()
     }
 
     #[tokio::test]
