@@ -93,7 +93,8 @@ impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
 }
 
 fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
-    let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
+    let resp: KickSession<'_> =
+        serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);
     let _enter = span.enter();

@@ -12,9 +12,11 @@ use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache, walrecord};
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
+use pageserver_api::key::CompactKey;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
@@ -78,7 +80,7 @@ pub struct InMemoryLayerInner {
     /// All versions of all pages in the layer are kept here. Indexed
     /// by block number and LSN. The value is an offset into the
     /// ephemeral file where the page version is stored.
-    index: BTreeMap<Key, VecMap<Lsn, u64>>,
+    index: BTreeMap<CompactKey, VecMap<Lsn, u64>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
@@ -312,8 +314,12 @@ impl InMemoryLayer {
         let reader = inner.file.block_cursor();
 
         for range in keyspace.ranges.iter() {
-            for (key, vec_map) in inner.index.range(range.start..range.end) {
-                let lsn_range = match reconstruct_state.get_cached_lsn(key) {
+            for (key, vec_map) in inner
+                .index
+                .range(range.start.to_compact()..range.end.to_compact())
+            {
+                let key = Key::from_compact(*key);
+                let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
                     Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
                     None => self.start_lsn..end_lsn,
                 };
@@ -324,20 +330,18 @@ impl InMemoryLayer {
                     // TODO: this uses the page cache => https://github.com/neondatabase/neon/issues/8183
                     let buf = reader.read_blob(*pos, &ctx).await;
                     if let Err(e) = buf {
-                        reconstruct_state
-                            .on_key_error(*key, PageReconstructError::from(anyhow!(e)));
+                        reconstruct_state.on_key_error(key, PageReconstructError::from(anyhow!(e)));
                         break;
                     }
 
                     let value = Value::des(&buf.unwrap());
                     if let Err(e) = value {
-                        reconstruct_state
-                            .on_key_error(*key, PageReconstructError::from(anyhow!(e)));
+                        reconstruct_state.on_key_error(key, PageReconstructError::from(anyhow!(e)));
                         break;
                     }
 
                     let key_situation =
-                        reconstruct_state.update_key(key, *entry_lsn, value.unwrap());
+                        reconstruct_state.update_key(&key, *entry_lsn, value.unwrap());
                     if key_situation == ValueReconstructSituation::Complete {
                         break;
                     }
@@ -417,7 +421,7 @@ impl InMemoryLayer {
     /// Adds the page version to the in-memory tree
     pub async fn put_value(
         &self,
-        key: Key,
+        key: CompactKey,
         lsn: Lsn,
         buf: &[u8],
         ctx: &RequestContext,
@@ -430,7 +434,7 @@ impl InMemoryLayer {
     async fn put_value_locked(
         &self,
         locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
-        key: Key,
+        key: CompactKey,
         lsn: Lsn,
         buf: &[u8],
         ctx: &RequestContext,
@@ -539,6 +543,8 @@ impl InMemoryLayer {
         let end_lsn = *self.end_lsn.get().unwrap();
 
         let key_count = if let Some(key_range) = key_range {
+            let key_range = key_range.start.to_compact()..key_range.end.to_compact();
+
             inner
                 .index
                 .iter()
@@ -576,11 +582,17 @@ impl InMemoryLayer {
                     for (lsn, pos) in vec_map.as_slice() {
                         cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
                         let will_init = Value::des(&buf)?.will_init();
-                        let res;
-                        (buf, res) = delta_layer_writer
-                            .put_value_bytes(*key, *lsn, buf, will_init, &ctx)
+                        let (tmp, res) = delta_layer_writer
+                            .put_value_bytes(
+                                Key::from_compact(*key),
+                                *lsn,
+                                buf.slice_len(),
+                                will_init,
+                                &ctx,
+                            )
                             .await;
                         res?;
+                        buf = tmp.into_raw_slice().into_inner();
                     }
                 }
             }
@@ -615,11 +627,17 @@ impl InMemoryLayer {
                         // => https://github.com/neondatabase/neon/issues/8183
                         cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
                         let will_init = Value::des(&buf)?.will_init();
-                        let res;
-                        (buf, res) = delta_layer_writer
-                            .put_value_bytes(*key, *lsn, buf, will_init, ctx)
+                        let (tmp, res) = delta_layer_writer
+                            .put_value_bytes(
+                                Key::from_compact(*key),
+                                *lsn,
+                                buf.slice_len(),
+                                will_init,
+                                ctx,
+                            )
                             .await;
                         res?;
+                        buf = tmp.into_raw_slice().into_inner();
                     }
                 }
             }

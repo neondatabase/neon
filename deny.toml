@@ -22,7 +22,10 @@ feature-depth = 1
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+
+[[advisories.ignore]]
+id = "RUSTSEC-2023-0071"
+reason = "the marvin attack only affects private key decryption, not public key signature verification"
 
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:

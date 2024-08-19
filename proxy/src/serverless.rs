@@ -120,7 +120,7 @@ pub async fn task_main(
             tracing::trace!("attempting to cancel a random connection");
             if let Some(token) = config.http_config.cancel_set.take() {
                 tracing::debug!("cancelling a random connection");
-                token.cancel()
+                token.cancel();
             }
         }
 
@@ -198,7 +198,7 @@ async fn connection_startup(
     let peer_addr = peer.unwrap_or(peer_addr).ip();
     let has_private_peer_addr = match peer_addr {
         IpAddr::V4(ip) => ip.is_private(),
-        _ => false,
+        IpAddr::V6(_) => false,
     };
     info!(?session_id, %peer_addr, "accepted new TCP connection");
 

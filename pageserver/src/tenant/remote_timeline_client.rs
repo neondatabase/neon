@@ -736,12 +736,13 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Reparent this timeline to a new parent.
+    ///
+    /// A retryable step of timeline ancestor detach.
     pub(crate) async fn schedule_reparenting_and_wait(
         self: &Arc<Self>,
         new_parent: &TimelineId,
     ) -> anyhow::Result<()> {
-        // FIXME: because of how Timeline::schedule_uploads works when called from layer flushing
-        // and reads the in-memory part we cannot do the detaching like this
         let receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
@@ -752,17 +753,25 @@ impl RemoteTimelineClient {
                 ));
             };
 
-            upload_queue.dirty.metadata.reparent(new_parent);
-            upload_queue.dirty.lineage.record_previous_ancestor(&prev);
+            let uploaded = &upload_queue.clean.0.metadata;
 
-            self.schedule_index_upload(upload_queue)?;
+            if uploaded.ancestor_timeline().is_none() && !uploaded.ancestor_lsn().is_valid() {
+                // nothing to do
+                None
+            } else {
+                upload_queue.dirty.metadata.reparent(new_parent);
+                upload_queue.dirty.lineage.record_previous_ancestor(&prev);
 
-            self.schedule_barrier0(upload_queue)
+                self.schedule_index_upload(upload_queue)?;
+
+                Some(self.schedule_barrier0(upload_queue))
+            }
         };
 
-        Self::wait_completion0(receiver)
-            .await
-            .context("wait completion")
+        if let Some(receiver) = receiver {
+            Self::wait_completion0(receiver).await?;
+        }
+        Ok(())
     }
 
     /// Schedules uploading a new version of `index_part.json` with the given layers added,
@@ -778,26 +787,30 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
-            upload_queue.dirty.lineage.record_detaching(&adopted);
+            if upload_queue.clean.0.lineage.detached_previous_ancestor() == Some(adopted) {
+                None
+            } else {
+                upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
+                upload_queue.dirty.lineage.record_detaching(&adopted);
 
-            for layer in layers {
-                upload_queue
-                    .dirty
-                    .layer_metadata
-                    .insert(layer.layer_desc().layer_name(), layer.metadata());
+                for layer in layers {
+                    let prev = upload_queue
+                        .dirty
+                        .layer_metadata
+                        .insert(layer.layer_desc().layer_name(), layer.metadata());
+                    assert!(prev.is_none(), "copied layer existed already {layer}");
+                }
+
+                self.schedule_index_upload(upload_queue)?;
+
+                Some(self.schedule_barrier0(upload_queue))
             }
-
-            self.schedule_index_upload(upload_queue)?;
-
-            let barrier = self.schedule_barrier0(upload_queue);
-            self.launch_queued_tasks(upload_queue);
-            barrier
         };
 
-        Self::wait_completion0(barrier)
-            .await
-            .context("wait completion")
+        if let Some(barrier) = barrier {
+            Self::wait_completion0(barrier).await?;
+        }
+        Ok(())
     }
 
     /// Adds a gc blocking reason for this timeline if one does not exist already.
@@ -873,12 +886,7 @@ impl RemoteTimelineClient {
             let upload_queue = guard.initialized_mut()?;
 
             if let index::GcBlockingReason::DetachAncestor = reason {
-                if !upload_queue
-                    .clean
-                    .0
-                    .lineage
-                    .is_detached_from_original_ancestor()
-                {
+                if !upload_queue.clean.0.lineage.is_detached_from_ancestor() {
                     drop(guard);
                     panic!("cannot complete timeline_ancestor_detach while not detached");
                 }

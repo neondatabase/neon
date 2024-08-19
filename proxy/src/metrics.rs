@@ -252,7 +252,7 @@ impl Drop for HttpEndpointPoolsGuard<'_> {
 }
 
 impl HttpEndpointPools {
-    pub fn guard(&self) -> HttpEndpointPoolsGuard {
+    pub fn guard(&self) -> HttpEndpointPoolsGuard<'_> {
         self.http_pool_endpoints_registered_total.inc();
         HttpEndpointPoolsGuard {
             dec: &self.http_pool_endpoints_unregistered_total,
