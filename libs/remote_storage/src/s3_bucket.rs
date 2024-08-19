@@ -657,13 +657,15 @@ impl RemoteStorage for S3Bucket {
                 );
 
                 return Err(DownloadError::Other(
-                    anyhow::Error::new(e).context("download s3 object"),
+                    anyhow::Error::new(e).context("s3 head object"),
                 ));
             }
         };
 
         let (Some(last_modified), Some(size)) = (data.last_modified, data.content_length) else {
-            return Err(DownloadError::Other(anyhow!("foobar")))?;
+            return Err(DownloadError::Other(anyhow!(
+                "head_object doesn't contain last_modified or content_length"
+            )))?;
         };
         Ok(ListingObject {
             key: key.to_owned(),
