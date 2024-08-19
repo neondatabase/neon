@@ -451,7 +451,7 @@ impl InMemoryLayer {
                     let e = Arc::new(e);
                     for MergedChunkReadDestination { value_read, .. } in dsts {
                         *value_read.value_buf.lock().unwrap() = Err(Arc::clone(&e));
-                        // this will make later reads short-circuit, see top of loop body
+                        // this will make later reads for the given ValueRead short-circuit, see top of loop body
                     }
                     continue;
                 }
