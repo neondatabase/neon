@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::checks::{list_timeline_blobs_generic, BlobDataParseResult, RemoteTimelineBlobData};
-use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines_generic};
+use crate::checks::{list_timeline_blobs, BlobDataParseResult, RemoteTimelineBlobData};
+use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines};
 use crate::{
-    download_object_to_file, init_remote, init_remote_generic, BucketConfig, NodeKind, RootTarget,
+    download_object_to_file, init_remote, init_remote_s3, BucketConfig, NodeKind, RootTarget,
     TenantShardTimelineId,
 };
 use anyhow::Context;
@@ -36,7 +36,8 @@ impl SnapshotDownloader {
         output_path: Utf8PathBuf,
         concurrency: usize,
     ) -> anyhow::Result<Self> {
-        let (s3_client, s3_root) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
+        let (s3_client, s3_root) =
+            init_remote_s3(bucket_config.clone(), NodeKind::Pageserver).await?;
         Ok(Self {
             s3_client,
             s3_root,
@@ -218,7 +219,7 @@ impl SnapshotDownloader {
 
     pub async fn download(&self) -> anyhow::Result<()> {
         let (remote_client, target) =
-            init_remote_generic(self.bucket_config.clone(), NodeKind::Pageserver).await?;
+            init_remote(self.bucket_config.clone(), NodeKind::Pageserver).await?;
 
         // Generate a stream of TenantShardId
         let shards = stream_tenant_shards(&remote_client, &target, self.tenant_id).await?;
@@ -239,7 +240,7 @@ impl SnapshotDownloader {
 
         for shard in shards.into_iter().filter(|s| s.shard_count == shard_count) {
             // Generate a stream of TenantTimelineId
-            let timelines = stream_tenant_timelines_generic(&remote_client, &target, shard).await?;
+            let timelines = stream_tenant_timelines(&remote_client, &target, shard).await?;
 
             // Generate a stream of S3TimelineBlobData
             async fn load_timeline_index(
@@ -247,7 +248,7 @@ impl SnapshotDownloader {
                 target: &RootTarget,
                 ttid: TenantShardTimelineId,
             ) -> anyhow::Result<(TenantShardTimelineId, RemoteTimelineBlobData)> {
-                let data = list_timeline_blobs_generic(remote_client, ttid, target).await?;
+                let data = list_timeline_blobs(remote_client, ttid, target).await?;
                 Ok((ttid, data))
             }
             let timelines =
