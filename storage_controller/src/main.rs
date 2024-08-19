@@ -47,6 +47,9 @@ struct Cli {
     #[arg(long)]
     control_plane_jwt_token: Option<String>,
 
+    #[arg(long)]
+    peer_jwt_token: Option<String>,
+
     /// URL to control plane compute notification endpoint
     #[arg(long)]
     compute_hook_url: Option<String>,
@@ -126,18 +129,19 @@ struct Secrets {
     public_key: Option<JwtAuth>,
     jwt_token: Option<String>,
     control_plane_jwt_token: Option<String>,
+    peer_jwt_token: Option<String>,
 }
 
 impl Secrets {
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
     const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
     const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
+    const PEER_JWT_TOKEN_ENV: &'static str = "PEER_JWT_TOKEN";
     const PUBLIC_KEY_ENV: &'static str = "PUBLIC_KEY";
 
     /// Load secrets from, in order of preference:
     /// - CLI args if database URL is provided on the CLI
     /// - Environment variables if DATABASE_URL is set.
-    /// - AWS Secrets Manager secrets
     async fn load(args: &Cli) -> anyhow::Result<Self> {
         let Some(database_url) =
             Self::load_secret(&args.database_url, Self::DATABASE_URL_ENV).await
@@ -159,13 +163,15 @@ impl Secrets {
             control_plane_jwt_token: Self::load_secret(
                 &args.control_plane_jwt_token,
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
-            )
+            ).await,
+            peer_jwt_token: Self::load_secret(&args.peer_jwt_token, Self::PEER_JWT_TOKEN_ENV)
             .await,
         };
 
         Ok(this)
     }
 
+    // TODO: de-async
     async fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
         if let Some(v) = cli {
             Some(v.clone())
