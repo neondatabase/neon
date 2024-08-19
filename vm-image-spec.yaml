@@ -312,6 +312,22 @@ files:
         query: |
           SELECT checkpoints_timed FROM pg_stat_bgwriter;
 
+      - metric_name: compute_logical_snapshot_files
+        type: guage
+        help: 'Number of snapshot files in pg_logical/snapshot'
+        key_labels:
+          - tenant_id
+          - timeline_id
+        values: [num_logical_snapshot_files]
+        query: |
+          SELECT
+            (SELECT setting FROM pg_settings WHERE name = 'neon.tenant_id') AS tenant_id,
+            (SELECT setting FROM pg_settings WHERE name = 'neon.timeline_id') AS timeline_id,
+            -- Postgres creates temporary snapshot files of the form %X-%X.snap.%d.tmp. These
+            -- temporary snapshot files are renamed to the actual snapshot files after they are
+            -- completely built. We only WAL-log the completely built snapshot files.
+            (SELECT COUNT(*) FROM pg_ls_logicalsnapdir() WHERE name LIKE '%.snap') AS num_logical_snapshot_files;
+
       # In all the below metrics, we cast LSNs to floats because Prometheus only supports floats.
       # It's probably fine because float64 can store integers from -2^53 to +2^53 exactly.
 
