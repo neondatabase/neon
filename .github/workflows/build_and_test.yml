@@ -985,10 +985,10 @@ jobs:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
             gh workflow --repo neondatabase/azure run deploy.yml -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=false \
               -f deployProxy=false \
               -f deployStorage=true \
@@ -998,14 +998,14 @@ jobs:
               -f dockerTag=${{needs.tag.outputs.build-tag}} \
               -f deployPreprodRegion=true
 
-            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-prod.yml --ref main \
               -f deployStorage=true \
               -f deployStorageBroker=true \
               -f deployStorageController=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=true \
               -f deployProxy=true \
               -f deployStorage=false \
@@ -1015,7 +1015,7 @@ jobs:
               -f dockerTag=${{needs.tag.outputs.build-tag}} \
               -f deployPreprodRegion=true
 
-            gh workflow --repo neondatabase/aws run deploy-proxy-prod.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-proxy-prod.yml --ref main \
               -f deployPgSniRouter=true \
               -f deployProxy=true \
               -f branch=main \

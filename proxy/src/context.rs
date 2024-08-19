@@ -166,7 +166,7 @@ impl RequestMonitoring {
     pub fn set_project(&self, x: MetricsAuxInfo) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         if this.endpoint_id.is_none() {
-            this.set_endpoint_id(x.endpoint_id.as_str().into())
+            this.set_endpoint_id(x.endpoint_id.as_str().into());
         }
         this.branch = Some(x.branch_id);
         this.project = Some(x.project_id);
@@ -260,7 +260,7 @@ impl RequestMonitoring {
             .cold_start_info
     }
 
-    pub fn latency_timer_pause(&self, waiting_for: Waiting) -> LatencyTimerPause {
+    pub fn latency_timer_pause(&self, waiting_for: Waiting) -> LatencyTimerPause<'_> {
         LatencyTimerPause {
             ctx: self,
             start: tokio::time::Instant::now(),
@@ -273,7 +273,7 @@ impl RequestMonitoring {
             .try_lock()
             .expect("should not deadlock")
             .latency_timer
-            .success()
+            .success();
     }
 }
 
@@ -328,7 +328,7 @@ impl RequestMonitoringInner {
     fn has_private_peer_addr(&self) -> bool {
         match self.peer_addr {
             IpAddr::V4(ip) => ip.is_private(),
-            _ => false,
+            IpAddr::V6(_) => false,
         }
     }
 
