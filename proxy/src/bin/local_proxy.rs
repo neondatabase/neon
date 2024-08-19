@@ -7,7 +7,7 @@ use proxy::{
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
     console::locks::ApiLocks,
     http::health_server::AppMetrics,
-    metrics::Metrics,
+    metrics::{Metrics, ThreadPoolMetrics},
     rate_limiter::{BucketRateLimiter, EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo},
     scram::threadpool::ThreadPool,
     serverless::{self, cancel_set::CancelSet, GlobalConnPoolOptions},
@@ -32,25 +32,9 @@ struct LocalProxyCliArgs {
     /// listen for incoming metrics connections on ip:port
     #[clap(long, default_value = "127.0.0.1:7001")]
     metrics: String,
-    /// listen for incoming compute_ctl connections on ip:port
-    #[clap(long, default_value = "127.0.0.1:7000")]
-    ctl: String,
     /// listen for incoming http connections on ip:port
     #[clap(long)]
     http: String,
-    /// path to TLS key for client postgres connections
-    ///
-    /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
-    #[clap(short = 'k', long, alias = "ssl-key")]
-    tls_key: Option<String>,
-    /// path to TLS cert for client postgres connections
-    ///
-    /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
-    #[clap(short = 'c', long, alias = "ssl-cert")]
-    tls_cert: Option<String>,
-    /// path to directory with TLS certificates for client postgres connections
-    #[clap(long)]
-    certs_dir: Option<String>,
     /// timeout for the TLS handshake
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     handshake_timeout: tokio::time::Duration,
@@ -105,6 +89,8 @@ async fn main() -> anyhow::Result<()> {
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
+    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
+
     info!("Version: {GIT_VERSION}");
     info!("Build_tag: {BUILD_TAG}");
     let neon_metrics = ::metrics::NeonMetrics::new(::metrics::BuildInfo {
@@ -125,7 +111,6 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics_listener = TcpListener::bind(args.metrics).await?.into_std()?;
     let http_listener = TcpListener::bind(args.http).await?;
-    let _ctl_listener = TcpListener::bind(args.ctl).await?;
     let shutdown = CancellationToken::new();
 
     // todo: should scale with CU
@@ -192,7 +177,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         accept_websockets: false,
         pool_options: GlobalConnPoolOptions {
             gc_epoch: Duration::from_secs(60),
-            pool_shards: 1,
+            pool_shards: 2,
             idle_timeout: args.sql_over_http.sql_over_http_idle_timeout,
             opt_in: false,
 
