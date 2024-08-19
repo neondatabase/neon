@@ -736,7 +736,7 @@ mod tests {
                 while let Some(r) = s.next().await {
                     tx.send(r).unwrap();
                 }
-                time::sleep(time::Duration::from_secs(70)).await
+                time::sleep(time::Duration::from_secs(70)).await;
             }
         });
 
