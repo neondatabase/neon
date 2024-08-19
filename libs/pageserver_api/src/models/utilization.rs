@@ -50,6 +50,8 @@ fn unity_percent() -> Percent {
     Percent::new(0).unwrap()
 }
 
+pub type RawScore = u64;
+
 impl PageserverUtilization {
     const UTILIZATION_FULL: u64 = 1000000;
 
@@ -62,7 +64,7 @@ impl PageserverUtilization {
     /// - Negative values are forbidden
     /// - Values over UTILIZATION_FULL indicate an overloaded node, which may show degraded performance due to
     ///   layer eviction.
-    pub fn score(&self) -> u64 {
+    pub fn score(&self) -> RawScore {
         let disk_usable_capacity = ((self.disk_usage_bytes + self.free_space_bytes)
             * self.disk_usable_pct.get() as u64)
             / 100;
@@ -74,7 +76,7 @@ impl PageserverUtilization {
         std::cmp::max(disk_utilization_score, shard_utilization_score)
     }
 
-    pub fn cached_score(&mut self) -> u64 {
+    pub fn cached_score(&mut self) -> RawScore {
         match self.utilization_score {
             None => {
                 let s = self.score();
@@ -83,6 +85,12 @@ impl PageserverUtilization {
             }
             Some(s) => s,
         }
+    }
+
+    /// If a node is currently hosting more work than it can comfortably handle.  This does not indicate that
+    /// it will fail, but it is a strong signal that more work should not be added unless there is no alternative.
+    pub fn is_overloaded(score: RawScore) -> bool {
+        score > Self::UTILIZATION_FULL
     }
 
     pub fn adjust_shard_count_max(&mut self, shard_count: u32) {

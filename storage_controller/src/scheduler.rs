@@ -439,6 +439,19 @@ impl Scheduler {
             })
             .collect();
 
+        // Exclude nodes whose utilization is critically high, if there are alternatives available.  This will
+        // cause us to violate affinity rules if it is necessary to avoid critically overloading nodes: for example
+        // we may place shards in the same tenant together on the same pageserver if all other pageservers are
+        // overloaded.
+        let non_overloaded_scores = scores
+            .iter()
+            .filter(|i| !PageserverUtilization::is_overloaded(i.2))
+            .copied()
+            .collect::<Vec<_>>();
+        if !non_overloaded_scores.is_empty() {
+            scores = non_overloaded_scores;
+        }
+
         // Sort by, in order of precedence:
         //  1st: Affinity score.  We should never pick a higher-score node if a lower-score node is available
         //  2nd: Utilization score (this combines shard count and disk utilization)
