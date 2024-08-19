@@ -49,7 +49,6 @@ impl TimelineAnalysis {
 
 pub(crate) async fn branch_cleanup_and_check_errors(
     remote_client: &GenericRemoteStorage,
-    _target: &RootTarget,
     id: &TenantShardTimelineId,
     tenant_objects: &mut TenantObjectListing,
     s3_active_branch: Option<&BranchData>,

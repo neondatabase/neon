@@ -192,7 +192,6 @@ pub async fn scan_pageserver_metadata(
                 // reference counts for layers across the tenant.
                 let analysis = branch_cleanup_and_check_errors(
                     remote_client,
-                    target,
                     &ttid,
                     &mut tenant_objects,
                     None,
