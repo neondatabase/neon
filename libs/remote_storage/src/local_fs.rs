@@ -445,6 +445,20 @@ impl RemoteStorage for LocalFs {
         }
     }
 
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        _cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        let target_file_path = key.with_base(&self.storage_root);
+        let metadata = file_metadata(&target_file_path).await?;
+        Ok(ListingObject {
+            key: key.clone(),
+            last_modified: metadata.modified()?,
+            size: metadata.len(),
+        })
+    }
+
     async fn upload(
         &self,
         data: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync,

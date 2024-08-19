@@ -24,7 +24,7 @@ impl<C: Cache> Cache for &C {
     type LookupInfo<Key> = C::LookupInfo<Key>;
 
     fn invalidate(&self, info: &Self::LookupInfo<Self::Key>) {
-        C::invalidate(self, info)
+        C::invalidate(self, info);
     }
 }
 

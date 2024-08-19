@@ -21,7 +21,6 @@ pub struct EphemeralFile {
 }
 
 mod page_caching;
-pub(crate) use page_caching::PrewarmOnWrite as PrewarmPageCacheOnWrite;
 mod zero_padded_read_write;
 
 impl EphemeralFile {
@@ -52,12 +51,10 @@ impl EphemeralFile {
         )
         .await?;
 
-        let prewarm = conf.l0_flush.prewarm_on_write();
-
         Ok(EphemeralFile {
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
-            rw: page_caching::RW::new(file, prewarm, gate_guard),
+            rw: page_caching::RW::new(file, gate_guard),
         })
     }
 

@@ -188,6 +188,11 @@ async fn check_timeline(
     // we need files, so unset it.
     timeline_dir_target.delimiter = String::new();
 
+    let prefix_str = &timeline_dir_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&timeline_dir_target.prefix_in_bucket);
+
     let mut stream = std::pin::pin!(stream_listing_generic(remote_client, &timeline_dir_target));
     while let Some(obj) = stream.next().await {
         let (key, _obj) = obj?;
@@ -195,7 +200,7 @@ async fn check_timeline(
         let seg_name = key
             .get_path()
             .as_str()
-            .strip_prefix(&timeline_dir_target.prefix_in_bucket)
+            .strip_prefix(prefix_str)
             .expect("failed to extract segment name");
         expected_segfiles.remove(seg_name);
     }
