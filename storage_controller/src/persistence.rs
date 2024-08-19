@@ -25,6 +25,9 @@ use crate::metrics::{
 };
 use crate::node::Node;
 
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
+
 /// ## What do we store?
 ///
 /// The storage controller service does not store most of its state durably.
@@ -165,6 +168,19 @@ impl Persistence {
                 }
             }
         }
+    }
+
+    /// Execute the diesel migrations that are built into this binary
+    pub async fn migration_run(database_url: &str) -> anyhow::Result<()> {
+        use diesel_migrations::{HarnessWithOutput, MigrationHarness};
+        let mut conn = PgConnection::establish(database_url)?;
+
+        HarnessWithOutput::write_to_stdout(&mut conn)
+            .run_pending_migrations(MIGRATIONS)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        Ok(())
     }
 
     /// Wraps `with_conn` in order to collect latency and error metrics
