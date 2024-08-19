@@ -143,15 +143,14 @@ impl Secrets {
     /// - CLI args if database URL is provided on the CLI
     /// - Environment variables if DATABASE_URL is set.
     async fn load(args: &Cli) -> anyhow::Result<Self> {
-        let Some(database_url) =
-            Self::load_secret(&args.database_url, Self::DATABASE_URL_ENV).await
+        let Some(database_url) = Self::load_secret(&args.database_url, Self::DATABASE_URL_ENV)
         else {
             anyhow::bail!(
                 "Database URL is not set (set `--database-url`, or `DATABASE_URL` environment)"
             )
         };
 
-        let public_key = match Self::load_secret(&args.public_key, Self::PUBLIC_KEY_ENV).await {
+        let public_key = match Self::load_secret(&args.public_key, Self::PUBLIC_KEY_ENV) {
             Some(v) => Some(JwtAuth::from_key(v).context("Loading public key")?),
             None => None,
         };
@@ -159,20 +158,18 @@ impl Secrets {
         let this = Self {
             database_url,
             public_key,
-            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV).await,
+            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV),
             control_plane_jwt_token: Self::load_secret(
                 &args.control_plane_jwt_token,
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
-            ).await,
-            peer_jwt_token: Self::load_secret(&args.peer_jwt_token, Self::PEER_JWT_TOKEN_ENV)
-            .await,
+            ),
+            peer_jwt_token: Self::load_secret(&args.peer_jwt_token, Self::PEER_JWT_TOKEN_ENV),
         };
 
         Ok(this)
     }
 
-    // TODO: de-async
-    async fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
+    fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
         if let Some(v) = cli {
             Some(v.clone())
         } else if let Ok(v) = std::env::var(env_name) {
