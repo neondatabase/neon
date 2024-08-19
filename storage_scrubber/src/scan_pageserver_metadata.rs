@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::checks::{
-    branch_cleanup_and_check_errors, list_timeline_blobs_generic, BlobDataParseResult,
+    branch_cleanup_and_check_errors, list_timeline_blobs, BlobDataParseResult,
     RemoteTimelineBlobData, TenantObjectListing, TimelineAnalysis,
 };
-use crate::metadata_stream::{stream_tenant_timelines_generic, stream_tenants_generic};
-use crate::{init_remote_generic, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
+use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::remote_layer_path;
 use pageserver_api::controller_api::MetadataHealthUpdateRequest;
@@ -120,10 +120,10 @@ pub async fn scan_pageserver_metadata(
     bucket_config: BucketConfig,
     tenant_ids: Vec<TenantShardId>,
 ) -> anyhow::Result<MetadataSummary> {
-    let (remote_client, target) = init_remote_generic(bucket_config, NodeKind::Pageserver).await?;
+    let (remote_client, target) = init_remote(bucket_config, NodeKind::Pageserver).await?;
 
     let tenants = if tenant_ids.is_empty() {
-        futures::future::Either::Left(stream_tenants_generic(&remote_client, &target))
+        futures::future::Either::Left(stream_tenants(&remote_client, &target))
     } else {
         futures::future::Either::Right(futures::stream::iter(tenant_ids.into_iter().map(Ok)))
     };
@@ -133,7 +133,7 @@ pub async fn scan_pageserver_metadata(
     const CONCURRENCY: usize = 32;
 
     // Generate a stream of TenantTimelineId
-    let timelines = tenants.map_ok(|t| stream_tenant_timelines_generic(&remote_client, &target, t));
+    let timelines = tenants.map_ok(|t| stream_tenant_timelines(&remote_client, &target, t));
     let timelines = timelines.try_buffered(CONCURRENCY);
     let timelines = timelines.try_flatten();
 
@@ -143,7 +143,7 @@ pub async fn scan_pageserver_metadata(
         target: &RootTarget,
         ttid: TenantShardTimelineId,
     ) -> anyhow::Result<(TenantShardTimelineId, RemoteTimelineBlobData)> {
-        let data = list_timeline_blobs_generic(remote_client, ttid, target).await?;
+        let data = list_timeline_blobs(remote_client, ttid, target).await?;
         Ok((ttid, data))
     }
     let timelines = timelines.map_ok(|ttid| report_on_timeline(&remote_client, &target, ttid));
