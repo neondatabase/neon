@@ -5,12 +5,39 @@ use tokio_util::task::{task_tracker::TaskTrackerToken, TaskTracker};
 /// Can be cloned, moved and kept around in futures as "guard objects".
 #[derive(Clone)]
 pub struct Completion {
-    _token: TaskTrackerToken,
+    token: TaskTrackerToken,
+}
+
+impl std::fmt::Debug for Completion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Completion")
+            .field("siblings", &self.token.task_tracker().len())
+            .finish()
+    }
+}
+
+impl Completion {
+    /// Returns true if this completion is associated with the given barrier.
+    pub fn blocks(&self, barrier: &Barrier) -> bool {
+        TaskTracker::ptr_eq(self.token.task_tracker(), &barrier.0)
+    }
+
+    pub fn barrier(&self) -> Barrier {
+        Barrier(self.token.task_tracker().clone())
+    }
 }
 
 /// Barrier will wait until all clones of [`Completion`] have been dropped.
 #[derive(Clone)]
 pub struct Barrier(TaskTracker);
+
+impl std::fmt::Debug for Barrier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Barrier")
+            .field("remaining", &self.0.len())
+            .finish()
+    }
+}
 
 impl Default for Barrier {
     fn default() -> Self {
@@ -51,5 +78,5 @@ pub fn channel() -> (Completion, Barrier) {
     tracker.close();
 
     let token = tracker.token();
-    (Completion { _token: token }, Barrier(tracker))
+    (Completion { token }, Barrier(tracker))
 }

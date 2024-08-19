@@ -116,7 +116,7 @@ Index versions: {version_summary}
 }
 
 /// Scan the pageserver metadata in an S3 bucket, reporting errors and statistics.
-pub async fn scan_metadata(
+pub async fn scan_pageserver_metadata(
     bucket_config: BucketConfig,
     tenant_ids: Vec<TenantShardId>,
 ) -> anyhow::Result<MetadataSummary> {

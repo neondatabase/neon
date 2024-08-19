@@ -1,13 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::checks::{list_timeline_blobs_generic, BlobDataParseResult};
 use crate::metadata_stream::{stream_tenant_timelines_generic, stream_tenants_generic};
-use crate::{
-    init_remote_generic, BucketConfig, ControllerClientConfig, NodeKind, RootTarget,
-    TenantShardTimelineId,
-};
+use crate::{init_remote_generic, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
@@ -118,7 +115,7 @@ use refs::AncestorRefs;
 // - Are there any refs to ancestor shards' layers?
 #[derive(Default)]
 struct TenantRefAccumulator {
-    shards_seen: HashMap<TenantId, Vec<ShardIndex>>,
+    shards_seen: HashMap<TenantId, BTreeSet<ShardIndex>>,
 
     // For each shard that has refs to an ancestor's layers, the set of ancestor layers referred to
     ancestor_ref_shards: AncestorRefs,
@@ -131,7 +128,7 @@ impl TenantRefAccumulator {
             .shards_seen
             .entry(ttid.tenant_shard_id.tenant_id)
             .or_default())
-        .push(this_shard_idx);
+        .insert(this_shard_idx);
 
         let mut ancestor_refs = Vec::new();
         for (layer_name, layer_metadata) in &index_part.layer_metadata {
@@ -155,7 +152,7 @@ impl TenantRefAccumulator {
         summary: &mut GcSummary,
     ) -> (Vec<TenantShardId>, AncestorRefs) {
         let mut ancestors_to_gc = Vec::new();
-        for (tenant_id, mut shard_indices) in self.shards_seen {
+        for (tenant_id, shard_indices) in self.shards_seen {
             // Find the highest shard count
             let latest_count = shard_indices
                 .iter()
@@ -163,6 +160,7 @@ impl TenantRefAccumulator {
                 .max()
                 .expect("Always at least one shard");
 
+            let mut shard_indices = shard_indices.iter().collect::<Vec<_>>();
             let (mut latest_shards, ancestor_shards) = {
                 let at =
                     itertools::partition(&mut shard_indices, |i| i.shard_count == latest_count);
@@ -175,7 +173,7 @@ impl TenantRefAccumulator {
             // to scan the S3 bucket halfway through a shard split.
             if latest_shards.len() != latest_count.count() as usize {
                 // This should be extremely rare, so we warn on it.
-                tracing::warn!(%tenant_id, "Missed some shards at count {:?}", latest_count);
+                tracing::warn!(%tenant_id, "Missed some shards at count {:?}: {latest_shards:?}", latest_count);
                 continue;
             }
 
@@ -213,7 +211,7 @@ impl TenantRefAccumulator {
                         .iter()
                         .map(|s| s.tenant_shard_id.to_index())
                         .collect();
-                    if controller_indices != latest_shards {
+                    if !controller_indices.iter().eq(latest_shards.iter().copied()) {
                         tracing::info!(%tenant_id, "Latest shards seen in S3 ({latest_shards:?}) don't match controller state ({controller_indices:?})");
                         continue;
                     }
@@ -452,8 +450,8 @@ async fn gc_ancestor(
 /// This type of GC is not necessary for correctness: rather it serves to reduce wasted storage capacity, and
 /// make sure that object listings don't get slowed down by large numbers of garbage objects.
 pub async fn pageserver_physical_gc(
-    bucket_config: BucketConfig,
-    controller_client_conf: Option<ControllerClientConfig>,
+    bucket_config: &BucketConfig,
+    controller_client: Option<&control_api::Client>,
     tenant_shard_ids: Vec<TenantShardId>,
     min_age: Duration,
     mode: GcMode,
@@ -537,7 +535,7 @@ pub async fn pageserver_physical_gc(
     }
 
     // Execute cross-shard GC, using the accumulator's full view of all the shards built in the per-shard GC
-    let Some(controller_client) = controller_client_conf.map(|c| c.build_client()) else {
+    let Some(client) = controller_client else {
         tracing::info!("Skipping ancestor layer GC, because no `--controller-api` was specified");
         return Ok(summary);
     };
@@ -546,7 +544,7 @@ pub async fn pageserver_physical_gc(
         .unwrap()
         .into_inner()
         .unwrap()
-        .into_gc_ancestors(&controller_client, &mut summary)
+        .into_gc_ancestors(client, &mut summary)
         .await;
 
     for ancestor_shard in ancestor_shards {

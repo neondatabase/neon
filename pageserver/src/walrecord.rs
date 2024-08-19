@@ -1018,7 +1018,7 @@ pub fn decode_wal_record(
                     );
 
                     let blk_img_is_compressed =
-                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)?;
+                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version);
 
                     if blk_img_is_compressed {
                         debug!("compressed block image , pg_version = {}", pg_version);

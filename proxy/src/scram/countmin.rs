@@ -98,8 +98,6 @@ mod tests {
         // q% of counts will be within p of the actual value
         let mut sketch = CountMinSketch::with_params(p / N as f64, 1.0 - q);
 
-        dbg!(sketch.buckets.len());
-
         // insert a bunch of entries in a random order
         let mut ids2 = ids.clone();
         while !ids2.is_empty() {

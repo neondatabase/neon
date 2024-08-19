@@ -1,3 +1,4 @@
+use hyper::Uri;
 use std::{
     borrow::Cow,
     cmp::Ordering,
@@ -16,8 +17,12 @@ use crate::{
     compute_hook::NotifyError,
     drain_utils::{self, TenantShardDrain, TenantShardIterator},
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
-    metrics::LeadershipStatusGroup,
-    persistence::{AbortShardSplitStatus, MetadataHealthPersistence, TenantFilter},
+    metrics,
+    peer_client::{GlobalObservedState, PeerClient},
+    persistence::{
+        AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
+        TenantFilter,
+    },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
     tenant_shard::{
@@ -83,7 +88,6 @@ use crate::{
         ReconcilerWaiter, TenantShard,
     },
 };
-use serde::{Deserialize, Serialize};
 
 pub mod chaos_injector;
 
@@ -140,7 +144,15 @@ enum NodeOperations {
 /// Allowed transitions are:
 /// 1. Leader -> SteppedDown
 /// 2. Candidate -> Leader
-#[derive(Copy, Clone, strum_macros::Display, measured::FixedCardinalityLabel)]
+#[derive(
+    Eq,
+    PartialEq,
+    Copy,
+    Clone,
+    strum_macros::Display,
+    strum_macros::EnumIter,
+    measured::FixedCardinalityLabel,
+)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum LeadershipStatus {
     /// This is the steady state where the storage controller can produce
@@ -226,22 +238,12 @@ impl ServiceState {
         tenants: BTreeMap<TenantShardId, TenantShard>,
         scheduler: Scheduler,
         delayed_reconcile_rx: tokio::sync::mpsc::Receiver<TenantShardId>,
+        initial_leadership_status: LeadershipStatus,
     ) -> Self {
-        let status = &crate::metrics::METRICS_REGISTRY
-            .metrics_group
-            .storage_controller_leadership_status;
-
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::Leader,
-            },
-            1,
-        );
+        metrics::update_leadership_status(initial_leadership_status);
 
         Self {
-            // TODO: Starting up as Leader is a transient state. Once we enable rolling
-            // upgrades on the k8s side, we should start up as Candidate.
-            leadership_status: LeadershipStatus::Leader,
+            leadership_status: initial_leadership_status,
             tenants,
             nodes: Arc::new(nodes),
             scheduler,
@@ -266,29 +268,12 @@ impl ServiceState {
 
     fn step_down(&mut self) {
         self.leadership_status = LeadershipStatus::SteppedDown;
+        metrics::update_leadership_status(self.leadership_status);
+    }
 
-        let status = &crate::metrics::METRICS_REGISTRY
-            .metrics_group
-            .storage_controller_leadership_status;
-
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::SteppedDown,
-            },
-            1,
-        );
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::Leader,
-            },
-            0,
-        );
-        status.set(
-            LeadershipStatusGroup {
-                status: LeadershipStatus::Candidate,
-            },
-            0,
-        );
+    fn become_leader(&mut self) {
+        self.leadership_status = LeadershipStatus::Leader;
+        metrics::update_leadership_status(self.leadership_status);
     }
 }
 
@@ -332,6 +317,12 @@ pub struct Config {
     // by more than the configured amount, then the secondary is not
     // upgraded to primary.
     pub max_secondary_lag_bytes: Option<u64>,
+
+    pub address_for_peers: Option<Uri>,
+
+    pub start_as_candidate: bool,
+
+    pub http_service_port: i32,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -499,10 +490,6 @@ pub(crate) enum ReconcileResultRequest {
     Stop,
 }
 
-// TODO: move this into the storcon peer client when that gets added
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub(crate) struct GlobalObservedState(HashMap<TenantShardId, ObservedState>);
-
 impl Service {
     pub fn get_config(&self) -> &Config {
         &self.config
@@ -513,15 +500,12 @@ impl Service {
     #[instrument(skip_all)]
     async fn startup_reconcile(
         self: &Arc<Service>,
+        current_leader: Option<ControllerPersistence>,
+        leader_step_down_state: Option<GlobalObservedState>,
         bg_compute_notify_result_tx: tokio::sync::mpsc::Sender<
             Result<(), (TenantShardId, NotifyError)>,
         >,
     ) {
-        // For all tenant shards, a vector of observed states on nodes (where None means
-        // indeterminate, same as in [`ObservedStateLocation`])
-        let mut observed: HashMap<TenantShardId, Vec<(NodeId, Option<LocationConfig>)>> =
-            HashMap::new();
-
         // Startup reconciliation does I/O to other services: whether they
         // are responsive or not, we should aim to finish within our deadline, because:
         // - If we don't, a k8s readiness hook watching /ready will kill us.
@@ -535,26 +519,26 @@ impl Service {
             .checked_add(STARTUP_RECONCILE_TIMEOUT / 2)
             .expect("Reconcile timeout is a modest constant");
 
+        let observed = if let Some(state) = leader_step_down_state {
+            tracing::info!(
+                "Using observed state received from leader at {}",
+                current_leader.as_ref().unwrap().address
+            );
+
+            state
+        } else {
+            self.build_global_observed_state(node_scan_deadline).await
+        };
+
         // Accumulate a list of any tenant locations that ought to be detached
         let mut cleanup = Vec::new();
 
-        let node_listings = self.scan_node_locations(node_scan_deadline).await;
-        // Send initial heartbeat requests to nodes that replied to the location listing above.
-        let nodes_online = self.initial_heartbeat_round(node_listings.keys()).await;
-
-        for (node_id, list_response) in node_listings {
-            let tenant_shards = list_response.tenant_shards;
-            tracing::info!(
-                "Received {} shard statuses from pageserver {}, setting it to Active",
-                tenant_shards.len(),
-                node_id
-            );
-
-            for (tenant_shard_id, conf_opt) in tenant_shards {
-                let shard_observations = observed.entry(tenant_shard_id).or_default();
-                shard_observations.push((node_id, conf_opt));
-            }
-        }
+        // Send initial heartbeat requests to all nodes loaded from the database
+        let all_nodes = {
+            let locked = self.inner.read().unwrap();
+            locked.nodes.clone()
+        };
+        let nodes_online = self.initial_heartbeat_round(all_nodes.keys()).await;
 
         // List of tenants for which we will attempt to notify compute of their location at startup
         let mut compute_notifications = Vec::new();
@@ -577,17 +561,16 @@ impl Service {
             }
             *nodes = Arc::new(new_nodes);
 
-            for (tenant_shard_id, shard_observations) in observed {
-                for (node_id, observed_loc) in shard_observations {
-                    let Some(tenant_shard) = tenants.get_mut(&tenant_shard_id) else {
-                        cleanup.push((tenant_shard_id, node_id));
-                        continue;
-                    };
-                    tenant_shard
-                        .observed
-                        .locations
-                        .insert(node_id, ObservedStateLocation { conf: observed_loc });
-                }
+            for (tenant_shard_id, observed_state) in observed.0 {
+                let Some(tenant_shard) = tenants.get_mut(&tenant_shard_id) else {
+                    for node_id in observed_state.locations.keys() {
+                        cleanup.push((tenant_shard_id, *node_id));
+                    }
+
+                    continue;
+                };
+
+                tenant_shard.observed = observed_state;
             }
 
             // Populate each tenant's intent state
@@ -620,6 +603,28 @@ impl Service {
 
             tenants.len()
         };
+
+        // Before making any obeservable changes to the cluster, persist self
+        // as leader in database and memory.
+        if let Some(address_for_peers) = &self.config.address_for_peers {
+            // TODO: `address-for-peers` can become a mandatory cli arg
+            // after we update the k8s setup
+            let proposed_leader = ControllerPersistence {
+                address: address_for_peers.to_string(),
+                started_at: chrono::Utc::now(),
+            };
+
+            if let Err(err) = self
+                .persistence
+                .update_leader(current_leader, proposed_leader)
+                .await
+            {
+                tracing::error!("Failed to persist self as leader: {err}. Aborting start-up ...");
+                std::process::exit(1);
+            }
+        }
+
+        self.inner.write().unwrap().become_leader();
 
         // TODO: if any tenant's intent now differs from its loaded generation_pageserver, we should clear that
         // generation_pageserver in the database.
@@ -784,6 +789,31 @@ impl Service {
         }
 
         node_results
+    }
+
+    async fn build_global_observed_state(&self, deadline: Instant) -> GlobalObservedState {
+        let node_listings = self.scan_node_locations(deadline).await;
+        let mut observed = GlobalObservedState::default();
+
+        for (node_id, location_confs) in node_listings {
+            tracing::info!(
+                "Received {} shard statuses from pageserver {}",
+                location_confs.tenant_shards.len(),
+                node_id
+            );
+
+            for (tid, location_conf) in location_confs.tenant_shards {
+                let entry = observed.0.entry(tid).or_default();
+                entry.locations.insert(
+                    node_id,
+                    ObservedStateLocation {
+                        conf: location_conf,
+                    },
+                );
+            }
+        }
+
+        observed
     }
 
     /// Used during [`Self::startup_reconcile`]: detach a list of unknown-to-us tenants from pageservers.
@@ -1264,12 +1294,20 @@ impl Service {
             config.max_warming_up_interval,
             cancel.clone(),
         );
+
+        let initial_leadership_status = if config.start_as_candidate {
+            LeadershipStatus::Candidate
+        } else {
+            LeadershipStatus::Leader
+        };
+
         let this = Arc::new(Self {
             inner: Arc::new(std::sync::RwLock::new(ServiceState::new(
                 nodes,
                 tenants,
                 scheduler,
                 delayed_reconcile_rx,
+                initial_leadership_status,
             ))),
             config: config.clone(),
             persistence,
@@ -1338,7 +1376,35 @@ impl Service {
                     return;
                 };
 
-                this.startup_reconcile(bg_compute_notify_result_tx).await;
+                let leadership_status = this.inner.read().unwrap().get_leadership_status();
+                let leader = match this.get_leader().await {
+                    Ok(ok) => ok,
+                    Err(err) => {
+                        tracing::error!(
+                            "Failed to query database for current leader: {err}. Aborting start-up ..."
+                        );
+                        std::process::exit(1);
+                    }
+                };
+
+                let leader_step_down_state = match leadership_status {
+                    LeadershipStatus::Candidate => {
+                        if let Some(ref leader) = leader {
+                            this.request_step_down(leader).await
+                        } else {
+                            tracing::info!(
+                                "No leader found to request step down from. Will build observed state."
+                            );
+                            None
+                        }
+                    }
+                    LeadershipStatus::Leader => None,
+                    LeadershipStatus::SteppedDown => unreachable!(),
+                };
+
+                this.startup_reconcile(leader, leader_step_down_state, bg_compute_notify_result_tx)
+                    .await;
+
                 drop(startup_completion);
             }
         });
@@ -2937,6 +3003,7 @@ impl Service {
             );
 
             let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+
             client
                 .timeline_detach_ancestor(tenant_shard_id, timeline_id)
                 .await
@@ -2953,7 +3020,13 @@ impl Service {
                         Error::ApiError(StatusCode::BAD_REQUEST, msg) => {
                             ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
                         }
-                        // rest can be mapped
+                        Error::ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg) => {
+                            // avoid turning these into conflicts to remain compatible with
+                            // pageservers, 500 errors are sadly retryable with timeline ancestor
+                            // detach
+                            ApiError::InternalServerError(anyhow::anyhow!("{node}: {msg}"))
+                        }
+                        // rest can be mapped as usual
                         other => passthrough_api_error(&node, other),
                     }
                 })
@@ -2987,6 +3060,8 @@ impl Service {
                 ?mismatching,
                 "shards returned different results"
             );
+
+            return Err(ApiError::InternalServerError(anyhow::anyhow!("pageservers returned mixed results for ancestor detach; manual intervention is required.")));
         }
 
         Ok(any.1)
@@ -4589,6 +4664,10 @@ impl Service {
             ))
     }
 
+    pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
+        self.persistence.get_leader().await
+    }
+
     pub(crate) async fn node_register(
         &self,
         register_req: NodeRegisterRequest,
@@ -4851,6 +4930,26 @@ impl Service {
         Ok(())
     }
 
+    /// Wrapper around [`Self::node_configure`] which only allows changes while there is no ongoing
+    /// operation for HTTP api.
+    pub(crate) async fn external_node_configure(
+        &self,
+        node_id: NodeId,
+        availability: Option<NodeAvailability>,
+        scheduling: Option<NodeSchedulingPolicy>,
+    ) -> Result<(), ApiError> {
+        {
+            let locked = self.inner.read().unwrap();
+            if let Some(op) = locked.ongoing_operation.as_ref().map(|op| op.operation) {
+                return Err(ApiError::PreconditionFailed(
+                    format!("Ongoing background operation forbids configuring: {op}").into(),
+                ));
+            }
+        }
+
+        self.node_configure(node_id, availability, scheduling).await
+    }
+
     pub(crate) async fn start_node_drain(
         self: &Arc<Self>,
         node_id: NodeId,
@@ -4908,6 +5007,8 @@ impl Service {
                     cancel: cancel.clone(),
                 });
 
+                let span = tracing::info_span!(parent: None, "drain_node", %node_id);
+
                 tokio::task::spawn({
                     let service = self.clone();
                     let cancel = cancel.clone();
@@ -4924,21 +5025,21 @@ impl Service {
                             }
                         }
 
-                        tracing::info!(%node_id, "Drain background operation starting");
+                        tracing::info!("Drain background operation starting");
                         let res = service.drain_node(node_id, cancel).await;
                         match res {
                             Ok(()) => {
-                                tracing::info!(%node_id, "Drain background operation completed successfully");
+                                tracing::info!("Drain background operation completed successfully");
                             }
                             Err(OperationError::Cancelled) => {
-                                tracing::info!(%node_id, "Drain background operation was cancelled");
+                                tracing::info!("Drain background operation was cancelled");
                             }
                             Err(err) => {
-                                tracing::error!(%node_id, "Drain background operation encountered: {err}")
+                                tracing::error!("Drain background operation encountered: {err}")
                             }
                         }
                     }
-                });
+                }.instrument(span));
             }
             NodeSchedulingPolicy::Draining => {
                 return Err(ApiError::Conflict(format!(
@@ -4956,25 +5057,19 @@ impl Service {
     }
 
     pub(crate) async fn cancel_node_drain(&self, node_id: NodeId) -> Result<(), ApiError> {
-        let (node_available, node_policy) = {
+        let node_available = {
             let locked = self.inner.read().unwrap();
             let nodes = &locked.nodes;
             let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
                 anyhow::anyhow!("Node {} not registered", node_id).into(),
             ))?;
 
-            (node.is_available(), node.get_scheduling())
+            node.is_available()
         };
 
         if !node_available {
             return Err(ApiError::ResourceUnavailable(
                 format!("Node {node_id} is currently unavailable").into(),
-            ));
-        }
-
-        if !matches!(node_policy, NodeSchedulingPolicy::Draining) {
-            return Err(ApiError::PreconditionFailed(
-                format!("Node {node_id} has no drain in progress").into(),
             ));
         }
 
@@ -5043,6 +5138,8 @@ impl Service {
                     cancel: cancel.clone(),
                 });
 
+                let span = tracing::info_span!(parent: None, "fill_node", %node_id);
+
                 tokio::task::spawn({
                     let service = self.clone();
                     let cancel = cancel.clone();
@@ -5059,21 +5156,21 @@ impl Service {
                             }
                         }
 
-                        tracing::info!(%node_id, "Fill background operation starting");
+                        tracing::info!("Fill background operation starting");
                         let res = service.fill_node(node_id, cancel).await;
                         match res {
                             Ok(()) => {
-                                tracing::info!(%node_id, "Fill background operation completed successfully");
+                                tracing::info!("Fill background operation completed successfully");
                             }
                             Err(OperationError::Cancelled) => {
-                                tracing::info!(%node_id, "Fill background operation was cancelled");
+                                tracing::info!("Fill background operation was cancelled");
                             }
                             Err(err) => {
-                                tracing::error!(%node_id, "Fill background operation encountered: {err}")
+                                tracing::error!("Fill background operation encountered: {err}")
                             }
                         }
                     }
-                });
+                }.instrument(span));
             }
             NodeSchedulingPolicy::Filling => {
                 return Err(ApiError::Conflict(format!(
@@ -5091,25 +5188,19 @@ impl Service {
     }
 
     pub(crate) async fn cancel_node_fill(&self, node_id: NodeId) -> Result<(), ApiError> {
-        let (node_available, node_policy) = {
+        let node_available = {
             let locked = self.inner.read().unwrap();
             let nodes = &locked.nodes;
             let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
                 anyhow::anyhow!("Node {} not registered", node_id).into(),
             ))?;
 
-            (node.is_available(), node.get_scheduling())
+            node.is_available()
         };
 
         if !node_available {
             return Err(ApiError::ResourceUnavailable(
                 format!("Node {node_id} is currently unavailable").into(),
-            ));
-        }
-
-        if !matches!(node_policy, NodeSchedulingPolicy::Filling) {
-            return Err(ApiError::PreconditionFailed(
-                format!("Node {node_id} has no fill in progress").into(),
             ));
         }
 
@@ -5921,7 +6012,7 @@ impl Service {
                 .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
                 .await;
 
-            failpoint_support::sleep_millis_async!("sleepy-drain-loop");
+            failpoint_support::sleep_millis_async!("sleepy-drain-loop", &cancel);
         }
 
         while !waiters.is_empty() {
@@ -6269,6 +6360,7 @@ impl Service {
 
     pub(crate) async fn step_down(&self) -> GlobalObservedState {
         tracing::info!("Received step down request from peer");
+        failpoint_support::sleep_millis_async!("sleep-on-step-down-handling");
 
         self.inner.write().unwrap().step_down();
         // TODO: would it make sense to have a time-out for this?
@@ -6284,5 +6376,43 @@ impl Service {
         }
 
         global_observed
+    }
+
+    /// Request step down from the currently registered leader in the database
+    ///
+    /// If such an entry is persisted, the success path returns the observed
+    /// state and details of the leader. Otherwise, None is returned indicating
+    /// there is no leader currently.
+    ///
+    /// On failures to query the database or step down error responses the process is killed
+    /// and we rely on k8s to retry.
+    async fn request_step_down(
+        &self,
+        leader: &ControllerPersistence,
+    ) -> Option<GlobalObservedState> {
+        tracing::info!("Sending step down request to {leader:?}");
+
+        // TODO: jwt token
+        let client = PeerClient::new(
+            Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
+            self.config.jwt_token.clone(),
+        );
+        let state = client.step_down(&self.cancel).await;
+        match state {
+            Ok(state) => Some(state),
+            Err(err) => {
+                // TODO: Make leaders periodically update a timestamp field in the
+                // database and, if the leader is not reachable from the current instance,
+                // but inferred as alive from the timestamp, abort start-up. This avoids
+                // a potential scenario in which we have two controllers acting as leaders.
+                tracing::error!(
+                    "Leader ({}) did not respond to step-down request: {}",
+                    leader.address,
+                    err
+                );
+
+                None
+            }
+        }
     }
 }

@@ -98,7 +98,7 @@ impl ConnectionWithCredentialsProvider {
         info!("Establishing a new connection...");
         self.con = None;
         if let Some(f) = self.refresh_token_task.take() {
-            f.abort()
+            f.abort();
         }
         let mut con = self
             .get_client()

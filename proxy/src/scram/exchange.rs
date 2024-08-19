@@ -210,23 +210,23 @@ impl sasl::Mechanism for Exchange<'_> {
     type Output = super::ScramKey;
 
     fn exchange(mut self, input: &str) -> sasl::Result<sasl::Step<Self, Self::Output>> {
-        use {sasl::Step::*, ExchangeState::*};
+        use {sasl::Step, ExchangeState};
         match &self.state {
-            Initial(init) => {
+            ExchangeState::Initial(init) => {
                 match init.transition(self.secret, &self.tls_server_end_point, input)? {
-                    Continue(sent, msg) => {
-                        self.state = SaltSent(sent);
-                        Ok(Continue(self, msg))
+                    Step::Continue(sent, msg) => {
+                        self.state = ExchangeState::SaltSent(sent);
+                        Ok(Step::Continue(self, msg))
                     }
-                    Success(x, _) => match x {},
-                    Failure(msg) => Ok(Failure(msg)),
+                    Step::Success(x, _) => match x {},
+                    Step::Failure(msg) => Ok(Step::Failure(msg)),
                 }
             }
-            SaltSent(sent) => {
+            ExchangeState::SaltSent(sent) => {
                 match sent.transition(self.secret, &self.tls_server_end_point, input)? {
-                    Success(keys, msg) => Ok(Success(keys, msg)),
-                    Continue(x, _) => match x {},
-                    Failure(msg) => Ok(Failure(msg)),
+                    Step::Success(keys, msg) => Ok(Step::Success(keys, msg)),
+                    Step::Continue(x, _) => match x {},
+                    Step::Failure(msg) => Ok(Step::Failure(msg)),
                 }
             }
         }
