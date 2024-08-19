@@ -18,8 +18,8 @@ use utils::http::endpoint::{prometheus_metrics_handler, request_span, ChannelWri
 use utils::http::request::parse_query_param;
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::TimelineCreateRequest;
 use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
+use safekeeper_api::models::{TimelineCreateRequest, TimelineTermBumpRequest};
 use utils::{
     auth::SwappableJwtAuth,
     http::{
@@ -302,12 +302,11 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
 
 /// Force persist control file.
 async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permission(&request, None)?;
-
     let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
     );
+    check_permission(&request, Some(ttid.tenant_id))?;
 
     let tli = GlobalTimelines::get(ttid)?;
     tli.write_shared_state()
@@ -318,6 +317,28 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, ())
+}
+
+/// Make term at least as high as one in request. If one in request is None,
+/// increment current one.
+async fn timeline_term_bump_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let request_data: TimelineTermBumpRequest = json_request(&mut request).await?;
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let response = tli
+        .term_bump(request_data.term)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, response)
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -582,6 +603,10 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
             |r| request_span(r, timeline_checkpoint_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/term_bump",
+            |r| request_span(r, timeline_term_bump_handler),
         )
         .post("/v1/pull_timeline", |r| {
             request_span(r, timeline_pull_handler)

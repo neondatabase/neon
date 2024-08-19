@@ -50,6 +50,19 @@ class SafekeeperMetrics(Metrics):
         ).value
 
 
+@dataclass
+class TermBumpResponse:
+    previous_term: int
+    current_term: int
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> "TermBumpResponse":
+        return TermBumpResponse(
+            previous_term=d["previous_term"],
+            current_term=d["current_term"],
+        )
+
+
 class SafekeeperHttpClient(requests.Session, MetricsGetter):
     HTTPError = requests.HTTPError
 
@@ -114,6 +127,22 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
+
+    def term_bump(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        term: Optional[int],
+    ) -> TermBumpResponse:
+        body = {}
+        if term is not None:
+            body["term"] = term
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/term_bump",
+            json=body,
+        )
+        res.raise_for_status()
+        return TermBumpResponse.from_json(res.json())
 
     def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
