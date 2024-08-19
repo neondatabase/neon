@@ -326,7 +326,7 @@ impl InMemoryLayer {
             offset_in_chunk: u32,
             len: u32,
         }
-        // use of BTreeMap's sorted iterator is critical to esnure value_buf is filled in order
+        // use of BTreeMap's sorted iterator is critical to ensure value_buf is filled in order
         let mut chunk_reads: BTreeMap<u32, Vec<ChunkReadDestination>> = BTreeMap::new();
         for value_read in reads.iter().flat_map(|(_, v)| v.iter()) {
             let ValueRead { pos, len, .. } = value_read;
