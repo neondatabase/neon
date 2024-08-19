@@ -34,6 +34,7 @@ use remote_storage::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use storage_controller_client::control_api;
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -531,11 +532,9 @@ async fn download_object_with_retries_generic(
             }
         };
 
-        match tokio::io::copy_buf(
-            &mut tokio_util::io::StreamReader::new(download.download_stream),
-            &mut buf,
-        )
-        .await
+        match tokio_util::io::StreamReader::new(download.download_stream)
+            .read_to_end(&mut buf)
+            .await
         {
             Ok(bytes_read) => {
                 tracing::debug!("Downloaded {bytes_read} bytes for object {key}");
