@@ -520,9 +520,10 @@ async fn download_object_with_retries_generic(
     remote_client: &GenericRemoteStorage,
     key: &RemotePath,
 ) -> anyhow::Result<Vec<u8>> {
+    let cancel = CancellationToken::new();
     for trial in 0..MAX_RETRIES {
         let mut buf = Vec::new();
-        let download = match remote_client.download(key, &CancellationToken::new()).await {
+        let download = match remote_client.download(key, &cancel).await {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to download object for key {key}: {e}");
