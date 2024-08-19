@@ -9,6 +9,7 @@ self-hosted-runner:
     - aws-arm64-8core
     - aws-arm64-16core
     - aws-arm64-32core
+    - qemu-arm64
 config-variables:
   - BENCHMARK_PROJECT_ID_PUB
   - BENCHMARK_PROJECT_ID_SUB
