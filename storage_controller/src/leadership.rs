@@ -83,7 +83,20 @@ impl Leadership {
     }
 
     async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
-        self.persistence.get_leader().await
+        let res = self.persistence.get_leader().await;
+        if let Err(DatabaseError::Query(diesel::result::Error::DatabaseError(_kind, ref err))) = res
+        {
+            const REL_NOT_FOUND_MSG: &str = "relation \"controllers\" does not exist";
+            if err.message().trim() == REL_NOT_FOUND_MSG {
+                // Special case: if this is a brand new storage controller, migrations will not
+                // have run at this point yet, and, hence, the controllers table does not exist.
+                // Detect this case via the error string (diesel doesn't type it) and allow it.
+                tracing::info!("Detected first storage controller start-up. Allowing missing controllers table ...");
+                return Ok(None);
+            }
+        }
+
+        res
     }
 
     /// Request step down from the currently registered leader in the database
