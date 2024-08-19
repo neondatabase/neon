@@ -355,12 +355,20 @@ impl InMemoryLayer {
     }
 }
 
+/// Offset of a particular Value within a serialized batch.
+struct SerializedBatchOffset {
+    key: CompactKey,
+    lsn: Lsn,
+    /// offset in bytes from the start of the batch's buffer to the Value's serialized size header.
+    offset: u64,
+}
+
 pub struct SerializedBatch {
     /// Blobs serialized in EphemeralFile's native format, ready for passing to [`EphemeralFile::write_raw`].
     pub(crate) raw: Vec<u8>,
 
     /// Index of values in [`Self::raw`], using offsets relative to the start of the buffer.
-    pub(crate) offsets: Vec<(CompactKey, Lsn, u64)>,
+    offsets: Vec<SerializedBatchOffset>,
 
     /// The highest LSN of any value in the batch
     pub(crate) max_lsn: Lsn,
@@ -393,7 +401,7 @@ impl SerializedBatch {
         let buffer_size = batch.iter().map(|i| i.2).sum::<usize>() + 4 * batch.len();
         let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
 
-        let mut offsets: Vec<(CompactKey, Lsn, u64)> = Vec::with_capacity(batch.len());
+        let mut offsets: Vec<SerializedBatchOffset> = Vec::with_capacity(batch.len());
         let mut max_lsn: Lsn = Lsn(0);
         for (key, lsn, val_ser_size, val) in batch {
             let relative_off = cursor.position();
@@ -402,7 +410,11 @@ impl SerializedBatch {
             val.ser_into(&mut cursor)
                 .expect("Writing into in-memory buffer is infallible");
 
-            offsets.push((key, lsn, relative_off));
+            offsets.push(SerializedBatchOffset {
+                key,
+                lsn,
+                offset: relative_off,
+            });
             max_lsn = std::cmp::max(max_lsn, lsn);
         }
 
@@ -500,7 +512,12 @@ impl InMemoryLayer {
                 .await?
         };
 
-        for (key, lsn, relative_off) in serialized_batch.offsets {
+        for SerializedBatchOffset {
+            key,
+            lsn,
+            offset: relative_off,
+        } in serialized_batch.offsets
+        {
             let off = base_off + relative_off;
             let vec_map = inner.index.entry(key).or_default();
             let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
