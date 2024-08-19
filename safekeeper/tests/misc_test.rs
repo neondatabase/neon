@@ -56,7 +56,7 @@ fn test_simple_restart() {
     info!("Sucessfully synced safekeepers at {}", lsn);
 }
 
-// Test runnning a simple schedule, restarting everything a several times.
+// Test running a simple schedule, restarting everything a several times.
 #[test]
 fn test_simple_schedule() -> anyhow::Result<()> {
     let clock = init_logger();

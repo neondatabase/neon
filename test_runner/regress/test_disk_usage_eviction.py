@@ -62,7 +62,7 @@ def test_min_resident_size_override_handling(
     tenant_id, _ = env.neon_cli.create_tenant()
     assert_overrides(tenant_id, config_level_override)
 
-    # Also ensure that specifying the paramter to create_tenant works, in addition to http-level recconfig.
+    # Also ensure that specifying the parameter to create_tenant works, in addition to http-level recconfig.
     tenant_id, _ = env.neon_cli.create_tenant(conf={"min_resident_size_override": "100"})
     assert_config(tenant_id, 100, 100)
     ps_http.set_tenant_config(tenant_id, {})
