@@ -286,12 +286,8 @@ async fn async_main() -> anyhow::Result<()> {
         http_service_port: args.listen.port() as i32,
     };
 
-    // After loading secrets & config, but before starting anything else, apply database migrations
+    // Validate that we can connect to the database
     Persistence::await_connection(&secrets.database_url, args.db_connect_timeout.into()).await?;
-
-    Persistence::migration_run(&secrets.database_url)
-        .await
-        .context("Running database migrations")?;
 
     let persistence = Arc::new(Persistence::new(secrets.database_url));
 

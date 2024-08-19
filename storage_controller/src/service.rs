@@ -334,7 +334,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Connection(_) | DatabaseError::ConnectionPool(_) => {
                 ApiError::ShuttingDown
             }
-            DatabaseError::Logical(reason) => {
+            DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
         }
@@ -1153,7 +1153,15 @@ impl Service {
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
         let (abort_tx, abort_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // TODO: migrate db here
+        let leadership_cancel = CancellationToken::new();
+        let leadership = Leadership::new(persistence.clone(), config.clone(), leadership_cancel);
+        let (leader, leader_step_down_state) = leadership.prologue().await?;
+
+        // Apply the migrations **after** the current leader has stepped down
+        // (or we've given up waiting for it), but **before** reading from the
+        // database. The only exception is reading the current leader before
+        // migrating.
+        persistence.migration_run().await?;
 
         tracing::info!("Loading nodes from database...");
         let nodes = persistence
@@ -1306,7 +1314,7 @@ impl Service {
                 initial_leadership_status,
             ))),
             config: config.clone(),
-            persistence: persistence.clone(),
+            persistence,
             compute_hook: Arc::new(ComputeHook::new(config.clone())),
             result_tx,
             heartbeater,
@@ -1370,17 +1378,6 @@ impl Service {
                 // Block shutdown until we're done (we must respect self.cancel)
                 let Ok(_gate) = this.gate.enter() else {
                     return;
-                };
-
-                let leadership_cancel = CancellationToken::new();
-                let leadership =
-                    Leadership::new(persistence.clone(), config.clone(), leadership_cancel);
-                let (leader, leader_step_down_state) = match leadership.prologue().await {
-                    Ok(ok) => ok,
-                    Err(err) => {
-                        tracing::error!("Failed storage contoller leadership prologue: {err}. Aborting start-up ...");
-                        std::process::exit(1);
-                    }
                 };
 
                 this.startup_reconcile(leader, leader_step_down_state, bg_compute_notify_result_tx)
