@@ -4,6 +4,7 @@
 use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
 use remote_storage::RemotePath;
+use safekeeper_api::models::TimelineTermBumpResponse;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
@@ -212,6 +213,10 @@ impl StateSK {
         self.state()
             .acceptor_state
             .get_last_log_term(self.flush_lsn())
+    }
+
+    pub async fn term_bump(&mut self, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
+        self.state_mut().term_bump(to).await
     }
 
     /// Close open WAL files to release FDs.
@@ -851,6 +856,11 @@ impl Timeline {
             .finish_change(&persistent_state)
             .await?;
         Ok(res)
+    }
+
+    pub async fn term_bump(self: &Arc<Self>, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
+        let mut state = self.write_shared_state().await;
+        state.sk.term_bump(to).await
     }
 
     /// Get the timeline guard for reading/writing WAL files.

@@ -2176,6 +2176,43 @@ def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
     assert res["timelines"][0]["control_file"]["timeline_start_lsn"] == "0/1"
 
 
+def test_term_bump(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+    # initialize safekeeper
+    endpoint.safe_psql("create table t(key int, value text)")
+
+    http_cli = env.safekeepers[0].http_client()
+
+    # check that bump up to specific term works
+    curr_term = http_cli.timeline_status(tenant_id, timeline_id).term
+    bump_to = curr_term + 3
+    res = http_cli.term_bump(tenant_id, timeline_id, bump_to)
+    log.info(f"bump to {bump_to} res: {res}")
+    assert res.current_term >= bump_to
+
+    # check that bump to none increments current term
+    res = http_cli.term_bump(tenant_id, timeline_id, None)
+    log.info(f"bump to None res: {res}")
+    assert res.current_term > bump_to
+    assert res.current_term > res.previous_term
+
+    # check that bumping doesn't work downward
+    res = http_cli.term_bump(tenant_id, timeline_id, 2)
+    log.info(f"bump to 2 res: {res}")
+    assert res.current_term > bump_to
+    assert res.current_term == res.previous_term
+
+    # check that this doesn't kill endpoint because last WAL flush was his and
+    # thus its basebackup is still good
+    endpoint.safe_psql("insert into t values (1, 'payload')")
+
+
 # Test disables periodic pushes from safekeeper to the broker and checks that
 # pageserver can still discover safekeepers with discovery requests.
 def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
