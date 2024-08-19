@@ -452,23 +452,26 @@ fn stream_objects_with_retries<'a>(
         let mut list_stream =
             storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
         while let Some(res) = list_stream.next().await {
-            if let Err(err) = res {
-                let yield_err = if err.is_permanent() {
-                    true
-                } else {
-                    let backoff_time = 1 << trial.max(5);
-                    tokio::time::sleep(Duration::from_secs(backoff_time)).await;
-                    trial += 1;
-                    trial == MAX_RETRIES - 1
-                };
-                if yield_err {
-                    yield Err(err)
-                        .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
-                    break;
+            match res {
+                Err(err) => {
+                    let yield_err = if err.is_permanent() {
+                        true
+                    } else {
+                        let backoff_time = 1 << trial.max(5);
+                        tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+                        trial += 1;
+                        trial == MAX_RETRIES - 1
+                    };
+                    if yield_err {
+                        yield Err(err)
+                            .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                        break;
+                    }
                 }
-            } else {
-                trial = 0;
-                yield res.map_err(anyhow::Error::from);
+                Ok(res) => {
+                    trial = 0;
+                    yield Ok(res);
+                }
             }
         }
     }
@@ -513,41 +516,35 @@ async fn list_objects_with_retries_generic(
     panic!("MAX_RETRIES is not allowed to be 0");
 }
 
-async fn download_object_with_retries(
-    s3_client: &Client,
-    bucket_name: &str,
-    key: &str,
+async fn download_object_with_retries_generic(
+    remote_client: &GenericRemoteStorage,
+    key: &RemotePath,
 ) -> anyhow::Result<Vec<u8>> {
-    for _ in 0..MAX_RETRIES {
-        let mut body_buf = Vec::new();
-        let response_stream = match s3_client
-            .get_object()
-            .bucket(bucket_name)
-            .key(key)
-            .send()
-            .await
-        {
+    let cancel = CancellationToken::new();
+    for trial in 0..MAX_RETRIES {
+        let mut buf = Vec::new();
+        let download = match remote_client.download(key, &cancel).await {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to download object for key {key}: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
                 continue;
             }
         };
 
-        match response_stream
-            .body
-            .into_async_read()
-            .read_to_end(&mut body_buf)
+        match tokio_util::io::StreamReader::new(download.download_stream)
+            .read_to_end(&mut buf)
             .await
         {
             Ok(bytes_read) => {
                 tracing::debug!("Downloaded {bytes_read} bytes for object {key}");
-                return Ok(body_buf);
+                return Ok(buf);
             }
             Err(e) => {
                 error!("Failed to stream object body for key {key}: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             }
         }
     }

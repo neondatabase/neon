@@ -1,16 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::checks::{
-    branch_cleanup_and_check_errors, list_timeline_blobs, BlobDataParseResult, S3TimelineBlobData,
-    TenantObjectListing, TimelineAnalysis,
+    branch_cleanup_and_check_errors, list_timeline_blobs_generic, BlobDataParseResult,
+    RemoteTimelineBlobData, TenantObjectListing, TimelineAnalysis,
 };
-use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
-use aws_sdk_s3::Client;
+use crate::metadata_stream::{stream_tenant_timelines_generic, stream_tenants_generic};
+use crate::{init_remote_generic, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::remote_layer_path;
 use pageserver_api::controller_api::MetadataHealthUpdateRequest;
 use pageserver_api::shard::TenantShardId;
+use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
 use utils::id::TenantId;
 use utils::shard::ShardCount;
@@ -36,7 +36,7 @@ impl MetadataSummary {
         Self::default()
     }
 
-    fn update_data(&mut self, data: &S3TimelineBlobData) {
+    fn update_data(&mut self, data: &RemoteTimelineBlobData) {
         self.timeline_shard_count += 1;
         if let BlobDataParseResult::Parsed {
             index_part,
@@ -120,10 +120,10 @@ pub async fn scan_pageserver_metadata(
     bucket_config: BucketConfig,
     tenant_ids: Vec<TenantShardId>,
 ) -> anyhow::Result<MetadataSummary> {
-    let (s3_client, target) = init_remote(bucket_config, NodeKind::Pageserver).await?;
+    let (remote_client, target) = init_remote_generic(bucket_config, NodeKind::Pageserver).await?;
 
     let tenants = if tenant_ids.is_empty() {
-        futures::future::Either::Left(stream_tenants(&s3_client, &target))
+        futures::future::Either::Left(stream_tenants_generic(&remote_client, &target))
     } else {
         futures::future::Either::Right(futures::stream::iter(tenant_ids.into_iter().map(Ok)))
     };
@@ -133,20 +133,20 @@ pub async fn scan_pageserver_metadata(
     const CONCURRENCY: usize = 32;
 
     // Generate a stream of TenantTimelineId
-    let timelines = tenants.map_ok(|t| stream_tenant_timelines(&s3_client, &target, t));
+    let timelines = tenants.map_ok(|t| stream_tenant_timelines_generic(&remote_client, &target, t));
     let timelines = timelines.try_buffered(CONCURRENCY);
     let timelines = timelines.try_flatten();
 
     // Generate a stream of S3TimelineBlobData
     async fn report_on_timeline(
-        s3_client: &Client,
+        remote_client: &GenericRemoteStorage,
         target: &RootTarget,
         ttid: TenantShardTimelineId,
-    ) -> anyhow::Result<(TenantShardTimelineId, S3TimelineBlobData)> {
-        let data = list_timeline_blobs(s3_client, ttid, target).await?;
+    ) -> anyhow::Result<(TenantShardTimelineId, RemoteTimelineBlobData)> {
+        let data = list_timeline_blobs_generic(remote_client, ttid, target).await?;
         Ok((ttid, data))
     }
-    let timelines = timelines.map_ok(|ttid| report_on_timeline(&s3_client, &target, ttid));
+    let timelines = timelines.map_ok(|ttid| report_on_timeline(&remote_client, &target, ttid));
     let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
 
     // We must gather all the TenantShardTimelineId->S3TimelineBlobData for each tenant, because different
@@ -157,12 +157,11 @@ pub async fn scan_pageserver_metadata(
     let mut tenant_timeline_results = Vec::new();
 
     async fn analyze_tenant(
-        s3_client: &Client,
-        target: &RootTarget,
+        remote_client: &GenericRemoteStorage,
         tenant_id: TenantId,
         summary: &mut MetadataSummary,
         mut tenant_objects: TenantObjectListing,
-        timelines: Vec<(TenantShardTimelineId, S3TimelineBlobData)>,
+        timelines: Vec<(TenantShardTimelineId, RemoteTimelineBlobData)>,
         highest_shard_count: ShardCount,
     ) {
         summary.tenant_count += 1;
@@ -191,8 +190,7 @@ pub async fn scan_pageserver_metadata(
                 // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
                 // reference counts for layers across the tenant.
                 let analysis = branch_cleanup_and_check_errors(
-                    s3_client,
-                    target,
+                    remote_client,
                     &ttid,
                     &mut tenant_objects,
                     None,
@@ -273,8 +271,7 @@ pub async fn scan_pageserver_metadata(
                     let tenant_objects = std::mem::take(&mut tenant_objects);
                     let timelines = std::mem::take(&mut tenant_timeline_results);
                     analyze_tenant(
-                        &s3_client,
-                        &target,
+                        &remote_client,
                         prev_tenant_id,
                         &mut summary,
                         tenant_objects,
@@ -311,8 +308,7 @@ pub async fn scan_pageserver_metadata(
 
     if !tenant_timeline_results.is_empty() {
         analyze_tenant(
-            &s3_client,
-            &target,
+            &remote_client,
             tenant_id.expect("Must be set if results are present"),
             &mut summary,
             tenant_objects,
