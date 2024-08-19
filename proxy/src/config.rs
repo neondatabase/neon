@@ -52,6 +52,7 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
+    pub accept_ws: bool,
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,

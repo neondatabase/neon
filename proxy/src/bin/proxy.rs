@@ -173,9 +173,6 @@ struct ProxyCliArgs {
     /// cache for `role_secret` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     role_secret_cache: String,
-    /// disable ip check for http requests. If it is too time consuming, it could be turned off.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    disable_ip_check_for_http: bool,
     /// redis url for notifications (if empty, redis_host:port will be used for both notifications and streaming connections)
     #[clap(long)]
     redis_notifications: Option<String>,
@@ -661,6 +658,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     )?;
 
     let http_config = HttpConfig {
+        accept_ws: true,
         pool_options: GlobalConnPoolOptions {
             max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
             gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
