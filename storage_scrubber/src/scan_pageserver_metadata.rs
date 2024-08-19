@@ -158,7 +158,6 @@ pub async fn scan_pageserver_metadata(
 
     async fn analyze_tenant(
         remote_client: &GenericRemoteStorage,
-        target: &RootTarget,
         tenant_id: TenantId,
         summary: &mut MetadataSummary,
         mut tenant_objects: TenantObjectListing,
@@ -273,7 +272,6 @@ pub async fn scan_pageserver_metadata(
                     let timelines = std::mem::take(&mut tenant_timeline_results);
                     analyze_tenant(
                         &remote_client,
-                        &target,
                         prev_tenant_id,
                         &mut summary,
                         tenant_objects,
@@ -311,7 +309,6 @@ pub async fn scan_pageserver_metadata(
     if !tenant_timeline_results.is_empty() {
         analyze_tenant(
             &remote_client,
-            &target,
             tenant_id.expect("Must be set if results are present"),
             &mut summary,
             tenant_objects,
