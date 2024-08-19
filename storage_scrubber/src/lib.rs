@@ -517,7 +517,7 @@ async fn download_object_with_retries(
     anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
 }
 
-async fn download_object_to_file(
+async fn download_object_to_file_s3(
     s3_client: &Client,
     bucket_name: &str,
     key: &str,

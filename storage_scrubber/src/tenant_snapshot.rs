@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::checks::{list_timeline_blobs, BlobDataParseResult, RemoteTimelineBlobData};
 use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines};
 use crate::{
-    download_object_to_file, init_remote, init_remote_s3, BucketConfig, NodeKind, RootTarget,
+    download_object_to_file_s3, init_remote, init_remote_s3, BucketConfig, NodeKind, RootTarget,
     TenantShardTimelineId,
 };
 use anyhow::Context;
@@ -94,7 +94,7 @@ impl SnapshotDownloader {
             let Some(version) = versions.versions.as_ref().and_then(|v| v.first()) else {
                 return Err(anyhow::anyhow!("No versions found for {remote_layer_path}"));
             };
-            download_object_to_file(
+            download_object_to_file_s3(
                 &self.s3_client,
                 &self.bucket_config.bucket,
                 &remote_layer_path,
