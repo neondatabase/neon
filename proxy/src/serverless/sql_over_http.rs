@@ -147,7 +147,7 @@ impl UserFacingError for ConnInfoError {
 fn get_conn_info(
     ctx: &RequestMonitoring,
     headers: &HeaderMap,
-    tls: &TlsConfig,
+    tls: Option<&TlsConfig>,
 ) -> Result<ConnInfo, ConnInfoError> {
     // HTTP only uses cleartext (for now and likely always)
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
@@ -184,12 +184,22 @@ fn get_conn_info(
         .ok_or(ConnInfoError::MissingPassword)?;
     let password = urlencoding::decode_binary(password.as_bytes());
 
-    let hostname = connection_url
-        .host_str()
-        .ok_or(ConnInfoError::MissingHostname)?;
-
-    let endpoint =
-        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?;
+    let endpoint = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => {
+            if let Some(tls) = tls {
+                endpoint_sni(hostname, &tls.common_names)?
+                    .ok_or(ConnInfoError::MalformedEndpoint)?
+            } else {
+                hostname
+                    .split_once(".")
+                    .map_or(hostname, |(prefix, _)| prefix)
+                    .into()
+            }
+        }
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) | None => {
+            return Err(ConnInfoError::MissingHostname)
+        }
+    };
     ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
@@ -502,7 +512,7 @@ async fn handle_inner(
     let headers = request.headers();
 
     // TLS config should be there.
-    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
+    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref())?;
     info!(user = conn_info.user_info.user.as_str(), "credentials");
 
     // Allow connection pooling only if explicitly requested
