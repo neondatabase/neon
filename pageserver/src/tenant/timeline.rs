@@ -3589,34 +3589,6 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
-            // FIXME(auxfilesv2): support multiple metadata key partitions might need initdb support as well?
-            // This code path will not be hit during regression tests. After #7099 we have a single partition
-            // with two key ranges. If someone wants to fix initdb optimization in the future, this might need
-            // to be fixed.
-
-            // For metadata, always create delta layers.
-            let delta_layer = if !metadata_partition.parts.is_empty() {
-                assert_eq!(
-                    metadata_partition.parts.len(),
-                    1,
-                    "currently sparse keyspace should only contain a single metadata keyspace"
-                );
-                let metadata_keyspace = &metadata_partition.parts[0];
-                self.create_delta_layer(
-                    &frozen_layer,
-                    Some(
-                        metadata_keyspace.0.ranges.first().unwrap().start
-                            ..metadata_keyspace.0.ranges.last().unwrap().end,
-                    ),
-                    ctx,
-                )
-                .await
-                .map_err(|e| FlushLayerError::from_anyhow(self, e))?
-            } else {
-                None
-            };
-
-            // For image layers, we add them immediately into the layer map.
             let mut layers_to_upload = Vec::new();
             layers_to_upload.extend(
                 self.create_image_layers(
@@ -3627,13 +3599,27 @@ impl Timeline {
                 )
                 .await?,
             );
-
-            if let Some(delta_layer) = delta_layer {
-                layers_to_upload.push(delta_layer.clone());
-                (layers_to_upload, Some(delta_layer))
-            } else {
-                (layers_to_upload, None)
+            if !metadata_partition.parts.is_empty() {
+                assert_eq!(
+                    metadata_partition.parts.len(),
+                    1,
+                    "currently sparse keyspace should only contain a single metadata keyspace"
+                );
+                layers_to_upload.extend(
+                    self.create_image_layers(
+                        // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
+                        // every single key within the keyspace, and therefore, it's safe to force converting it
+                        // into a dense keyspace before calling this function.
+                        &metadata_partition.into_dense(),
+                        self.initdb_lsn,
+                        ImageLayerCreationMode::Initial,
+                        ctx,
+                    )
+                    .await?,
+                );
             }
+
+            (layers_to_upload, None)
         } else {
             // Normal case, write out a L0 delta layer file.
             // `create_delta_layer` will not modify the layer map.
@@ -4210,15 +4196,13 @@ impl Timeline {
                         "metadata keys must be partitioned separately"
                     );
                 }
-                if mode == ImageLayerCreationMode::Initial {
-                    return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
-                }
                 if mode == ImageLayerCreationMode::Try && !check_for_image_layers {
                     // Skip compaction if there are not enough updates. Metadata compaction will do a scan and
                     // might mess up with evictions.
                     start = img_range.end;
                     continue;
                 }
+                // For initial and force modes, we always generate image layers for metadata keys.
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
@@ -4226,7 +4210,9 @@ impl Timeline {
                     start = img_range.end;
                     continue;
                 }
-            } else if let ImageLayerCreationMode::Force = mode {
+            }
+
+            if let ImageLayerCreationMode::Force = mode {
                 // When forced to create image layers, we might try and create them where they already
                 // exist.  This mode is only used in tests/debug.
                 let layers = self.layers.read().await;
@@ -4240,6 +4226,7 @@ impl Timeline {
                         img_range.start,
                         img_range.end
                     );
+                    start = img_range.end;
                     continue;
                 }
             }
