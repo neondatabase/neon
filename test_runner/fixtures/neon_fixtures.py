@@ -4617,12 +4617,20 @@ class Safekeeper(LogUtils):
         wait_until(20, 0.5, paused)
 
 
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class NodeKind(str, Enum):
+    PAGESERVER = "pageserver"
+    SAFEKEEPER = "safekeeper"
+
+
 class StorageScrubber:
     def __init__(self, env: NeonEnv, log_dir: Path):
         self.env = env
         self.log_dir = log_dir
 
-    def scrubber_cli(self, args: list[str], timeout) -> str:
+    def scrubber_cli(
+        self, args: list[str], timeout, extra_env: Optional[Dict[str, str]] = None
+    ) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
         s3_storage = self.env.pageserver_remote_storage
 
@@ -4636,6 +4644,9 @@ class StorageScrubber:
 
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
+
+        if extra_env is not None:
+            env.update(extra_env)
 
         base_args = [
             str(self.env.neon_binpath / "storage_scrubber"),
@@ -4664,18 +4675,43 @@ class StorageScrubber:
         assert stdout is not None
         return stdout
 
-    def scan_metadata(self, post_to_storage_controller: bool = False) -> Tuple[bool, Any]:
+    def scan_metadata_safekeeper(
+        self,
+        timeline_lsns: List[Dict[str, Any]],
+        cloud_admin_api_url: str,
+        cloud_admin_api_token: str,
+    ) -> Tuple[bool, Any]:
+        extra_env = {
+            "CLOUD_ADMIN_API_URL": cloud_admin_api_url,
+            "CLOUD_ADMIN_API_TOKEN": cloud_admin_api_token,
+        }
+        return self.scan_metadata(
+            node_kind=NodeKind.SAFEKEEPER, timeline_lsns=timeline_lsns, extra_env=extra_env
+        )
+
+    def scan_metadata(
+        self,
+        post_to_storage_controller: bool = False,
+        node_kind: NodeKind = NodeKind.PAGESERVER,
+        timeline_lsns: Optional[List[Dict[str, Any]]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, Any]:
         """
         Returns the health status and the metadata summary.
         """
-        args = ["scan-metadata", "--node-kind", "pageserver", "--json"]
+        args = ["scan-metadata", "--node-kind", node_kind.value, "--json"]
         if post_to_storage_controller:
             args.append("--post")
-        stdout = self.scrubber_cli(args, timeout=30)
+        if timeline_lsns is not None:
+            args.append("--timeline-lsns")
+            args.append(json.dumps(timeline_lsns))
+        stdout = self.scrubber_cli(args, timeout=30, extra_env=extra_env)
 
         try:
             summary = json.loads(stdout)
-            healthy = not summary["with_errors"] and not summary["with_warnings"]
+            # summary does not contain "with_warnings" if node_kind is the safekeeper
+            no_warnings = not "with_warnings" in summary or not summary["with_warnings"]
+            healthy = not summary["with_errors"] and no_warnings
             return healthy, summary
         except:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")

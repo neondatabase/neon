@@ -7,7 +7,7 @@ use postgres_ffi::{XLogFileName, PG_TLI};
 use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -151,7 +151,7 @@ async fn check_timeline(
     timeline_start_lsn: Lsn,
     backup_lsn: Lsn,
 ) -> anyhow::Result<TimelineCheckResult> {
-    trace!(
+    debug!(
         "checking ttid {}, should contain WAL [{}-{}]",
         ttid,
         timeline_start_lsn,
@@ -165,7 +165,7 @@ async fn check_timeline(
             .map(|segno| XLogFileName(PG_TLI, segno, WAL_SEGSIZE)),
     );
     let expected_files_num = expected_segfiles.len();
-    trace!("expecting {} files", expected_segfiles.len(),);
+    debug!("expecting {} files", expected_segfiles.len(),);
 
     // now list s3 and check if it misses something
     let ttshid =

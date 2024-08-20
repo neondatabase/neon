@@ -4,9 +4,11 @@ import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    NodeKind,
     PgBin,
     wait_for_last_flush_lsn,
 )
+from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
@@ -17,6 +19,8 @@ from fixtures.pageserver.utils import (
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.utils import run_pg_bench_small, wait_until
 from requests.exceptions import ReadTimeout
+from werkzeug.wrappers.request import Request
+from werkzeug.wrappers.response import Response
 
 
 def error_tolerant_delete(ps_http, tenant_id):
@@ -322,7 +326,7 @@ def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder)
     env.pageserver.stop()
 
 
-def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
+def test_tenant_delete_scrubber(pg_bin: PgBin, make_httpserver, neon_env_builder: NeonEnvBuilder):
     """
     Validate that creating and then deleting the tenant both survives the scrubber,
     and that one can run the scrubber without problems.
@@ -347,10 +351,56 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
     healthy, _ = env.storage_scrubber.scan_metadata()
     assert healthy
 
+    timeline_lsns = {
+        "tenant_id": f"{tenant_id}",
+        "timeline_id": f"{timeline_id}",
+        "timeline_start_lsn": f"{last_flush_lsn}",
+        "backup_lsn": f"{last_flush_lsn}",
+    }
+
+    cloud_admin_url = f"http://{make_httpserver.host}:{make_httpserver.port}/"
+    cloud_admin_token = ""
+
+    def get_branches(request: Request):
+        # Compare definition with `BranchData` struct
+        dummy_data = {
+            "id": "test-branch-id",
+            "created_at": "",  # TODO
+            "updated_at": "",  # TODO
+            "name": "testbranchname",
+            "project_id": "test-project-id",
+            "timeline_id": f"{timeline_id}",
+            "default": False,
+            "deleted": False,
+            "logical_size": 42000,
+            "physical_size": 42000,
+            "written_size": 42000,
+        }
+        # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
+        # so we send controller notifications to /dev/null to prevent it fighting the test for control of the compute.
+        log.info(f"got get_branches request: {request.json}")
+        return Response(status=200)
+
+    make_httpserver.expect_request("/branches", method="GET").respond_with_handler(get_branches)
+
+    healthy, _ = env.storage_scrubber.scan_metadata_safekeeper(
+        timeline_lsns=[timeline_lsns],
+        cloud_admin_api_url=cloud_admin_url,
+        cloud_admin_api_token=cloud_admin_token,
+    )
+    assert healthy
+
     env.start()
     ps_http = env.pageserver.http_client()
     ps_http.tenant_delete(tenant_id)
     env.stop()
 
     healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
+
+    healthy, _ = env.storage_scrubber.scan_metadata_safekeeper(
+        timeline_lsns=[timeline_lsns],
+        cloud_admin_api_url=cloud_admin_url,
+        cloud_admin_api_token=cloud_admin_token,
+    )
     assert healthy
