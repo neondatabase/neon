@@ -1853,16 +1853,64 @@ pub(crate) static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
-pub(crate) static BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE: Lazy<IntCounterPairVec> = Lazy::new(|| {
-    register_int_counter_pair_vec!(
-        "pageserver_background_loop_semaphore_wait_start_count",
-        "Counter for background loop concurrency-limiting semaphore acquire calls started",
-        "pageserver_background_loop_semaphore_wait_finish_count",
-        "Counter for background loop concurrency-limiting semaphore acquire calls finished",
-        &["task"],
-    )
-    .unwrap()
-});
+pub struct BackgroundLoopSemaphoreMetrics {
+    counters: EnumMap<BackgroundLoopKind, IntCounterPair>,
+    durations: EnumMap<BackgroundLoopKind, Counter>,
+}
+
+pub(crate) static BACKGROUND_LOOP_SEMAPHORE: Lazy<BackgroundLoopSemaphoreMetrics> = Lazy::new(
+    || {
+        let counters = register_int_counter_pair_vec!(
+            "pageserver_background_loop_semaphore_wait_start_count",
+            "Counter for background loop concurrency-limiting semaphore acquire calls started",
+            "pageserver_background_loop_semaphore_wait_finish_count",
+            "Counter for background loop concurrency-limiting semaphore acquire calls finished",
+            &["task"],
+        )
+        .unwrap();
+
+        let durations = register_counter_vec!(
+            "pageserver_background_loop_semaphore_wait_duration_seconds",
+            "Sum of wall clock time spent waiting on the background loop concurrency-limiting semaphore acquire calls",
+            &["task"],
+        )
+        .unwrap();
+
+        BackgroundLoopSemaphoreMetrics {
+            counters: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+                counters.with_label_values(&[kind.into()])
+            })),
+            durations: enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+                let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+                durations.with_label_values(&[kind.into()])
+            })),
+        }
+    },
+);
+
+impl BackgroundLoopSemaphoreMetrics {
+    pub(crate) fn measure_acquisition(&self, task: BackgroundLoopKind) -> impl Drop + '_ {
+        struct Record<'a> {
+            metrics: &'a BackgroundLoopSemaphoreMetrics,
+            task: BackgroundLoopKind,
+            _counter_guard: metrics::IntCounterPairGuard,
+            start: Instant,
+        }
+        impl Drop for Record<'_> {
+            fn drop(&mut self) {
+                let elapsed = self.start.elapsed().as_secs_f64();
+                self.metrics.durations[self.task].inc_by(elapsed);
+            }
+        }
+        Record {
+            metrics: self,
+            task,
+            _counter_guard: self.counters[task].guard(),
+            start: Instant::now(),
+        }
+    }
+}
 
 pub(crate) static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -2544,6 +2592,7 @@ use std::time::{Duration, Instant};
 use crate::context::{PageContentKind, RequestContext};
 use crate::task_mgr::TaskKind;
 use crate::tenant::mgr::TenantSlot;
+use crate::tenant::tasks::BackgroundLoopKind;
 
 /// Maintain a per timeline gauge in addition to the global gauge.
 pub(crate) struct PerTimelineRemotePhysicalSizeGauge {
