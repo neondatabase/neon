@@ -1,6 +1,6 @@
 import time
 
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 
 
 #
@@ -14,7 +14,7 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     # We want to have a lot of lot of layer files to exercise the layer map. Disable
     # GC, and make checkpoint_distance very small, so that we get a lot of small layer
     # files.
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, timeline = env.neon_cli.create_tenant(
         conf={
             "gc_period": "0s",
             "checkpoint_distance": "16384",
@@ -37,5 +37,7 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
         cur.execute("SELECT count(*) from t")
         assert cur.fetchone() == (n_iters * n_records,)
 
-    # see https://github.com/neondatabase/neon/issues/8712
-    env.stop(immediate=True)
+    flush_ep_to_pageserver(env, endpoint, tenant, timeline)
+    env.pageserver.http_client().timeline_checkpoint(
+        tenant, timeline, compact=False, wait_until_uploaded=True
+    )

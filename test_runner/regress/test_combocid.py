@@ -1,4 +1,4 @@
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 
 
 def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
@@ -137,3 +137,8 @@ def test_combocid(neon_env_builder: NeonEnvBuilder):
     assert cur.rowcount == n_records
 
     cur.execute("rollback")
+
+    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
+    env.pageserver.http_client().timeline_checkpoint(
+        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
+    )
