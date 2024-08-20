@@ -4029,8 +4029,6 @@ impl Timeline {
         mode: ImageLayerCreationMode,
         start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
-        assert!(!matches!(mode, ImageLayerCreationMode::Initial));
-
         // Metadata keys image layer creation.
         let mut reconstruct_state = ValuesReconstructState::default();
         let data = self
