@@ -96,12 +96,6 @@ impl VectoredReadCoalesceMode {
     }
 }
 
-impl Default for VectoredReadCoalesceMode {
-    fn default() -> Self {
-        VectoredReadCoalesceMode::AdjacentOnly
-    }
-}
-
 pub(crate) enum VectoredReadBuilder {
     Unconstrained(VectoredReadBuilderInner),
     Chunked(ChunkedVectoredReadBuilderInner),
@@ -325,7 +319,7 @@ impl ChunkedVectoredReadBuilderInner {
     }
 
     pub(crate) fn size(&self) -> usize {
-        (self.end_blk_no - self.start_blk_no) as usize * self.chunk_size
+        (self.end_blk_no - self.start_blk_no) * self.chunk_size
     }
 
     pub(crate) fn build(self) -> VectoredRead {

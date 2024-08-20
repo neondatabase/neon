@@ -1161,8 +1161,9 @@ fn get_open_files() -> &'static OpenFiles {
 const IO_BUFFER_ALIGNMENT_NOT_SET: usize = 0;
 static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(IO_BUFFER_ALIGNMENT_NOT_SET);
 
+/// Returns true if `x` is a power of two.
 fn is_power_of_two(x: usize) -> bool {
-    return (x != 0) && ((x & (x - 1)) == 0);
+    (x != 0) && ((x & (x - 1)) == 0)
 }
 
 #[allow(unused)]
