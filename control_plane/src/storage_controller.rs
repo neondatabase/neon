@@ -217,7 +217,7 @@ impl StorageController {
         Ok(exitcode.success())
     }
 
-    /// Create our database if it doesn't exist, and run migrations.
+    /// Create our database if it doesn't exist
     ///
     /// This function is equivalent to the `diesel setup` command in the diesel CLI.  We implement
     /// the same steps by hand to avoid imposing a dependency on installing diesel-cli for developers
@@ -382,7 +382,6 @@ impl StorageController {
             )
             .await?;
 
-            // Run migrations on every startup, in case something changed.
             self.setup_database(postgres_port).await?;
         }
 
