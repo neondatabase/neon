@@ -2144,6 +2144,8 @@ def test_storage_controller_leadership_transfer(
     port_distributor: PortDistributor,
     step_down_times_out: bool,
 ):
+    neon_env_builder.auth_enabled = True
+
     neon_env_builder.num_pageservers = 3
 
     neon_env_builder.storage_controller_config = {
