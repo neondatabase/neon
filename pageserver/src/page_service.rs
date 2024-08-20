@@ -601,8 +601,7 @@ impl PageServerHandler {
             fail::fail_point!("ps::handle-pagerequest-message");
 
             // parse request
-            let neon_fe_msg =
-                PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
+            let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
             // invoke handler function
             let (handler_result, span) = match neon_fe_msg {

@@ -1226,9 +1226,7 @@ impl PagestreamFeMessage {
         bytes.into()
     }
 
-    pub fn parse<R: std::io::Read>(
-        body: &mut R,
-    ) -> anyhow::Result<PagestreamFeMessage> {
+    pub fn parse<R: std::io::Read>(body: &mut R) -> anyhow::Result<PagestreamFeMessage> {
         // these correspond to the NeonMessageTag enum in pagestore_client.h
         //
         // TODO: consider using protobuf or serde bincode for less error prone
@@ -1446,9 +1444,7 @@ mod tests {
         ];
         for msg in messages {
             let bytes = msg.serialize();
-            let reconstructed =
-                PagestreamFeMessage::parse(&mut bytes.reader())
-                    .unwrap();
+            let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
             assert!(msg == reconstructed);
         }
     }
