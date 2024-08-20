@@ -15,7 +15,6 @@ use crate::{l0_flush, page_cache};
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
-use itertools::Itertools;
 use pageserver_api::key::CompactKey;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
@@ -23,7 +22,6 @@ use pageserver_api::shard::TenantShardId;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use tokio_epoll_uring::BoundedBuf;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
 // avoid binding to Write (conflicts with std::io::Write)
@@ -318,14 +316,15 @@ impl InMemoryLayer {
         }
 
         // Execute the read.
-        vectored_dio_read::execute(
+        let f = vectored_dio_read::execute(
             &inner.file,
             reads
                 .iter()
                 .flat_map(|(_, value_reads)| value_reads.iter().map(|v| &v.read)),
             &ctx,
-        )
-        .await;
+        );
+        send_future::SendFuture::send(f) // https://github.com/rust-lang/rust/issues/96865
+            .await;
 
         // Process results into the reconstruct state
         'next_key: for (key, value_reads) in reads {

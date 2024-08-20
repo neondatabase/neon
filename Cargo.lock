@@ -3736,6 +3736,7 @@ dependencies = [
  "reqwest 0.12.4",
  "rpds",
  "scopeguard",
+ "send-future",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -5465,6 +5466,12 @@ name = "semver"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bebd363326d05ec3e2f532ab7660680f3b02130d780c299bca73469d521bc0ed"
+
+[[package]]
+name = "send-future"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "224e328af6e080cddbab3c770b1cf50f0351ba0577091ef2410c3951d835ff87"
 
 [[package]]
 name = "sentry"

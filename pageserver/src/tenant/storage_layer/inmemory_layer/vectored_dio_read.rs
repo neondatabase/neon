@@ -8,7 +8,12 @@ use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 
 use crate::context::RequestContext;
 
-pub trait File {
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// The file interface we require. At runtime, this is a [`crate::virtual_file::VirtualFile`].
+pub trait File: Send {
     async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
         &'b self,
         start: u32,
@@ -17,40 +22,14 @@ pub trait File {
     ) -> std::io::Result<(Slice<B>, usize)>;
 }
 
-trait Sealed {}
-
-pub trait Buffer: Sealed + std::ops::Deref<Target = [u8]> {
-    fn cap(&self) -> usize;
-    fn len(&self) -> usize;
-    fn remaining(&self) -> usize {
-        self.cap().checked_sub(self.len()).unwrap()
-    }
-    /// Panics if the total length would exceed the initialized capacity.
-    fn extend_from_slice(&mut self, src: &[u8]);
-}
-
+/// A logical read that our user wants to do.
 pub struct ValueRead<B: Buffer> {
     pos: u32,
     state: MutexRefCell<Result<B, Arc<std::io::Error>>>,
 }
 
-struct MutexRefCell<T>(Mutex<T>);
-impl<T> MutexRefCell<T> {
-    fn new(value: T) -> Self {
-        Self(Mutex::new(value))
-    }
-    fn borrow(&self) -> impl std::ops::Deref<Target = T> + '_ {
-        self.0.lock().unwrap()
-    }
-    fn borrow_mut(&self) -> impl std::ops::DerefMut<Target = T> + '_ {
-        self.0.lock().unwrap()
-    }
-    fn into_inner(self) -> T {
-        self.0.into_inner().unwrap()
-    }
-}
-
 impl<B: Buffer> ValueRead<B> {
+    /// Create a new [`ValueRead`] from [`File`] of the data in the file in range `[ pos, pos + buf.cap() )`.
     pub fn new(pos: u32, buf: B) -> Self {
         Self {
             pos,
@@ -62,25 +41,25 @@ impl<B: Buffer> ValueRead<B> {
     }
 }
 
-impl Sealed for Vec<u8> {}
-impl Buffer for Vec<u8> {
-    fn cap(&self) -> usize {
-        self.capacity()
+/// The buffer into which a [`ValueRead`] result is placed.
+pub trait Buffer: sealed::Sealed + std::ops::Deref<Target = [u8]> {
+    fn cap(&self) -> usize;
+    fn len(&self) -> usize;
+    fn remaining(&self) -> usize {
+        self.cap().checked_sub(self.len()).unwrap()
     }
-
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    fn extend_from_slice(&mut self, src: &[u8]) {
-        if self.len() + src.len() > self.cap() {
-            panic!("Buffer capacity exceeded");
-        }
-        Vec::extend_from_slice(self, src);
-    }
+    /// Panics if the total length would exceed the initialized capacity.
+    fn extend_from_slice(&mut self, src: &[u8]);
 }
 
-pub async fn execute<'a, 'b, 'c, I, F, B>(file: &'c F, reads: I, ctx: &'b RequestContext)
+/// Execute the given `reads` against `file`.
+/// The results are placed in the buffers of the [`ValueRead`]s.
+/// Retrieve the results by calling [`ValueRead::into_result`] on each [`ValueRead`].
+///
+/// The [`ValueRead`]s must be freshly created using [`ValueRead::new`] when calling this function.
+/// Otherwise, it might panic or the value resad result will be undefined.
+/// TODO: prevent this through type system.
+pub async fn execute<'a, I, F, B>(file: &F, reads: I, ctx: &RequestContext)
 where
     I: IntoIterator<Item = &'a ValueRead<B>> + Send,
     F: File + Send,
@@ -98,12 +77,20 @@ where
     let mut chunk_reads: BTreeMap<u32, Vec<ChunkReadDestination<B>>> = BTreeMap::new();
     for value_read in reads {
         let ValueRead { pos, state } = value_read;
-        let len = state
-            .borrow()
+        let state = state.borrow();
+        match state.as_ref() {
+            Err(_) => panic!("The `ValueRead`s that are passed in must be freshly created using `ValueRead::new`"),
+            Ok(buf) => {
+                if buf.len() != 0 {
+                    panic!("The `ValueRead`s that are passed in must be freshly created using `ValueRead::new`");
+                }
+            }
+        }
+        let remaining = state
             .as_ref()
             .expect("we haven't started reading, no chance it's in Err() state")
-            .len();
-        let mut remaining = usize::try_from(len).unwrap();
+            .remaining();
+        let mut remaining = usize::try_from(remaining).unwrap();
         let mut chunk_no = *pos / (DIO_CHUNK_SIZE as u32);
         let mut offset_in_chunk = usize::try_from(*pos % (DIO_CHUNK_SIZE as u32)).unwrap();
         while remaining > 0 {
@@ -240,5 +227,39 @@ where
                 buf.extend_from_slice(data);
             }
         }
+    }
+}
+
+struct MutexRefCell<T>(Mutex<T>);
+impl<T> MutexRefCell<T> {
+    fn new(value: T) -> Self {
+        Self(Mutex::new(value))
+    }
+    fn borrow(&self) -> impl std::ops::Deref<Target = T> + '_ {
+        self.0.lock().unwrap()
+    }
+    fn borrow_mut(&self) -> impl std::ops::DerefMut<Target = T> + '_ {
+        self.0.lock().unwrap()
+    }
+    fn into_inner(self) -> T {
+        self.0.into_inner().unwrap()
+    }
+}
+
+impl sealed::Sealed for Vec<u8> {}
+impl Buffer for Vec<u8> {
+    fn cap(&self) -> usize {
+        self.capacity()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn extend_from_slice(&mut self, src: &[u8]) {
+        if self.len() + src.len() > self.cap() {
+            panic!("Buffer capacity exceeded");
+        }
+        Vec::extend_from_slice(self, src);
     }
 }
