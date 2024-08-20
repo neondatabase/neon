@@ -307,6 +307,158 @@ index 6e816c57f1f..6ef45b468e9 100644
  SELECT * FROM stud_emp_copy;
   name  | age |  location  | salary | manager | gpa | percent 
  -------+-----+------------+--------+---------+-----+---------
+diff --git a/src/test/regress/expected/password.out b/src/test/regress/expected/password.out
+index 84752317356..3d678d232b8 100644
+--- a/src/test/regress/expected/password.out
++++ b/src/test/regress/expected/password.out
+@@ -12,11 +12,11 @@ SET password_encryption = 'md5'; -- ok
+ SET password_encryption = 'scram-sha-256'; -- ok
+ -- consistency of password entries
+ SET password_encryption = 'md5';
+-CREATE ROLE regress_passwd1 PASSWORD 'role_pwd1';
+-CREATE ROLE regress_passwd2 PASSWORD 'role_pwd2';
++CREATE ROLE regress_passwd1 PASSWORD 'role_pwd1Mahqu4eit2';
++CREATE ROLE regress_passwd2 PASSWORD 'role_pwd2Mahqu4eit2';
+ SET password_encryption = 'scram-sha-256';
+-CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3';
+-CREATE ROLE regress_passwd4 PASSWORD NULL;
++CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3Mahqu4eit2';
++CREATE ROLE regress_passwd4 PASSWORD 'Mahqu4eit2FHS';
+ -- check list of created entries
+ --
+ -- The scram secret will look something like:
+@@ -30,10 +30,10 @@ SELECT rolname, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+
+     ORDER BY rolname, rolpassword;
+      rolname     |                rolpassword_masked                 
+ -----------------+---------------------------------------------------
+- regress_passwd1 | md5783277baca28003b33453252be4dbb34
+- regress_passwd2 | md54044304ba511dd062133eb5b4b84a2a3
++ regress_passwd1 | md5cf164b1eb55cd11cd73be38189a421f6
++ regress_passwd2 | md51b973138181bae7549ef288d52425a2e
+  regress_passwd3 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
+- regress_passwd4 | 
++ regress_passwd4 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
+ (4 rows)
+ 
+ -- Rename a role
+@@ -54,24 +54,30 @@ ALTER ROLE regress_passwd2_new RENAME TO regress_passwd2;
+ -- passwords.
+ SET password_encryption = 'md5';
+ -- encrypt with MD5
+-ALTER ROLE regress_passwd2 PASSWORD 'foo';
++ALTER ROLE regress_passwd2 PASSWORD 'Mahqu4eit2FOO';
+ -- already encrypted, use as they are
+ ALTER ROLE regress_passwd1 PASSWORD 'md5cd3578025fe2c3d7ed1b9a9b26238b70';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ ALTER ROLE regress_passwd3 PASSWORD 'SCRAM-SHA-256$4096:VLK4RMaQLCvNtQ==$6YtlR4t69SguDiwFvbVgVZtuz6gpJQQqUMZ7IQJK5yI=:ps75jrHeYU4lXCcXI4O8oIdJ3eO8o2jirjruw9phBTo=';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ SET password_encryption = 'scram-sha-256';
+ -- create SCRAM secret
+-ALTER ROLE  regress_passwd4 PASSWORD 'foo';
++ALTER ROLE  regress_passwd4 PASSWORD 'Mahqu4eit2foo';
+ -- already encrypted with MD5, use as it is
+ CREATE ROLE regress_passwd5 PASSWORD 'md5e73a4b11df52a6068f8b39f90be36023';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ -- This looks like a valid SCRAM-SHA-256 secret, but it is not
+ -- so it should be hashed with SCRAM-SHA-256.
+ CREATE ROLE regress_passwd6 PASSWORD 'SCRAM-SHA-256$1234';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ -- These may look like valid MD5 secrets, but they are not, so they
+ -- should be hashed with SCRAM-SHA-256.
+ -- trailing garbage at the end
+ CREATE ROLE regress_passwd7 PASSWORD 'md5012345678901234567890123456789zz';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ -- invalid length
+ CREATE ROLE regress_passwd8 PASSWORD 'md501234567890123456789012345678901zz';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ -- Changing the SCRAM iteration count
+ SET scram_iterations = 1024;
+ CREATE ROLE regress_passwd9 PASSWORD 'alterediterationcount';
+@@ -81,63 +87,67 @@ SELECT rolname, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+
+     ORDER BY rolname, rolpassword;
+      rolname     |                rolpassword_masked                 
+ -----------------+---------------------------------------------------
+- regress_passwd1 | md5cd3578025fe2c3d7ed1b9a9b26238b70
+- regress_passwd2 | md5dfa155cadd5f4ad57860162f3fab9cdb
++ regress_passwd1 | md5cf164b1eb55cd11cd73be38189a421f6
++ regress_passwd2 | md51c72b7907ee13c2116fd36cc255ed306
+  regress_passwd3 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
+  regress_passwd4 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
+- regress_passwd5 | md5e73a4b11df52a6068f8b39f90be36023
+- regress_passwd6 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
+- regress_passwd7 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
+- regress_passwd8 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
+  regress_passwd9 | SCRAM-SHA-256$1024:<salt>$<storedkey>:<serverkey>
+-(9 rows)
++(5 rows)
+ 
+ -- An empty password is not allowed, in any form
+ CREATE ROLE regress_passwd_empty PASSWORD '';
+ NOTICE:  empty string is not a valid password, clearing password
++ERROR:  Failed to get encrypted password: User "regress_passwd_empty" has no password assigned.
+ ALTER ROLE regress_passwd_empty PASSWORD 'md585939a5ce845f1a1b620742e3c659e0a';
+-NOTICE:  empty string is not a valid password, clearing password
++ERROR:  role "regress_passwd_empty" does not exist
+ ALTER ROLE regress_passwd_empty PASSWORD 'SCRAM-SHA-256$4096:hpFyHTUsSWcR7O9P$LgZFIt6Oqdo27ZFKbZ2nV+vtnYM995pDh9ca6WSi120=:qVV5NeluNfUPkwm7Vqat25RjSPLkGeoZBQs6wVv+um4=';
+-NOTICE:  empty string is not a valid password, clearing password
++ERROR:  role "regress_passwd_empty" does not exist
+ SELECT rolpassword FROM pg_authid WHERE rolname='regress_passwd_empty';
+  rolpassword 
+ -------------
+- 
+-(1 row)
++(0 rows)
+ 
+ -- Test with invalid stored and server keys.
+ --
+ -- The first is valid, to act as a control. The others have too long
+ -- stored/server keys. They will be re-hashed.
+ CREATE ROLE regress_passwd_sha_len0 PASSWORD 'SCRAM-SHA-256$4096:A6xHKoH/494E941doaPOYg==$Ky+A30sewHIH3VHQLRN9vYsuzlgNyGNKCh37dy96Rqw=:COPdlNiIkrsacU5QoxydEuOH6e/KfiipeETb/bPw8ZI=';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ CREATE ROLE regress_passwd_sha_len1 PASSWORD 'SCRAM-SHA-256$4096:A6xHKoH/494E941doaPOYg==$Ky+A30sewHIH3VHQLRN9vYsuzlgNyGNKCh37dy96RqwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:COPdlNiIkrsacU5QoxydEuOH6e/KfiipeETb/bPw8ZI=';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ CREATE ROLE regress_passwd_sha_len2 PASSWORD 'SCRAM-SHA-256$4096:A6xHKoH/494E941doaPOYg==$Ky+A30sewHIH3VHQLRN9vYsuzlgNyGNKCh37dy96Rqw=:COPdlNiIkrsacU5QoxydEuOH6e/KfiipeETb/bPw8ZIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
++ERROR:  Received HTTP code 400 from control plane: {"error":"Neon only supports being given plaintext passwords"}
+ -- Check that the invalid secrets were re-hashed. A re-hashed secret
+ -- should not contain the original salt.
+ SELECT rolname, rolpassword not like '%A6xHKoH/494E941doaPOYg==%' as is_rolpassword_rehashed
+     FROM pg_authid
+     WHERE rolname LIKE 'regress_passwd_sha_len%'
+     ORDER BY rolname;
+-         rolname         | is_rolpassword_rehashed 
+--------------------------+-------------------------
+- regress_passwd_sha_len0 | f
+- regress_passwd_sha_len1 | t
+- regress_passwd_sha_len2 | t
+-(3 rows)
++ rolname | is_rolpassword_rehashed 
++---------+-------------------------
++(0 rows)
+ 
+ DROP ROLE regress_passwd1;
+ DROP ROLE regress_passwd2;
+ DROP ROLE regress_passwd3;
+ DROP ROLE regress_passwd4;
+ DROP ROLE regress_passwd5;
++ERROR:  role "regress_passwd5" does not exist
+ DROP ROLE regress_passwd6;
++ERROR:  role "regress_passwd6" does not exist
+ DROP ROLE regress_passwd7;
++ERROR:  role "regress_passwd7" does not exist
+ DROP ROLE regress_passwd8;
++ERROR:  role "regress_passwd8" does not exist
+ DROP ROLE regress_passwd9;
+ DROP ROLE regress_passwd_empty;
++ERROR:  role "regress_passwd_empty" does not exist
+ DROP ROLE regress_passwd_sha_len0;
++ERROR:  role "regress_passwd_sha_len0" does not exist
+ DROP ROLE regress_passwd_sha_len1;
++ERROR:  role "regress_passwd_sha_len1" does not exist
+ DROP ROLE regress_passwd_sha_len2;
++ERROR:  role "regress_passwd_sha_len2" does not exist
+ -- all entries should have been removed
+ SELECT rolname, rolpassword
+     FROM pg_authid
 diff --git a/src/test/regress/expected/psql.out b/src/test/regress/expected/psql.out
 index 7cd0c27cca8..e85353d2aa1 100644
 --- a/src/test/regress/expected/psql.out
@@ -628,7 +780,7 @@ index 5ffcd4ffc7b..913c7ad80d1 100644
  SELECT * FROM COPY_TBL;
  
 diff --git a/src/test/regress/sql/copy.sql b/src/test/regress/sql/copy.sql
-index 43d2e906dd9..dba19a970ab 100644
+index 43d2e906dd9..6c993d70f05 100644
 --- a/src/test/regress/sql/copy.sql
 +++ b/src/test/regress/sql/copy.sql
 @@ -20,11 +20,13 @@ insert into copytest values('Mac',E'abc\rdef',3);
@@ -704,7 +856,7 @@ index 43d2e906dd9..dba19a970ab 100644
  1	1	str1
  2	2	str2
  \.
-@@ -191,8 +200,9 @@ bill	20	(11,10)	1000	sharon
+@@ -191,8 +200,8 @@ bill	20	(11,10)	1000	sharon
  -- Generate COPY FROM report with FILE, with some excluded tuples.
  truncate tab_progress_reporting;
  \set filename :abs_srcdir '/data/emp.data'
@@ -712,11 +864,10 @@ index 43d2e906dd9..dba19a970ab 100644
 -	where (salary < 2000);
 +\set command '\\copy tab_progress_reporting from ' :'filename' 'where (salary < 2000)';
 +:command
-+	
  
  drop trigger check_after_tab_progress_reporting on tab_progress_reporting;
  drop function notice_after_tab_progress_reporting();
-@@ -311,7 +321,8 @@ CREATE TABLE parted_si_p_odd PARTITION OF parted_si FOR VALUES IN (1);
+@@ -311,7 +320,8 @@ CREATE TABLE parted_si_p_odd PARTITION OF parted_si FOR VALUES IN (1);
  -- https://postgr.es/m/18130-7a86a7356a75209d%40postgresql.org
  -- https://postgr.es/m/257696.1695670946%40sss.pgh.pa.us
  \set filename :abs_srcdir '/data/desc.data'
@@ -861,8 +1012,45 @@ index 165a2e175fb..08d7096e2cd 100644
  
  SELECT * FROM stud_emp_copy;
  
+diff --git a/src/test/regress/sql/password.sql b/src/test/regress/sql/password.sql
+index 53e86b0b6ce..f8bf0d1323f 100644
+--- a/src/test/regress/sql/password.sql
++++ b/src/test/regress/sql/password.sql
+@@ -10,11 +10,11 @@ SET password_encryption = 'scram-sha-256'; -- ok
+ 
+ -- consistency of password entries
+ SET password_encryption = 'md5';
+-CREATE ROLE regress_passwd1 PASSWORD 'role_pwd1';
+-CREATE ROLE regress_passwd2 PASSWORD 'role_pwd2';
++CREATE ROLE regress_passwd1 PASSWORD 'role_pwd1Mahqu4eit2';
++CREATE ROLE regress_passwd2 PASSWORD 'role_pwd2Mahqu4eit2';
+ SET password_encryption = 'scram-sha-256';
+-CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3';
+-CREATE ROLE regress_passwd4 PASSWORD NULL;
++CREATE ROLE regress_passwd3 PASSWORD 'role_pwd3Mahqu4eit2';
++CREATE ROLE regress_passwd4 PASSWORD 'Mahqu4eit2FHS';
+ 
+ -- check list of created entries
+ --
+@@ -42,14 +42,14 @@ ALTER ROLE regress_passwd2_new RENAME TO regress_passwd2;
+ SET password_encryption = 'md5';
+ 
+ -- encrypt with MD5
+-ALTER ROLE regress_passwd2 PASSWORD 'foo';
++ALTER ROLE regress_passwd2 PASSWORD 'Mahqu4eit2FOO';
+ -- already encrypted, use as they are
+ ALTER ROLE regress_passwd1 PASSWORD 'md5cd3578025fe2c3d7ed1b9a9b26238b70';
+ ALTER ROLE regress_passwd3 PASSWORD 'SCRAM-SHA-256$4096:VLK4RMaQLCvNtQ==$6YtlR4t69SguDiwFvbVgVZtuz6gpJQQqUMZ7IQJK5yI=:ps75jrHeYU4lXCcXI4O8oIdJ3eO8o2jirjruw9phBTo=';
+ 
+ SET password_encryption = 'scram-sha-256';
+ -- create SCRAM secret
+-ALTER ROLE  regress_passwd4 PASSWORD 'foo';
++ALTER ROLE  regress_passwd4 PASSWORD 'Mahqu4eit2foo';
+ -- already encrypted with MD5, use as it is
+ CREATE ROLE regress_passwd5 PASSWORD 'md5e73a4b11df52a6068f8b39f90be36023';
+ 
 diff --git a/src/test/regress/sql/psql.sql b/src/test/regress/sql/psql.sql
-index f3bc6cd07e8..9d49aaa9000 100644
+index f3bc6cd07e8..4e32f4bddba 100644
 --- a/src/test/regress/sql/psql.sql
 +++ b/src/test/regress/sql/psql.sql
 @@ -1431,11 +1431,14 @@ CREATE TEMPORARY TABLE reload_output(
@@ -889,7 +1077,7 @@ index f3bc6cd07e8..9d49aaa9000 100644
  \set QUIET false
 -COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO :'g_out_file';
 +\set command '\\COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO ' :'g_out_file';
-+:command 
++:command
  -- DML command status
  UPDATE onek SET unique1 = unique1 WHERE false;
  \set QUIET true
