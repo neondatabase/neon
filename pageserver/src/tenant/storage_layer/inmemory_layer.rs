@@ -319,11 +319,10 @@ impl InMemoryLayer {
 
         // Execute the read.
         vectored_dio_read::execute(
-            &inner.file,
+            |_, _| async move { todo!() },
             reads
                 .iter()
                 .flat_map(|(_, value_reads)| value_reads.iter().map(|v| &v.read)),
-            &ctx,
         )
         .await;
 
@@ -357,17 +356,6 @@ impl InMemoryLayer {
         reconstruct_state.on_lsn_advanced(&keyspace, self.start_lsn);
 
         Ok(())
-    }
-}
-
-impl vectored_dio_read::File for EphemeralFile {
-    async fn read_at_to_end<'a, 'b, B: tokio_epoll_uring::IoBufMut + Send>(
-        &'b self,
-        start: u32,
-        dst: tokio_epoll_uring::Slice<B>,
-        ctx: &'a RequestContext,
-    ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-        EphemeralFile::read_at_to_end(self, start, dst, ctx).await
     }
 }
 

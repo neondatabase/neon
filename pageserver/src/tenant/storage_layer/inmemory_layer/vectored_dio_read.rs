@@ -8,15 +8,6 @@ use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 
 use crate::context::RequestContext;
 
-pub trait File {
-    async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
-        &'b self,
-        start: u32,
-        dst: Slice<B>,
-        ctx: &'a RequestContext,
-    ) -> std::io::Result<(Slice<B>, usize)>;
-}
-
 trait Sealed {}
 
 pub trait Buffer: Sealed + std::ops::Deref<Target = [u8]> {
@@ -80,10 +71,11 @@ impl Buffer for Vec<u8> {
     }
 }
 
-pub async fn execute<'a, 'b, 'c, I, F, B>(file: &'c F, reads: I, ctx: &'b RequestContext)
+pub async fn execute<'a, 'b, I, F, Fut, B>(file: F, reads: I)
 where
     I: IntoIterator<Item = &'a ValueRead<B>> + Send,
-    F: File + Send,
+    F: Fn(u32, Slice<Vec<u8>>) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<(Slice<Vec<u8>>, usize), Arc<std::io::Error>>> + Send,
     B: Buffer + IoBufMut + Send,
 {
     const DIO_CHUNK_SIZE: usize = 512;
@@ -206,13 +198,11 @@ where
         if all_done {
             continue;
         }
-        let (merged_read_buf_slice, nread) = match file
-            .read_at_to_end(
-                start_chunk_no * DIO_CHUNK_SIZE as u32,
-                get_chunk_buf(nchunks).slice_full(),
-                ctx,
-            )
-            .await
+        let (merged_read_buf_slice, nread) = match file(
+            start_chunk_no * DIO_CHUNK_SIZE as u32,
+            get_chunk_buf(nchunks).slice_full(),
+        )
+        .await
         {
             Ok(t) => t,
             Err(e) => {
