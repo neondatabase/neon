@@ -110,10 +110,9 @@ impl Leadership {
     ) -> Option<GlobalObservedState> {
         tracing::info!("Sending step down request to {leader:?}");
 
-        // TODO: jwt token
         let client = PeerClient::new(
             Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
-            self.config.jwt_token.clone(),
+            self.config.peer_jwt_token.clone(),
         );
         let state = client.step_down(&self.cancel).await;
         match state {

@@ -269,6 +269,7 @@ async fn async_main() -> anyhow::Result<()> {
     let config = Config {
         jwt_token: secrets.jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
+        peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,
         max_offline_interval: args
             .max_offline_interval

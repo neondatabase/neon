@@ -288,6 +288,9 @@ pub struct Config {
     // This JWT token will be used to authenticate this service to the control plane.
     pub control_plane_jwt_token: Option<String>,
 
+    // This JWT token will be used to authenticate with other storage controller instances
+    pub peer_jwt_token: Option<String>,
+
     /// Where the compute hook should send notifications of pageserver attachment locations
     /// (this URL points to the control plane in prod). If this is None, the compute hook will
     /// assume it is running in a test environment and try to update neon_local.
