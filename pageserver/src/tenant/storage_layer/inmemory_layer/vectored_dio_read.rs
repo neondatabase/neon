@@ -23,6 +23,7 @@ pub trait File: Send {
 }
 
 /// A logical read that our user wants to do.
+#[derive(Debug)]
 pub struct ValueRead<B: Buffer> {
     pos: u32,
     state: MutexRefCell<Result<B, Arc<std::io::Error>>>,
@@ -52,6 +53,9 @@ pub trait Buffer: sealed::Sealed + std::ops::Deref<Target = [u8]> {
     fn extend_from_slice(&mut self, src: &[u8]);
 }
 
+/// The minimum alignment and size requirement for disk offsets and memory buffer size for direct IO.
+const DIO_CHUNK_SIZE: usize = 512;
+
 /// Execute the given `reads` against `file`.
 /// The results are placed in the buffers of the [`ValueRead`]s.
 /// Retrieve the results by calling [`ValueRead::into_result`] on each [`ValueRead`].
@@ -65,8 +69,6 @@ where
     F: File + Send,
     B: Buffer + IoBufMut + Send,
 {
-    const DIO_CHUNK_SIZE: usize = 512;
-
     // Plan which parts of which chunks need to be appended to which buffer
     struct ChunkReadDestination<'a, B: Buffer> {
         value_read: &'a ValueRead<B>,
@@ -230,6 +232,7 @@ where
     }
 }
 
+#[derive(Debug)]
 struct MutexRefCell<T>(Mutex<T>);
 impl<T> MutexRefCell<T> {
     fn new(value: T) -> Self {
@@ -266,6 +269,8 @@ impl Buffer for Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
+
     use crate::{
         context::DownloadBehavior, task_mgr::TaskKind,
         virtual_file::owned_buffers_io::slice::SliceMutExt,
@@ -371,5 +376,98 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.to_string(), "foo");
+    }
+
+    struct InMemoryFile {
+        content: Vec<u8>,
+    }
+
+    impl InMemoryFile {
+        fn new_random(len: usize) -> Self {
+            Self {
+                content: rand::thread_rng()
+                    .sample_iter(rand::distributions::Standard)
+                    .take(len)
+                    .collect(),
+            }
+        }
+        fn test_value_read(&self, pos: u32, len: usize) -> TestValueRead {
+            let expected_result = self.content[pos as usize..pos as usize + len].to_vec();
+            TestValueRead {
+                pos,
+                expected_result,
+            }
+        }
+    }
+
+    impl File for InMemoryFile {
+        async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
+            &'b self,
+            start: u32,
+            mut dst: Slice<B>,
+            _ctx: &'a RequestContext,
+        ) -> std::io::Result<(Slice<B>, usize)> {
+            let len = std::cmp::min(
+                dst.bytes_total(),
+                self.content.len().saturating_sub(start as usize),
+            );
+            let dst_slice: &mut [u8] = dst.as_mut_rust_slice_full_zeroed();
+            dst_slice[..len].copy_from_slice(&self.content[start as usize..start as usize + len]);
+            rand::Rng::fill(&mut rand::thread_rng(), &mut dst_slice[len..]); // to discover bugs
+            Ok((dst, len))
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestValueRead {
+        pos: u32,
+        expected_result: Vec<u8>,
+    }
+
+    impl TestValueRead {
+        fn make_value_read(&self) -> ValueRead<Vec<u8>> {
+            ValueRead::new(self.pos, Vec::with_capacity(self.expected_result.len()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blackbox() {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let cs = DIO_CHUNK_SIZE;
+        let cs_u32 = u32::try_from(cs).unwrap();
+
+        let file = InMemoryFile::new_random(10 * cs);
+
+        let test_value_reads = vec![
+            file.test_value_read(0, 1),
+            // adjacent to value_read0
+            file.test_value_read(1, 2),
+            // gap
+            // spans adjacent chunks
+            file.test_value_read(cs_u32 - 1, 2),
+            // gap
+            //  tail of chunk 3, all of chunk 4, and 2 bytes of chunk 5
+            file.test_value_read(3 * cs_u32 - 1, cs + 2),
+            // gap
+            file.test_value_read(5 * cs_u32, 1),
+        ];
+        let test_value_reads_perms = test_value_reads.iter().permutations(test_value_reads.len());
+
+        // test all orderings of ValueReads, the order shouldn't matter for the results
+        for test_value_reads in test_value_reads_perms {
+            let value_reads: Vec<ValueRead<_>> = test_value_reads
+                .iter()
+                .map(|tr| tr.make_value_read())
+                .collect();
+            execute(&file, value_reads.iter(), &ctx).await;
+            for (value_read, test_value_read) in
+                value_reads.into_iter().zip(test_value_reads.iter())
+            {
+                let res = value_read
+                    .into_result()
+                    .expect("InMemoryFile is infallible");
+                assert_eq!(res, test_value_read.expected_result);
+            }
+        }
     }
 }
