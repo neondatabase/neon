@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::checks::{list_timeline_blobs_generic, BlobDataParseResult};
-use crate::metadata_stream::{stream_tenant_timelines_generic, stream_tenants_generic};
-use crate::{init_remote_generic, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
+use crate::checks::{list_timeline_blobs, BlobDataParseResult};
+use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
+use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
@@ -352,7 +352,7 @@ async fn gc_ancestor(
     summary: &mut GcSummary,
 ) -> anyhow::Result<()> {
     // Scan timelines in the ancestor
-    let timelines = stream_tenant_timelines_generic(remote_client, root_target, ancestor).await?;
+    let timelines = stream_tenant_timelines(remote_client, root_target, ancestor).await?;
     let mut timelines = std::pin::pin!(timelines);
 
     // Build a list of keys to retain
@@ -360,7 +360,7 @@ async fn gc_ancestor(
     while let Some(ttid) = timelines.next().await {
         let ttid = ttid?;
 
-        let data = list_timeline_blobs_generic(remote_client, ttid, root_target).await?;
+        let data = list_timeline_blobs(remote_client, ttid, root_target).await?;
 
         let s3_layers = match data.blob_data {
             BlobDataParseResult::Parsed {
@@ -456,11 +456,10 @@ pub async fn pageserver_physical_gc(
     min_age: Duration,
     mode: GcMode,
 ) -> anyhow::Result<GcSummary> {
-    let (remote_client, target) =
-        init_remote_generic(bucket_config.clone(), NodeKind::Pageserver).await?;
+    let (remote_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
 
     let tenants = if tenant_shard_ids.is_empty() {
-        futures::future::Either::Left(stream_tenants_generic(&remote_client, &target))
+        futures::future::Either::Left(stream_tenants(&remote_client, &target))
     } else {
         futures::future::Either::Right(futures::stream::iter(tenant_shard_ids.into_iter().map(Ok)))
     };
@@ -473,7 +472,7 @@ pub async fn pageserver_physical_gc(
     let accumulator = Arc::new(std::sync::Mutex::new(TenantRefAccumulator::default()));
 
     // Generate a stream of TenantTimelineId
-    let timelines = tenants.map_ok(|t| stream_tenant_timelines_generic(&remote_client, &target, t));
+    let timelines = tenants.map_ok(|t| stream_tenant_timelines(&remote_client, &target, t));
     let timelines = timelines.try_buffered(CONCURRENCY);
     let timelines = timelines.try_flatten();
 
@@ -487,7 +486,7 @@ pub async fn pageserver_physical_gc(
         accumulator: &Arc<std::sync::Mutex<TenantRefAccumulator>>,
     ) -> anyhow::Result<GcSummary> {
         let mut summary = GcSummary::default();
-        let data = list_timeline_blobs_generic(remote_client, ttid, target).await?;
+        let data = list_timeline_blobs(remote_client, ttid, target).await?;
 
         let (index_part, latest_gen, candidates) = match &data.blob_data {
             BlobDataParseResult::Parsed {

@@ -15,7 +15,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use aws_config::retry::{RetryConfigBuilder, RetryMode};
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::DisplayErrorContext;
@@ -352,7 +352,7 @@ fn make_root_target(
     }
 }
 
-async fn init_remote(
+async fn init_remote_s3(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
 ) -> anyhow::Result<(Arc<Client>, RootTarget)> {
@@ -369,7 +369,7 @@ async fn init_remote(
     Ok((s3_client, s3_root))
 }
 
-async fn init_remote_generic(
+async fn init_remote(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
 ) -> anyhow::Result<(GenericRemoteStorage, RootTarget)> {
@@ -394,45 +394,10 @@ async fn init_remote_generic(
 
     // We already pass the prefix to the remote client above
     let prefix_in_root_target = String::new();
-    let s3_root = make_root_target(bucket_config.bucket, prefix_in_root_target, node_kind);
+    let root_target = make_root_target(bucket_config.bucket, prefix_in_root_target, node_kind);
 
     let client = GenericRemoteStorage::from_config(&storage_config).await?;
-    Ok((client, s3_root))
-}
-
-async fn list_objects_with_retries(
-    s3_client: &Client,
-    s3_target: &S3Target,
-    continuation_token: Option<String>,
-) -> anyhow::Result<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output> {
-    for trial in 0..MAX_RETRIES {
-        match s3_client
-            .list_objects_v2()
-            .bucket(&s3_target.bucket_name)
-            .prefix(&s3_target.prefix_in_bucket)
-            .delimiter(&s3_target.delimiter)
-            .set_continuation_token(continuation_token.clone())
-            .send()
-            .await
-        {
-            Ok(response) => return Ok(response),
-            Err(e) => {
-                if trial == MAX_RETRIES - 1 {
-                    return Err(e)
-                        .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
-                }
-                error!(
-                    "list_objects_v2 query failed: bucket_name={}, prefix={}, delimiter={}, error={}",
-                    s3_target.bucket_name,
-                    s3_target.prefix_in_bucket,
-                    s3_target.delimiter,
-                    DisplayErrorContext(e),
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    }
-    Err(anyhow!("unreachable unless MAX_RETRIES==0"))
+    Ok((client, root_target))
 }
 
 /// Listing possibly large amounts of keys in a streaming fashion.
@@ -479,7 +444,7 @@ fn stream_objects_with_retries<'a>(
 
 /// If you want to list a bounded amount of prefixes or keys. For larger numbers of keys/prefixes,
 /// use [`stream_objects_with_retries`] instead.
-async fn list_objects_with_retries_generic(
+async fn list_objects_with_retries(
     remote_client: &GenericRemoteStorage,
     listing_mode: ListingMode,
     s3_target: &S3Target,
@@ -516,7 +481,7 @@ async fn list_objects_with_retries_generic(
     panic!("MAX_RETRIES is not allowed to be 0");
 }
 
-async fn download_object_with_retries_generic(
+async fn download_object_with_retries(
     remote_client: &GenericRemoteStorage,
     key: &RemotePath,
 ) -> anyhow::Result<Vec<u8>> {
@@ -552,7 +517,7 @@ async fn download_object_with_retries_generic(
     anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
 }
 
-async fn download_object_to_file(
+async fn download_object_to_file_s3(
     s3_client: &Client,
     bucket_name: &str,
     key: &str,

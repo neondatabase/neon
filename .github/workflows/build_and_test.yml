@@ -280,6 +280,7 @@ jobs:
           save_perf_report: ${{ github.ref_name == 'main' }}
           extra_params: --splits 5 --group ${{ matrix.pytest_split_group }}
           benchmark_durations: ${{ needs.get-benchmarks-durations.outputs.json }}
+          pg_version: v16
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"

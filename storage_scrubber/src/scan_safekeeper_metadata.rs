@@ -14,9 +14,8 @@ use utils::{
 };
 
 use crate::{
-    cloud_admin_api::CloudAdminApiClient, init_remote_generic,
-    metadata_stream::stream_listing_generic, BucketConfig, ConsoleConfig, NodeKind, RootTarget,
-    TenantShardTimelineId,
+    cloud_admin_api::CloudAdminApiClient, init_remote, metadata_stream::stream_listing,
+    BucketConfig, ConsoleConfig, NodeKind, RootTarget, TenantShardTimelineId,
 };
 
 /// Generally we should ask safekeepers, but so far we use everywhere default 16MB.
@@ -107,7 +106,7 @@ pub async fn scan_safekeeper_metadata(
     let timelines = client.query(&query, &[]).await?;
     info!("loaded {} timelines", timelines.len());
 
-    let (remote_client, target) = init_remote_generic(bucket_config, NodeKind::Safekeeper).await?;
+    let (remote_client, target) = init_remote(bucket_config, NodeKind::Safekeeper).await?;
     let console_config = ConsoleConfig::from_env()?;
     let cloud_admin_api_client = CloudAdminApiClient::new(console_config);
 
@@ -193,7 +192,7 @@ async fn check_timeline(
         .strip_prefix("/")
         .unwrap_or(&timeline_dir_target.prefix_in_bucket);
 
-    let mut stream = std::pin::pin!(stream_listing_generic(remote_client, &timeline_dir_target));
+    let mut stream = std::pin::pin!(stream_listing(remote_client, &timeline_dir_target));
     while let Some(obj) = stream.next().await {
         let (key, _obj) = obj?;
 
