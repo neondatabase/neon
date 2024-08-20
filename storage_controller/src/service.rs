@@ -613,7 +613,7 @@ impl Service {
             self.cancel.child_token(),
         );
 
-        if let Err(e) = leadership.epilogue(current_leader).await {
+        if let Err(e) = leadership.become_leader(current_leader).await {
             tracing::error!("Failed to persist self as leader: {e}. Aborting start-up ...");
             std::process::exit(1);
         }
@@ -1155,7 +1155,7 @@ impl Service {
 
         let leadership_cancel = CancellationToken::new();
         let leadership = Leadership::new(persistence.clone(), config.clone(), leadership_cancel);
-        let (leader, leader_step_down_state) = leadership.prologue().await?;
+        let (leader, leader_step_down_state) = leadership.step_down_current_leader().await?;
 
         // Apply the migrations **after** the current leader has stepped down
         // (or we've given up waiting for it), but **before** reading from the

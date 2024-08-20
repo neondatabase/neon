@@ -17,12 +17,12 @@ pub(crate) struct Leadership {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub(crate) enum LeadershipError {
+pub(crate) enum Error {
     #[error(transparent)]
     Database(#[from] DatabaseError),
 }
 
-pub(crate) type LeadershipResult<T> = Result<T, LeadershipError>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 impl Leadership {
     pub(crate) fn new(
@@ -41,10 +41,10 @@ impl Leadership {
     /// Should be called early on in within the start-up sequence.
     ///
     /// Returns a tuple of two optionals: the current leader and its observed state
-    pub(crate) async fn prologue(
+    pub(crate) async fn step_down_current_leader(
         &self,
-    ) -> LeadershipResult<(Option<ControllerPersistence>, Option<GlobalObservedState>)> {
-        let leader = self.get_leader().await?;
+    ) -> Result<(Option<ControllerPersistence>, Option<GlobalObservedState>)> {
+        let leader = self.current_leader().await?;
         let leader_step_down_state = if let Some(ref leader) = leader {
             if self.config.start_as_candidate {
                 self.request_step_down(leader).await
@@ -60,10 +60,10 @@ impl Leadership {
     }
 
     /// Mark the current storage controller instance as the leader in the database
-    pub(crate) async fn epilogue(
+    pub(crate) async fn become_leader(
         &self,
         current_leader: Option<ControllerPersistence>,
-    ) -> LeadershipResult<()> {
+    ) -> Result<()> {
         if let Some(address_for_peers) = &self.config.address_for_peers {
             // TODO: `address-for-peers` can become a mandatory cli arg
             // after we update the k8s setup
@@ -75,14 +75,14 @@ impl Leadership {
             self.persistence
                 .update_leader(current_leader, proposed_leader)
                 .await
-                .map_err(LeadershipError::Database)
+                .map_err(Error::Database)
         } else {
             tracing::info!("No address-for-peers provided. Skipping leader persistence.");
             Ok(())
         }
     }
 
-    async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
+    async fn current_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
         let res = self.persistence.get_leader().await;
         if let Err(DatabaseError::Query(diesel::result::Error::DatabaseError(_kind, ref err))) = res
         {
