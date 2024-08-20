@@ -9,7 +9,7 @@ use utils::serde_percent::Percent;
 
 use pageserver_api::models::PageserverUtilization;
 
-use crate::{config::PageServerConf, tenant::mgr::TenantManager};
+use crate::{config::PageServerConf, metrics::NODE_UTILIZATION_SCORE, tenant::mgr::TenantManager};
 
 pub(crate) fn regenerate(
     conf: &PageServerConf,
@@ -63,9 +63,8 @@ pub(crate) fn regenerate(
     };
 
     // Initialize `PageserverUtilization::utilization_score`
-    let _ = doc.cached_score();
-
-    // TODO: make utilization_score into a metric
+    let score = doc.cached_score();
+    NODE_UTILIZATION_SCORE.set(score);
 
     Ok(doc)
 }

@@ -1803,6 +1803,14 @@ pub(crate) static SECONDARY_RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::n
     .expect("failed to define a metric")
 });
 
+pub(crate) static NODE_UTILIZATION_SCORE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_utilization_score",
+        "The utilization score we report to the storage controller for scheduling, where 0.0 is empty and 1.0 is full.  May exceed 1.0.",
+    )
+    .expect("failed to define a metric")
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
