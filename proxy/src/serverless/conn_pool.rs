@@ -758,7 +758,7 @@ mod tests {
     async fn test_pool() {
         let _ = env_logger::try_init();
         let config = Box::leak(Box::new(crate::config::HttpConfig {
-            accept_ws: false,
+            accept_websockets: false,
             pool_options: GlobalConnPoolOptions {
                 max_conns_per_endpoint: 2,
                 gc_epoch: Duration::from_secs(1),

@@ -353,7 +353,9 @@ async fn request_handler(
         .map(|s| s.to_string());
 
     // Check if the request is a websocket upgrade request.
-    if config.http_config.accept_ws && framed_websockets::upgrade::is_upgrade_request(&request) {
+    if config.http_config.accept_websockets
+        && framed_websockets::upgrade::is_upgrade_request(&request)
+    {
         let ctx = RequestMonitoring::new(
             session_id,
             peer_addr,
