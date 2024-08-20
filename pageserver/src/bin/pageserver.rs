@@ -125,6 +125,7 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
     info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
+    info!(?conf.io_buffer_alignment, "starting with setting for IO buffer alignment");
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
