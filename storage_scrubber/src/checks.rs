@@ -10,8 +10,8 @@ use utils::generation::Generation;
 use utils::id::TimelineId;
 
 use crate::cloud_admin_api::BranchData;
-use crate::metadata_stream::stream_listing_generic;
-use crate::{download_object_with_retries_generic, RootTarget, TenantShardTimelineId};
+use crate::metadata_stream::stream_listing;
+use crate::{download_object_with_retries, RootTarget, TenantShardTimelineId};
 use futures_util::StreamExt;
 use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
 use pageserver::tenant::storage_layer::LayerName;
@@ -320,17 +320,17 @@ pub(crate) fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generati
     }
 }
 
-pub(crate) async fn list_timeline_blobs_generic(
+pub(crate) async fn list_timeline_blobs(
     remote_client: &GenericRemoteStorage,
     id: TenantShardTimelineId,
-    s3_root: &RootTarget,
+    root_target: &RootTarget,
 ) -> anyhow::Result<RemoteTimelineBlobData> {
     let mut s3_layers = HashSet::new();
 
     let mut errors = Vec::new();
     let mut unknown_keys = Vec::new();
 
-    let mut timeline_dir_target = s3_root.timeline_root(&id);
+    let mut timeline_dir_target = root_target.timeline_root(&id);
     timeline_dir_target.delimiter = String::new();
 
     let mut index_part_keys: Vec<ListingObject> = Vec::new();
@@ -341,7 +341,7 @@ pub(crate) async fn list_timeline_blobs_generic(
         .strip_prefix("/")
         .unwrap_or(&timeline_dir_target.prefix_in_bucket);
 
-    let mut stream = std::pin::pin!(stream_listing_generic(remote_client, &timeline_dir_target));
+    let mut stream = std::pin::pin!(stream_listing(remote_client, &timeline_dir_target));
     while let Some(obj) = stream.next().await {
         let (key, Some(obj)) = obj? else {
             panic!("ListingObject not specified");
@@ -421,7 +421,7 @@ pub(crate) async fn list_timeline_blobs_generic(
 
     if let Some(index_part_object_key) = index_part_object.as_ref() {
         let index_part_bytes =
-            download_object_with_retries_generic(remote_client, &index_part_object_key.key)
+            download_object_with_retries(remote_client, &index_part_object_key.key)
                 .await
                 .context("index_part.json download")?;
 
