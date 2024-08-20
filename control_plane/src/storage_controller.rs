@@ -453,6 +453,11 @@ impl StorageController {
             let jwt_token =
                 encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
             args.push(format!("--jwt-token={jwt_token}"));
+
+            let peer_claims = Claims::new(None, Scope::Admin);
+            let peer_jwt_token = encode_from_key_file(&peer_claims, private_key)
+                .expect("failed to generate jwt token");
+            args.push(format!("--peer-jwt-token={peer_jwt_token}"));
         }
 
         if let Some(public_key) = &self.public_key {
