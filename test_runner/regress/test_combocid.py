@@ -43,6 +43,10 @@ def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
     assert len(rows) == 500
 
     cur.execute("rollback")
+    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
+    env.pageserver.http_client().timeline_checkpoint(
+        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
+    )
 
 
 def test_combocid_delete(neon_env_builder: NeonEnvBuilder):
@@ -101,6 +105,11 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     assert len(rows) == 500
 
     cur.execute("rollback")
+
+    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
+    env.pageserver.http_client().timeline_checkpoint(
+        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
+    )
 
 
 def test_combocid(neon_env_builder: NeonEnvBuilder):
