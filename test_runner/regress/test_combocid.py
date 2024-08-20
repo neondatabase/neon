@@ -34,7 +34,7 @@ def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
 
     # Clear the cache, so that we exercise reconstructing the pages
     # from WAL
-    cur.execute("SELECT clear_buffer_cache()")
+    endpoint.clear_shared_buffers()
 
     # Check that the cursor opened earlier still works. If the
     # combocids are not restored correctly, it won't.
@@ -92,7 +92,7 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     cur.execute("delete from t")
     # Clear the cache, so that we exercise reconstructing the pages
     # from WAL
-    cur.execute("SELECT clear_buffer_cache()")
+    endpoint.clear_shared_buffers()
 
     # Check that the cursor opened earlier still works. If the
     # combocids are not restored correctly, it won't.
