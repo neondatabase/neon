@@ -118,6 +118,37 @@ impl PageserverUtilization {
     }
 }
 
+/// Test helper
+pub mod test_utilization {
+    use super::PageserverUtilization;
+    use std::time::SystemTime;
+    use utils::{
+        serde_percent::Percent,
+        serde_system_time::{self},
+    };
+
+    // Parameters of the imaginary node used for test utilization instances
+    const TEST_DISK_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
+    const TEST_SHARDS_MAX: u32 = 1000;
+
+    /// Unit test helper.  Unconditionally compiled because cfg(test) doesn't carry across crates.  Do
+    /// not abuse this function from non-test code.
+    ///
+    /// Emulates a node with a 1000 shard limit and a 1TB disk.
+    pub fn simple(shard_count: u32, disk_wanted_bytes: u64) -> PageserverUtilization {
+        PageserverUtilization {
+            disk_usage_bytes: disk_wanted_bytes,
+            free_space_bytes: TEST_DISK_SIZE - std::cmp::min(disk_wanted_bytes, TEST_DISK_SIZE),
+            disk_wanted_bytes,
+            disk_usable_pct: Percent::new(100).unwrap(),
+            shard_count,
+            max_shard_count: TEST_SHARDS_MAX,
+            utilization_score: None,
+            captured_at: serde_system_time::SystemTime(SystemTime::now()),
+        }
+    }
+}
+
 /// openapi knows only `format: int64`, so avoid outputting a non-parseable value by generated clients.
 ///
 /// Instead of newtype, use this because a newtype would get require handling deserializing values

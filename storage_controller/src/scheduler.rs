@@ -512,7 +512,7 @@ impl Scheduler {
 pub(crate) mod test_utils {
 
     use crate::node::Node;
-    use pageserver_api::{controller_api::NodeAvailability, models::PageserverUtilization};
+    use pageserver_api::{controller_api::NodeAvailability, models::utilization::test_utilization};
     use std::collections::HashMap;
     use utils::id::NodeId;
     /// Test helper: synthesize the requested number of nodes, all in active state.
@@ -529,7 +529,7 @@ pub(crate) mod test_utils {
                         format!("pghost-{i}"),
                         5432 + i as u16,
                     );
-                    node.set_availability(NodeAvailability::Active(PageserverUtilization::full()));
+                    node.set_availability(NodeAvailability::Active(test_utilization::simple(0, 0)));
                     assert!(node.is_available());
                     node
                 })
@@ -540,6 +540,8 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
+    use pageserver_api::{controller_api::NodeAvailability, models::utilization::test_utilization};
+
     use super::*;
 
     use crate::tenant_shard::IntentState;
@@ -599,5 +601,131 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    /// Test the PageserverUtilization's contribution to scheduling algorithm
+    fn scheduler_utilization() {
+        let mut nodes = test_utils::make_test_nodes(3);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        // Need to keep these alive because they contribute to shard counts via RAII
+        let mut scheduled_intents = Vec::new();
+
+        let empty_context = ScheduleContext::default();
+
+        fn assert_scheduler_chooses(
+            expect_node: NodeId,
+            scheduled_intents: &mut Vec<IntentState>,
+            scheduler: &mut Scheduler,
+            context: &ScheduleContext,
+        ) {
+            let scheduled = scheduler.schedule_shard(&[], context).unwrap();
+            let mut intent = IntentState::new();
+            intent.set_attached(scheduler, Some(scheduled));
+            scheduled_intents.push(intent);
+            assert_eq!(scheduled, expect_node);
+        }
+
+        // Independent schedule calls onto empty nodes should round-robin, because each node's
+        // utilization's shard count is updated inline.  The order is determinsitic because when all other factors are
+        // equal, we order by node ID.
+        assert_scheduler_chooses(
+            NodeId(1),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(2),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(3),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+
+        // Manually setting utilization higher should cause schedule calls to round-robin the other nodes
+        // which have equal utilization.
+        nodes
+            .get_mut(&NodeId(1))
+            .unwrap()
+            .set_availability(NodeAvailability::Active(test_utilization::simple(
+                10,
+                1024 * 1024 * 1024,
+            )));
+        scheduler.node_upsert(nodes.get(&NodeId(1)).unwrap());
+
+        assert_scheduler_chooses(
+            NodeId(2),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(3),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(2),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(3),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+
+        // The scheduler should prefer nodes with lower affinity score,
+        // even if they have higher utilization (as long as they aren't utilized at >100%)
+        let mut context_prefer_node1 = ScheduleContext::default();
+        context_prefer_node1.avoid(&[NodeId(2), NodeId(3)]);
+        assert_scheduler_chooses(
+            NodeId(1),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &context_prefer_node1,
+        );
+        assert_scheduler_chooses(
+            NodeId(1),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &context_prefer_node1,
+        );
+
+        // If a node is over-utilized, it will not be used even if affinity scores prefer it
+        nodes
+            .get_mut(&NodeId(1))
+            .unwrap()
+            .set_availability(NodeAvailability::Active(test_utilization::simple(
+                20000,
+                1024 * 1024 * 1024,
+            )));
+        scheduler.node_upsert(nodes.get(&NodeId(1)).unwrap());
+        assert_scheduler_chooses(
+            NodeId(2),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &context_prefer_node1,
+        );
+        assert_scheduler_chooses(
+            NodeId(3),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &context_prefer_node1,
+        );
+
+        for mut intent in scheduled_intents {
+            intent.clear(&mut scheduler);
+        }
     }
 }
