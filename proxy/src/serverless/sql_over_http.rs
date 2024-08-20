@@ -184,17 +184,21 @@ fn get_conn_info(
         .ok_or(ConnInfoError::MissingPassword)?;
     let password = urlencoding::decode_binary(password.as_bytes());
 
-    let hostname = connection_url
-        .host_str()
-        .ok_or(ConnInfoError::MissingHostname)?;
-
-    let endpoint = if let Some(tls) = tls {
-        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?
-    } else {
-        hostname
-            .split_once(".")
-            .map_or(hostname, |(prefix, _)| prefix)
-            .into()
+    let endpoint = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => {
+            if let Some(tls) = tls {
+                endpoint_sni(hostname, &tls.common_names)?
+                    .ok_or(ConnInfoError::MalformedEndpoint)?
+            } else {
+                hostname
+                    .split_once(".")
+                    .map_or(hostname, |(prefix, _)| prefix)
+                    .into()
+            }
+        }
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) | None => {
+            return Err(ConnInfoError::MissingHostname)
+        }
     };
     ctx.set_endpoint_id(endpoint.clone());
 
