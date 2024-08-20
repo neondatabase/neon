@@ -43,7 +43,7 @@ inputs:
   pg_version:
     description: 'Postgres version to use for tests'
     required: false
-    default: 'v14'
+    default: 'v16'
   benchmark_durations:
     description: 'benchmark durations JSON'
     required: false
