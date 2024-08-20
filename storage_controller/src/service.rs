@@ -17,8 +17,9 @@ use crate::{
     compute_hook::NotifyError,
     drain_utils::{self, TenantShardDrain, TenantShardIterator},
     id_lock_map::{trace_exclusive_lock, trace_shared_lock, IdLockMap, TracingExclusiveGuard},
+    leadership::Leadership,
     metrics,
-    peer_client::{GlobalObservedState, PeerClient},
+    peer_client::GlobalObservedState,
     persistence::{
         AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
         TenantFilter,
@@ -333,7 +334,7 @@ impl From<DatabaseError> for ApiError {
             DatabaseError::Connection(_) | DatabaseError::ConnectionPool(_) => {
                 ApiError::ShuttingDown
             }
-            DatabaseError::Logical(reason) => {
+            DatabaseError::Logical(reason) | DatabaseError::Migration(reason) => {
                 ApiError::InternalServerError(anyhow::anyhow!(reason))
             }
         }
@@ -606,22 +607,15 @@ impl Service {
 
         // Before making any obeservable changes to the cluster, persist self
         // as leader in database and memory.
-        if let Some(address_for_peers) = &self.config.address_for_peers {
-            // TODO: `address-for-peers` can become a mandatory cli arg
-            // after we update the k8s setup
-            let proposed_leader = ControllerPersistence {
-                address: address_for_peers.to_string(),
-                started_at: chrono::Utc::now(),
-            };
+        let leadership = Leadership::new(
+            self.persistence.clone(),
+            self.config.clone(),
+            self.cancel.child_token(),
+        );
 
-            if let Err(err) = self
-                .persistence
-                .update_leader(current_leader, proposed_leader)
-                .await
-            {
-                tracing::error!("Failed to persist self as leader: {err}. Aborting start-up ...");
-                std::process::exit(1);
-            }
+        if let Err(e) = leadership.become_leader(current_leader).await {
+            tracing::error!("Failed to persist self as leader: {e}. Aborting start-up ...");
+            std::process::exit(1);
         }
 
         self.inner.write().unwrap().become_leader();
@@ -1159,6 +1153,16 @@ impl Service {
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
         let (abort_tx, abort_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        let leadership_cancel = CancellationToken::new();
+        let leadership = Leadership::new(persistence.clone(), config.clone(), leadership_cancel);
+        let (leader, leader_step_down_state) = leadership.step_down_current_leader().await?;
+
+        // Apply the migrations **after** the current leader has stepped down
+        // (or we've given up waiting for it), but **before** reading from the
+        // database. The only exception is reading the current leader before
+        // migrating.
+        persistence.migration_run().await?;
+
         tracing::info!("Loading nodes from database...");
         let nodes = persistence
             .list_nodes()
@@ -1374,32 +1378,6 @@ impl Service {
                 // Block shutdown until we're done (we must respect self.cancel)
                 let Ok(_gate) = this.gate.enter() else {
                     return;
-                };
-
-                let leadership_status = this.inner.read().unwrap().get_leadership_status();
-                let leader = match this.get_leader().await {
-                    Ok(ok) => ok,
-                    Err(err) => {
-                        tracing::error!(
-                            "Failed to query database for current leader: {err}. Aborting start-up ..."
-                        );
-                        std::process::exit(1);
-                    }
-                };
-
-                let leader_step_down_state = match leadership_status {
-                    LeadershipStatus::Candidate => {
-                        if let Some(ref leader) = leader {
-                            this.request_step_down(leader).await
-                        } else {
-                            tracing::info!(
-                                "No leader found to request step down from. Will build observed state."
-                            );
-                            None
-                        }
-                    }
-                    LeadershipStatus::Leader => None,
-                    LeadershipStatus::SteppedDown => unreachable!(),
                 };
 
                 this.startup_reconcile(leader, leader_step_down_state, bg_compute_notify_result_tx)
@@ -6376,43 +6354,5 @@ impl Service {
         }
 
         global_observed
-    }
-
-    /// Request step down from the currently registered leader in the database
-    ///
-    /// If such an entry is persisted, the success path returns the observed
-    /// state and details of the leader. Otherwise, None is returned indicating
-    /// there is no leader currently.
-    ///
-    /// On failures to query the database or step down error responses the process is killed
-    /// and we rely on k8s to retry.
-    async fn request_step_down(
-        &self,
-        leader: &ControllerPersistence,
-    ) -> Option<GlobalObservedState> {
-        tracing::info!("Sending step down request to {leader:?}");
-
-        // TODO: jwt token
-        let client = PeerClient::new(
-            Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
-            self.config.jwt_token.clone(),
-        );
-        let state = client.step_down(&self.cancel).await;
-        match state {
-            Ok(state) => Some(state),
-            Err(err) => {
-                // TODO: Make leaders periodically update a timestamp field in the
-                // database and, if the leader is not reachable from the current instance,
-                // but inferred as alive from the timestamp, abort start-up. This avoids
-                // a potential scenario in which we have two controllers acting as leaders.
-                tracing::error!(
-                    "Leader ({}) did not respond to step-down request: {}",
-                    leader.address,
-                    err
-                );
-
-                None
-            }
-        }
     }
 }

@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context};
 use clap::Parser;
-use diesel::Connection;
 use hyper::Uri;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
@@ -26,9 +25,6 @@ use utils::{project_build_tag, project_git_version, tcp_listener};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
-
-use diesel_migrations::{embed_migrations, EmbeddedMigrations};
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -181,20 +177,6 @@ impl Secrets {
     }
 }
 
-/// Execute the diesel migrations that are built into this binary
-async fn migration_run(database_url: &str) -> anyhow::Result<()> {
-    use diesel::PgConnection;
-    use diesel_migrations::{HarnessWithOutput, MigrationHarness};
-    let mut conn = PgConnection::establish(database_url)?;
-
-    HarnessWithOutput::write_to_stdout(&mut conn)
-        .run_pending_migrations(MIGRATIONS)
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
     logging::init(
         LogFormat::Plain,
@@ -304,12 +286,8 @@ async fn async_main() -> anyhow::Result<()> {
         http_service_port: args.listen.port() as i32,
     };
 
-    // After loading secrets & config, but before starting anything else, apply database migrations
+    // Validate that we can connect to the database
     Persistence::await_connection(&secrets.database_url, args.db_connect_timeout.into()).await?;
-
-    migration_run(&secrets.database_url)
-        .await
-        .context("Running database migrations")?;
 
     let persistence = Arc::new(Persistence::new(secrets.database_url));
 
