@@ -603,7 +603,7 @@ impl ImageLayerInner {
                     .blobs_at
                     .as_slice()
                     .iter()
-                    .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                    .map(|(_, (_, blob_meta))| format!("{}@{}", blob_meta.key, blob_meta.lsn))
                     .join(", ");
                 tracing::warn!(
                     "Oversized vectored read ({} > {}) for keys {}",
@@ -631,7 +631,7 @@ impl ImageLayerInner {
                 }
                 Err(err) => {
                     let kind = err.kind();
-                    for (_, blob_meta) in read.blobs_at.as_slice() {
+                    for (_, (_, blob_meta)) in read.blobs_at.as_slice() {
                         reconstruct_state.on_key_error(
                             blob_meta.key,
                             PageReconstructError::from(anyhow!(
@@ -1361,7 +1361,7 @@ mod test {
                 .await
                 .unwrap();
         let img_layer = resident_layer.get_as_image(&ctx).await.unwrap();
-        for max_read_size in [1, 1024] {
+        for max_read_size in [1, 2048] {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined

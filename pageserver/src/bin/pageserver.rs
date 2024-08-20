@@ -136,7 +136,11 @@ fn main() -> anyhow::Result<()> {
     let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
-    virtual_file::init(conf.max_file_descriptors, conf.virtual_file_io_engine);
+    virtual_file::init(
+        conf.max_file_descriptors,
+        conf.virtual_file_io_engine,
+        conf.io_buffer_alignment,
+    );
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;

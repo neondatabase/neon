@@ -39,7 +39,7 @@ use crate::tenant::disk_btree::{
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
-    VectoredReadPlanner,
+    VectoredReadCoalesceMode, VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
@@ -989,7 +989,7 @@ impl DeltaLayerInner {
                 .blobs_at
                 .as_slice()
                 .iter()
-                .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                .map(|(_, (_, blob_meta))| format!("{}@{}", blob_meta.key, blob_meta.lsn))
                 .join(", ");
             tracing::warn!(
                 "Oversized vectored read ({} > {}) for keys {}",
@@ -1031,7 +1031,7 @@ impl DeltaLayerInner {
                 Ok(blobs_buf) => blobs_buf,
                 Err(err) => {
                     let kind = err.kind();
-                    for (_, blob_meta) in read.blobs_at.as_slice() {
+                    for (_, (_, blob_meta)) in read.blobs_at.as_slice() {
                         reconstruct_state.on_key_error(
                             blob_meta.key,
                             PageReconstructError::Other(anyhow!(
@@ -1243,6 +1243,7 @@ impl DeltaLayerInner {
                         offsets.end.pos(),
                         meta,
                         max_read_size,
+                        VectoredReadCoalesceMode::AdjacentOnly,
                     ))
                 }
             } else {
@@ -1692,7 +1693,7 @@ pub(crate) mod test {
 
         let mut planned_blobs = Vec::new();
         for read in vectored_reads {
-            for (at, meta) in read.blobs_at.as_slice() {
+            for (at, (_, meta)) in read.blobs_at.as_slice() {
                 planned_blobs.push(BlobSpec {
                     key: meta.key,
                     lsn: meta.lsn,
@@ -2267,7 +2268,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         let delta_layer = resident_layer.get_as_delta(&ctx).await.unwrap();
-        for max_read_size in [1, 1024] {
+        for max_read_size in [1, 2048] {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined

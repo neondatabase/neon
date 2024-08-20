@@ -27,7 +27,7 @@ use utils::vec_map::VecMap;
 
 use crate::context::RequestContext;
 use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
-use crate::virtual_file::VirtualFile;
+use crate::virtual_file::{self, VirtualFile};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
@@ -61,7 +61,7 @@ pub struct VectoredRead {
     pub start: u64,
     pub end: u64,
     /// Starting offsets and metadata for each blob in this read
-    pub blobs_at: VecMap<u64, BlobMeta>,
+    pub blobs_at: VecMap<u64, (u64, BlobMeta)>,
 }
 
 impl VectoredRead {
@@ -76,14 +76,113 @@ pub(crate) enum VectoredReadExtended {
     No,
 }
 
-pub(crate) struct VectoredReadBuilder {
-    start: u64,
-    end: u64,
-    blobs_at: VecMap<u64, BlobMeta>,
-    max_read_size: Option<usize>,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VectoredReadCoalesceMode {
+    /// Only coalesce exactly adjacent reads.
+    AdjacentOnly,
+    /// In addition to adjacent reads, also consider reads whose corresponding
+    /// `end` and `start` offsets reside at the same chunk.
+    Chunked(usize),
+}
+
+impl VectoredReadCoalesceMode {
+    fn get() -> Self {
+        let align = virtual_file::get_io_buffer_alignment();
+        if align == 1 {
+            VectoredReadCoalesceMode::AdjacentOnly
+        } else {
+            VectoredReadCoalesceMode::Chunked(align)
+        }
+    }
+}
+
+impl Default for VectoredReadCoalesceMode {
+    fn default() -> Self {
+        VectoredReadCoalesceMode::AdjacentOnly
+    }
+}
+
+pub(crate) enum VectoredReadBuilder {
+    Unconstrained(VectoredReadBuilderInner),
+    Chunked(ChunkedVectoredReadBuilderInner),
 }
 
 impl VectoredReadBuilder {
+    pub(crate) fn new(
+        start_offset: u64,
+        end_offset: u64,
+        meta: BlobMeta,
+        max_read_size: usize,
+        mode: VectoredReadCoalesceMode,
+    ) -> Self {
+        match mode {
+            VectoredReadCoalesceMode::AdjacentOnly => Self::Unconstrained(
+                VectoredReadBuilderInner::new(start_offset, end_offset, meta, Some(max_read_size)),
+            ),
+            VectoredReadCoalesceMode::Chunked(chunk_size) => {
+                Self::Chunked(ChunkedVectoredReadBuilderInner::new(
+                    start_offset,
+                    end_offset,
+                    meta,
+                    Some(max_read_size),
+                    chunk_size,
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn new_streaming(
+        start_offset: u64,
+        end_offset: u64,
+        meta: BlobMeta,
+        mode: VectoredReadCoalesceMode,
+    ) -> Self {
+        match mode {
+            VectoredReadCoalesceMode::AdjacentOnly => Self::Unconstrained(
+                VectoredReadBuilderInner::new(start_offset, end_offset, meta, None),
+            ),
+            VectoredReadCoalesceMode::Chunked(chunk_size) => {
+                Self::Chunked(ChunkedVectoredReadBuilderInner::new(
+                    start_offset,
+                    end_offset,
+                    meta,
+                    None,
+                    chunk_size,
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
+        match self {
+            VectoredReadBuilder::Unconstrained(builder) => builder.extend(start, end, meta),
+            VectoredReadBuilder::Chunked(builder) => builder.extend(start, end, meta),
+        }
+    }
+
+    pub(crate) fn build(self) -> VectoredRead {
+        match self {
+            VectoredReadBuilder::Unconstrained(builder) => builder.build(),
+            VectoredReadBuilder::Chunked(builder) => builder.build(),
+        }
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        match self {
+            VectoredReadBuilder::Unconstrained(builder) => builder.size(),
+            VectoredReadBuilder::Chunked(builder) => builder.size(),
+        }
+    }
+}
+
+pub(crate) struct VectoredReadBuilderInner {
+    start: u64,
+    end: u64,
+    blobs_at: VecMap<u64, (u64, BlobMeta)>,
+    max_read_size: Option<usize>,
+}
+
+impl VectoredReadBuilderInner {
     /// Start building a new vectored read.
     ///
     /// Note that by design, this does not check against reading more than `max_read_size` to
@@ -93,18 +192,18 @@ impl VectoredReadBuilder {
         start_offset: u64,
         end_offset: u64,
         meta: BlobMeta,
-        max_read_size: usize,
+        max_read_size: Option<usize>,
     ) -> Self {
         let mut blobs_at = VecMap::default();
         blobs_at
-            .append(start_offset, meta)
+            .append(start_offset, (end_offset, meta))
             .expect("First insertion always succeeds");
 
         Self {
             start: start_offset,
             end: end_offset,
             blobs_at,
-            max_read_size: Some(max_read_size),
+            max_read_size,
         }
     }
     /// Attempt to extend the current read with a new blob if the start
@@ -122,7 +221,7 @@ impl VectoredReadBuilder {
         } {
             self.end = end;
             self.blobs_at
-                .append(start, meta)
+                .append(start, (end, meta))
                 .expect("LSNs are ordered within vectored reads");
 
             return VectoredReadExtended::Yes;
@@ -139,6 +238,102 @@ impl VectoredReadBuilder {
         VectoredRead {
             start: self.start,
             end: self.end,
+            blobs_at: self.blobs_at,
+        }
+    }
+}
+
+pub(crate) struct ChunkedVectoredReadBuilderInner {
+    /// Start block number
+    start_blk_no: usize,
+    /// End block number (exclusive).
+    end_blk_no: usize,
+    /// Blobs (metadata, end offset) ordered by blobs start offset.
+    blobs_at: VecMap<u64, (u64, BlobMeta)>,
+    max_read_size: Option<usize>,
+    chunk_size: usize,
+}
+
+/// Computes x / d rounded up.
+fn div_round_up(x: usize, d: usize) -> usize {
+    (x + (d - 1)) / d
+}
+
+impl ChunkedVectoredReadBuilderInner {
+    /// Start building a new vectored read.
+    ///
+    /// Note that by design, this does not check against reading more than `max_read_size` to
+    /// support reading larger blobs than the configuration value. The builder will be single use
+    /// however after that.
+    pub(crate) fn new(
+        start_offset: u64,
+        end_offset: u64,
+        meta: BlobMeta,
+        max_read_size: Option<usize>,
+        chunk_size: usize,
+    ) -> Self {
+        let mut blobs_at = VecMap::default();
+        blobs_at
+            .append(start_offset, (end_offset, meta))
+            .expect("First insertion always succeeds");
+
+        let start_blk_no = start_offset as usize / chunk_size;
+        let end_blk_no = div_round_up(end_offset as usize, chunk_size);
+        Self {
+            start_blk_no,
+            end_blk_no,
+            blobs_at,
+            max_read_size,
+            chunk_size,
+        }
+    }
+
+    /// Returns the end offset of the last blob.
+    pub(crate) fn last_end_offset(&self) -> u64 {
+        // SAFETY(unwrap): `self.blobs_at` always has a least one entry since construction.
+        let (_, (end, _)) = self.blobs_at.as_slice().last().unwrap();
+        *end
+    }
+
+    /// Attempts to extend the current read with a new blob if:
+    ///
+    /// - The start offset matches with the current end of the vectored read
+    /// - The end block number matches the current end block number.
+    ///
+    /// The resulting size also must be below the max read size.
+    pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
+        tracing::trace!(start, end, "trying to extend");
+        let start_blk_no = start as usize / self.chunk_size;
+        let end_blk_no = div_round_up(end as usize, self.chunk_size);
+        if (self.last_end_offset() == start || self.end_blk_no == start_blk_no + 1) && {
+            if let Some(max_read_size) = self.max_read_size {
+                let coalesced_size = (end_blk_no - self.start_blk_no) * self.chunk_size;
+                coalesced_size <= max_read_size
+            } else {
+                true
+            }
+        } {
+            self.end_blk_no = end_blk_no;
+            self.blobs_at
+                .append(start, (end, meta))
+                .expect("LSNs are ordered within vectored reads");
+
+            return VectoredReadExtended::Yes;
+        }
+
+        VectoredReadExtended::No
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        (self.end_blk_no - self.start_blk_no) as usize * self.chunk_size
+    }
+
+    pub(crate) fn build(self) -> VectoredRead {
+        let start = (self.start_blk_no * self.chunk_size) as u64;
+        let end = (self.end_blk_no * self.chunk_size) as u64;
+        VectoredRead {
+            start,
+            end,
             blobs_at: self.blobs_at,
         }
     }
@@ -166,14 +361,18 @@ pub struct VectoredReadPlanner {
     prev: Option<(Key, Lsn, u64, BlobFlag)>,
 
     max_read_size: usize,
+
+    mode: VectoredReadCoalesceMode,
 }
 
 impl VectoredReadPlanner {
     pub fn new(max_read_size: usize) -> Self {
+        let mode = VectoredReadCoalesceMode::get();
         Self {
             blobs: BTreeMap::new(),
             prev: None,
             max_read_size,
+            mode,
         }
     }
 
@@ -252,6 +451,7 @@ impl VectoredReadPlanner {
                         end_offset,
                         BlobMeta { key, lsn },
                         self.max_read_size,
+                        self.mode,
                     );
 
                     let prev_read_builder = current_read_builder.replace(next_read_builder);
@@ -310,10 +510,11 @@ impl<'a> VectoredBlobReader<'a> {
             .into_inner();
 
         let blobs_at = read.blobs_at.as_slice();
-        let start_offset = blobs_at.first().expect("VectoredRead is never empty").0;
+
+        // Note: read.start != blobs_at.first().start
+        let start_offset = read.start;
 
         let mut metas = Vec::with_capacity(blobs_at.len());
-
         // Blobs in `read` only provide their starting offset. The end offset
         // of a blob is implicit: the start of the next blob if one exists
         // or the end of the read.
@@ -328,9 +529,9 @@ impl<'a> VectoredBlobReader<'a> {
         // Some scratch space, put here for reusing the allocation
         let mut decompressed_vec = Vec::new();
 
-        for ((offset, meta), next) in pairs {
-            let offset_in_buf = offset - start_offset;
-            let first_len_byte = buf[offset_in_buf as usize];
+        for ((blob_start, (blob_end, meta)), next) in pairs {
+            let blob_start_in_buf = blob_start - start_offset;
+            let first_len_byte = buf[blob_start_in_buf as usize];
 
             // Each blob is prefixed by a header containing its size and compression information.
             // Extract the size and skip that header to find the start of the data.
@@ -340,7 +541,7 @@ impl<'a> VectoredBlobReader<'a> {
                 (1, first_len_byte as u64, BYTE_UNCOMPRESSED)
             } else {
                 let mut blob_size_buf = [0u8; 4];
-                let offset_in_buf = offset_in_buf as usize;
+                let offset_in_buf = blob_start_in_buf as usize;
 
                 blob_size_buf.copy_from_slice(&buf[offset_in_buf..offset_in_buf + 4]);
                 blob_size_buf[0] &= !LEN_COMPRESSION_BIT_MASK;
@@ -353,9 +554,9 @@ impl<'a> VectoredBlobReader<'a> {
                 )
             };
 
-            let start_raw = offset_in_buf + size_length;
+            let start_raw = blob_start_in_buf + size_length;
             let end_raw = match next {
-                Some((next_blob_start_offset, _)) => next_blob_start_offset - start_offset,
+                Some(_) => blob_end - start_offset,
                 None => start_raw + blob_size,
             };
             assert_eq!(end_raw - start_raw, blob_size);
@@ -407,18 +608,22 @@ pub struct StreamingVectoredReadPlanner {
     max_cnt: usize,
     /// Size of the current batch
     cnt: usize,
+
+    mode: VectoredReadCoalesceMode,
 }
 
 impl StreamingVectoredReadPlanner {
     pub fn new(max_read_size: u64, max_cnt: usize) -> Self {
         assert!(max_cnt > 0);
         assert!(max_read_size > 0);
+        let mode = VectoredReadCoalesceMode::get();
         Self {
             read_builder: None,
             prev: None,
             max_cnt,
             max_read_size,
             cnt: 0,
+            mode,
         }
     }
 
@@ -467,17 +672,12 @@ impl StreamingVectoredReadPlanner {
             }
             None => {
                 self.read_builder = {
-                    let mut blobs_at = VecMap::default();
-                    blobs_at
-                        .append(start_offset, BlobMeta { key, lsn })
-                        .expect("First insertion always succeeds");
-
-                    Some(VectoredReadBuilder {
-                        start: start_offset,
-                        end: end_offset,
-                        blobs_at,
-                        max_read_size: None,
-                    })
+                    Some(VectoredReadBuilder::new_streaming(
+                        start_offset,
+                        end_offset,
+                        BlobMeta { key, lsn },
+                        self.mode,
+                    ))
                 };
             }
         }
@@ -737,6 +937,7 @@ mod tests {
         let reserved_bytes = blobs.iter().map(|bl| bl.len()).max().unwrap() * 2 + 16;
         let mut buf = BytesMut::with_capacity(reserved_bytes);
 
+        let mode = VectoredReadCoalesceMode::get();
         let vectored_blob_reader = VectoredBlobReader::new(&file);
         let meta = BlobMeta {
             key: Key::MIN,
@@ -748,7 +949,7 @@ mod tests {
             if idx + 1 == offsets.len() {
                 continue;
             }
-            let read_builder = VectoredReadBuilder::new(*offset, *end, meta, 16 * 4096);
+            let read_builder = VectoredReadBuilder::new(*offset, *end, meta, 16 * 4096, mode);
             let read = read_builder.build();
             let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
             assert_eq!(result.blobs.len(), 1);

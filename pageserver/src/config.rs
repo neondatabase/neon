@@ -95,6 +95,8 @@ pub mod defaults {
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
+    pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 1;
+
     ///
     /// Default built-in configuration file.
     ///
@@ -289,6 +291,8 @@ pub struct PageServerConf {
 
     /// Direct IO settings
     pub virtual_file_direct_io: virtual_file::DirectIoMode,
+
+    pub io_buffer_alignment: usize,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -393,6 +397,8 @@ struct PageServerConfigBuilder {
     compact_level0_phase1_value_access: BuilderValue<CompactL0Phase1ValueAccess>,
 
     virtual_file_direct_io: BuilderValue<virtual_file::DirectIoMode>,
+
+    io_buffer_alignment: BuilderValue<usize>,
 }
 
 impl PageServerConfigBuilder {
@@ -481,6 +487,7 @@ impl PageServerConfigBuilder {
             l0_flush: Set(L0FlushConfig::default()),
             compact_level0_phase1_value_access: Set(CompactL0Phase1ValueAccess::default()),
             virtual_file_direct_io: Set(virtual_file::DirectIoMode::default()),
+            io_buffer_alignment: Set(DEFAULT_IO_BUFFER_ALIGNMENT),
         }
     }
 }
@@ -716,6 +723,7 @@ impl PageServerConfigBuilder {
                 l0_flush,
                 compact_level0_phase1_value_access,
                 virtual_file_direct_io,
+                io_buffer_alignment,
             }
             CUSTOM LOGIC
             {
@@ -1068,6 +1076,7 @@ impl PageServerConf {
             l0_flush: L0FlushConfig::default(),
             compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
             virtual_file_direct_io: virtual_file::DirectIoMode::default(),
+            io_buffer_alignment: defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
         }
     }
 }
@@ -1308,6 +1317,7 @@ background_task_maximum_delay = '334 s'
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
                 virtual_file_direct_io: virtual_file::DirectIoMode::default(),
+                io_buffer_alignment: defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1381,6 +1391,7 @@ background_task_maximum_delay = '334 s'
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
                 virtual_file_direct_io: virtual_file::DirectIoMode::default(),
+                io_buffer_alignment: defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
             },
             "Should be able to parse all basic config values correctly"
         );
