@@ -374,114 +374,6 @@ mod tests {
         }
     }
 
-    struct ExpectedRead {
-        expect_pos: u32,
-        expect_len: usize,
-        respond: Result<Vec<u8>, String>,
-    }
-
-    struct MockFile {
-        expected: RefCell<VecDeque<ExpectedRead>>,
-    }
-
-    impl Drop for MockFile {
-        fn drop(&mut self) {
-            assert!(
-                self.expected.borrow().is_empty(),
-                "expected reads not satisfied"
-            );
-        }
-    }
-
-    macro_rules! mock_file {
-        ($($pos:expr , $len:expr => $respond:expr),* $(,)?) => {{
-            MockFile {
-                expected: RefCell::new(VecDeque::from(vec![$(ExpectedRead {
-                    expect_pos: $pos,
-                    expect_len: $len,
-                    respond: $respond,
-                }),*])),
-            }
-        }};
-    }
-
-    impl File for MockFile {
-        async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
-            &'b self,
-            start: u32,
-            mut dst: Slice<B>,
-            _ctx: &'a RequestContext,
-        ) -> std::io::Result<(Slice<B>, usize)> {
-            let ExpectedRead {
-                expect_pos,
-                expect_len,
-                respond,
-            } = self
-                .expected
-                .borrow_mut()
-                .pop_front()
-                .expect("unexpected read");
-            assert_eq!(start, expect_pos);
-            assert_eq!(dst.bytes_total(), expect_len);
-            match respond {
-                Ok(mocked_bytes) => {
-                    let len = std::cmp::min(dst.bytes_total(), mocked_bytes.len());
-                    let dst_slice: &mut [u8] = dst.as_mut_rust_slice_full_zeroed();
-                    dst_slice[..len].copy_from_slice(&mocked_bytes[..len]);
-                    rand::Rng::fill(&mut rand::thread_rng(), &mut dst_slice[len..]); // to discover bugs
-                    Ok((dst, len))
-                }
-                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_mock_file() {
-        // Self-test to ensure the relevant features of mock file work as expected.
-
-        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
-
-        let mock_file = mock_file! {
-            0    , 512 => Ok(vec![0; 512]),
-            512  , 512 => Ok(vec![1; 512]),
-            1024 , 512 => Ok(vec![2; 10]),
-            2048,  1024 => Err("foo".to_owned()),
-        };
-
-        let buf = Vec::with_capacity(512);
-        let (buf, nread) = mock_file
-            .read_at_to_end(0, buf.slice_full(), &ctx)
-            .await
-            .unwrap();
-        assert_eq!(nread, 512);
-        assert_eq!(&buf.into_inner()[..nread], &[0; 512]);
-
-        let buf = Vec::with_capacity(512);
-        let (buf, nread) = mock_file
-            .read_at_to_end(512, buf.slice_full(), &ctx)
-            .await
-            .unwrap();
-        assert_eq!(nread, 512);
-        assert_eq!(&buf.into_inner()[..nread], &[1; 512]);
-
-        let buf = Vec::with_capacity(512);
-        let (buf, nread) = mock_file
-            .read_at_to_end(1024, buf.slice_full(), &ctx)
-            .await
-            .unwrap();
-        assert_eq!(nread, 10);
-        assert_eq!(&buf.into_inner()[..nread], &[2; 10]);
-
-        let buf = Vec::with_capacity(1024);
-        let err = mock_file
-            .read_at_to_end(2048, buf.slice_full(), &ctx)
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(err.to_string(), "foo");
-    }
-
     struct RecorderFile<'a> {
         recorded: RefCell<Vec<RecordedRead>>,
         file: &'a InMemoryFile,
@@ -588,5 +480,113 @@ mod tests {
             assert_eq!(*pos as usize, (3 + MAX_CHUNK_BATCH_SIZE) * DIO_CHUNK_SIZE);
             assert_eq!(*req_len, MAX_CHUNK_BATCH_SIZE / 2 * DIO_CHUNK_SIZE);
         }
+    }
+
+    struct ExpectedRead {
+        expect_pos: u32,
+        expect_len: usize,
+        respond: Result<Vec<u8>, String>,
+    }
+
+    struct MockFile {
+        expected: RefCell<VecDeque<ExpectedRead>>,
+    }
+
+    impl Drop for MockFile {
+        fn drop(&mut self) {
+            assert!(
+                self.expected.borrow().is_empty(),
+                "expected reads not satisfied"
+            );
+        }
+    }
+
+    macro_rules! mock_file {
+        ($($pos:expr , $len:expr => $respond:expr),* $(,)?) => {{
+            MockFile {
+                expected: RefCell::new(VecDeque::from(vec![$(ExpectedRead {
+                    expect_pos: $pos,
+                    expect_len: $len,
+                    respond: $respond,
+                }),*])),
+            }
+        }};
+    }
+
+    impl File for MockFile {
+        async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
+            &'b self,
+            start: u32,
+            mut dst: Slice<B>,
+            _ctx: &'a RequestContext,
+        ) -> std::io::Result<(Slice<B>, usize)> {
+            let ExpectedRead {
+                expect_pos,
+                expect_len,
+                respond,
+            } = self
+                .expected
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected read");
+            assert_eq!(start, expect_pos);
+            assert_eq!(dst.bytes_total(), expect_len);
+            match respond {
+                Ok(mocked_bytes) => {
+                    let len = std::cmp::min(dst.bytes_total(), mocked_bytes.len());
+                    let dst_slice: &mut [u8] = dst.as_mut_rust_slice_full_zeroed();
+                    dst_slice[..len].copy_from_slice(&mocked_bytes[..len]);
+                    rand::Rng::fill(&mut rand::thread_rng(), &mut dst_slice[len..]); // to discover bugs
+                    Ok((dst, len))
+                }
+                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_file() {
+        // Self-test to ensure the relevant features of mock file work as expected.
+
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+
+        let mock_file = mock_file! {
+            0    , 512 => Ok(vec![0; 512]),
+            512  , 512 => Ok(vec![1; 512]),
+            1024 , 512 => Ok(vec![2; 10]),
+            2048,  1024 => Err("foo".to_owned()),
+        };
+
+        let buf = Vec::with_capacity(512);
+        let (buf, nread) = mock_file
+            .read_at_to_end(0, buf.slice_full(), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(nread, 512);
+        assert_eq!(&buf.into_inner()[..nread], &[0; 512]);
+
+        let buf = Vec::with_capacity(512);
+        let (buf, nread) = mock_file
+            .read_at_to_end(512, buf.slice_full(), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(nread, 512);
+        assert_eq!(&buf.into_inner()[..nread], &[1; 512]);
+
+        let buf = Vec::with_capacity(512);
+        let (buf, nread) = mock_file
+            .read_at_to_end(1024, buf.slice_full(), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(nread, 10);
+        assert_eq!(&buf.into_inner()[..nread], &[2; 10]);
+
+        let buf = Vec::with_capacity(1024);
+        let err = mock_file
+            .read_at_to_end(2048, buf.slice_full(), &ctx)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.to_string(), "foo");
     }
 }
