@@ -26,6 +26,7 @@ pub trait File: Send {
 #[derive(Debug)]
 pub struct ValueRead<B: Buffer> {
     pos: u32,
+    // TODO: use tri-state enum to distinguish between not started, started, and finished-with-ok-or-err
     state: MutexRefCell<Result<B, Arc<std::io::Error>>>,
 }
 
@@ -372,6 +373,18 @@ mod tests {
                 assert_eq!(res, test_value_read.expected_result);
             }
         }
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_reusing_value_reads_panics() {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+        let file = InMemoryFile::new_random(DIO_CHUNK_SIZE);
+        let a = file.test_value_read(23, 10);
+        let value_reads = vec![a.make_value_read()];
+        execute(&file, &value_reads, &ctx).await;
+        // reuse pancis
+        execute(&file, &value_reads, &ctx).await;
     }
 
     struct RecorderFile<'a> {
