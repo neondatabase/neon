@@ -602,4 +602,63 @@ mod tests {
             .unwrap();
         assert_eq!(err.to_string(), "foo");
     }
+
+    #[tokio::test]
+    async fn test_error_on_one_read_fails_all_value_reads() {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+
+        let file = mock_file!(
+            0 * DIO_CHUNK_SIZE as u32, MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE => Ok(vec![0; MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE]),
+            (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Err("foo".to_owned()),
+            (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE + 2*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Ok(vec![1; DIO_CHUNK_SIZE]),
+        );
+
+        // 1 full batch and first chunk of the second batch
+        let read_spanning_two_batches = ValueRead::new(
+            DIO_CHUNK_SIZE as u32 / 2,
+            Vec::with_capacity(MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE),
+        );
+        let second_read_in_failing_chunk = ValueRead::new(
+            (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE) as u32 + DIO_CHUNK_SIZE as u32 - 10,
+            Vec::with_capacity(5),
+        );
+        let read_unaffected = ValueRead::new(
+            (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE) as u32 + 2 * DIO_CHUNK_SIZE as u32 + 10,
+            Vec::with_capacity(5),
+        );
+
+        // TODO test all permutations
+
+        execute(
+            &file,
+            [
+                &read_spanning_two_batches,
+                &second_read_in_failing_chunk,
+                &read_unaffected,
+            ],
+            &ctx,
+        )
+        .await;
+
+        assert_eq!(
+            read_spanning_two_batches
+                .into_result()
+                .err()
+                .unwrap()
+                .to_string(),
+            "foo".to_owned(),
+        );
+        assert_eq!(
+            second_read_in_failing_chunk
+                .into_result()
+                .err()
+                .unwrap()
+                .to_string(),
+            "foo".to_owned(),
+        );
+
+        assert_eq!(read_unaffected.into_result().unwrap(), vec![1; 5],);
+    }
+
+    // TODO: short reads at end
 }
