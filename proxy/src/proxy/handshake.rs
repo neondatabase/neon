@@ -34,7 +34,7 @@ pub enum HandshakeError {
     #[error("{0}")]
     StreamUpgradeError(#[from] StreamUpgradeError),
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(test)))]
     #[error("{0}")]
     KtlsUpgradeError(#[from] ktls::Error),
 
@@ -199,9 +199,9 @@ where
                             framed: Framed {
                                 stream: Stream::Tls {
                                     #[cfg(any(not(target_os = "linux"), test))]
-                                    tls: Box::new(tls_stream),
+                                    tls: Box::pin(tls_stream),
                                     #[cfg(all(target_os = "linux", not(test)))]
-                                    tls: ktls::config_ktls_server(tls_stream)?,
+                                    tls: Box::pin(ktls::config_ktls_server(tls_stream)?),
                                     tls_server_end_point,
                                 },
                                 read_buf,
