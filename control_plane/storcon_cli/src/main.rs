@@ -147,9 +147,9 @@ enum Command {
         #[arg(long)]
         threshold: humantime::Duration,
     },
-    // Drain a set of specified pageservers by moving the primary attachments to pageservers
+    // Migrate away from a set of specified pageservers by moving the primary attachments to pageservers
     // outside of the specified set.
-    Drain {
+    BulkMigrate {
         // Set of pageserver node ids to drain.
         #[arg(long)]
         nodes: Vec<NodeId>,
@@ -628,7 +628,7 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
         }
-        Command::Drain {
+        Command::BulkMigrate {
             nodes,
             concurrency,
             max_shards,
@@ -657,7 +657,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if nodes.len() != node_to_drain_descs.len() {
-                anyhow::bail!("Drain requested for node which doesn't exist.")
+                anyhow::bail!("Bulk migration requested away from node which doesn't exist.")
             }
 
             node_to_fill_descs.retain(|desc| {
@@ -669,7 +669,7 @@ async fn main() -> anyhow::Result<()> {
             });
 
             if node_to_fill_descs.is_empty() {
-                anyhow::bail!("There are no nodes to drain to")
+                anyhow::bail!("There are no nodes to migrate to")
             }
 
             // Set the node scheduling policy to draining for the nodes which
@@ -690,7 +690,7 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
             }
 
-            // Perform the drain: move each tenant shard scheduled on a node to
+            // Perform the migration: move each tenant shard scheduled on a node to
             // be drained to a node which is being filled. A simple round robin
             // strategy is used to pick the new node.
             let tenants = storcon_client
@@ -703,13 +703,13 @@ async fn main() -> anyhow::Result<()> {
 
             let mut selected_node_idx = 0;
 
-            struct DrainMove {
+            struct MigrationMove {
                 tenant_shard_id: TenantShardId,
                 from: NodeId,
                 to: NodeId,
             }
 
-            let mut moves: Vec<DrainMove> = Vec::new();
+            let mut moves: Vec<MigrationMove> = Vec::new();
 
             let shards = tenants
                 .into_iter()
@@ -739,7 +739,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                moves.push(DrainMove {
+                moves.push(MigrationMove {
                     tenant_shard_id: shard.tenant_shard_id,
                     from: shard
                         .node_attached
