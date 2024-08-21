@@ -1,3 +1,4 @@
+use std::os::fd::AsRawFd;
 /// A stand-alone program that routes connections, e.g. from
 /// `aaa--bbb--1234.external.domain` to `aaa.bbb.internal.domain:1234`.
 ///
@@ -9,6 +10,7 @@ use futures::future::Either;
 use itertools::Itertools;
 use proxy::context::RequestMonitoring;
 use proxy::metrics::{Metrics, ThreadPoolMetrics};
+use proxy::proxy::handshake::KtlsAsyncReadReady;
 use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
@@ -197,7 +199,7 @@ async fn task_main(
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
-async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>(
     ctx: &RequestMonitoring,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
@@ -248,7 +250,7 @@ async fn handle_client(
     ctx: RequestMonitoring,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
+    stream: impl AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady,
 ) -> anyhow::Result<()> {
     let mut tls_stream = ssl_handshake(&ctx, stream, tls_config).await?;
 

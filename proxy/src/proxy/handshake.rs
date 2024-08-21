@@ -50,6 +50,8 @@ impl ReportableError for HandshakeError {
         match self {
             HandshakeError::EarlyData => crate::error::ErrorKind::User,
             HandshakeError::ProtocolViolation => crate::error::ErrorKind::User,
+            #[cfg(all(target_os = "linux", not(test)))]
+            HandshakeError::KtlsUpgradeError(_) => crate::error::ErrorKind::Service,
             // This error should not happen, but will if we have no default certificate and
             // the client sends no SNI extension.
             // If they provide SNI then we can be sure there is a certificate that matches.
@@ -64,7 +66,7 @@ impl ReportableError for HandshakeError {
     }
 }
 
-pub enum HandshakeData<S> {
+pub enum HandshakeData<S: AsRawFd> {
     Startup(
         PqStream<Stream<S>>,
         Option<EndpointId>,
@@ -201,7 +203,7 @@ where
                                     #[cfg(any(not(target_os = "linux"), test))]
                                     tls: Box::pin(tls_stream),
                                     #[cfg(all(target_os = "linux", not(test)))]
-                                    tls: Box::pin(ktls::config_ktls_server(tls_stream)?),
+                                    tls: ktls::config_ktls_server(tls_stream).await?,
                                     tls_server_end_point,
                                 },
                                 read_buf,

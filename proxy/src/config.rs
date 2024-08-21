@@ -76,7 +76,7 @@ impl TlsConfig {
 pub const PG_ALPN_PROTOCOL: &[u8] = b"postgresql";
 
 /// Configure TLS for the main endpoint.
-pub fn configure_tls(
+pub async fn configure_tls(
     key_path: &str,
     cert_path: &str,
     certs_dir: Option<&String>,
@@ -114,8 +114,9 @@ pub fn configure_tls(
     #[cfg(target_os = "linux")]
     let provider = {
         let mut provider = provider;
-        let compat = ktls::CompatibleCiphers::new()?;
-        provider.cipher_suites.retain(|s| compat.is_supported(s));
+        let compat = ktls::CompatibleCiphers::new().await?;
+        provider.cipher_suites.retain(|s| compat.is_compatible(*s));
+        provider
     };
 
     // allow TLS 1.2 to be compatible with older client libraries

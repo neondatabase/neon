@@ -64,7 +64,7 @@ fn generate_certs(
     ))
 }
 
-struct DummyClient(DuplexStream);
+pub struct DummyClient(pub DuplexStream);
 
 impl AsRawFd for DummyClient {
     fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
@@ -170,7 +170,9 @@ fn generate_tls_config<'a>(
 
 #[async_trait]
 trait TestAuth: Sized {
-    async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    async fn authenticate<
+        S: AsyncRead + AsyncWrite + Unpin + Send + AsRawFd + KtlsAsyncReadReady,
+    >(
         self,
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {
@@ -199,7 +201,9 @@ impl Scram {
 
 #[async_trait]
 impl TestAuth for Scram {
-    async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    async fn authenticate<
+        S: AsyncRead + AsyncWrite + Unpin + Send + AsRawFd + KtlsAsyncReadReady,
+    >(
         self,
         stream: &mut PqStream<Stream<S>>,
     ) -> anyhow::Result<()> {

@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests;
+pub mod tests;
 
 pub mod connect_compute;
 mod copy_bidirectional;

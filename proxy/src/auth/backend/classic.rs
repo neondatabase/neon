@@ -1,3 +1,5 @@
+use std::os::fd::AsRawFd;
+
 use super::{ComputeCredentials, ComputeUserInfo};
 use crate::{
     auth::{self, backend::ComputeCredentialKeys, AuthFlow},
@@ -5,6 +7,7 @@ use crate::{
     config::AuthenticationConfig,
     console::AuthSecret,
     context::RequestMonitoring,
+    proxy::handshake::KtlsAsyncReadReady,
     sasl,
     stream::{PqStream, Stream},
 };
@@ -14,7 +17,9 @@ use tracing::{info, warn};
 pub(super) async fn authenticate(
     ctx: &RequestMonitoring,
     creds: ComputeUserInfo,
-    client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut PqStream<
+        Stream<impl AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>,
+    >,
     config: &'static AuthenticationConfig,
     secret: AuthSecret,
 ) -> auth::Result<ComputeCredentials> {

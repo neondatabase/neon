@@ -6,13 +6,14 @@ use crate::{
     console::AuthSecret,
     context::RequestMonitoring,
     intern::EndpointIdInt,
+    proxy::handshake::KtlsAsyncReadReady,
     sasl,
     scram::{self, threadpool::ThreadPool},
     stream::{PqStream, Stream},
 };
 use postgres_protocol::authentication::sasl::{SCRAM_SHA_256, SCRAM_SHA_256_PLUS};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
-use std::{io, sync::Arc};
+use std::{io, os::fd::AsRawFd, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
@@ -70,7 +71,7 @@ impl AuthMethod for CleartextPassword {
 
 /// This wrapper for [`PqStream`] performs client authentication.
 #[must_use]
-pub struct AuthFlow<'a, S, State> {
+pub struct AuthFlow<'a, S: AsRawFd, State> {
     /// The underlying stream which implements libpq's protocol.
     stream: &'a mut PqStream<Stream<S>>,
     /// State might contain ancillary data (see [`Self::begin`]).
@@ -79,7 +80,7 @@ pub struct AuthFlow<'a, S, State> {
 }
 
 /// Initial state of the stream wrapper.
-impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
+impl<'a, S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady> AuthFlow<'a, S, Begin> {
     /// Create a new wrapper for client authentication.
     pub fn new(stream: &'a mut PqStream<Stream<S>>) -> Self {
         let tls_server_end_point = stream.get_ref().tls_server_end_point();
@@ -105,7 +106,9 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
+impl<S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>
+    AuthFlow<'_, S, PasswordHack>
+{
     /// Perform user authentication. Raise an error in case authentication failed.
     pub async fn get_password(self) -> super::Result<PasswordHackPayload> {
         let msg = self.stream.read_password_message().await?;
@@ -124,7 +127,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
+impl<S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>
+    AuthFlow<'_, S, CleartextPassword>
+{
     /// Perform user authentication. Raise an error in case authentication failed.
     pub async fn authenticate(self) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
         let msg = self.stream.read_password_message().await?;
@@ -149,7 +154,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
 }
 
 /// Stream wrapper for handling [SCRAM](crate::scram) auth.
-impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
+impl<S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady> AuthFlow<'_, S, Scram<'_>> {
     /// Perform user authentication. Raise an error in case authentication failed.
     pub async fn authenticate(self) -> super::Result<sasl::Outcome<scram::ScramKey>> {
         let Scram(secret, ctx) = self.state;

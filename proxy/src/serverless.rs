@@ -197,6 +197,8 @@ impl MaybeTlsAcceptor for rustls::ServerConfig {
 
         #[cfg(all(target_os = "linux", not(test)))]
         return ktls::config_ktls_server(tls)
+            .await
+            .map(|s| Box::pin(s) as _)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
 
         #[cfg(any(not(target_os = "linux"), test))]

@@ -1,3 +1,5 @@
+use std::os::fd::AsRawFd;
+
 use super::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint,
 };
@@ -7,6 +9,7 @@ use crate::{
     console::AuthSecret,
     context::RequestMonitoring,
     intern::EndpointIdInt,
+    proxy::handshake::KtlsAsyncReadReady,
     sasl,
     stream::{self, Stream},
 };
@@ -20,7 +23,9 @@ use tracing::{info, warn};
 pub async fn authenticate_cleartext(
     ctx: &RequestMonitoring,
     info: ComputeUserInfo,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut stream::PqStream<
+        Stream<impl AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>,
+    >,
     secret: AuthSecret,
     config: &'static AuthenticationConfig,
 ) -> auth::Result<ComputeCredentials> {
@@ -62,7 +67,9 @@ pub async fn authenticate_cleartext(
 pub async fn password_hack_no_authentication(
     ctx: &RequestMonitoring,
     info: ComputeUserInfoNoEndpoint,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut stream::PqStream<
+        Stream<impl AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>,
+    >,
 ) -> auth::Result<ComputeCredentials> {
     warn!("project not specified, resorting to the password hack auth flow");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);

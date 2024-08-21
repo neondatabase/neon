@@ -1,11 +1,13 @@
 use crate::config::TlsServerEndPoint;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::Metrics;
+use crate::proxy::handshake::KtlsAsyncReadReady;
 use bytes::BytesMut;
 
 use pq_proto::framed::{ConnectionError, Framed};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};
 use rustls::ServerConfig;
+use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{io, task};
@@ -172,7 +174,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 }
 
 /// Wrapper for upgrading raw streams into secure streams.
-pub enum Stream<S> {
+pub enum Stream<S: AsRawFd> {
     /// We always begin with a raw stream,
     /// which may then be upgraded into a secure stream.
     Raw { raw: S },
@@ -182,16 +184,16 @@ pub enum Stream<S> {
         tls: Pin<Box<TlsStream<S>>>,
 
         #[cfg(all(target_os = "linux", not(test)))]
-        tls: Pin<Box<ktls::KtlsStream<S>>>,
+        tls: ktls::KtlsStream<S>,
 
         /// Channel binding parameter
         tls_server_end_point: TlsServerEndPoint,
     },
 }
 
-impl<S: Unpin> Unpin for Stream<S> {}
+impl<S: Unpin + AsRawFd> Unpin for Stream<S> {}
 
-impl<S> Stream<S> {
+impl<S: AsRawFd> Stream<S> {
     /// Construct a new instance from a raw stream.
     pub fn from_raw(raw: S) -> Self {
         Self::Raw { raw }
@@ -218,7 +220,7 @@ pub enum StreamUpgradeError {
     Io(#[from] io::Error),
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + AsRawFd> Stream<S> {
     /// If possible, upgrade raw stream into a secure TLS-based stream.
     pub async fn upgrade(
         self,
@@ -239,7 +241,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Stream<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady> AsyncRead for Stream<S> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         context: &mut task::Context<'_>,
@@ -247,12 +249,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Stream<S> {
     ) -> task::Poll<io::Result<()>> {
         match &mut *self {
             Self::Raw { raw } => Pin::new(raw).poll_read(context, buf),
-            Self::Tls { tls, .. } => tls.as_mut().poll_read(context, buf),
+            Self::Tls { tls, .. } => Pin::new(tls).poll_read(context, buf),
         }
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady> AsyncWrite for Stream<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         context: &mut task::Context<'_>,
@@ -260,7 +262,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
     ) -> task::Poll<io::Result<usize>> {
         match &mut *self {
             Self::Raw { raw } => Pin::new(raw).poll_write(context, buf),
-            Self::Tls { tls, .. } => tls.as_mut().poll_write(context, buf),
+            Self::Tls { tls, .. } => Pin::new(tls).poll_write(context, buf),
         }
     }
 
@@ -270,7 +272,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
     ) -> task::Poll<io::Result<()>> {
         match &mut *self {
             Self::Raw { raw } => Pin::new(raw).poll_flush(context),
-            Self::Tls { tls, .. } => tls.as_mut().poll_flush(context),
+            Self::Tls { tls, .. } => Pin::new(tls).poll_flush(context),
         }
     }
 
@@ -280,7 +282,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
     ) -> task::Poll<io::Result<()>> {
         match &mut *self {
             Self::Raw { raw } => Pin::new(raw).poll_shutdown(context),
-            Self::Tls { tls, .. } => tls.as_mut().poll_shutdown(context),
+            Self::Tls { tls, .. } => Pin::new(tls).poll_shutdown(context),
         }
     }
 }

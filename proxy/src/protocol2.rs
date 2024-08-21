@@ -28,7 +28,7 @@ impl<S: AsRawFd> AsRawFd for ChainRW<S> {
 }
 
 #[cfg(all(target_os = "linux", not(test)))]
-impl<S: ktls::AsyncReadReady> AsRawFd for ChainRW<S> {
+impl<S: ktls::AsyncReadReady> ktls::AsyncReadReady for ChainRW<S> {
     fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         if self.buf.is_empty() {
             self.inner.poll_read_ready(cx)

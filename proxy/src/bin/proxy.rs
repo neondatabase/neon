@@ -285,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let args = ProxyCliArgs::parse();
-    let config = build_config(&args)?;
+    let config = build_config(&args).await?;
 
     info!("Authentication backend: {}", config.auth_backend);
     info!("Using region: {}", args.aws_region);
@@ -529,16 +529,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// ProxyConfig is created at proxy startup, and lives forever.
-fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
+async fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     let thread_pool = ThreadPool::new(args.scram_thread_pool_size);
     Metrics::install(thread_pool.metrics.clone());
 
     let tls_config = match (&args.tls_key, &args.tls_cert) {
-        (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
-            key_path,
-            cert_path,
-            args.certs_dir.as_ref(),
-        )?),
+        (Some(key_path), Some(cert_path)) => {
+            Some(config::configure_tls(key_path, cert_path, args.certs_dir.as_ref()).await?)
+        }
         (None, None) => None,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };

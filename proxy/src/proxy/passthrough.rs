@@ -1,3 +1,5 @@
+use std::os::fd::AsRawFd;
+
 use crate::{
     cancellation,
     compute::PostgresConnection,
@@ -10,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 use utils::measured_stream::MeasuredStream;
 
-use super::copy_bidirectional::ErrorSource;
+use super::{copy_bidirectional::ErrorSource, handshake::KtlsAsyncReadReady};
 
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
@@ -57,7 +59,7 @@ pub async fn proxy_pass(
     Ok(())
 }
 
-pub struct ProxyPassthrough<P, S> {
+pub struct ProxyPassthrough<P, S: AsRawFd> {
     pub client: Stream<S>,
     pub compute: PostgresConnection,
     pub aux: MetricsAuxInfo,
@@ -67,7 +69,7 @@ pub struct ProxyPassthrough<P, S> {
     pub cancel: cancellation::Session<P>,
 }
 
-impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
+impl<P, S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady> ProxyPassthrough<P, S> {
     pub async fn proxy_pass(self) -> Result<(), ErrorSource> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
         if let Err(err) = self.compute.cancel_closure.try_cancel_query().await {

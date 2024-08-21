@@ -4,6 +4,7 @@ pub mod jwt;
 mod link;
 
 use std::net::IpAddr;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use crate::context::RequestMonitoring;
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
+use crate::proxy::handshake::KtlsAsyncReadReady;
 use crate::proxy::NeonOptions;
 use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter, RateBucketInfo};
 use crate::stream::Stream;
@@ -274,7 +276,9 @@ async fn auth_quirks(
     ctx: &RequestMonitoring,
     api: &impl console::Api,
     user_info: ComputeUserInfoMaybeEndpoint,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut stream::PqStream<
+        Stream<impl AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>,
+    >,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -358,7 +362,9 @@ async fn authenticate_with_secret(
     ctx: &RequestMonitoring,
     secret: AuthSecret,
     info: ComputeUserInfo,
-    client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+    client: &mut stream::PqStream<
+        Stream<impl AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>,
+    >,
     unauthenticated_password: Option<Vec<u8>>,
     allow_cleartext: bool,
     config: &'static AuthenticationConfig,
@@ -417,7 +423,9 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
     pub async fn authenticate(
         self,
         ctx: &RequestMonitoring,
-        client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
+        client: &mut stream::PqStream<
+            Stream<impl AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>,
+        >,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -542,7 +550,7 @@ mod tests {
             CachedNodeInfo,
         },
         context::RequestMonitoring,
-        proxy::NeonOptions,
+        proxy::{tests::DummyClient, NeonOptions},
         rate_limiter::{EndpointRateLimiter, RateBucketInfo},
         scram::{threadpool::ThreadPool, ServerSecret},
         stream::{PqStream, Stream},
@@ -650,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_scram() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new(Stream::from_raw(DummyClient(server)));
 
         let ctx = RequestMonitoring::test();
         let api = Auth {
@@ -727,7 +735,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_cleartext() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new(Stream::from_raw(DummyClient(server)));
 
         let ctx = RequestMonitoring::test();
         let api = Auth {
@@ -779,7 +787,7 @@ mod tests {
     #[tokio::test]
     async fn auth_quirks_password_hack() {
         let (mut client, server) = tokio::io::duplex(1024);
-        let mut stream = PqStream::new(Stream::from_raw(server));
+        let mut stream = PqStream::new(Stream::from_raw(DummyClient(server)));
 
         let ctx = RequestMonitoring::test();
         let api = Auth {
