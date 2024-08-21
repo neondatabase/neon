@@ -259,7 +259,7 @@ files:
           from
             (values ('5m'),('15m'),('1h')) as t (x);
 
-      - metric_name: current_lsn
+      - metric_name: compute_current_lsn
         type: gauge
         help: 'Current LSN of the database'
         key_labels:
