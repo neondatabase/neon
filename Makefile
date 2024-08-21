@@ -165,7 +165,7 @@ postgres-check-%: postgres-%
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-headers-%
+neon-pg-ext-%: postgres-%
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
@@ -301,7 +301,7 @@ distclean:
 fmt:
 	./pre-commit.py --fix-inplace
 
-postgres-%-pg-bsd-indent: postgres-configure-%
+postgres-%-pg-bsd-indent: postgres-%
 	+@echo "Compiling pg_bsd_indent"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/tools/pg_bsd_indent/
 
