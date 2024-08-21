@@ -35,25 +35,28 @@ fn generate_certs(
     pki_types::CertificateDer<'static>,
     pki_types::PrivateKeyDer<'static>,
 )> {
-    let ca = rcgen::Certificate::from_params({
+    let ca_key = rcgen::KeyPair::generate()?;
+    let cert_key = rcgen::KeyPair::generate()?;
+
+    let ca = {
         let mut params = rcgen::CertificateParams::default();
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params
-    })?;
+        params.self_signed(&ca_key)?
+    };
 
-    let cert = rcgen::Certificate::from_params({
-        let mut params = rcgen::CertificateParams::new(vec![hostname.into()]);
+    let cert = {
+        let mut params = rcgen::CertificateParams::new(vec![hostname.into()])?;
         params.distinguished_name = rcgen::DistinguishedName::new();
         params
             .distinguished_name
             .push(rcgen::DnType::CommonName, common_name);
-        params
-    })?;
+        params.signed_by(&cert_key, &ca, &ca_key)?
+    };
 
     Ok((
-        pki_types::CertificateDer::from(ca.serialize_der()?),
-        pki_types::CertificateDer::from(cert.serialize_der_with_signer(&ca)?),
-        pki_types::PrivateKeyDer::Pkcs8(cert.serialize_private_key_der().into()),
+        ca.into(),
+        cert.into(),
+        pki_types::PrivateKeyDer::Pkcs8(cert_key.serialize_der().into()),
     ))
 }
 

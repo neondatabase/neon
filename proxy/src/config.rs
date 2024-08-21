@@ -10,7 +10,7 @@ use anyhow::{bail, ensure, Context, Ok};
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
 use rustls::{
-    crypto::ring::sign,
+    crypto::aws_lc_rs::sign,
     pki_types::{CertificateDer, PrivateKeyDer},
 };
 use sha2::{Digest, Sha256};

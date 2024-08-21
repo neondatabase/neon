@@ -139,7 +139,7 @@ reqwest-retry = "0.5"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"
-rustls = "0.22"
+rustls = "0.23"
 rustls-pemfile = "2"
 rustls-split = "0.3"
 scopeguard = "1.1"
@@ -171,8 +171,8 @@ tikv-jemalloc-ctl = "0.5"
 tokio = { version = "1.17", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
-tokio-postgres-rustls = "0.11.0"
-tokio-rustls = "0.25"
+tokio-postgres-rustls = "0.12.0"
+tokio-rustls = "0.26"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
@@ -232,7 +232,7 @@ workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
 criterion = "0.5.1"
-rcgen = "0.12"
+rcgen = "0.13"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
 tonic-build = "0.9"
