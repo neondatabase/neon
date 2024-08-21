@@ -14,63 +14,40 @@ use utils::{
     shard::{ShardCount, ShardNumber, TenantShardId},
 };
 
-use crate::compute::{ComputeNode, ComputeState};
+use crate::compute::ComputeNode;
 
 /// Spawns a background thread to periodically renew LSN leases for static compute.
 /// Do nothing if the compute is not in static mode.
 pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
-    let lsn = {
+    let (tenant_id, timline_id, lsn) = {
         let state = compute.state.lock().unwrap();
         let spec = state.pspec.as_ref().expect("spec must be set");
         match spec.spec.mode {
-            ComputeMode::Static(lsn) => lsn,
+            ComputeMode::Static(lsn) => (spec.tenant_id, spec.timeline_id, lsn),
             _ => return,
         }
     };
     let compute = compute.clone();
     thread::spawn(move || {
-        if let Err(e) = lsn_lease_bg_task(compute, lsn) {
+        if let Err(e) = lsn_lease_bg_task(compute, tenant_id, timline_id, lsn) {
             // TODO: might need stronger error feedback than logging an warning.
             warn!("lsn_lease_bg_task failed: {e}");
         }
     });
 }
 
-fn postgres_configs_from_state(compute_state: &ComputeState) -> Vec<postgres::Config> {
-    let spec = compute_state.pspec.as_ref().expect("spec must be set");
-    let conn_strings = spec.pageserver_connstr.split(',');
-
-    conn_strings
-        .map(|connstr| {
-            let mut config = postgres::Config::from_str(connstr).expect("invalid connstr");
-            if let Some(storage_auth_token) = &spec.storage_auth_token {
-                info!("Got storage auth token from spec file");
-                config.password(storage_auth_token.clone());
-            } else {
-                info!("Storage auth token not set");
-            }
-            config
-        })
-        .collect::<Vec<_>>()
-}
-
 /// Renews lsn lease periodically so static compute are not affected by GC.
-fn lsn_lease_bg_task(compute: Arc<ComputeNode>, lsn: Lsn) -> Result<()> {
+fn lsn_lease_bg_task(
+    compute: Arc<ComputeNode>,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    lsn: Lsn,
+) -> Result<()> {
     loop {
-        let (tenant_id, timeline_id, configs) = {
-            let state = compute.state.lock().unwrap();
-
-            let spec = state.pspec.as_ref().expect("spec must be set");
-
-            let configs = postgres_configs_from_state(&state);
-            (spec.tenant_id, spec.timeline_id, configs)
-        };
-
-        let valid_until = acquire_lsn_lease_with_retry(tenant_id, timeline_id, lsn, &configs)
+        let valid_until = acquire_lsn_lease_with_retry(&compute, tenant_id, timeline_id, lsn)
             .with_context(|| {
                 format!("failed to get lsn lease for {tenant_id}/{timeline_id}@{lsn}")
             })?;
-
         let valid_duration = valid_until
             .duration_since(SystemTime::now())
             .unwrap_or(Duration::ZERO);
@@ -90,17 +67,39 @@ fn lsn_lease_bg_task(compute: Arc<ComputeNode>, lsn: Lsn) -> Result<()> {
 
 /// Acquires lsn lease in a retry loop.
 fn acquire_lsn_lease_with_retry(
+    compute: &Arc<ComputeNode>,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
-    configs: &[postgres::Config],
 ) -> Result<SystemTime> {
     const MAX_ATTEMPTS: usize = 10;
     let mut attempts = 0;
     let mut retry_period_ms = 500.0;
 
     loop {
-        let result = try_acquire_lsn_lease(tenant_id, timeline_id, lsn, configs);
+        // Note: List of pageservers is dynamic, need to re-read configs before each attempt.
+        let configs = {
+            let state = compute.state.lock().unwrap();
+
+            let spec = state.pspec.as_ref().expect("spec must be set");
+
+            let conn_strings = spec.pageserver_connstr.split(',');
+
+            conn_strings
+                .map(|connstr| {
+                    let mut config = postgres::Config::from_str(connstr).expect("invalid connstr");
+                    if let Some(storage_auth_token) = &spec.storage_auth_token {
+                        info!("Got storage auth token from spec file");
+                        config.password(storage_auth_token.clone());
+                    } else {
+                        info!("Storage auth token not set");
+                    }
+                    config
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let result = try_acquire_lsn_lease(tenant_id, timeline_id, lsn, &configs);
         match result {
             Ok(_) => {
                 return result;
