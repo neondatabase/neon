@@ -1,3 +1,5 @@
+use std::os::fd::AsRawFd;
+
 use bytes::Buf;
 use pq_proto::{
     framed::Framed, BeMessage as Be, CancelKeyData, FeStartupPacket, ProtocolVersion,
@@ -76,7 +78,7 @@ pub enum HandshakeData<S> {
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
-pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin + AsRawFd>(
     ctx: &RequestMonitoring,
     stream: S,
     mut tls: Option<&TlsConfig>,
@@ -123,7 +125,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                             ));
                         };
 
-                        #[cfg(target_os = "linux")]
+                        #[cfg(all(target_os = "linux", not(test)))]
                         let raw = ktls::CorkStream::new(raw);
 
                         let mut read_buf = read_buf.reader();
@@ -183,9 +185,9 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         stream = PqStream {
                             framed: Framed {
                                 stream: Stream::Tls {
-                                    #[cfg(not(target_os = "linux"))]
+                                    #[cfg(any(not(target_os = "linux"), test))]
                                     tls: Box::new(tls_stream),
-                                    #[cfg(target_os = "linux")]
+                                    #[cfg(all(target_os = "linux", not(test)))]
                                     tls: ktls::config_ktls_server(tls_stream)?,
                                     tls_server_end_point,
                                 },

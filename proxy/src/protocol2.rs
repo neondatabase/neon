@@ -3,6 +3,7 @@
 use std::{
     io,
     net::SocketAddr,
+    os::fd::AsRawFd,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -17,6 +18,12 @@ pin_project! {
         #[pin]
         pub inner: T,
         buf: BytesMut,
+    }
+}
+
+impl<S: AsRawFd> AsRawFd for ChainRW<S> {
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        self.inner.as_raw_fd()
     }
 }
 

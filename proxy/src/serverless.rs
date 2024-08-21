@@ -190,7 +190,17 @@ trait MaybeTlsAcceptor: Send + Sync + 'static {
 #[async_trait]
 impl MaybeTlsAcceptor for rustls::ServerConfig {
     async fn accept(self: Arc<Self>, conn: ChainRW<TcpStream>) -> std::io::Result<AsyncRW> {
-        Ok(Box::pin(TlsAcceptor::from(self).accept(conn).await?))
+        #[cfg(all(target_os = "linux", not(test)))]
+        let conn = ktls::CorkStream::new(conn);
+
+        let tls = TlsAcceptor::from(self).accept(conn).await?;
+
+        #[cfg(all(target_os = "linux", not(test)))]
+        return ktls::config_ktls_server(tls)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+
+        #[cfg(any(not(target_os = "linux"), test))]
+        Ok(Box::pin(tls))
     }
 }
 

@@ -2,6 +2,8 @@
 
 mod mitm;
 
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use super::connect_compute::ConnectMechanism;
@@ -23,6 +25,7 @@ use async_trait::async_trait;
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::pki_types;
+use tokio::io::DuplexStream;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
 use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
@@ -59,6 +62,48 @@ fn generate_certs(
         cert.into(),
         pki_types::PrivateKeyDer::Pkcs8(cert_key.serialize_der().into()),
     ))
+}
+
+struct DummyClient(DuplexStream);
+
+impl AsRawFd for DummyClient {
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        unreachable!()
+    }
+}
+
+impl AsyncWrite for DummyClient {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+impl AsyncRead for DummyClient {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
 }
 
 struct ClientConfig<'a> {
@@ -174,7 +219,7 @@ impl TestAuth for Scram {
 
 /// A dummy proxy impl which performs a handshake and reports auth success.
 async fn dummy_proxy(
-    client: impl AsyncRead + AsyncWrite + Unpin + Send,
+    client: impl AsyncRead + AsyncWrite + Unpin + Send + AsRawFd,
     tls: Option<TlsConfig>,
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
@@ -200,7 +245,11 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
     let (client, server) = tokio::io::duplex(1024);
 
     let (_, server_config) = generate_tls_config("generic-project-name.localhost", "localhost")?;
-    let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
+    let proxy = tokio::spawn(dummy_proxy(
+        DummyClient(client),
+        Some(server_config),
+        NoAuth,
+    ));
 
     let client_err = tokio_postgres::Config::new()
         .user("john_doe")
@@ -229,7 +278,11 @@ async fn handshake_tls() -> anyhow::Result<()> {
 
     let (client_config, server_config) =
         generate_tls_config("generic-project-name.localhost", "localhost")?;
-    let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
+    let proxy = tokio::spawn(dummy_proxy(
+        DummyClient(client),
+        Some(server_config),
+        NoAuth,
+    ));
 
     let (_client, _conn) = tokio_postgres::Config::new()
         .user("john_doe")
@@ -245,7 +298,7 @@ async fn handshake_tls() -> anyhow::Result<()> {
 async fn handshake_raw() -> anyhow::Result<()> {
     let (client, server) = tokio::io::duplex(1024);
 
-    let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
+    let proxy = tokio::spawn(dummy_proxy(DummyClient(client), None, NoAuth));
 
     let (_client, _conn) = tokio_postgres::Config::new()
         .user("john_doe")
@@ -289,7 +342,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
     let (client_config, server_config) =
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(
-        client,
+        DummyClient(client),
         Some(server_config),
         Scram::new(password).await?,
     ));
@@ -313,7 +366,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
     let (client_config, server_config) =
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(
-        client,
+        DummyClient(client),
         Some(server_config),
         Scram::new("password").await?,
     ));
@@ -336,7 +389,11 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
 
     let (client_config, server_config) =
         generate_tls_config("generic-project-name.localhost", "localhost")?;
-    let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
+    let proxy = tokio::spawn(dummy_proxy(
+        DummyClient(client),
+        Some(server_config),
+        Scram::mock(),
+    ));
 
     use rand::{distributions::Alphanumeric, Rng};
     let password: String = rand::thread_rng()

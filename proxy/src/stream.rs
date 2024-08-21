@@ -178,10 +178,10 @@ pub enum Stream<S> {
     Raw { raw: S },
     Tls {
         /// We box [`TlsStream`] since it can be quite large.
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(any(not(target_os = "linux"), test))]
         tls: Box<TlsStream<S>>,
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(test)))]
         tls: ktls::KtlsStream<S>,
 
         /// Channel binding parameter

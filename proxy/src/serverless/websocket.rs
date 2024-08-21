@@ -16,6 +16,7 @@ use hyper1::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
 
+use std::os::fd::AsRawFd;
 use std::{
     pin::Pin,
     sync::Arc,
@@ -42,6 +43,12 @@ impl<S> WebSocketRw<S> {
             recv: Bytes::new(),
             send: BytesMut::new(),
         }
+    }
+}
+
+impl<S> AsRawFd for WebSocketRw<S> {
+    fn as_raw_fd(&self) -> std::os::unix::prelude::RawFd {
+        unreachable!("ktls should not need to be used for websocket rw")
     }
 }
 

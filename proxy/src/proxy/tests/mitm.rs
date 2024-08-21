@@ -36,7 +36,7 @@ async fn proxy_mitm(
         let end_server = connect_tls(server2, client_config2.make_tls_connect().unwrap()).await;
         let (end_client, startup) = match handshake(
             &RequestMonitoring::test(),
-            client1,
+            DummyClient(client1),
             Some(&server_config1),
             false,
         )
@@ -154,7 +154,7 @@ impl Encoder<Bytes> for PgFrame {
 async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
     let (server, client, client_config, server_config) = proxy_mitm(Intercept::None).await;
     let proxy = tokio::spawn(dummy_proxy(
-        client,
+        DummyClient(client),
         Some(server_config),
         Scram::new("password").await?,
     ));
@@ -237,7 +237,7 @@ async fn connect_failure(
 ) -> anyhow::Result<()> {
     let (server, client, client_config, server_config) = proxy_mitm(intercept).await;
     let proxy = tokio::spawn(dummy_proxy(
-        client,
+        DummyClient(client),
         Some(server_config),
         Scram::new("password").await?,
     ));

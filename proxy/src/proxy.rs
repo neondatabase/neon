@@ -30,6 +30,7 @@ use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
 use smol_str::{format_smolstr, SmolStr};
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -231,7 +232,7 @@ impl ReportableError for ClientRequestError {
     }
 }
 
-pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + AsRawFd>(
     config: &'static ProxyConfig,
     ctx: &RequestMonitoring,
     cancellation_handler: Arc<CancellationHandlerMain>,
