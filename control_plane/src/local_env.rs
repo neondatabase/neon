@@ -27,7 +27,7 @@ use crate::pageserver::PageServerNode;
 use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 15;
+pub const DEFAULT_PG_VERSION: u32 = 16;
 
 //
 // This data structures represents neon_local CLI config
@@ -156,8 +156,15 @@ pub struct NeonStorageControllerConf {
     #[serde(with = "humantime_serde")]
     pub max_warming_up: Duration,
 
+    pub start_as_candidate: bool,
+
+    /// Database url used when running multiple storage controller instances
+    pub database_url: Option<SocketAddr>,
+
     /// Threshold for auto-splitting a tenant into shards
     pub split_threshold: Option<u64>,
+
+    pub max_secondary_lag_bytes: Option<u64>,
 }
 
 impl NeonStorageControllerConf {
@@ -172,7 +179,10 @@ impl Default for NeonStorageControllerConf {
         Self {
             max_offline: Self::DEFAULT_MAX_OFFLINE_INTERVAL,
             max_warming_up: Self::DEFAULT_MAX_WARMING_UP_INTERVAL,
+            start_as_candidate: false,
+            database_url: None,
             split_threshold: None,
+            max_secondary_lag_bytes: None,
         }
     }
 }
@@ -387,6 +397,36 @@ impl LocalEnv {
             let joined = have_ids.join(",");
             bail!("could not find pageserver {id}, have ids {joined}")
         }
+    }
+
+    /// Inspect the base data directory and extract the instance id and instance directory path
+    /// for all storage controller instances
+    pub async fn storage_controller_instances(&self) -> std::io::Result<Vec<(u8, PathBuf)>> {
+        let mut instances = Vec::default();
+
+        let dir = std::fs::read_dir(self.base_data_dir.clone())?;
+        for dentry in dir {
+            let dentry = dentry?;
+            let is_dir = dentry.metadata()?.is_dir();
+            let filename = dentry.file_name().into_string().unwrap();
+            let parsed_instance_id = match filename.strip_prefix("storage_controller_") {
+                Some(suffix) => suffix.parse::<u8>().ok(),
+                None => None,
+            };
+
+            let is_instance_dir = is_dir && parsed_instance_id.is_some();
+
+            if !is_instance_dir {
+                continue;
+            }
+
+            instances.push((
+                parsed_instance_id.expect("Checked previously"),
+                dentry.path(),
+            ));
+        }
+
+        Ok(instances)
     }
 
     pub fn register_branch_mapping(

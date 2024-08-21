@@ -9,8 +9,6 @@ anyhow.workspace = true
 utils.workspace = true
 postgres_ffi.workspace = true
 
-workspace_hack.workspace = true
-
 [build-dependencies]
 anyhow.workspace = true
 bindgen.workspace = true

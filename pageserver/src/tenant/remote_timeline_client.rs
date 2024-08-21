@@ -736,12 +736,13 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Reparent this timeline to a new parent.
+    ///
+    /// A retryable step of timeline ancestor detach.
     pub(crate) async fn schedule_reparenting_and_wait(
         self: &Arc<Self>,
         new_parent: &TimelineId,
     ) -> anyhow::Result<()> {
-        // FIXME: because of how Timeline::schedule_uploads works when called from layer flushing
-        // and reads the in-memory part we cannot do the detaching like this
         let receiver = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
@@ -752,17 +753,25 @@ impl RemoteTimelineClient {
                 ));
             };
 
-            upload_queue.dirty.metadata.reparent(new_parent);
-            upload_queue.dirty.lineage.record_previous_ancestor(&prev);
+            let uploaded = &upload_queue.clean.0.metadata;
 
-            self.schedule_index_upload(upload_queue)?;
+            if uploaded.ancestor_timeline().is_none() && !uploaded.ancestor_lsn().is_valid() {
+                // nothing to do
+                None
+            } else {
+                upload_queue.dirty.metadata.reparent(new_parent);
+                upload_queue.dirty.lineage.record_previous_ancestor(&prev);
 
-            self.schedule_barrier0(upload_queue)
+                self.schedule_index_upload(upload_queue)?;
+
+                Some(self.schedule_barrier0(upload_queue))
+            }
         };
 
-        Self::wait_completion0(receiver)
-            .await
-            .context("wait completion")
+        if let Some(receiver) = receiver {
+            Self::wait_completion0(receiver).await?;
+        }
+        Ok(())
     }
 
     /// Schedules uploading a new version of `index_part.json` with the given layers added,
@@ -778,26 +787,142 @@ impl RemoteTimelineClient {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
 
-            upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
-            upload_queue.dirty.lineage.record_detaching(&adopted);
+            if upload_queue.clean.0.lineage.detached_previous_ancestor() == Some(adopted) {
+                None
+            } else {
+                upload_queue.dirty.metadata.detach_from_ancestor(&adopted);
+                upload_queue.dirty.lineage.record_detaching(&adopted);
 
-            for layer in layers {
-                upload_queue
-                    .dirty
-                    .layer_metadata
-                    .insert(layer.layer_desc().layer_name(), layer.metadata());
+                for layer in layers {
+                    let prev = upload_queue
+                        .dirty
+                        .layer_metadata
+                        .insert(layer.layer_desc().layer_name(), layer.metadata());
+                    assert!(prev.is_none(), "copied layer existed already {layer}");
+                }
+
+                self.schedule_index_upload(upload_queue)?;
+
+                Some(self.schedule_barrier0(upload_queue))
             }
-
-            self.schedule_index_upload(upload_queue)?;
-
-            let barrier = self.schedule_barrier0(upload_queue);
-            self.launch_queued_tasks(upload_queue);
-            barrier
         };
 
-        Self::wait_completion0(barrier)
-            .await
-            .context("wait completion")
+        if let Some(barrier) = barrier {
+            Self::wait_completion0(barrier).await?;
+        }
+        Ok(())
+    }
+
+    /// Adds a gc blocking reason for this timeline if one does not exist already.
+    ///
+    /// A retryable step of timeline detach ancestor.
+    ///
+    /// Returns a future which waits until the completion of the upload.
+    pub(crate) fn schedule_insert_gc_block_reason(
+        self: &Arc<Self>,
+        reason: index::GcBlockingReason,
+    ) -> Result<impl std::future::Future<Output = Result<(), WaitCompletionError>>, NotInitialized>
+    {
+        let maybe_barrier = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
+
+            if let index::GcBlockingReason::DetachAncestor = reason {
+                if upload_queue.dirty.metadata.ancestor_timeline().is_none() {
+                    drop(guard);
+                    panic!("cannot start detach ancestor if there is nothing to detach from");
+                }
+            }
+
+            let wanted = |x: Option<&index::GcBlocking>| x.is_some_and(|x| x.blocked_by(reason));
+
+            let current = upload_queue.dirty.gc_blocking.as_ref();
+            let uploaded = upload_queue.clean.0.gc_blocking.as_ref();
+
+            match (current, uploaded) {
+                (x, y) if wanted(x) && wanted(y) => None,
+                (x, y) if wanted(x) && !wanted(y) => Some(self.schedule_barrier0(upload_queue)),
+                // Usual case: !wanted(x) && !wanted(y)
+                //
+                // Unusual: !wanted(x) && wanted(y) which means we have two processes waiting to
+                // turn on and off some reason.
+                (x, y) => {
+                    if !wanted(x) && wanted(y) {
+                        // this could be avoided by having external in-memory synchronization, like
+                        // timeline detach ancestor
+                        warn!(?reason, op="insert", "unexpected: two racing processes to enable and disable a gc blocking reason");
+                    }
+
+                    // at this point, the metadata must always show that there is a parent
+                    upload_queue.dirty.gc_blocking = current
+                        .map(|x| x.with_reason(reason))
+                        .or_else(|| Some(index::GcBlocking::started_now_for(reason)));
+                    self.schedule_index_upload(upload_queue)?;
+                    Some(self.schedule_barrier0(upload_queue))
+                }
+            }
+        };
+
+        Ok(async move {
+            if let Some(barrier) = maybe_barrier {
+                Self::wait_completion0(barrier).await?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Removes a gc blocking reason for this timeline if one exists.
+    ///
+    /// A retryable step of timeline detach ancestor.
+    ///
+    /// Returns a future which waits until the completion of the upload.
+    pub(crate) fn schedule_remove_gc_block_reason(
+        self: &Arc<Self>,
+        reason: index::GcBlockingReason,
+    ) -> Result<impl std::future::Future<Output = Result<(), WaitCompletionError>>, NotInitialized>
+    {
+        let maybe_barrier = {
+            let mut guard = self.upload_queue.lock().unwrap();
+            let upload_queue = guard.initialized_mut()?;
+
+            if let index::GcBlockingReason::DetachAncestor = reason {
+                if !upload_queue.clean.0.lineage.is_detached_from_ancestor() {
+                    drop(guard);
+                    panic!("cannot complete timeline_ancestor_detach while not detached");
+                }
+            }
+
+            let wanted = |x: Option<&index::GcBlocking>| {
+                x.is_none() || x.is_some_and(|b| !b.blocked_by(reason))
+            };
+
+            let current = upload_queue.dirty.gc_blocking.as_ref();
+            let uploaded = upload_queue.clean.0.gc_blocking.as_ref();
+
+            match (current, uploaded) {
+                (x, y) if wanted(x) && wanted(y) => None,
+                (x, y) if wanted(x) && !wanted(y) => Some(self.schedule_barrier0(upload_queue)),
+                (x, y) => {
+                    if !wanted(x) && wanted(y) {
+                        warn!(?reason, op="remove", "unexpected: two racing processes to enable and disable a gc blocking reason (remove)");
+                    }
+
+                    upload_queue.dirty.gc_blocking =
+                        current.as_ref().and_then(|x| x.without_reason(reason));
+                    assert!(wanted(upload_queue.dirty.gc_blocking.as_ref()));
+                    // FIXME: bogus ?
+                    self.schedule_index_upload(upload_queue)?;
+                    Some(self.schedule_barrier0(upload_queue))
+                }
+            }
+        };
+
+        Ok(async move {
+            if let Some(barrier) = maybe_barrier {
+                Self::wait_completion0(barrier).await?;
+            }
+            Ok(())
+        })
     }
 
     /// Launch an upload operation in the background; the file is added to be included in next
@@ -868,7 +993,10 @@ impl RemoteTimelineClient {
     ///
     /// The files will be leaked in remote storage unless [`Self::schedule_deletion_of_unlinked`]
     /// is invoked on them.
-    pub(crate) fn schedule_gc_update(self: &Arc<Self>, gc_layers: &[Layer]) -> anyhow::Result<()> {
+    pub(crate) fn schedule_gc_update(
+        self: &Arc<Self>,
+        gc_layers: &[Layer],
+    ) -> Result<(), NotInitialized> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
 
@@ -1378,6 +1506,18 @@ impl RemoteTimelineClient {
                 .dirty
                 .layer_metadata
                 .drain()
+                .filter(|(_file_name, meta)| {
+                    // Filter out layers that belonged to an ancestor shard.  Since we are deleting the whole timeline from
+                    // all shards anyway, we _could_ delete these, but
+                    // - it creates a potential race if other shards are still
+                    //   using the layers while this shard deletes them.
+                    // - it means that if we rolled back the shard split, the ancestor shards would be in a state where
+                    //   these timelines are present but corrupt (their index exists but some layers don't)
+                    //
+                    // These layers will eventually be cleaned up by the scrubber when it does physical GC.
+                    meta.shard.shard_number == self.tenant_shard_id.shard_number
+                        && meta.shard.shard_count == self.tenant_shard_id.shard_count
+                })
                 .map(|(file_name, meta)| {
                     remote_layer_path(
                         &self.tenant_shard_id.tenant_id,
@@ -1588,7 +1728,7 @@ impl RemoteTimelineClient {
             task_mgr::spawn(
                 &self.runtime,
                 TaskKind::RemoteUploadTask,
-                Some(self.tenant_shard_id),
+                self.tenant_shard_id,
                 Some(self.timeline_id),
                 "remote upload",
                 async move {

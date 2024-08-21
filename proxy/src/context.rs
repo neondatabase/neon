@@ -7,13 +7,14 @@ use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tracing::{field::display, info, info_span, Span};
+use try_lock::TryLock;
 use uuid::Uuid;
 
 use crate::{
     console::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
-    metrics::{ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol},
+    metrics::{ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting},
     DbName, EndpointId, RoleName,
 };
 
@@ -28,7 +29,15 @@ pub static LOG_CHAN_DISCONNECT: OnceCell<mpsc::WeakUnboundedSender<RequestData>>
 ///
 /// This data should **not** be used for connection logic, only for observability and limiting purposes.
 /// All connection logic should instead use strongly typed state machines, not a bunch of Options.
-pub struct RequestMonitoring {
+pub struct RequestMonitoring(
+    /// To allow easier use of the ctx object, we have interior mutability.
+    /// I would typically use a RefCell but that would break the `Send` requirements
+    /// so we need something with thread-safety. `TryLock` is a cheap alternative
+    /// that offers similar semantics to a `RefCell` but with synchronisation.
+    TryLock<RequestMonitoringInner>,
+);
+
+struct RequestMonitoringInner {
     pub peer_addr: IpAddr,
     pub session_id: Uuid,
     pub protocol: Protocol,
@@ -85,7 +94,7 @@ impl RequestMonitoring {
             role = tracing::field::Empty,
         );
 
-        Self {
+        let inner = RequestMonitoringInner {
             peer_addr,
             session_id,
             protocol,
@@ -110,7 +119,9 @@ impl RequestMonitoring {
             disconnect_sender: LOG_CHAN_DISCONNECT.get().and_then(|tx| tx.upgrade()),
             latency_timer: LatencyTimer::new(protocol),
             disconnect_timestamp: None,
-        }
+        };
+
+        Self(TryLock::new(inner))
     }
 
     #[cfg(test)]
@@ -119,48 +130,177 @@ impl RequestMonitoring {
     }
 
     pub fn console_application_name(&self) -> String {
+        let this = self.0.try_lock().expect("should not deadlock");
         format!(
             "{}/{}",
-            self.application.as_deref().unwrap_or_default(),
-            self.protocol
+            this.application.as_deref().unwrap_or_default(),
+            this.protocol
         )
     }
 
-    pub fn set_rejected(&mut self, rejected: bool) {
-        self.rejected = Some(rejected);
+    pub fn set_rejected(&self, rejected: bool) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        this.rejected = Some(rejected);
     }
 
-    pub fn set_cold_start_info(&mut self, info: ColdStartInfo) {
+    pub fn set_cold_start_info(&self, info: ColdStartInfo) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_cold_start_info(info);
+    }
+
+    pub fn set_db_options(&self, options: StartupMessageParams) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        this.set_application(options.get("application_name").map(SmolStr::from));
+        if let Some(user) = options.get("user") {
+            this.set_user(user.into());
+        }
+        if let Some(dbname) = options.get("database") {
+            this.set_dbname(dbname.into());
+        }
+
+        this.pg_options = Some(options);
+    }
+
+    pub fn set_project(&self, x: MetricsAuxInfo) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        if this.endpoint_id.is_none() {
+            this.set_endpoint_id(x.endpoint_id.as_str().into());
+        }
+        this.branch = Some(x.branch_id);
+        this.project = Some(x.project_id);
+        this.set_cold_start_info(x.cold_start_info);
+    }
+
+    pub fn set_project_id(&self, project_id: ProjectIdInt) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        this.project = Some(project_id);
+    }
+
+    pub fn set_endpoint_id(&self, endpoint_id: EndpointId) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_endpoint_id(endpoint_id);
+    }
+
+    pub fn set_dbname(&self, dbname: DbName) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_dbname(dbname);
+    }
+
+    pub fn set_user(&self, user: RoleName) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .set_user(user);
+    }
+
+    pub fn set_auth_method(&self, auth_method: AuthMethod) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        this.auth_method = Some(auth_method);
+    }
+
+    pub fn has_private_peer_addr(&self) -> bool {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .has_private_peer_addr()
+    }
+
+    pub fn set_error_kind(&self, kind: ErrorKind) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        // Do not record errors from the private address to metrics.
+        if !this.has_private_peer_addr() {
+            Metrics::get().proxy.errors_total.inc(kind);
+        }
+        if let Some(ep) = &this.endpoint_id {
+            let metric = &Metrics::get().proxy.endpoints_affected_by_errors;
+            let label = metric.with_labels(kind);
+            metric.get_metric(label).measure(ep);
+        }
+        this.error_kind = Some(kind);
+    }
+
+    pub fn set_success(&self) {
+        let mut this = self.0.try_lock().expect("should not deadlock");
+        this.success = true;
+    }
+
+    pub fn log_connect(&self) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .log_connect();
+    }
+
+    pub fn protocol(&self) -> Protocol {
+        self.0.try_lock().expect("should not deadlock").protocol
+    }
+
+    pub fn span(&self) -> Span {
+        self.0.try_lock().expect("should not deadlock").span.clone()
+    }
+
+    pub fn session_id(&self) -> Uuid {
+        self.0.try_lock().expect("should not deadlock").session_id
+    }
+
+    pub fn peer_addr(&self) -> IpAddr {
+        self.0.try_lock().expect("should not deadlock").peer_addr
+    }
+
+    pub fn cold_start_info(&self) -> ColdStartInfo {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .cold_start_info
+    }
+
+    pub fn latency_timer_pause(&self, waiting_for: Waiting) -> LatencyTimerPause<'_> {
+        LatencyTimerPause {
+            ctx: self,
+            start: tokio::time::Instant::now(),
+            waiting_for,
+        }
+    }
+
+    pub fn success(&self) {
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .latency_timer
+            .success();
+    }
+}
+
+pub struct LatencyTimerPause<'a> {
+    ctx: &'a RequestMonitoring,
+    start: tokio::time::Instant,
+    waiting_for: Waiting,
+}
+
+impl Drop for LatencyTimerPause<'_> {
+    fn drop(&mut self) {
+        self.ctx
+            .0
+            .try_lock()
+            .expect("should not deadlock")
+            .latency_timer
+            .unpause(self.start, self.waiting_for);
+    }
+}
+
+impl RequestMonitoringInner {
+    fn set_cold_start_info(&mut self, info: ColdStartInfo) {
         self.cold_start_info = info;
         self.latency_timer.cold_start_info(info);
     }
 
-    pub fn set_db_options(&mut self, options: StartupMessageParams) {
-        self.set_application(options.get("application_name").map(SmolStr::from));
-        if let Some(user) = options.get("user") {
-            self.set_user(user.into());
-        }
-        if let Some(dbname) = options.get("database") {
-            self.set_dbname(dbname.into());
-        }
-
-        self.pg_options = Some(options);
-    }
-
-    pub fn set_project(&mut self, x: MetricsAuxInfo) {
-        if self.endpoint_id.is_none() {
-            self.set_endpoint_id(x.endpoint_id.as_str().into())
-        }
-        self.branch = Some(x.branch_id);
-        self.project = Some(x.project_id);
-        self.set_cold_start_info(x.cold_start_info);
-    }
-
-    pub fn set_project_id(&mut self, project_id: ProjectIdInt) {
-        self.project = Some(project_id);
-    }
-
-    pub fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
+    fn set_endpoint_id(&mut self, endpoint_id: EndpointId) {
         if self.endpoint_id.is_none() {
             self.span.record("ep", display(&endpoint_id));
             let metric = &Metrics::get().proxy.connecting_endpoints;
@@ -176,44 +316,23 @@ impl RequestMonitoring {
         }
     }
 
-    pub fn set_dbname(&mut self, dbname: DbName) {
+    fn set_dbname(&mut self, dbname: DbName) {
         self.dbname = Some(dbname);
     }
 
-    pub fn set_user(&mut self, user: RoleName) {
+    fn set_user(&mut self, user: RoleName) {
         self.span.record("role", display(&user));
         self.user = Some(user);
     }
 
-    pub fn set_auth_method(&mut self, auth_method: AuthMethod) {
-        self.auth_method = Some(auth_method);
-    }
-
-    pub fn has_private_peer_addr(&self) -> bool {
+    fn has_private_peer_addr(&self) -> bool {
         match self.peer_addr {
             IpAddr::V4(ip) => ip.is_private(),
-            _ => false,
+            IpAddr::V6(_) => false,
         }
     }
 
-    pub fn set_error_kind(&mut self, kind: ErrorKind) {
-        // Do not record errors from the private address to metrics.
-        if !self.has_private_peer_addr() {
-            Metrics::get().proxy.errors_total.inc(kind);
-        }
-        if let Some(ep) = &self.endpoint_id {
-            let metric = &Metrics::get().proxy.endpoints_affected_by_errors;
-            let label = metric.with_labels(kind);
-            metric.get_metric(label).measure(ep);
-        }
-        self.error_kind = Some(kind);
-    }
-
-    pub fn set_success(&mut self) {
-        self.success = true;
-    }
-
-    pub fn log_connect(&mut self) {
+    fn log_connect(&mut self) {
         let outcome = if self.success {
             ConnectOutcome::Success
         } else {
@@ -256,7 +375,7 @@ impl RequestMonitoring {
     }
 }
 
-impl Drop for RequestMonitoring {
+impl Drop for RequestMonitoringInner {
     fn drop(&mut self) {
         if self.sender.is_some() {
             self.log_connect();

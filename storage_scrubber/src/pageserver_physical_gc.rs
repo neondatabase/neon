@@ -1,13 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crate::checks::{list_timeline_blobs, BlobDataParseResult};
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{
-    init_remote, BucketConfig, ControllerClientConfig, NodeKind, RootTarget, TenantShardTimelineId,
-};
-use aws_sdk_s3::Client;
+use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
@@ -15,10 +12,11 @@ use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use pageserver_api::controller_api::TenantDescribeResponse;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
-use remote_storage::RemotePath;
+use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
 use reqwest::Method;
 use serde::Serialize;
 use storage_controller_client::control_api;
+use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
 use utils::generation::Generation;
 use utils::id::{TenantId, TenantTimelineId};
@@ -117,7 +115,7 @@ use refs::AncestorRefs;
 // - Are there any refs to ancestor shards' layers?
 #[derive(Default)]
 struct TenantRefAccumulator {
-    shards_seen: HashMap<TenantId, Vec<ShardIndex>>,
+    shards_seen: HashMap<TenantId, BTreeSet<ShardIndex>>,
 
     // For each shard that has refs to an ancestor's layers, the set of ancestor layers referred to
     ancestor_ref_shards: AncestorRefs,
@@ -130,7 +128,7 @@ impl TenantRefAccumulator {
             .shards_seen
             .entry(ttid.tenant_shard_id.tenant_id)
             .or_default())
-        .push(this_shard_idx);
+        .insert(this_shard_idx);
 
         let mut ancestor_refs = Vec::new();
         for (layer_name, layer_metadata) in &index_part.layer_metadata {
@@ -154,7 +152,7 @@ impl TenantRefAccumulator {
         summary: &mut GcSummary,
     ) -> (Vec<TenantShardId>, AncestorRefs) {
         let mut ancestors_to_gc = Vec::new();
-        for (tenant_id, mut shard_indices) in self.shards_seen {
+        for (tenant_id, shard_indices) in self.shards_seen {
             // Find the highest shard count
             let latest_count = shard_indices
                 .iter()
@@ -162,6 +160,7 @@ impl TenantRefAccumulator {
                 .max()
                 .expect("Always at least one shard");
 
+            let mut shard_indices = shard_indices.iter().collect::<Vec<_>>();
             let (mut latest_shards, ancestor_shards) = {
                 let at =
                     itertools::partition(&mut shard_indices, |i| i.shard_count == latest_count);
@@ -174,7 +173,7 @@ impl TenantRefAccumulator {
             // to scan the S3 bucket halfway through a shard split.
             if latest_shards.len() != latest_count.count() as usize {
                 // This should be extremely rare, so we warn on it.
-                tracing::warn!(%tenant_id, "Missed some shards at count {:?}", latest_count);
+                tracing::warn!(%tenant_id, "Missed some shards at count {:?}: {latest_shards:?}", latest_count);
                 continue;
             }
 
@@ -212,7 +211,7 @@ impl TenantRefAccumulator {
                         .iter()
                         .map(|s| s.tenant_shard_id.to_index())
                         .collect();
-                    if controller_indices != latest_shards {
+                    if !controller_indices.iter().eq(latest_shards.iter().copied()) {
                         tracing::info!(%tenant_id, "Latest shards seen in S3 ({latest_shards:?}) don't match controller state ({controller_indices:?})");
                         continue;
                     }
@@ -241,38 +240,13 @@ impl TenantRefAccumulator {
     }
 }
 
-async fn is_old_enough(
-    s3_client: &Client,
-    bucket_config: &BucketConfig,
-    min_age: &Duration,
-    key: &str,
-    summary: &mut GcSummary,
-) -> bool {
+fn is_old_enough(min_age: &Duration, key: &ListingObject, summary: &mut GcSummary) -> bool {
     // Validation: we will only GC indices & layers after a time threshold (e.g. one week) so that during an incident
     // it is easier to read old data for analysis, and easier to roll back shard splits without having to un-delete any objects.
-    let age: Duration = match s3_client
-        .head_object()
-        .bucket(&bucket_config.bucket)
-        .key(key)
-        .send()
-        .await
-    {
-        Ok(response) => match response.last_modified {
-            None => {
-                tracing::warn!("Missing last_modified");
-                summary.remote_storage_errors += 1;
-                return false;
-            }
-            Some(last_modified) => match SystemTime::try_from(last_modified).map(|t| t.elapsed()) {
-                Ok(Ok(e)) => e,
-                Err(_) | Ok(Err(_)) => {
-                    tracing::warn!("Bad last_modified time: {last_modified:?}");
-                    return false;
-                }
-            },
-        },
-        Err(e) => {
-            tracing::warn!("Failed to HEAD {key}: {e}");
+    let age = match key.last_modified.elapsed() {
+        Ok(e) => e,
+        Err(_) => {
+            tracing::warn!("Bad last_modified time: {:?}", key.last_modified);
             summary.remote_storage_errors += 1;
             return false;
         }
@@ -290,17 +264,30 @@ async fn is_old_enough(
     old_enough
 }
 
+/// Same as [`is_old_enough`], but doesn't require a [`ListingObject`] passed to it.
+async fn check_is_old_enough(
+    remote_client: &GenericRemoteStorage,
+    key: &RemotePath,
+    min_age: &Duration,
+    summary: &mut GcSummary,
+) -> Option<bool> {
+    let listing_object = remote_client
+        .head_object(key, &CancellationToken::new())
+        .await
+        .ok()?;
+    Some(is_old_enough(min_age, &listing_object, summary))
+}
+
 async fn maybe_delete_index(
-    s3_client: &Client,
-    bucket_config: &BucketConfig,
+    remote_client: &GenericRemoteStorage,
     min_age: &Duration,
     latest_gen: Generation,
-    key: &str,
+    obj: &ListingObject,
     mode: GcMode,
     summary: &mut GcSummary,
 ) {
     // Validation: we will only delete things that parse cleanly
-    let basename = key.rsplit_once('/').unwrap().1;
+    let basename = obj.key.get_path().file_name().unwrap();
     let candidate_generation =
         match parse_remote_index_path(RemotePath::from_string(basename).unwrap()) {
             Some(g) => g,
@@ -329,7 +316,7 @@ async fn maybe_delete_index(
         return;
     }
 
-    if !is_old_enough(s3_client, bucket_config, min_age, key, summary).await {
+    if !is_old_enough(min_age, obj, summary) {
         return;
     }
 
@@ -339,11 +326,8 @@ async fn maybe_delete_index(
     }
 
     // All validations passed: erase the object
-    match s3_client
-        .delete_object()
-        .bucket(&bucket_config.bucket)
-        .key(key)
-        .send()
+    match remote_client
+        .delete(&obj.key, &CancellationToken::new())
         .await
     {
         Ok(_) => {
@@ -359,8 +343,7 @@ async fn maybe_delete_index(
 
 #[allow(clippy::too_many_arguments)]
 async fn gc_ancestor(
-    s3_client: &Client,
-    bucket_config: &BucketConfig,
+    remote_client: &GenericRemoteStorage,
     root_target: &RootTarget,
     min_age: &Duration,
     ancestor: TenantShardId,
@@ -369,7 +352,7 @@ async fn gc_ancestor(
     summary: &mut GcSummary,
 ) -> anyhow::Result<()> {
     // Scan timelines in the ancestor
-    let timelines = stream_tenant_timelines(s3_client, root_target, ancestor).await?;
+    let timelines = stream_tenant_timelines(remote_client, root_target, ancestor).await?;
     let mut timelines = std::pin::pin!(timelines);
 
     // Build a list of keys to retain
@@ -377,7 +360,7 @@ async fn gc_ancestor(
     while let Some(ttid) = timelines.next().await {
         let ttid = ttid?;
 
-        let data = list_timeline_blobs(s3_client, ttid, root_target).await?;
+        let data = list_timeline_blobs(remote_client, ttid, root_target).await?;
 
         let s3_layers = match data.blob_data {
             BlobDataParseResult::Parsed {
@@ -389,10 +372,13 @@ async fn gc_ancestor(
                 // Post-deletion tenant location: don't try and GC it.
                 continue;
             }
-            BlobDataParseResult::Incorrect(reasons) => {
+            BlobDataParseResult::Incorrect {
+                errors,
+                s3_layers: _, // TODO(yuchen): could still check references to these s3 layers?
+            } => {
                 // Our primary purpose isn't to report on bad data, but log this rather than skipping silently
                 tracing::warn!(
-                    "Skipping ancestor GC for timeline {ttid}, bad metadata: {reasons:?}"
+                    "Skipping ancestor GC for timeline {ttid}, bad metadata: {errors:?}"
                 );
                 continue;
             }
@@ -425,7 +411,8 @@ async fn gc_ancestor(
 
             // We apply a time threshold to GCing objects that are un-referenced: this preserves our ability
             // to roll back a shard split if we have to, by avoiding deleting ancestor layers right away
-            if !is_old_enough(s3_client, bucket_config, min_age, &key, summary).await {
+            let path = RemotePath::from_string(key.strip_prefix("/").unwrap_or(&key)).unwrap();
+            if check_is_old_enough(remote_client, &path, min_age, summary).await != Some(true) {
                 continue;
             }
 
@@ -435,13 +422,7 @@ async fn gc_ancestor(
             }
 
             // All validations passed: erase the object
-            match s3_client
-                .delete_object()
-                .bucket(&bucket_config.bucket)
-                .key(&key)
-                .send()
-                .await
-            {
+            match remote_client.delete(&path, &CancellationToken::new()).await {
                 Ok(_) => {
                     tracing::info!("Successfully deleted unreferenced ancestor layer {key}");
                     summary.ancestor_layers_deleted += 1;
@@ -469,16 +450,16 @@ async fn gc_ancestor(
 /// This type of GC is not necessary for correctness: rather it serves to reduce wasted storage capacity, and
 /// make sure that object listings don't get slowed down by large numbers of garbage objects.
 pub async fn pageserver_physical_gc(
-    bucket_config: BucketConfig,
-    controller_client_conf: Option<ControllerClientConfig>,
+    bucket_config: &BucketConfig,
+    controller_client: Option<&control_api::Client>,
     tenant_shard_ids: Vec<TenantShardId>,
     min_age: Duration,
     mode: GcMode,
 ) -> anyhow::Result<GcSummary> {
-    let (s3_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
+    let (remote_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
 
     let tenants = if tenant_shard_ids.is_empty() {
-        futures::future::Either::Left(stream_tenants(&s3_client, &target))
+        futures::future::Either::Left(stream_tenants(&remote_client, &target))
     } else {
         futures::future::Either::Right(futures::stream::iter(tenant_shard_ids.into_iter().map(Ok)))
     };
@@ -491,14 +472,13 @@ pub async fn pageserver_physical_gc(
     let accumulator = Arc::new(std::sync::Mutex::new(TenantRefAccumulator::default()));
 
     // Generate a stream of TenantTimelineId
-    let timelines = tenants.map_ok(|t| stream_tenant_timelines(&s3_client, &target, t));
+    let timelines = tenants.map_ok(|t| stream_tenant_timelines(&remote_client, &target, t));
     let timelines = timelines.try_buffered(CONCURRENCY);
     let timelines = timelines.try_flatten();
 
     // Generate a stream of S3TimelineBlobData
     async fn gc_timeline(
-        s3_client: &Client,
-        bucket_config: &BucketConfig,
+        remote_client: &GenericRemoteStorage,
         min_age: &Duration,
         target: &RootTarget,
         mode: GcMode,
@@ -506,7 +486,7 @@ pub async fn pageserver_physical_gc(
         accumulator: &Arc<std::sync::Mutex<TenantRefAccumulator>>,
     ) -> anyhow::Result<GcSummary> {
         let mut summary = GcSummary::default();
-        let data = list_timeline_blobs(s3_client, ttid, target).await?;
+        let data = list_timeline_blobs(remote_client, ttid, target).await?;
 
         let (index_part, latest_gen, candidates) = match &data.blob_data {
             BlobDataParseResult::Parsed {
@@ -518,9 +498,12 @@ pub async fn pageserver_physical_gc(
                 // Post-deletion tenant location: don't try and GC it.
                 return Ok(summary);
             }
-            BlobDataParseResult::Incorrect(reasons) => {
+            BlobDataParseResult::Incorrect {
+                errors,
+                s3_layers: _,
+            } => {
                 // Our primary purpose isn't to report on bad data, but log this rather than skipping silently
-                tracing::warn!("Skipping timeline {ttid}, bad metadata: {reasons:?}");
+                tracing::warn!("Skipping timeline {ttid}, bad metadata: {errors:?}");
                 return Ok(summary);
             }
         };
@@ -528,17 +511,9 @@ pub async fn pageserver_physical_gc(
         accumulator.lock().unwrap().update(ttid, index_part);
 
         for key in candidates {
-            maybe_delete_index(
-                s3_client,
-                bucket_config,
-                min_age,
-                latest_gen,
-                &key,
-                mode,
-                &mut summary,
-            )
-            .instrument(info_span!("maybe_delete_index", %ttid, ?latest_gen, key))
-            .await;
+            maybe_delete_index(remote_client, min_age, latest_gen, &key, mode, &mut summary)
+                .instrument(info_span!("maybe_delete_index", %ttid, ?latest_gen, %key.key))
+                .await;
         }
 
         Ok(summary)
@@ -549,15 +524,7 @@ pub async fn pageserver_physical_gc(
     // Drain futures for per-shard GC, populating accumulator as a side effect
     {
         let timelines = timelines.map_ok(|ttid| {
-            gc_timeline(
-                &s3_client,
-                &bucket_config,
-                &min_age,
-                &target,
-                mode,
-                ttid,
-                &accumulator,
-            )
+            gc_timeline(&remote_client, &min_age, &target, mode, ttid, &accumulator)
         });
         let mut timelines = std::pin::pin!(timelines.try_buffered(CONCURRENCY));
 
@@ -567,7 +534,7 @@ pub async fn pageserver_physical_gc(
     }
 
     // Execute cross-shard GC, using the accumulator's full view of all the shards built in the per-shard GC
-    let Some(controller_client) = controller_client_conf.map(|c| c.build_client()) else {
+    let Some(client) = controller_client else {
         tracing::info!("Skipping ancestor layer GC, because no `--controller-api` was specified");
         return Ok(summary);
     };
@@ -576,13 +543,12 @@ pub async fn pageserver_physical_gc(
         .unwrap()
         .into_inner()
         .unwrap()
-        .into_gc_ancestors(&controller_client, &mut summary)
+        .into_gc_ancestors(client, &mut summary)
         .await;
 
     for ancestor_shard in ancestor_shards {
         gc_ancestor(
-            &s3_client,
-            &bucket_config,
+            &remote_client,
             &target,
             &min_age,
             ancestor_shard,

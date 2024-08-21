@@ -63,10 +63,19 @@ pub(super) async fn delete_local_timeline_directory(
     tenant_shard_id: TenantShardId,
     timeline: &Timeline,
 ) -> anyhow::Result<()> {
-    let guards = async { tokio::join!(timeline.gc_lock.lock(), timeline.compaction_lock.lock()) };
-    let guards = crate::timed(
-        guards,
-        "acquire gc and compaction locks",
+    // Always ensure the lock order is compaction -> gc.
+    let compaction_lock = timeline.compaction_lock.lock();
+    let compaction_lock = crate::timed(
+        compaction_lock,
+        "acquires compaction lock",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+
+    let gc_lock = timeline.gc_lock.lock();
+    let gc_lock = crate::timed(
+        gc_lock,
+        "acquires gc lock",
         std::time::Duration::from_secs(5),
     )
     .await;
@@ -107,7 +116,8 @@ pub(super) async fn delete_local_timeline_directory(
         .context("fsync_pre_mark_remove")?;
 
     info!("finished deleting layer files, releasing locks");
-    drop(guards);
+    drop(gc_lock);
+    drop(compaction_lock);
 
     fail::fail_point!("timeline-delete-after-rm", |_| {
         Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
@@ -219,6 +229,8 @@ impl DeleteTimelineFlow {
 
         // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
         timeline.shutdown(super::ShutdownMode::Hard).await;
+
+        tenant.gc_block.before_delete(&timeline);
 
         fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
             Err(anyhow::anyhow!(
@@ -383,7 +395,7 @@ impl DeleteTimelineFlow {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
-            Some(tenant_shard_id),
+            tenant_shard_id,
             Some(timeline_id),
             "timeline_delete",
             async move {

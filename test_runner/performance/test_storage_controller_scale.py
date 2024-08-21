@@ -2,7 +2,6 @@ import concurrent.futures
 import random
 import time
 from collections import defaultdict
-from typing import Any, Dict
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -24,51 +23,14 @@ def get_consistent_node_shard_counts(env: NeonEnv, total_shards) -> defaultdict[
     This function takes into account the intersection of the intent and the observed state.
     If they do not match, it asserts out.
     """
-    tenants = env.storage_controller.tenant_list()
-
-    intent = dict()
-    observed = dict()
-
-    tenant_placement: defaultdict[str, Dict[str, Any]] = defaultdict(
-        lambda: {
-            "observed": {"attached": None, "secondary": []},
-            "intent": {"attached": None, "secondary": []},
-        }
-    )
-
-    for t in tenants:
-        for node_id, loc_state in t["observed"]["locations"].items():
-            if (
-                loc_state is not None
-                and "conf" in loc_state
-                and loc_state["conf"] is not None
-                and loc_state["conf"]["mode"]
-                in set(["AttachedSingle", "AttachedMulti", "AttachedStale"])
-            ):
-                observed[t["tenant_shard_id"]] = int(node_id)
-                tenant_placement[t["tenant_shard_id"]]["observed"]["attached"] = int(node_id)
-
-            if (
-                loc_state is not None
-                and "conf" in loc_state
-                and loc_state["conf"] is not None
-                and loc_state["conf"]["mode"] == "Secondary"
-            ):
-                tenant_placement[t["tenant_shard_id"]]["observed"]["secondary"].append(int(node_id))
-
-        if "attached" in t["intent"]:
-            intent[t["tenant_shard_id"]] = t["intent"]["attached"]
-            tenant_placement[t["tenant_shard_id"]]["intent"]["attached"] = t["intent"]["attached"]
-
-        if "secondary" in t["intent"]:
-            tenant_placement[t["tenant_shard_id"]]["intent"]["secondary"] += t["intent"][
-                "secondary"
-            ]
-
+    tenant_placement = env.storage_controller.get_tenants_placement()
     log.info(f"{tenant_placement=}")
 
     matching = {
-        tid: intent[tid] for tid in observed if tid in intent and intent[tid] == observed[tid]
+        tid: tenant_placement[tid]["intent"]["attached"]
+        for tid in tenant_placement
+        if tenant_placement[tid]["intent"]["attached"]
+        == tenant_placement[tid]["observed"]["attached"]
     }
     assert len(matching) == total_shards
 
@@ -217,7 +179,11 @@ def test_storage_controller_many_tenants(
                 # A reconciler operation: migrate a shard.
                 shard_number = rng.randint(0, shard_count - 1)
                 tenant_shard_id = TenantShardId(tenant_id, shard_number, shard_count)
-                dest_ps_id = rng.choice([ps.id for ps in env.pageservers])
+
+                # Migrate it to its secondary location
+                desc = env.storage_controller.tenant_describe(tenant_id)
+                dest_ps_id = desc["shards"][shard_number]["node_secondary"][0]
+
                 f = executor.submit(
                     env.storage_controller.tenant_shard_migrate, tenant_shard_id, dest_ps_id
                 )
@@ -231,7 +197,11 @@ def test_storage_controller_many_tenants(
         for f in futs:
             f.result()
 
-    # Consistency check is safe here: all the previous operations waited for reconcile before completing
+    # Some of the operations above (notably migrations) might leave the controller in a state where it has
+    # some work to do, for example optimizing shard placement after we do a random migration. Wait for the system
+    # to reach a quiescent state before doing following checks.
+    env.storage_controller.reconcile_until_idle()
+
     env.storage_controller.consistency_check()
     check_memory()
 

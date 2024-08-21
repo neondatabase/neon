@@ -23,7 +23,7 @@ use utils::backoff;
 
 use crate::{config::remote_storage_from_toml, context::LOG_CHAN_DISCONNECT};
 
-use super::{RequestMonitoring, LOG_CHAN};
+use super::{RequestMonitoringInner, LOG_CHAN};
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct ParquetUploadArgs {
@@ -118,8 +118,8 @@ impl<'a> serde::Serialize for Options<'a> {
     }
 }
 
-impl From<&RequestMonitoring> for RequestData {
-    fn from(value: &RequestMonitoring) -> Self {
+impl From<&RequestMonitoringInner> for RequestData {
+    fn from(value: &RequestMonitoringInner) -> Self {
         Self {
             session_id: value.session_id,
             peer_addr: value.peer_addr.to_string(),
@@ -736,7 +736,7 @@ mod tests {
                 while let Some(r) = s.next().await {
                     tx.send(r).unwrap();
                 }
-                time::sleep(time::Duration::from_secs(70)).await
+                time::sleep(time::Duration::from_secs(70)).await;
             }
         });
 

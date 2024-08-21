@@ -7,7 +7,7 @@ use std::{
 use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
-    reconciler::ReconcileUnits,
+    reconciler::{ReconcileUnits, ReconcilerConfig},
     scheduler::{AffinityScore, MaySchedule, RefCountUpdate, ScheduleContext},
     service::ReconcileResultRequest,
 };
@@ -1063,6 +1063,7 @@ impl TenantShard {
         result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
         compute_hook: &Arc<ComputeHook>,
+        reconciler_config: ReconcilerConfig,
         service_config: &service::Config,
         persistence: &Arc<Persistence>,
         units: ReconcileUnits,
@@ -1101,6 +1102,7 @@ impl TenantShard {
             generation: self.generation,
             intent: reconciler_intent,
             detach,
+            reconciler_config,
             config: self.config.clone(),
             observed: self.observed.clone(),
             compute_hook: compute_hook.clone(),

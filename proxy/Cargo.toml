@@ -11,6 +11,7 @@ testing = []
 [dependencies]
 ahash.workspace = true
 anyhow.workspace = true
+arc-swap.workspace = true
 async-compression.workspace = true
 async-trait.workspace = true
 atomic-take.workspace = true
@@ -73,7 +74,7 @@ rustls.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = { workspace = true, features = ["asm"] }
+sha2 = { workspace = true, features = ["asm", "oid"] }
 smol_str.workspace = true
 smallvec.workspace = true
 socket2.workspace = true
@@ -92,6 +93,7 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 tracing.workspace = true
+try-lock.workspace = true
 typed-json.workspace = true
 url.workspace = true
 urlencoding.workspace = true
@@ -101,6 +103,14 @@ rustls-native-certs.workspace = true
 x509-parser.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
+
+# jwt stuff
+jose-jwa = "0.1.2"
+jose-jwk = { version = "0.1.2", features = ["p256", "p384", "rsa"] }
+signature = "2"
+ecdsa = "0.16"
+p256 = "0.13"
+rsa = "0.9"
 
 workspace_hack.workspace = true
 

@@ -25,6 +25,9 @@ use crate::metrics::{
 };
 use crate::node::Node;
 
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
+
 /// ## What do we store?
 ///
 /// The storage controller service does not store most of its state durably.
@@ -72,6 +75,8 @@ pub(crate) enum DatabaseError {
     ConnectionPool(#[from] r2d2::Error),
     #[error("Logical error: {0}")]
     Logical(String),
+    #[error("Migration error: {0}")]
+    Migration(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -95,6 +100,8 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealth,
     ListMetadataHealthUnhealthy,
     ListMetadataHealthOutdated,
+    GetLeader,
+    UpdateLeader,
 }
 
 #[must_use]
@@ -163,6 +170,19 @@ impl Persistence {
                 }
             }
         }
+    }
+
+    /// Execute the diesel migrations that are built into this binary
+    pub(crate) async fn migration_run(&self) -> DatabaseResult<()> {
+        use diesel_migrations::{HarnessWithOutput, MigrationHarness};
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            HarnessWithOutput::write_to_stdout(conn)
+                .run_pending_migrations(MIGRATIONS)
+                .map(|_| ())
+                .map_err(|e| DatabaseError::Migration(e.to_string()))
+        })
+        .await
     }
 
     /// Wraps `with_conn` in order to collect latency and error metrics
@@ -785,6 +805,69 @@ impl Persistence {
         )
         .await
     }
+
+    /// Get the current entry from the `leader` table if one exists.
+    /// It is an error for the table to contain more than one entry.
+    pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
+        let mut leader: Vec<ControllerPersistence> = self
+            .with_measured_conn(
+                DatabaseOperation::GetLeader,
+                move |conn| -> DatabaseResult<_> {
+                    Ok(crate::schema::controllers::table.load::<ControllerPersistence>(conn)?)
+                },
+            )
+            .await?;
+
+        if leader.len() > 1 {
+            return Err(DatabaseError::Logical(format!(
+                "More than one entry present in the leader table: {leader:?}"
+            )));
+        }
+
+        Ok(leader.pop())
+    }
+
+    /// Update the new leader with compare-exchange semantics. If `prev` does not
+    /// match the current leader entry, then the update is treated as a failure.
+    /// When `prev` is not specified, the update is forced.
+    pub(crate) async fn update_leader(
+        &self,
+        prev: Option<ControllerPersistence>,
+        new: ControllerPersistence,
+    ) -> DatabaseResult<()> {
+        use crate::schema::controllers::dsl::*;
+
+        let updated = self
+            .with_measured_conn(
+                DatabaseOperation::UpdateLeader,
+                move |conn| -> DatabaseResult<usize> {
+                    let updated = match &prev {
+                        Some(prev) => diesel::update(controllers)
+                            .filter(address.eq(prev.address.clone()))
+                            .filter(started_at.eq(prev.started_at))
+                            .set((
+                                address.eq(new.address.clone()),
+                                started_at.eq(new.started_at),
+                            ))
+                            .execute(conn)?,
+                        None => diesel::insert_into(controllers)
+                            .values(new.clone())
+                            .execute(conn)?,
+                    };
+
+                    Ok(updated)
+                },
+            )
+            .await?;
+
+        if updated == 0 {
+            return Err(DatabaseError::Logical(
+                "Leader table update failed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
@@ -909,4 +992,13 @@ impl From<MetadataHealthPersistence> for MetadataHealthRecord {
             last_scrubbed_at: value.last_scrubbed_at,
         }
     }
+}
+
+#[derive(
+    Serialize, Deserialize, Queryable, Selectable, Insertable, Eq, PartialEq, Debug, Clone,
+)]
+#[diesel(table_name = crate::schema::controllers)]
+pub(crate) struct ControllerPersistence {
+    pub(crate) address: String,
+    pub(crate) started_at: chrono::DateTime<chrono::Utc>,
 }

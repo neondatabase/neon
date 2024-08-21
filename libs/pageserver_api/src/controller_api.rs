@@ -313,20 +313,17 @@ pub struct MetadataHealthUpdateRequest {
 pub struct MetadataHealthUpdateResponse {}
 
 #[derive(Serialize, Deserialize, Debug)]
-
 pub struct MetadataHealthListUnhealthyResponse {
     pub unhealthy_tenant_shards: Vec<TenantShardId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-
 pub struct MetadataHealthListOutdatedRequest {
     #[serde(with = "humantime_serde")]
     pub not_scrubbed_for: Duration,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-
 pub struct MetadataHealthListOutdatedResponse {
     pub health_records: Vec<MetadataHealthRecord>,
 }

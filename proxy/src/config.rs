@@ -31,11 +31,8 @@ pub struct ProxyConfig {
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
-    pub disable_ip_check_for_http: bool,
-    pub redis_rps_limit: Vec<RateBucketInfo>,
     pub region: String,
     pub handshake_timeout: Duration,
-    pub aws_region: String,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute_retry_config: RetryConfig,
@@ -55,7 +52,7 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub request_timeout: tokio::time::Duration,
+    pub accept_websockets: bool,
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,
@@ -159,7 +156,7 @@ pub enum TlsServerEndPoint {
 }
 
 impl TlsServerEndPoint {
-    pub fn new(cert: &CertificateDer) -> anyhow::Result<Self> {
+    pub fn new(cert: &CertificateDer<'_>) -> anyhow::Result<Self> {
         let sha256_oids = [
             // I'm explicitly not adding MD5 or SHA1 here... They're bad.
             oid_registry::OID_SIG_ECDSA_WITH_SHA256,
@@ -282,7 +279,7 @@ impl CertResolver {
 impl rustls::server::ResolvesServerCert for CertResolver {
     fn resolve(
         &self,
-        client_hello: rustls::server::ClientHello,
+        client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         self.resolve(client_hello.server_name()).map(|x| x.0)
     }
@@ -563,7 +560,7 @@ impl RetryConfig {
             match key {
                 "num_retries" => num_retries = Some(value.parse()?),
                 "base_retry_wait_duration" => {
-                    base_retry_wait_duration = Some(humantime::parse_duration(value)?)
+                    base_retry_wait_duration = Some(humantime::parse_duration(value)?);
                 }
                 "retry_wait_exponent_base" => retry_wait_exponent_base = Some(value.parse()?),
                 unknown => bail!("unknown key: {unknown}"),

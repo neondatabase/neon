@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::{
     auth::endpoint_sni,
     config::{TlsConfig, PG_ALPN_PROTOCOL},
+    context::RequestMonitoring,
     error::ReportableError,
     metrics::Metrics,
     proxy::ERR_INSECURE_CONNECTION,
@@ -67,6 +68,7 @@ pub enum HandshakeData<S> {
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
 pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    ctx: &RequestMonitoring,
     stream: S,
     mut tls: Option<&TlsConfig>,
     record_handshake_error: bool,
@@ -80,11 +82,8 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
         let msg = stream.read_startup_packet().await?;
-        info!("received {msg:?}");
-
-        use FeStartupPacket::*;
         match msg {
-            SslRequest { direct } => match stream.get_ref() {
+            FeStartupPacket::SslRequest { direct } => match stream.get_ref() {
                 Stream::Raw { .. } if !tried_ssl => {
                     tried_ssl = true;
 
@@ -139,22 +138,26 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                         let tls_stream = accept.await.inspect_err(|_| {
                             if record_handshake_error {
-                                Metrics::get().proxy.tls_handshake_failures.inc()
+                                Metrics::get().proxy.tls_handshake_failures.inc();
                             }
                         })?;
 
                         let conn_info = tls_stream.get_ref().1;
 
+                        // try parse endpoint
+                        let ep = conn_info
+                            .server_name()
+                            .and_then(|sni| endpoint_sni(sni, &tls.common_names).ok().flatten());
+                        if let Some(ep) = ep {
+                            ctx.set_endpoint_id(ep);
+                        }
+
                         // check the ALPN, if exists, as required.
                         match conn_info.alpn_protocol() {
                             None | Some(PG_ALPN_PROTOCOL) => {}
                             Some(other) => {
-                                // try parse ep for better error
-                                let ep = conn_info.server_name().and_then(|sni| {
-                                    endpoint_sni(sni, &tls.common_names).ok().flatten()
-                                });
                                 let alpn = String::from_utf8_lossy(other);
-                                warn!(?ep, %alpn, "unexpected ALPN");
+                                warn!(%alpn, "unexpected ALPN");
                                 return Err(HandshakeError::ProtocolViolation);
                             }
                         }
@@ -178,7 +181,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
             },
-            GssEncRequest => match stream.get_ref() {
+            FeStartupPacket::GssEncRequest => match stream.get_ref() {
                 Stream::Raw { .. } if !tried_gss => {
                     tried_gss = true;
 
@@ -187,7 +190,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
             },
-            StartupMessage { params, version }
+            FeStartupPacket::StartupMessage { params, version }
                 if PG_PROTOCOL_EARLIEST <= version && version <= PG_PROTOCOL_LATEST =>
             {
                 // Check that the config has been consumed during upgrade
@@ -198,11 +201,16 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         .await?;
                 }
 
-                info!(?version, session_type = "normal", "successful handshake");
+                info!(
+                    ?version,
+                    ?params,
+                    session_type = "normal",
+                    "successful handshake"
+                );
                 break Ok(HandshakeData::Startup(stream, params));
             }
             // downgrade protocol version
-            StartupMessage { params, version }
+            FeStartupPacket::StartupMessage { params, version }
                 if version.major() == 3 && version > PG_PROTOCOL_LATEST =>
             {
                 warn!(?version, "unsupported minor version");
@@ -232,7 +240,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 );
                 break Ok(HandshakeData::Startup(stream, params));
             }
-            StartupMessage { version, .. } => {
+            FeStartupPacket::StartupMessage { version, .. } => {
                 warn!(
                     ?version,
                     session_type = "normal",
@@ -240,7 +248,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 );
                 return Err(HandshakeError::ProtocolViolation);
             }
-            CancelRequest(cancel_key_data) => {
+            FeStartupPacket::CancelRequest(cancel_key_data) => {
                 info!(session_type = "cancellation", "successful handshake");
                 break Ok(HandshakeData::Cancel(cancel_key_data));
             }

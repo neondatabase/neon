@@ -34,6 +34,7 @@ use tracing::error;
 use tracing::info;
 use typed_json::json;
 use url::Url;
+use urlencoding;
 use utils::http::error::ApiError;
 
 use crate::auth::backend::ComputeUserInfo;
@@ -144,9 +145,9 @@ impl UserFacingError for ConnInfoError {
 }
 
 fn get_conn_info(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     headers: &HeaderMap,
-    tls: &TlsConfig,
+    tls: Option<&TlsConfig>,
 ) -> Result<ConnInfo, ConnInfoError> {
     // HTTP only uses cleartext (for now and likely always)
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
@@ -168,7 +169,8 @@ fn get_conn_info(
         .path_segments()
         .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname: DbName = url_path.next().ok_or(ConnInfoError::InvalidDbName)?.into();
+    let dbname: DbName =
+        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
     ctx.set_dbname(dbname.clone());
 
     let username = RoleName::from(urlencoding::decode(connection_url.username())?);
@@ -182,12 +184,22 @@ fn get_conn_info(
         .ok_or(ConnInfoError::MissingPassword)?;
     let password = urlencoding::decode_binary(password.as_bytes());
 
-    let hostname = connection_url
-        .host_str()
-        .ok_or(ConnInfoError::MissingHostname)?;
-
-    let endpoint =
-        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?;
+    let endpoint = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => {
+            if let Some(tls) = tls {
+                endpoint_sni(hostname, &tls.common_names)?
+                    .ok_or(ConnInfoError::MalformedEndpoint)?
+            } else {
+                hostname
+                    .split_once(".")
+                    .map_or(hostname, |(prefix, _)| prefix)
+                    .into()
+            }
+        }
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) | None => {
+            return Err(ConnInfoError::MissingHostname)
+        }
+    };
     ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
@@ -203,7 +215,6 @@ fn get_conn_info(
             options = Some(NeonOptions::parse_options_raw(&value));
         }
     }
-    ctx.set_db_options(params.freeze());
 
     let user_info = ComputeUserInfo {
         endpoint,
@@ -224,12 +235,12 @@ fn get_conn_info(
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
-    let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
+    let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
         Ok(r) => {
@@ -482,13 +493,16 @@ fn map_isolation_level_to_headers(level: IsolationLevel) -> Option<HeaderValue> 
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
-    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
+    let _requeset_gauge = Metrics::get()
+        .proxy
+        .connection_requests
+        .guard(ctx.protocol());
     info!(
-        protocol = %ctx.protocol,
+        protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
 
@@ -498,7 +512,7 @@ async fn handle_inner(
     let headers = request.headers();
 
     // TLS config should be there.
-    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
+    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref())?;
     info!(user = conn_info.user_info.user.as_str(), "credentials");
 
     // Allow connection pooling only if explicitly requested
@@ -544,7 +558,7 @@ async fn handle_inner(
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
-            ctx.latency_timer.success();
+            ctx.success();
             Ok::<_, HttpConnError>(client)
         }
         .map_err(SqlOverHttpError::from),

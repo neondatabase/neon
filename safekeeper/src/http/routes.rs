@@ -114,6 +114,16 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
     })
 }
 
+/// List all (not deleted) timelines.
+async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let res: Vec<TenantTimelineId> = GlobalTimelines::get_all()
+        .iter()
+        .map(|tli| tli.ttid)
+        .collect();
+    json_response(StatusCode::OK, res)
+}
+
 /// Report info about timeline.
 async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
@@ -205,6 +215,7 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
 
 /// Stream tar archive with all timeline data.
 async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let destination = parse_request_param(&request, "destination_id")?;
     let ttid = TenantTimelineId::new(
         parse_request_param(&request, "tenant_id")?,
         parse_request_param(&request, "timeline_id")?,
@@ -225,7 +236,13 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
     // so create the chan and write to it in another task.
     let (tx, rx) = mpsc::channel(1);
 
-    task::spawn(pull_timeline::stream_snapshot(tli, tx));
+    let conf = get_conf(&request);
+    task::spawn(pull_timeline::stream_snapshot(
+        tli,
+        conf.my_id,
+        destination,
+        tx,
+    ));
 
     let rx_stream = ReceiverStream::new(rx);
     let body = Body::wrap_stream(rx_stream);
@@ -555,6 +572,9 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .post("/v1/tenant/timeline", |r| {
             request_span(r, timeline_create_handler)
         })
+        .get("/v1/tenant/timeline", |r| {
+            request_span(r, timeline_list_handler)
+        })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             request_span(r, timeline_status_handler)
         })
@@ -565,7 +585,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             request_span(r, tenant_delete_handler)
         })
         .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/snapshot",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/snapshot/:destination_id",
             |r| request_span(r, timeline_snapshot_handler),
         )
         .post("/v1/pull_timeline", |r| {
