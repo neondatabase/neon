@@ -839,14 +839,14 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			entry->hash = hash;
 			memset(entry->bitmap, 0, sizeof entry->bitmap);
 		}
-		}
 
 		generation = lfc_ctl->generation;
 		entry_offset = entry->offset;
 		lfc_ctl->writes += blocks_in_chunk;
 		LWLockRelease(lfc_lock);
 
-		rc = pwritev(lfc_desc, iov, blocks_in_chunk, ((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
+		rc = pwritev(lfc_desc, iov, blocks_in_chunk,
+					 ((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
 		if (rc != BLCKSZ * blocks_in_chunk)
 		{
 			lfc_disable("write");

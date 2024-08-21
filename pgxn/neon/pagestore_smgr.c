@@ -1389,6 +1389,49 @@ log_newpage_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 	return log_newpage(rinfo, forkNum, blkno, copied_buffer.data, page_std);
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+/*
+ * Wrapper around log_newpages() that makes a temporary copy of the block and
+ * WAL-logs that. This makes it safe to use while holding only a shared lock
+ * on the page, see XLogSaveBufferForHint. We don't use XLogSaveBufferForHint
+ * directly because it skips the logging if the LSN is new enough.
+ */
+static XLogRecPtr
+log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
+				  BlockNumber nblocks, Page *pages, bool page_std)
+{
+	PGAlignedBlock copied_buffer[XLR_MAX_BLOCK_ID];
+	BlockNumber	blknos[XLR_MAX_BLOCK_ID];
+	Page		pageptrs[XLR_MAX_BLOCK_ID];
+	int			nregistered = 0;
+	XLogRecPtr	result = 0;
+
+	for (int i = 0; i < nblocks; i++)
+	{
+		memcpy(copied_buffer[nregistered].data, pages[nregistered], BLCKSZ);
+		pageptrs[nregistered] = copied_buffer[nregistered].data;
+		blknos[nregistered] = blkno + i;
+
+		++nregistered;
+
+		if (nregistered >= XLR_MAX_BLOCK_ID)
+		{
+			log_newpages(rinfo, forkNum, nregistered, blknos, pageptrs,
+						 page_std);
+			nregistered = 0;
+		}
+	}
+
+	if (nregistered != 0)
+	{
+		log_newpages(rinfo, forkNum, nregistered, blknos, pageptrs,
+					 page_std);
+	}
+
+	return ProcLastRecPtr;
+}
+#endif /* PG_MAJORVERSION_NUM >= 17 */
+
 /*
  * Is 'buffer' identical to a freshly initialized empty heap page?
  */
@@ -1402,14 +1445,156 @@ PageIsEmptyHeapPage(char *buffer)
 	return memcmp(buffer, empty_page.data, BLCKSZ) == 0;
 }
 
+#if PG_MAJORVERSION_NUM >= 17
+static void
+neon_wallog_pages(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+				  BlockNumber nblocks, const char **buffers, bool force)
+{
+#define BLOCK_BATCH_SIZE	16
+	bool		log_pages;
+	BlockNumber	blocks[BLOCK_BATCH_SIZE];
+	XLogRecPtr	lsns[BLOCK_BATCH_SIZE];
+	int			batch_size = 0;
+
+	/*
+	 * Whenever a VM or FSM page is evicted, WAL-log it. FSM and (some) VM
+	 * changes are not WAL-logged when the changes are made, so this is our
+	 * last chance to log them, otherwise they're lost. That's OK for
+	 * correctness, the non-logged updates are not critical. But we want to
+	 * have a reasonably up-to-date VM and FSM in the page server.
+	 */
+	log_pages = false;
+	if (force)
+	{
+		Assert(XLogInsertAllowed());
+		log_pages = true;
+	}
+	else if (XLogInsertAllowed() &&
+			 !ShutdownRequestPending &&
+			 (forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM))
+	{
+		log_pages = true;
+	}
+
+	if (log_pages)
+	{
+		XLogRecPtr	recptr;
+		recptr = log_newpages_copy(&InfoFromSMgrRel(reln), forknum, blocknum,
+								   nblocks, (Page *) buffers, false);
+		ereport(SmgrTrace,
+				(errmsg(NEON_TAG "Page %u through %u of relation %u/%u/%u.%u "
+								 "were force logged, lsn=%X/%X",
+						blocknum, blocknum + nblocks,
+						RelFileInfoFmt(InfoFromSMgrRel(reln)),
+						forknum, LSN_FORMAT_ARGS(recptr))));
+	}
+
+	for (int i = 0; i < nblocks; i++)
+	{
+		Page		page = (Page) buffers[i];
+		BlockNumber blkno = blocknum + i;
+		XLogRecPtr	lsn = PageGetLSN(page);
+
+		if (lsn == InvalidXLogRecPtr)
+		{
+			/*
+			 * When PostgreSQL extends a relation, it calls smgrextend() with an
+			 * all-zeros pages, and we can just ignore that in Neon. We do need to
+			 * remember the new size, though, so that smgrnblocks() returns the
+			 * right answer after the rel has been extended. We rely on the
+			 * relsize cache for that.
+			 *
+			 * A completely empty heap page doesn't need to be WAL-logged, either.
+			 * The heapam can leave such a page behind, if e.g. an insert errors
+			 * out after initializing the page, but before it has inserted the
+			 * tuple and WAL-logged the change. When we read the page from the
+			 * page server, it will come back as all-zeros. That's OK, the heapam
+			 * will initialize an all-zeros page on first use.
+			 *
+			 * In other scenarios, evicting a dirty page with no LSN is a bad
+			 * sign: it implies that the page was not WAL-logged, and its contents
+			 * will be lost when it's evicted.
+			 */
+			if (PageIsNew(page))
+			{
+				ereport(SmgrTrace,
+						(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is all-zeros",
+								blkno,
+								RelFileInfoFmt(InfoFromSMgrRel(reln)),
+								forknum)));
+			}
+			else if (PageIsEmptyHeapPage(page))
+			{
+				ereport(SmgrTrace,
+						(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is an empty heap page with no LSN",
+								blkno,
+								RelFileInfoFmt(InfoFromSMgrRel(reln)),
+								forknum)));
+			}
+			else if (forknum != FSM_FORKNUM && forknum != VISIBILITYMAP_FORKNUM)
+			{
+				/*
+				 * Its a bad sign if there is a page with zero LSN in the buffer
+				 * cache in a standby, too. However, PANICing seems like a cure
+				 * worse than the disease, as the damage has likely already been
+				 * done in the primary. So in a standby, make this an assertion,
+				 * and in a release build just LOG the error and soldier on. We
+				 * update the last-written LSN of the page with a conservative
+				 * value in that case, which is the last replayed LSN.
+				 */
+				ereport(RecoveryInProgress() ? LOG : PANIC,
+						(errmsg(NEON_TAG "Page %u of relation %u/%u/%u.%u is evicted with zero LSN",
+								blkno,
+								RelFileInfoFmt(InfoFromSMgrRel(reln)),
+								forknum)));
+				Assert(false);
+
+				lsn = GetXLogReplayRecPtr(NULL); /* in standby mode, soldier on */
+			}
+		}
+		else
+		{
+			ereport(SmgrTrace,
+					(errmsg(NEON_TAG "Evicting page %u of relation %u/%u/%u.%u with lsn=%X/%X",
+							blkno,
+							RelFileInfoFmt(InfoFromSMgrRel(reln)),
+							forknum, LSN_FORMAT_ARGS(lsn))));
+		}
+
+		/*
+		 * Remember the LSN on this page. When we read the page again, we must
+		 * read the same or newer version of it.
+		 */
+		blocks[batch_size] = blkno;
+		lsns[batch_size] = lsn;
+		batch_size++;
+		if (batch_size >= BLOCK_BATCH_SIZE)
+		{
+			SetLastWrittenLSNForBlockv(lsns, InfoFromSMgrRel(reln), forknum,
+									   blocknum + i - batch_size + 1,
+									   batch_size);
+			batch_size = 0;
+		}
+	}
+
+	if (batch_size != 0)
+	{
+		SetLastWrittenLSNForBlockv(lsns, InfoFromSMgrRel(reln), forknum,
+								   blocknum + nblocks - batch_size + 1,
+								   batch_size);
+	}
+}
+#endif
+
 /*
  * A page is being evicted from the shared buffer cache. Update the
  * last-written LSN of the page, and WAL-log it if needed.
  */
-static void
 #if PG_MAJORVERSION_NUM < 16
+static void
 neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
 #else
+static void
 neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const char *buffer, bool force)
 #endif
 {
@@ -2312,8 +2497,8 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 		case RELPERSISTENCE_TEMP:
 		case RELPERSISTENCE_UNLOGGED:
 #if PG_MAJORVERSION_NUM >= 17
-            // TODO Do we want to improve this and implement multi-block prefetch?
-			return mdprefetch(reln, forknum, blocknum, 1);
+			// TODO Do we want to improve this and implement multi-block prefetch?
+			return mdprefetch(reln, forknum, blocknum, nblocks);
 #else
 			return mdprefetch(reln, forknum, blocknum);
 #endif
@@ -2680,8 +2865,6 @@ hexdump_page(char *page)
  *		relation (ie, those before the current EOF).  To extend a relation,
  *		use mdextend().
  */
-
-
 void
 #if PG_MAJORVERSION_NUM < 16
 neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool skipFsync)
@@ -2698,11 +2881,11 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 			if (mdexists(reln, forknum))
 			{
 				/* It exists locally. Guess it's unlogged then. */
-				#if PG_MAJORVERSION_NUM >= 17
+#if PG_MAJORVERSION_NUM >= 17
 				mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
-				#else
+#else
 				mdwrite(reln, forknum, blocknum, buffer, skipFsync);
-				#endif
+#endif
 				/*
 				 * We could set relpersistence now that we have determined
 				 * that it's local. But we don't dare to do it, because that
@@ -2754,10 +2937,45 @@ void
 neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 const void **buffers, BlockNumber nblocks, bool skipFsync)
 {
-	for (int i = 0; i < nblocks; i++)
+	switch (reln->smgr_relpersistence)
 	{
-		neon_write(reln, forknum, blkno, buffers[i], skipFsync);
+		case 0:
+			/* This is a bit tricky. Check if the relation exists locally */
+			if (mdexists(reln, forknum))
+			{
+				/* It exists locally. Guess it's unlogged then. */
+				mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+
+				/*
+				 * We could set relpersistence now that we have determined
+				 * that it's local. But we don't dare to do it, because that
+				 * would immediately allow reads as well, which shouldn't
+				 * happen. We could cache it with a different 'relpersistence'
+				 * value, but this isn't performance critical.
+				 */
+				return;
+			}
+			break;
+
+		case RELPERSISTENCE_PERMANENT:
+			break;
+
+		case RELPERSISTENCE_TEMP:
+		case RELPERSISTENCE_UNLOGGED:
+			mdwritev(reln, forknum, blkno, buffers, nblocks, skipFsync);
+			return;
+		default:
+			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
+
+	neon_wallog_pages(reln, forknum, blkno, nblocks, (const char **) buffers, false);
+
+	lfc_writev(InfoFromSMgrRel(reln), forknum, blkno, buffers, nblocks);
+
+#ifdef DEBUG_COMPARE_LOCAL
+	if (IS_LOCAL_REL(reln))
+		mdwritev(reln, forknum, blocknum, &buffer, 1, skipFsync);
+#endif
 }
 
 #endif

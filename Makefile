@@ -165,7 +165,7 @@ postgres-check-%: postgres-%
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-%
+neon-pg-ext-%: postgres-headers-%
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
@@ -312,31 +312,31 @@ postgres-%-typedefs.list: postgres-%
 	$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/find_typedef $(POSTGRES_INSTALL_DIR)/$*/bin > $@
 
 # Indent postgres. See src/tools/pgindent/README for details.
-# .PHONY: postgres-%-pgindent
-# postgres-%-pgindent: postgres-%-pg-bsd-indent postgres-%-typedefs.list
-# 	+@echo merge with buildfarm typedef to cover all platforms
-# 	+@echo note: I first tried to download from pgbuildfarm.org, but for unclear reason e.g. \
-# 		REL_16_STABLE list misses PGSemaphoreData
-# 	# wget -q -O - "http://www.pgbuildfarm.org/cgi-bin/typedefs.pl?branch=REL_16_STABLE" |\
-# 	# cat - postgres-$*-typedefs.list | sort | uniq > postgres-$*-typedefs-full.list
-# 	cat $(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/typedefs.list |\
-# 		cat - postgres-$*-typedefs.list | sort | uniq > postgres-$*-typedefs-full.list
-# 	+@echo note: you might want to run it on selected files/dirs instead.
-# 	INDENT=$(POSTGRES_INSTALL_DIR)/build/$*/src/tools/pg_bsd_indent/pg_bsd_indent \
-# 		$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/pgindent --typedefs postgres-$*-typedefs-full.list \
-# 		$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/ \
-# 		--excludes $(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/exclude_file_patterns
-# 	rm -f pg*.BAK
+.PHONY: postgres-%-pgindent
+postgres-%-pgindent: postgres-%-pg-bsd-indent postgres-%-typedefs.list
+	+@echo merge with buildfarm typedef to cover all platforms
+	+@echo note: I first tried to download from pgbuildfarm.org, but for unclear reason e.g. \
+		REL_16_STABLE list misses PGSemaphoreData
+	# wget -q -O - "http://www.pgbuildfarm.org/cgi-bin/typedefs.pl?branch=REL_16_STABLE" |\
+	# cat - postgres-$*-typedefs.list | sort | uniq > postgres-$*-typedefs-full.list
+	cat $(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/typedefs.list |\
+		cat - postgres-$*-typedefs.list | sort | uniq > postgres-$*-typedefs-full.list
+	+@echo note: you might want to run it on selected files/dirs instead.
+	INDENT=$(POSTGRES_INSTALL_DIR)/build/$*/src/tools/pg_bsd_indent/pg_bsd_indent \
+		$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/pgindent --typedefs postgres-$*-typedefs-full.list \
+		$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/ \
+		--excludes $(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/exclude_file_patterns
+	rm -f pg*.BAK
 
-# # Indent pxgn/neon.
-# .PHONY: neon-pgindent
-# neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
-# 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
-# 		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/find_typedef \
-# 		INDENT=$(POSTGRES_INSTALL_DIR)/build/v17/src/tools/pg_bsd_indent/pg_bsd_indent \
-# 		PGINDENT_SCRIPT=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/pgindent/pgindent \
-# 		-C $(POSTGRES_INSTALL_DIR)/build/neon-v17 \
-# 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile pgindent
+# Indent pxgn/neon.
+.PHONY: neon-pgindent
+neon-pgindent: postgres-v17-pg-bsd-indent neon-pg-ext-v17
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
+		FIND_TYPEDEF=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/find_typedef \
+		INDENT=$(POSTGRES_INSTALL_DIR)/build/v17/src/tools/pg_bsd_indent/pg_bsd_indent \
+		PGINDENT_SCRIPT=$(ROOT_PROJECT_DIR)/vendor/postgres-v17/src/tools/pgindent/pgindent \
+		-C $(POSTGRES_INSTALL_DIR)/build/neon-v17 \
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile pgindent
 
 
 .PHONY: setup-pre-commit-hook
