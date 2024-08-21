@@ -148,7 +148,7 @@ struct ProxyCliArgs {
     disable_dynamic_rate_limiter: bool,
     /// Endpoint rate limiter max number of requests per second.
     ///
-    /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
+    /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,

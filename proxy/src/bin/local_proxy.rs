@@ -45,7 +45,7 @@ struct LocalProxyCliArgs {
     sql_over_http: SqlOverHttpArgs,
     /// User rate limiter max number of requests per second.
     ///
-    /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
+    /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     user_rps_limit: Vec<RateBucketInfo>,
