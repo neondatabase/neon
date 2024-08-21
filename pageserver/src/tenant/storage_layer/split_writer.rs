@@ -196,7 +196,7 @@ impl SplitImageLayerWriter {
 /// to be cleaned up).
 ///
 /// Note that if updates of a single key exceed the target size limit, all of the updates will be batched
-/// in a single file. This behavior might change in the future. For reference, the legacy compaction algorithm
+/// into a single file. This behavior might change in the future. For reference, the legacy compaction algorithm
 /// will split them into multiple files based on size.
 #[must_use]
 pub struct SplitDeltaLayerWriter {
@@ -242,8 +242,7 @@ impl SplitDeltaLayerWriter {
         })
     }
 
-    /// Put value into the layer writer. When the writer decides to produce a layer, and the discard fn returns true,
-    /// the layer will be discarded.
+    /// Put value into the layer writer. In the case the writer decides to produce a layer, and the discard fn returns true, no layer will be written in the end.
     pub async fn put_value_with_discard_fn<D, F>(
         &mut self,
         key: Key,
