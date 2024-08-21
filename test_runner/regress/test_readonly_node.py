@@ -184,7 +184,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 cur.execute("SELECT count(*) FROM t0")
                 assert cur.fetchone() == (ROW_COUNT,)
 
-            time.sleep(2)
+            time.sleep(3)
 
             generate_updates_on_main(env, ep_main, i, end=100)
 
@@ -206,7 +206,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         generate_updates_on_main(env, ep_main, i, end=100)
 
     # Now trigger GC again, layers should be removed.
-    time.sleep(3)
+    time.sleep(4)
     for shard, ps in tenant_get_shards(env, env.initial_tenant):
         client = ps.http_client()
         gc_result = client.timeline_gc(shard, env.initial_timeline, 0)

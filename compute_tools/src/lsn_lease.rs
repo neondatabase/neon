@@ -1,5 +1,4 @@
 use anyhow::bail;
-use anyhow::Context;
 use anyhow::Result;
 use postgres::{NoTls, SimpleQueryMessage};
 use std::time::SystemTime;
@@ -47,8 +46,7 @@ fn lsn_lease_bg_task(
     lsn: Lsn,
 ) -> Result<()> {
     loop {
-        let valid_until = acquire_lsn_lease_with_retry(&compute, tenant_id, timeline_id, lsn)
-            .with_context(|| format!("Unable to get lsn lease"))?;
+        let valid_until = acquire_lsn_lease_with_retry(&compute, tenant_id, timeline_id, lsn)?;
         let valid_duration = valid_until
             .duration_since(SystemTime::now())
             .unwrap_or(Duration::ZERO);
@@ -66,16 +64,17 @@ fn lsn_lease_bg_task(
     }
 }
 
-/// Acquires lsn lease in a retry loop.
+/// Acquires lsn lease in a retry loop. Returns the expiration time if a lease is granted.
+/// Returns an error if a lease is explicitly not granted. Otherwise, we keep sending requests.
 fn acquire_lsn_lease_with_retry(
     compute: &Arc<ComputeNode>,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<SystemTime> {
-    const MAX_ATTEMPTS: usize = 10;
     let mut attempts = 0;
     let mut retry_period_ms = 500.0;
+    const MAX_RETRY_DURATION: Duration = Duration::from_secs(60);
 
     loop {
         // Note: List of pageservers is dynamic, need to re-read configs before each attempt.
@@ -102,16 +101,18 @@ fn acquire_lsn_lease_with_retry(
 
         let result = try_acquire_lsn_lease(tenant_id, timeline_id, lsn, &configs);
         match result {
-            Ok(_) => {
-                return result;
+            Ok(Some(res)) => {
+                return Ok(res);
             }
-            Err(ref e) if attempts < MAX_ATTEMPTS => {
-                warn!("Failed to acquire lsn lease: {e} (attempt {attempts}/{MAX_ATTEMPTS})",);
-                thread::sleep(Duration::from_millis(retry_period_ms as u64));
+            Ok(None) => {
+                bail!("Lsn lease is not granted");
+            }
+            Err(e) => {
+                warn!("Failed to acquire lsn lease: {e} (attempt {attempts}");
+                thread::sleep(
+                    Duration::from_millis(retry_period_ms as u64).min(MAX_RETRY_DURATION),
+                );
                 retry_period_ms *= 1.5;
-            }
-            Err(_) => {
-                return result;
             }
         }
         attempts += 1;
@@ -124,13 +125,13 @@ fn try_acquire_lsn_lease(
     timeline_id: TimelineId,
     lsn: Lsn,
     configs: &[postgres::Config],
-) -> Result<SystemTime> {
+) -> Result<Option<SystemTime>> {
     fn get_valid_until(
         config: &postgres::Config,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         lsn: Lsn,
-    ) -> Result<SystemTime> {
+    ) -> Result<Option<SystemTime>> {
         let mut client = config.connect(NoTls)?;
         let cmd = format!("lease lsn {} {} {} ", tenant_shard_id, timeline_id, lsn);
         let res = client.simple_query(&cmd)?;
@@ -142,16 +143,15 @@ fn try_acquire_lsn_lease(
             SimpleQueryMessage::Row(row) => row,
             _ => bail!("error parsing lsn lease response"),
         };
-        let valid_until_str = match row.get("valid_until") {
-            Some(valid_until) => valid_until,
-            None => bail!("valid_until not found"),
-        };
 
-        let valid_until = SystemTime::UNIX_EPOCH
-            .checked_add(Duration::from_millis(
-                u128::from_str(valid_until_str)? as u64
-            ))
-            .expect("Time larger than max SystemTime could handle");
+        // Note: this will be None if a lease is explicitly not granted.
+        let valid_until_str = row.get("valid_until");
+
+        let valid_until = valid_until_str.map(|s| {
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_millis(u128::from_str(s).unwrap() as u64))
+                .expect("Time larger than max SystemTime could handle")
+        });
         Ok(valid_until)
     }
 
@@ -169,7 +169,7 @@ fn try_acquire_lsn_lease(
                 };
                 get_valid_until(config, tenant_shard_id, timeline_id, lsn)
             })
-            .collect::<Result<Vec<SystemTime>>>()?
+            .collect::<Result<Vec<Option<SystemTime>>>>()?
             .into_iter()
             .min()
             .unwrap()
