@@ -115,7 +115,7 @@ pub struct InMemoryLayerIndexValue(u64);
 
 impl InMemoryLayerIndexValue {
     /// Derive remaining space for pos.
-    /// TODO: define and enforce a hard limit at the [`Timline::should_roll`] level.
+    /// TODO: define and enforce a hard limit at the [`crate::tenant::Timeline::should_roll`] level.
     /// => see also [`Self::does_timeline_should_roll_prevent_failure`]
     const MAX_SUPPORTED_POS_BITS: usize = {
         let remainder = 64 - 1 - MAX_SUPPORTED_BLOB_LEN_BITS;
