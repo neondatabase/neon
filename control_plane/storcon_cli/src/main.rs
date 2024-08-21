@@ -163,6 +163,34 @@ enum Command {
         #[arg(long)]
         dry_run: Option<bool>,
     },
+    /// Start draining the specified pageserver.
+    /// The drain is complete when the schedulling policy returns to active.
+    StartDrain {
+        #[arg(long)]
+        node_id: NodeId,
+    },
+    /// Cancel draining the specified pageserver and wait for `timeout`
+    /// for the operation to be canceled. May be retried.
+    CancelDrain {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        timeout: humantime::Duration,
+    },
+    /// Start filling the specified pageserver.
+    /// The drain is complete when the schedulling policy returns to active.
+    StartFill {
+        #[arg(long)]
+        node_id: NodeId,
+    },
+    /// Cancel filling the specified pageserver and wait for `timeout`
+    /// for the operation to be canceled. May be retried.
+    CancelFill {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        timeout: humantime::Duration,
+    },
 }
 
 #[derive(Parser)]
@@ -247,6 +275,34 @@ impl FromStr for NodeAvailabilityArg {
             _ => Err(anyhow::anyhow!("Unknown availability state '{s}'")),
         }
     }
+}
+
+async fn wait_for_scheduling_policy<F>(
+    client: Client,
+    node_id: NodeId,
+    timeout: Duration,
+    f: F,
+) -> anyhow::Result<NodeSchedulingPolicy>
+where
+    F: Fn(NodeSchedulingPolicy) -> bool,
+{
+    let waiter = tokio::time::timeout(timeout, async move {
+        loop {
+            let node = client
+                .dispatch::<(), NodeDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/node/{node_id}"),
+                    None,
+                )
+                .await?;
+
+            if f(node.scheduling) {
+                return Ok::<NodeSchedulingPolicy, mgmt_api::Error>(node.scheduling);
+            }
+        }
+    });
+
+    Ok(waiter.await??)
 }
 
 #[tokio::main]
@@ -814,6 +870,67 @@ async fn main() -> anyhow::Result<()> {
                 total_moves,
                 success,
                 failure
+            );
+        }
+        Command::StartDrain { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::PUT,
+                    format!("control/v1/node/{node_id}/drain"),
+                    None,
+                )
+                .await?;
+            println!("Drain started for {node_id}");
+        }
+        Command::CancelDrain { node_id, timeout } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/drain"),
+                    None,
+                )
+                .await?;
+
+            println!("Waiting for node {node_id} to quiesce on scheduling policy ...");
+
+            let final_policy =
+                wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
+                    use NodeSchedulingPolicy::*;
+                    matches!(sched, Active | PauseForRestart)
+                })
+                .await?;
+
+            println!(
+                "Drain was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
+            );
+        }
+        Command::StartFill { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(Method::PUT, format!("control/v1/node/{node_id}/fill"), None)
+                .await?;
+
+            println!("Fill started for {node_id}");
+        }
+        Command::CancelFill { node_id, timeout } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/fill"),
+                    None,
+                )
+                .await?;
+
+            println!("Waiting for node {node_id} to quiesce on scheduling policy ...");
+
+            let final_policy =
+                wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
+                    use NodeSchedulingPolicy::*;
+                    matches!(sched, Active)
+                })
+                .await?;
+
+            println!(
+                "Fill was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
             );
         }
     }
