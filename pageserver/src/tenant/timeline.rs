@@ -4209,7 +4209,6 @@ impl Timeline {
                     continue;
                 }
             }
-
             if let ImageLayerCreationMode::Force = mode {
                 // When forced to create image layers, we might try and create them where they already
                 // exist.  This mode is only used in tests/debug.
