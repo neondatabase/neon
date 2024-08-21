@@ -88,6 +88,7 @@ pub struct InMemoryLayerInner {
 
     resource_units: GlobalResourceUnits,
 }
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct InMemoryLayerIndexValue {
     pub(crate) pos: u32,
     pub(crate) len: u32,

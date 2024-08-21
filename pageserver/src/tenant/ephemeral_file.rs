@@ -271,6 +271,8 @@ pub fn is_ephemeral_file(filename: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
+
     use super::*;
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
@@ -336,5 +338,62 @@ mod tests {
             .await
             .expect("closing completes right away")
             .expect("closing does not panic");
+    }
+
+    #[tokio::test]
+    async fn test_ephemeral_file_basics() {
+        let (conf, tenant_id, timeline_id, ctx) = harness("test_ephemeral_file_basics").unwrap();
+
+        let gate = utils::sync::gate::Gate::default();
+
+        let mut file =
+            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
+                .await
+                .unwrap();
+
+        let cap = file.buffered_writer.inspect_buffer().capacity();
+
+        let write_nbytes = cap + cap / 2;
+
+        let content: Vec<u8> = rand::thread_rng()
+            .sample_iter(rand::distributions::Standard)
+            .take(write_nbytes)
+            .collect();
+
+        let mut index_values = Vec::new();
+        for i in 0..write_nbytes {
+            let index_value = file
+                .write_blob(&content[i..i + 1], i % 2 == 0, &ctx)
+                .await
+                .unwrap();
+            index_values.push(index_value);
+        }
+
+        assert!(file.len() as usize == write_nbytes);
+        for i in 0..write_nbytes {
+            assert_eq!(
+                index_values[i],
+                InMemoryLayerIndexValue {
+                    pos: i as u32,
+                    len: 1,
+                    will_init: i % 2 == 0,
+                }
+            );
+            let buf = Vec::with_capacity(1);
+            let (buf_slice, nread) = file
+                .read_at_to_end(i as u32, buf.slice_full(), &ctx)
+                .await
+                .unwrap();
+            let buf = buf_slice.into_inner();
+            assert_eq!(nread, 1);
+            assert_eq!(&buf, &content[i..i + 1]);
+        }
+
+        let file_contents =
+            std::fs::read(&file.buffered_writer.as_inner().as_inner().path).unwrap();
+        assert_eq!(file_contents, &content[0..cap]);
+
+        let buffer_contents = file.buffered_writer.inspect_buffer();
+        assert_eq!(buffer_contents, &content[cap..write_nbytes]);
     }
 }
