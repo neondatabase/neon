@@ -153,9 +153,7 @@ async fn check_timeline(
 ) -> anyhow::Result<TimelineCheckResult> {
     debug!(
         "checking ttid {}, should contain WAL [{}-{}]",
-        ttid,
-        timeline_start_lsn,
-        backup_lsn
+        ttid, timeline_start_lsn, backup_lsn
     );
     // calculate expected segfiles
     let expected_first_segno = timeline_start_lsn.segment_number(WAL_SEGSIZE);
