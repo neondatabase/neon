@@ -7653,8 +7653,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.24.0",
  "tokio-util",
- "toml_datetime",
- "toml_edit 0.19.10",
  "tonic",
  "tower",
  "tracing",
