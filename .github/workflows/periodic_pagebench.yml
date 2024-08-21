@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   trigger_bench_on_ec2_machine_in_eu_central_1:
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: neondatabase/build-tools:pinned
       credentials:

@@ -403,7 +403,7 @@ def wait_until(
         try:
             res = func()
         except Exception as e:
-            log.info("waiting for %s iteration %s failed", func, i + 1)
+            log.info("waiting for %s iteration %s failed: %s", func, i + 1, e)
             last_exception = e
             if show_intermediate_error:
                 log.info(e)

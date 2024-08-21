@@ -70,7 +70,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
@@ -208,7 +207,7 @@ jobs:
           export LD_LIBRARY_PATH
 
           #nextest does not yet support running doctests
-          cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
+          ${cov_prefix} cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
 
           for io_engine in std-fs tokio-epoll-uring ; do
             NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
@@ -263,7 +262,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set

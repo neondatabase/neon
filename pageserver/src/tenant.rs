@@ -41,6 +41,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use upload_queue::NotInitialized;
 use utils::backoff;
 use utils::circuit_breaker::CircuitBreaker;
 use utils::completion;
@@ -301,7 +302,11 @@ pub struct Tenant {
     pub(crate) timeline_get_throttle:
         Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
 
-    /// An ongoing timeline detach must be checked during attempts to GC or compact a timeline.
+    /// An ongoing timeline detach concurrency limiter.
+    ///
+    /// As a tenant will likely be restarted as part of timeline detach ancestor it makes no sense
+    /// to have two running at the same time. A different one can be started if an earlier one
+    /// has failed for whatever reason.
     ongoing_timeline_detach: std::sync::Mutex<Option<(TimelineId, utils::completion::Barrier)>>,
 
     /// `index_part.json` based gc blocking reason tracking.
@@ -601,6 +606,15 @@ impl From<PageReconstructError> for GcError {
     }
 }
 
+impl From<NotInitialized> for GcError {
+    fn from(value: NotInitialized) -> Self {
+        match value {
+            NotInitialized::Uninitialized => GcError::Remote(value.into()),
+            NotInitialized::Stopped | NotInitialized::ShuttingDown => GcError::TimelineCancelled,
+        }
+    }
+}
+
 impl From<timeline::layer_manager::Shutdown> for GcError {
     fn from(_: timeline::layer_manager::Shutdown) -> Self {
         GcError::TimelineCancelled
@@ -823,9 +837,9 @@ impl Tenant {
                             // The Stopping case is for when we have passed control on to DeleteTenantFlow:
                             // if it errors, we will call make_broken when tenant is already in Stopping.
                             assert!(
-                            matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
-                            "the attach task owns the tenant state until activation is complete"
-                        );
+                                matches!(*state, TenantState::Attaching | TenantState::Stopping { .. }),
+                                "the attach task owns the tenant state until activation is complete"
+                            );
 
                             *state = TenantState::broken_from_reason(err.to_string());
                         });
@@ -3722,6 +3736,19 @@ impl Tenant {
     pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
         self.tenant_conf.load().tenant_conf.clone()
     }
+
+    /// How much local storage would this tenant like to have?  It can cope with
+    /// less than this (via eviction and on-demand downloads), but this function enables
+    /// the Tenant to advertise how much storage it would prefer to have to provide fast I/O
+    /// by keeping important things on local disk.
+    pub(crate) fn local_storage_wanted(&self) -> u64 {
+        let mut wanted = 0;
+        let timelines = self.timelines.lock().unwrap();
+        for timeline in timelines.values() {
+            wanted += timeline.metrics.visible_physical_size_gauge.get();
+        }
+        wanted
+    }
 }
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
@@ -4464,10 +4491,13 @@ mod tests {
 
         // This needs to traverse to the parent, and fails.
         let err = newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await.unwrap_err();
-        assert!(err.to_string().starts_with(&format!(
-            "Bad state on timeline {}: Broken",
-            tline.timeline_id
-        )));
+        assert!(
+            err.to_string().starts_with(&format!(
+                "bad state on timeline {}: Broken",
+                tline.timeline_id
+            )),
+            "{err}"
+        );
 
         Ok(())
     }

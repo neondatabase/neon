@@ -489,10 +489,7 @@ impl Timeline {
             // - We do not run concurrently with other kinds of compaction, so the only layer map writes we race with are:
             //    - GC, which at worst witnesses us "undelete" a layer that they just deleted.
             //    - ingestion, which only inserts layers, therefore cannot collide with us.
-            let resident = layer
-                .download_and_keep_resident()
-                .await
-                .map_err(CompactionError::input_layer_download_failed)?;
+            let resident = layer.download_and_keep_resident().await?;
 
             let keys_written = resident
                 .filter(&self.shard_identity, &mut image_layer_writer, ctx)
@@ -693,23 +690,14 @@ impl Timeline {
 
         let mut fully_compacted = true;
 
-        deltas_to_compact.push(
-            first_level0_delta
-                .download_and_keep_resident()
-                .await
-                .map_err(CompactionError::input_layer_download_failed)?,
-        );
+        deltas_to_compact.push(first_level0_delta.download_and_keep_resident().await?);
         for l in level0_deltas_iter {
             let lsn_range = &l.layer_desc().lsn_range;
 
             if lsn_range.start != prev_lsn_end {
                 break;
             }
-            deltas_to_compact.push(
-                l.download_and_keep_resident()
-                    .await
-                    .map_err(CompactionError::input_layer_download_failed)?,
-            );
+            deltas_to_compact.push(l.download_and_keep_resident().await?);
             deltas_to_compact_bytes += l.metadata().file_size;
             prev_lsn_end = lsn_range.end;
 
@@ -760,6 +748,9 @@ impl Timeline {
         let all_keys = {
             let mut all_keys = Vec::new();
             for l in deltas_to_compact.iter() {
+                if self.cancel.is_cancelled() {
+                    return Err(CompactionError::ShuttingDown);
+                }
                 all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
             }
             // The current stdlib sorting implementation is designed in a way where it is
@@ -842,6 +833,11 @@ impl Timeline {
         };
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
         drop_rlock(guard);
+
+        if self.cancel.is_cancelled() {
+            return Err(CompactionError::ShuttingDown);
+        }
+
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
 
         // This iterator walks through all key-value pairs from all the layers
@@ -1052,11 +1048,22 @@ impl Timeline {
         let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
         let mut next_hole = 0; // index of next hole in holes vector
 
+        let mut keys = 0;
+
         while let Some((key, lsn, value)) = all_values_iter
             .next(ctx)
             .await
             .map_err(CompactionError::Other)?
         {
+            keys += 1;
+
+            if keys % 32_768 == 0 && self.cancel.is_cancelled() {
+                // avoid hitting the cancellation token on every key. in benches, we end up
+                // shuffling an order of million keys per layer, this means we'll check it
+                // around tens of times per layer.
+                return Err(CompactionError::ShuttingDown);
+            }
+
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
             // We need to check key boundaries once we reach next key or end of layer with the same key
             if !same_key || lsn == dup_end_lsn {
@@ -1137,6 +1144,10 @@ impl Timeline {
 
             if !self.shard_identity.is_key_disposable(&key) {
                 if writer.is_none() {
+                    if self.cancel.is_cancelled() {
+                        // to be somewhat responsive to cancellation, check for each new layer
+                        return Err(CompactionError::ShuttingDown);
+                    }
                     // Create writer if not initiaized yet
                     writer = Some(
                         DeltaLayerWriter::new(
@@ -1157,6 +1168,8 @@ impl Timeline {
                         .await
                         .map_err(CompactionError::Other)?,
                     );
+
+                    keys = 0;
                 }
 
                 writer
@@ -2325,7 +2338,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
                 key_range,
             ))
         } else {
-            // The current compaction implementatin only ever requests the key space
+            // The current compaction implementation only ever requests the key space
             // at the compaction end LSN.
             anyhow::bail!("keyspace not available for requested lsn");
         }

@@ -1137,3 +1137,10 @@ def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_met
         delete_lazy_activating(lazy_tenant, env.pageserver, expect_attaching=True)
     else:
         raise RuntimeError(activation_method)
+
+    client.configure_failpoints(
+        [
+            ("timeline-calculate-logical-size-pause", "off"),
+            ("walreceiver-after-ingest", "off"),
+        ]
+    )

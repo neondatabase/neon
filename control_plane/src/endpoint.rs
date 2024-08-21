@@ -824,11 +824,12 @@ impl Endpoint {
         // cleanup work to do after postgres stops, like syncing safekeepers,
         // etc.
         //
-        // If destroying, send it SIGTERM before waiting. Sometimes we do *not*
-        // want this cleanup: tests intentionally do stop when majority of
-        // safekeepers is down, so sync-safekeepers would hang otherwise. This
-        // could be a separate flag though.
-        self.wait_for_compute_ctl_to_exit(destroy)?;
+        // If destroying or stop mode is immediate, send it SIGTERM before
+        // waiting. Sometimes we do *not* want this cleanup: tests intentionally
+        // do stop when majority of safekeepers is down, so sync-safekeepers
+        // would hang otherwise. This could be a separate flag though.
+        let send_sigterm = destroy || mode == "immediate";
+        self.wait_for_compute_ctl_to_exit(send_sigterm)?;
         if destroy {
             println!(
                 "Destroying postgres data directory '{}'",
