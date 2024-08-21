@@ -244,7 +244,7 @@ pub async fn shutdown_pageserver(
     info!("walredo_extraordinary_shutdown_thread done");
 
     info!(
-        elpased_ms = started_at.elapsed().as_millis(),
+        elapsed_ms = started_at.elapsed().as_millis(),
         "Shut down successfully completed"
     );
     std::process::exit(exit_code);
