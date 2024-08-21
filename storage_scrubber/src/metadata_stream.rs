@@ -2,20 +2,19 @@ use std::str::FromStr;
 
 use anyhow::{anyhow, Context};
 use async_stream::{stream, try_stream};
-use aws_sdk_s3::Client;
 use futures::StreamExt;
 use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePath};
 use tokio_stream::Stream;
 
 use crate::{
-    list_objects_with_retries, list_objects_with_retries_generic, stream_objects_with_retries,
-    RootTarget, S3Target, TenantShardTimelineId,
+    list_objects_with_retries, stream_objects_with_retries, RootTarget, S3Target,
+    TenantShardTimelineId,
 };
 use pageserver_api::shard::TenantShardId;
 use utils::id::{TenantId, TimelineId};
 
 /// Given a remote storage and a target, output a stream of TenantIds discovered via listing prefixes
-pub fn stream_tenants_generic<'a>(
+pub fn stream_tenants<'a>(
     remote_client: &'a GenericRemoteStorage,
     target: &'a RootTarget,
 ) -> impl Stream<Item = anyhow::Result<TenantShardId>> + 'a {
@@ -36,44 +35,6 @@ pub fn stream_tenants_generic<'a>(
     }
 }
 
-/// Given an S3 bucket, output a stream of TenantIds discovered via ListObjectsv2
-pub fn stream_tenants<'a>(
-    s3_client: &'a Client,
-    target: &'a RootTarget,
-) -> impl Stream<Item = anyhow::Result<TenantShardId>> + 'a {
-    try_stream! {
-        let mut continuation_token = None;
-        let tenants_target = target.tenants_root();
-        loop {
-            let fetch_response =
-                list_objects_with_retries(s3_client, &tenants_target, continuation_token.clone()).await?;
-
-            let new_entry_ids = fetch_response
-                .common_prefixes()
-                .iter()
-                .filter_map(|prefix| prefix.prefix())
-                .filter_map(|prefix| -> Option<&str> {
-                    prefix
-                        .strip_prefix(&tenants_target.prefix_in_bucket)?
-                        .strip_suffix('/')
-                }).map(|entry_id_str| {
-                entry_id_str
-                    .parse()
-                    .with_context(|| format!("Incorrect entry id str: {entry_id_str}"))
-            });
-
-            for i in new_entry_ids {
-                yield i?;
-            }
-
-            match fetch_response.next_continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
-                None => break,
-            }
-        }
-    }
-}
-
 pub async fn stream_tenant_shards<'a>(
     remote_client: &'a GenericRemoteStorage,
     target: &'a RootTarget,
@@ -85,12 +46,9 @@ pub async fn stream_tenant_shards<'a>(
     let prefix_str = &strip_prefix.strip_prefix("/").unwrap_or(&strip_prefix);
 
     tracing::info!("Listing shards in {}", shards_target.prefix_in_bucket);
-    let listing = list_objects_with_retries_generic(
-        remote_client,
-        ListingMode::WithDelimiter,
-        &shards_target,
-    )
-    .await?;
+    let listing =
+        list_objects_with_retries(remote_client, ListingMode::WithDelimiter, &shards_target)
+            .await?;
 
     let tenant_shard_ids = listing
         .prefixes
@@ -118,7 +76,7 @@ pub async fn stream_tenant_shards<'a>(
 /// Given a `TenantShardId`, output a stream of the timelines within that tenant, discovered
 /// using a listing. The listing is done before the stream is built, so that this
 /// function can be used to generate concurrency on a stream using buffer_unordered.
-pub async fn stream_tenant_timelines_generic<'a>(
+pub async fn stream_tenant_timelines<'a>(
     remote_client: &'a GenericRemoteStorage,
     target: &'a RootTarget,
     tenant: TenantShardId,
@@ -173,7 +131,7 @@ pub async fn stream_tenant_timelines_generic<'a>(
     })
 }
 
-pub(crate) fn stream_listing_generic<'a>(
+pub(crate) fn stream_listing<'a>(
     remote_client: &'a GenericRemoteStorage,
     target: &'a S3Target,
 ) -> impl Stream<Item = anyhow::Result<(RemotePath, Option<ListingObject>)>> + 'a {

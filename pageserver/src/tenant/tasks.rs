@@ -61,21 +61,12 @@ impl BackgroundLoopKind {
     }
 }
 
-static PERMIT_GAUGES: once_cell::sync::Lazy<
-    enum_map::EnumMap<BackgroundLoopKind, metrics::IntCounterPair>,
-> = once_cell::sync::Lazy::new(|| {
-    enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-        let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
-        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE.with_label_values(&[kind.into()])
-    }))
-});
-
 /// Cancellation safe.
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
 ) -> tokio::sync::SemaphorePermit<'static> {
-    let _guard = PERMIT_GAUGES[loop_kind].guard();
+    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.measure_acquisition(loop_kind);
 
     pausable_failpoint!(
         "initial-size-calculation-permit-pause",
@@ -98,7 +89,7 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("compactor for tenant {tenant_shard_id}"),
         {
@@ -121,7 +112,7 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("garbage collector for tenant {tenant_shard_id}"),
         {
@@ -144,7 +135,7 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::IngestHousekeeping,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("ingest housekeeping for tenant {tenant_shard_id}"),
         {

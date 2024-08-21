@@ -6,7 +6,7 @@ use remote_storage::ListingMode;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    checks::parse_layer_object_name, init_remote_generic, metadata_stream::stream_tenants_generic,
+    checks::parse_layer_object_name, init_remote, metadata_stream::stream_tenants,
     stream_objects_with_retries, BucketConfig, NodeKind,
 };
 
@@ -50,9 +50,8 @@ pub async fn find_large_objects(
     ignore_deltas: bool,
     concurrency: usize,
 ) -> anyhow::Result<LargeObjectListing> {
-    let (remote_client, target) =
-        init_remote_generic(bucket_config.clone(), NodeKind::Pageserver).await?;
-    let tenants = pin!(stream_tenants_generic(&remote_client, &target));
+    let (remote_client, target) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
+    let tenants = pin!(stream_tenants(&remote_client, &target));
 
     let objects_stream = tenants.map_ok(|tenant_shard_id| {
         let mut tenant_root = target.tenant_root(&tenant_shard_id);
