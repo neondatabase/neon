@@ -1811,6 +1811,15 @@ pub(crate) static NODE_UTILIZATION_SCORE: Lazy<UIntGauge> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static SECONDARY_HEATMAP_TOTAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_secondary_heatmap_total_size",
+        "The total size in bytes of all layers in the most recently downloaded heatmap.",
+        &["tenant_id", "shard_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
