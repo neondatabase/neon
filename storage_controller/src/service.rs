@@ -1851,37 +1851,54 @@ impl Service {
         Ok(response)
     }
 
-    pub(crate) fn validate(&self, validate_req: ValidateRequest) -> ValidateResponse {
-        let locked = self.inner.read().unwrap();
+    pub(crate) async fn validate(
+        &self,
+        validate_req: ValidateRequest,
+    ) -> Result<ValidateResponse, DatabaseError> {
+        // Fast in-memory check: we may reject validation on anything that doesn't match our
+        // in-memory generation for a shard
+        let in_memory_result = {
+            let mut in_memory_result = Vec::new();
+            let locked = self.inner.read().unwrap();
+            for req_tenant in validate_req.tenants {
+                if let Some(tenant_shard) = locked.tenants.get(&req_tenant.id) {
+                    let valid = tenant_shard.generation == Some(Generation::new(req_tenant.gen));
+                    tracing::info!(
+                        "handle_validate: {}(gen {}): valid={valid} (latest {:?})",
+                        req_tenant.id,
+                        req_tenant.gen,
+                        tenant_shard.generation
+                    );
 
+                    in_memory_result.push((req_tenant.id, Generation::new(req_tenant.gen), valid));
+                }
+            }
+
+            in_memory_result
+        };
+
+        // Database calls to confirm validity for anything that passed the in-memory check.  We must do this
+        // in case of controller split-brain, where some other controller process might have incremented the generation.
         let mut response = ValidateResponse {
             tenants: Vec::new(),
         };
-
-        for req_tenant in validate_req.tenants {
-            if let Some(tenant_shard) = locked.tenants.get(&req_tenant.id) {
-                let valid = tenant_shard.generation == Some(Generation::new(req_tenant.gen));
-                tracing::info!(
-                    "handle_validate: {}(gen {}): valid={valid} (latest {:?})",
-                    req_tenant.id,
-                    req_tenant.gen,
-                    tenant_shard.generation
-                );
-                response.tenants.push(ValidateResponseTenant {
-                    id: req_tenant.id,
-                    valid,
-                });
+        for (tenant_shard_id, validate_generation, valid) in in_memory_result.into_iter() {
+            let valid = if valid {
+                let db_generation = self.persistence.get_generation(tenant_shard_id).await?;
+                db_generation == Some(validate_generation)
             } else {
-                // After tenant deletion, we may approve any validation.  This avoids
-                // spurious warnings on the pageserver if it has pending LSN updates
-                // at the point a deletion happens.
-                response.tenants.push(ValidateResponseTenant {
-                    id: req_tenant.id,
-                    valid: true,
-                });
-            }
+                // If in-memory state says it's invalid, trust that.  It's always safe to fail a validation, at worst
+                // this prevents a pageserver from cleaning up an object in S3.
+                false
+            };
+
+            response.tenants.push(ValidateResponseTenant {
+                id: tenant_shard_id,
+                valid,
+            })
         }
-        response
+
+        Ok(response)
     }
 
     pub(crate) async fn tenant_create(

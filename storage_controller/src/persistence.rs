@@ -572,6 +572,30 @@ impl Persistence {
             .collect())
     }
 
+    /// Read the generation number of a specific tenant shard
+    pub(crate) async fn get_generation(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<Option<Generation>, DatabaseError> {
+        use crate::schema::tenant_shards::dsl::*;
+        let mut rows = self
+            .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
+                let result = tenant_shards
+                    .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
+                    .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
+                    .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
+                    .select(TenantShardPersistence::as_select())
+                    .load(conn)?;
+                Ok(result)
+            })
+            .await?;
+
+        Ok(rows
+            .pop()
+            .and_then(|p| p.generation)
+            .map(|g| Generation::new(g as u32)))
+    }
+
     #[allow(non_local_definitions)]
     /// For use when updating a persistent property of a tenant, such as its config or placement_policy.
     ///

@@ -101,7 +101,7 @@ async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiEr
 
     let validate_req = json_request::<ValidateRequest>(&mut req).await?;
     let state = get_state(&req);
-    json_response(StatusCode::OK, state.service.validate(validate_req))
+    json_response(StatusCode::OK, state.service.validate(validate_req).await?)
 }
 
 /// Call into this before attaching a tenant to a pageserver, to acquire a generation number
