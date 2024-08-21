@@ -296,11 +296,9 @@ mod tests {
             }
         }
         fn test_value_read(&self, pos: u32, len: usize) -> TestValueRead {
-            let expected_result = self.content[pos as usize..pos as usize + len].to_vec();
-            TestValueRead {
-                pos,
-                expected_result,
-            }
+            // InMemoryFile reads are infallible
+            let expected_result = Ok(self.content[pos as usize..pos as usize + len].to_vec());
+            TestValueRead::new(pos, len, expected_result)
         }
     }
 
@@ -322,15 +320,46 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     struct TestValueRead {
         pos: u32,
-        expected_result: Vec<u8>,
+        len: usize,
+        expected_result: Result<Vec<u8>, String>,
     }
 
     impl TestValueRead {
+        fn new(pos: u32, len: usize, expected_result: Result<Vec<u8>, String>) -> Self {
+            Self {
+                pos,
+                len,
+                expected_result,
+            }
+        }
         fn make_value_read(&self) -> ValueRead<Vec<u8>> {
-            ValueRead::new(self.pos, Vec::with_capacity(self.expected_result.len()))
+            ValueRead::new(self.pos, Vec::with_capacity(self.len))
+        }
+    }
+
+    async fn execute_and_validate_test_value_reads<I, F>(
+        file: &F,
+        test_value_reads: I,
+        ctx: &RequestContext,
+    ) where
+        I: IntoIterator<Item = TestValueRead>,
+        F: File,
+    {
+        let (tmp, test_value_reads) = test_value_reads.into_iter().tee();
+        let value_reads = tmp.map(|tr| tr.make_value_read()).collect::<Vec<_>>();
+        execute(file, value_reads.iter(), &ctx).await;
+        for (value_read, test_value_read) in value_reads.into_iter().zip(test_value_reads) {
+            let actual = value_read.into_result();
+            match (actual, test_value_read.expected_result) {
+                (Ok(actual), Ok(expected)) if actual == expected => {}
+                (Err(actual), Err(expected)) => {
+                    assert_eq!(actual.to_string(), expected);
+                }
+                (actual, expected) => panic!("expected {expected:?}\nactual {actual:?}"),
+            }
         }
     }
 
@@ -355,23 +384,14 @@ mod tests {
             // gap
             file.test_value_read(5 * cs_u32, 1),
         ];
-        let test_value_reads_perms = test_value_reads.iter().permutations(test_value_reads.len());
+        let num_test_value_reads = test_value_reads.len();
+        let test_value_reads_perms = test_value_reads
+            .into_iter()
+            .permutations(num_test_value_reads);
 
         // test all orderings of ValueReads, the order shouldn't matter for the results
         for test_value_reads in test_value_reads_perms {
-            let value_reads: Vec<ValueRead<_>> = test_value_reads
-                .iter()
-                .map(|tr| tr.make_value_read())
-                .collect();
-            execute(&file, value_reads.iter(), &ctx).await;
-            for (value_read, test_value_read) in
-                value_reads.into_iter().zip(test_value_reads.iter())
-            {
-                let res = value_read
-                    .into_result()
-                    .expect("InMemoryFile is infallible");
-                assert_eq!(res, test_value_read.expected_result);
-            }
+            execute_and_validate_test_value_reads(&file, test_value_reads, &ctx).await;
         }
     }
 
@@ -421,25 +441,6 @@ mod tests {
                 res: Vec::from(&dst[..nread]),
             });
             Ok((dst, nread))
-        }
-    }
-
-    async fn execute_and_validate_test_value_reads<I, F>(
-        file: &F,
-        test_value_reads: I,
-        ctx: &RequestContext,
-    ) where
-        I: IntoIterator<Item = TestValueRead>,
-        F: File,
-    {
-        let (tmp, test_value_reads) = test_value_reads.into_iter().tee();
-        let value_reads = tmp.map(|tr| tr.make_value_read()).collect::<Vec<_>>();
-        execute(file, value_reads.iter(), &ctx).await;
-        for (value_read, test_value_read) in value_reads.into_iter().zip(test_value_reads) {
-            let res = value_read
-                .into_result()
-                .expect("InMemoryFile is infallible");
-            assert_eq!(res, test_value_read.expected_result);
         }
     }
 
@@ -604,60 +605,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_error_on_one_read_fails_all_value_reads() {
+    async fn test_error_on_one_chunk_read_fails_only_dependent_value_reads() {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
-        let file = mock_file!(
-            0 * DIO_CHUNK_SIZE as u32, MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE => Ok(vec![0; MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE]),
-            (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Err("foo".to_owned()),
-            (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE + 2*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Ok(vec![1; DIO_CHUNK_SIZE]),
-        );
+        let test_value_reads = vec![
+            // read spanning two batches
+            TestValueRead::new(
+                DIO_CHUNK_SIZE as u32 / 2,
+                MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE,
+                Err("foo".to_owned()),
+            ),
+            // second read in failing chunk
+            TestValueRead::new(
+                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE) as u32 + DIO_CHUNK_SIZE as u32 - 10,
+                5,
+                Err("foo".to_owned()),
+            ),
+            // read unaffected
+            TestValueRead::new(
+                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE) as u32 + 2 * DIO_CHUNK_SIZE as u32 + 10,
+                5,
+                Ok(vec![1; 5]),
+            ),
+        ];
+        let (tmp, test_value_reads) = test_value_reads.into_iter().tee();
+        let test_value_read_perms = tmp.permutations(test_value_reads.len());
 
-        // 1 full batch and first chunk of the second batch
-        let read_spanning_two_batches = ValueRead::new(
-            DIO_CHUNK_SIZE as u32 / 2,
-            Vec::with_capacity(MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE),
-        );
-        let second_read_in_failing_chunk = ValueRead::new(
-            (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE) as u32 + DIO_CHUNK_SIZE as u32 - 10,
-            Vec::with_capacity(5),
-        );
-        let read_unaffected = ValueRead::new(
-            (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE) as u32 + 2 * DIO_CHUNK_SIZE as u32 + 10,
-            Vec::with_capacity(5),
-        );
-
-        // TODO test all permutations
-
-        execute(
-            &file,
-            [
-                &read_spanning_two_batches,
-                &second_read_in_failing_chunk,
-                &read_unaffected,
-            ],
-            &ctx,
-        )
-        .await;
-
-        assert_eq!(
-            read_spanning_two_batches
-                .into_result()
-                .err()
-                .unwrap()
-                .to_string(),
-            "foo".to_owned(),
-        );
-        assert_eq!(
-            second_read_in_failing_chunk
-                .into_result()
-                .err()
-                .unwrap()
-                .to_string(),
-            "foo".to_owned(),
-        );
-
-        assert_eq!(read_unaffected.into_result().unwrap(), vec![1; 5],);
+        for test_value_reads in test_value_read_perms {
+            let file = mock_file!(
+                0 * DIO_CHUNK_SIZE as u32, MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE => Ok(vec![0; MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE]),
+                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Err("foo".to_owned()),
+                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE + 2*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Ok(vec![1; DIO_CHUNK_SIZE]),
+            );
+            execute_and_validate_test_value_reads(&file, test_value_reads, &ctx).await;
+        }
     }
 
     // TODO: short reads at end
