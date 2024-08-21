@@ -112,7 +112,7 @@ where
 
         // transition from NotStarted to Ongoing
         let cur = std::mem::replace(&mut *state, LogicalReadState::Undefined);
-        let remaining = match cur {
+        let req_len = match cur {
             LogicalReadState::NotStarted(buf) => {
                 if buf.len() != 0 {
                     panic!("The `LogicalRead`s that are passed in must be freshly created using `LogicalRead::new`");
@@ -120,15 +120,15 @@ where
                 // buf.cap() == 0 is ok
 
                 // transition into Ongoing state
-                let remaining = buf.cap();
+                let req_len = buf.cap();
                 *state = LogicalReadState::Ongoing(buf);
-                remaining
+                req_len
             }
             x => panic!("must only call with fresh LogicalReads, got another state, leaving Undefined state behind state={x:?}"),
         };
 
         // plan which chunks we need to read from
-        let mut remaining = usize::try_from(remaining).unwrap();
+        let mut remaining = req_len;
         let mut chunk_no = *pos / (DIO_CHUNK_SIZE as u32);
         let mut offset_in_chunk = usize::try_from(*pos % (DIO_CHUNK_SIZE as u32)).unwrap();
         while remaining > 0 {
@@ -406,6 +406,7 @@ impl Buffer for Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::assertions_on_constants)]
 mod tests {
     use rand::Rng;
 
@@ -432,7 +433,7 @@ mod tests {
         }
         fn test_logical_read(&self, pos: u32, len: usize) -> TestLogicalRead {
             let expected_result = if pos as usize + len > self.content.len() {
-                Err(format!("InMemoryFile short read"))
+                Err("InMemoryFile short read".to_string())
             } else {
                 Ok(self.content[pos as usize..pos as usize + len].to_vec())
             };
@@ -517,7 +518,7 @@ mod tests {
     {
         let (tmp, test_logical_reads) = test_logical_reads.into_iter().tee();
         let logical_reads = tmp.map(|tr| tr.make_logical_read()).collect::<Vec<_>>();
-        execute(file, logical_reads.iter(), &ctx).await;
+        execute(file, logical_reads.iter(), ctx).await;
         for (logical_read, test_logical_read) in logical_reads.into_iter().zip(test_logical_reads) {
             let actual = logical_read.into_result().expect("we call execute()");
             match (actual, test_logical_read.expected_result) {
@@ -830,7 +831,7 @@ mod tests {
 
         for test_logical_reads in test_logical_read_perms {
             let file = mock_file!(
-                0 * DIO_CHUNK_SIZE as u32, MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE => Ok(vec![0; MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE]),
+                0, MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE => Ok(vec![0; MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE]),
                 (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Err("foo".to_owned()),
                 (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE + 2*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Ok(vec![1; DIO_CHUNK_SIZE]),
             );
