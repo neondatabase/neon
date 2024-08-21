@@ -7,7 +7,7 @@ use postgres_ffi::{XLogFileName, PG_TLI};
 use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info};
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
