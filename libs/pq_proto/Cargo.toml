@@ -11,7 +11,7 @@ itertools.workspace = true
 pin-project-lite.workspace = true
 postgres-protocol.workspace = true
 rand.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
 thiserror.workspace = true
 serde.workspace = true

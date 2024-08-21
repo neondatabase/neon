@@ -46,3 +46,4 @@ sync_wrapper = { workspace = true, features = ["futures"] }
 camino-tempfile.workspace = true
 test-context.workspace = true
 rand.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

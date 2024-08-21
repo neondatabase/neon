@@ -21,7 +21,7 @@ hex.workspace = true
 humantime.workspace = true
 thiserror.workspace = true
 humantime-serde.workspace = true
-chrono.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 itertools.workspace = true
 
 [dev-dependencies]

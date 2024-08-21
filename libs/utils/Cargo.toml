@@ -70,6 +70,7 @@ criterion.workspace = true
 hex-literal.workspace = true
 camino-tempfile.workspace = true
 serde_assert.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "benchmarks"
