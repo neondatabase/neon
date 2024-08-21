@@ -4710,7 +4710,7 @@ class StorageScrubber:
         try:
             summary = json.loads(stdout)
             # summary does not contain "with_warnings" if node_kind is the safekeeper
-            no_warnings = not "with_warnings" in summary or not summary["with_warnings"]
+            no_warnings = "with_warnings" not in summary or not summary["with_warnings"]
             healthy = not summary["with_errors"] and no_warnings
             return healthy, summary
         except:

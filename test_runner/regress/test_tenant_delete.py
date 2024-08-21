@@ -1,14 +1,14 @@
+import json
 from threading import Thread
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    NodeKind,
     PgBin,
     wait_for_last_flush_lsn,
 )
-from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     MANY_SMALL_LAYERS_TENANT_CONFIG,
@@ -379,7 +379,7 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, make_httpserver, neon_env_builder
         # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
         # so we send controller notifications to /dev/null to prevent it fighting the test for control of the compute.
         log.info(f"got get_branches request: {request.json}")
-        return Response(status=200)
+        return Response(json.dumps(dummy_data), content_type="application/json", status=200)
 
     make_httpserver.expect_request("/branches", method="GET").respond_with_handler(get_branches)
 
