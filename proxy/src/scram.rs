@@ -137,12 +137,12 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip() {
-        run_round_trip_test("pencil", "pencil").await
+        run_round_trip_test("pencil", "pencil").await;
     }
 
     #[tokio::test]
     #[should_panic(expected = "password doesn't match")]
     async fn failure() {
-        run_round_trip_test("pencil", "eraser").await
+        run_round_trip_test("pencil", "eraser").await;
     }
 }

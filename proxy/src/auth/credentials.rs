@@ -89,10 +89,12 @@ impl ComputeUserInfoMaybeEndpoint {
         sni: Option<&str>,
         common_names: Option<&HashSet<String>>,
     ) -> Result<Self, ComputeUserInfoParseError> {
-        use ComputeUserInfoParseError::*;
-
         // Some parameters are stored in the startup message.
-        let get_param = |key| params.get(key).ok_or(MissingKey(key));
+        let get_param = |key| {
+            params
+                .get(key)
+                .ok_or(ComputeUserInfoParseError::MissingKey(key))
+        };
         let user: RoleName = get_param("user")?.into();
 
         // Project name might be passed via PG's command-line options.
@@ -122,11 +124,14 @@ impl ComputeUserInfoMaybeEndpoint {
         let endpoint = match (endpoint_option, endpoint_from_domain) {
             // Invariant: if we have both project name variants, they should match.
             (Some(option), Some(domain)) if option != domain => {
-                Some(Err(InconsistentProjectNames { domain, option }))
+                Some(Err(ComputeUserInfoParseError::InconsistentProjectNames {
+                    domain,
+                    option,
+                }))
             }
             // Invariant: project name may not contain certain characters.
             (a, b) => a.or(b).map(|name| match project_name_valid(name.as_ref()) {
-                false => Err(MalformedProjectName(name)),
+                false => Err(ComputeUserInfoParseError::MalformedProjectName(name)),
                 true => Ok(name),
             }),
         }
@@ -186,7 +191,7 @@ impl<'de> serde::de::Deserialize<'de> for IpPattern {
         impl<'de> serde::de::Visitor<'de> for StrVisitor {
             type Value = IpPattern;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(formatter, "comma separated list with ip address, ip address range, or ip address subnet mask")
             }
 

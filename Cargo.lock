@@ -1214,7 +1214,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -1327,7 +1326,6 @@ dependencies = [
  "serde",
  "serde_with",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -1676,7 +1674,6 @@ dependencies = [
  "smallvec",
  "tracing",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -3153,7 +3150,6 @@ dependencies = [
  "rand 0.8.5",
  "rand_distr",
  "twox-hash",
- "workspace_hack",
 ]
 
 [[package]]
@@ -3799,7 +3795,6 @@ dependencies = [
  "strum_macros",
  "thiserror",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4201,7 +4196,6 @@ dependencies = [
  "tokio-rustls 0.25.0",
  "tokio-util",
  "tracing",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4214,7 +4208,6 @@ dependencies = [
  "postgres",
  "tokio-postgres",
  "url",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4237,7 +4230,6 @@ dependencies = [
  "serde",
  "thiserror",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4275,7 +4267,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4840,7 +4831,6 @@ dependencies = [
  "toml_edit 0.19.10",
  "tracing",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -5365,7 +5355,6 @@ dependencies = [
  "serde",
  "serde_with",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -6207,7 +6196,6 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "workspace_hack",
 ]
 
 [[package]]
@@ -6808,7 +6796,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "workspace_hack",
 ]
 
 [[package]]
@@ -7026,7 +7013,6 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
- "workspace_hack",
 ]
 
 [[package]]
@@ -7105,7 +7091,6 @@ dependencies = [
  "postgres_ffi",
  "regex",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -7126,7 +7111,6 @@ dependencies = [
  "bindgen",
  "postgres_ffi",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -7683,8 +7667,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.24.0",
  "tokio-util",
- "toml_datetime",
- "toml_edit 0.19.10",
  "tonic",
  "tower",
  "tracing",

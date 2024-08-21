@@ -222,13 +222,20 @@ jobs:
       id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
+      with:
+        store-test-results-into-db: true
+      env:
+        REGRESS_TEST_RESULT_CONNSTR_NEW: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
-        channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic replication testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        channel-id: "C06T9AMNDQQ" # on-call-compute-staging-stream
+        slack-message: |
+          Periodic replication testing: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -330,7 +337,7 @@ jobs:
   prepare_AWS_RDS_databases:
     uses: ./.github/workflows/_benchmarking_preparation.yml
     secrets: inherit
-  
+
   pgbench-compare:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     needs: [ generate-matrices, prepare_AWS_RDS_databases ]

@@ -9,14 +9,12 @@ from typing import List, Optional
 
 import pytest
 import toml
-from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, flush_ep_to_pageserver
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
-    wait_for_last_record_lsn,
-    wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
@@ -39,7 +37,7 @@ from fixtures.workload import Workload
 #
 # How to run `test_backward_compatibility` locally:
 #
-#    export DEFAULT_PG_VERSION=15
+#    export DEFAULT_PG_VERSION=16
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
@@ -61,7 +59,7 @@ from fixtures.workload import Workload
 #
 # How to run `test_forward_compatibility` locally:
 #
-#    export DEFAULT_PG_VERSION=15
+#    export DEFAULT_PG_VERSION=16
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
@@ -122,11 +120,9 @@ def test_create_snapshot(
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
 
     pageserver_http = env.pageserver.http_client()
-    lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
-    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-    wait_for_upload(pageserver_http, tenant_id, timeline_id, lsn)
+    flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
 
     env.endpoints.stop_all()
     for sk in env.safekeepers:

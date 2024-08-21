@@ -483,6 +483,16 @@ pub(crate) async fn backup_partial_segment(
         .await
 }
 
+pub(crate) async fn copy_partial_segment(
+    source: &RemotePath,
+    destination: &RemotePath,
+) -> Result<()> {
+    let storage = get_configured_remote_storage();
+    let cancel = CancellationToken::new();
+
+    storage.copy_object(source, destination, &cancel).await
+}
+
 pub async fn read_object(
     file_path: &RemotePath,
     offset: u64,

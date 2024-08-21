@@ -1646,6 +1646,20 @@ impl Timeline {
         self.last_record_lsn.shutdown();
 
         if try_freeze_and_flush {
+            if let Some((open, frozen)) = self
+                .layers
+                .read()
+                .await
+                .layer_map()
+                .map(|lm| (lm.open_layer.is_some(), lm.frozen_layers.len()))
+                .ok()
+                .filter(|(open, frozen)| *open || *frozen > 0)
+            {
+                tracing::info!(?open, frozen, "flushing and freezing on shutdown");
+            } else {
+                // this is double-shutdown, ignore it
+            }
+
             // we shut down walreceiver above, so, we won't add anything more
             // to the InMemoryLayer; freeze it and wait for all frozen layers
             // to reach the disk & upload queue, then shut the upload queue and
@@ -2270,7 +2284,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             "layer flush task",
             async move {
@@ -2624,7 +2638,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             "initial size calculation",
             // NB: don't log errors here, task_mgr will do that.
@@ -2792,7 +2806,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             "ondemand logical size calculation",
             async move {
@@ -2966,11 +2980,7 @@ impl Timeline {
                 LayerVisibilityHint::Visible => {
                     // Layer is visible to one or more read LSNs: elegible for inclusion in layer map
                     let last_activity_ts = layer.latest_activity();
-                    Some(HeatMapLayer::new(
-                        layer.layer_desc().layer_name(),
-                        layer.metadata(),
-                        last_activity_ts,
-                    ))
+                    Some((layer.layer_desc(), layer.metadata(), last_activity_ts))
                 }
                 LayerVisibilityHint::Covered => {
                     // Layer is resident but unlikely to be read: not elegible for inclusion in heatmap.
@@ -2979,7 +2989,23 @@ impl Timeline {
             }
         });
 
-        let layers = resident.collect();
+        let mut layers = resident.collect::<Vec<_>>();
+
+        // Sort layers in order of which to download first.  For a large set of layers to download, we
+        // want to prioritize those layers which are most likely to still be in the resident many minutes
+        // or hours later:
+        // - Download L0s last, because they churn the fastest: L0s on a fast-writing tenant might
+        //   only exist for a few minutes before being compacted into L1s.
+        // - For L1 & image layers, download most recent LSNs first: the older the LSN, the sooner
+        //   the layer is likely to be covered by an image layer during compaction.
+        layers.sort_by_key(|(desc, _meta, _atime)| {
+            std::cmp::Reverse((!LayerMap::is_l0(&desc.key_range), desc.lsn_range.end))
+        });
+
+        let layers = layers
+            .into_iter()
+            .map(|(desc, meta, atime)| HeatMapLayer::new(desc.layer_name(), meta, atime))
+            .collect();
 
         Some(HeatMapTimeline::new(self.timeline_id, layers))
     }
@@ -4505,6 +4531,7 @@ impl DurationRecorder {
 /// the layer descriptor requires the user to provide the ranges, which should cover all
 /// keys specified in the `data` field.
 #[cfg(test)]
+#[derive(Clone)]
 pub struct DeltaLayerTestDesc {
     pub lsn_range: Range<Lsn>,
     pub key_range: Range<Key>,
@@ -4533,6 +4560,13 @@ impl DeltaLayerTestDesc {
             lsn_range,
             data,
         }
+    }
+
+    pub(crate) fn layer_name(&self) -> LayerName {
+        LayerName::Delta(super::storage_layer::DeltaLayerName {
+            key_range: self.key_range.clone(),
+            lsn_range: self.lsn_range.clone(),
+        })
     }
 }
 
@@ -5131,7 +5165,7 @@ impl Timeline {
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             "download all remote layers task",
             async move {
@@ -5759,11 +5793,109 @@ fn is_send() {
 
 #[cfg(test)]
 mod tests {
+    use pageserver_api::key::Key;
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::tenant::{
-        harness::TenantHarness, storage_layer::Layer, timeline::EvictionError, Timeline,
+    use crate::{
+        repository::Value,
+        tenant::{
+            harness::{test_img, TenantHarness},
+            layer_map::LayerMap,
+            storage_layer::{Layer, LayerName},
+            timeline::{DeltaLayerTestDesc, EvictionError},
+            Timeline,
+        },
     };
+
+    #[tokio::test]
+    async fn test_heatmap_generation() {
+        let harness = TenantHarness::create("heatmap_generation").await.unwrap();
+
+        let covered_delta = DeltaLayerTestDesc::new_with_inferred_key_range(
+            Lsn(0x10)..Lsn(0x20),
+            vec![(
+                Key::from_hex("620000000033333333444444445500000000").unwrap(),
+                Lsn(0x11),
+                Value::Image(test_img("foo")),
+            )],
+        );
+        let visible_delta = DeltaLayerTestDesc::new_with_inferred_key_range(
+            Lsn(0x10)..Lsn(0x20),
+            vec![(
+                Key::from_hex("720000000033333333444444445500000000").unwrap(),
+                Lsn(0x11),
+                Value::Image(test_img("foo")),
+            )],
+        );
+        let l0_delta = DeltaLayerTestDesc::new(
+            Lsn(0x20)..Lsn(0x30),
+            Key::from_hex("000000000000000000000000000000000000").unwrap()
+                ..Key::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap(),
+            vec![(
+                Key::from_hex("720000000033333333444444445500000000").unwrap(),
+                Lsn(0x25),
+                Value::Image(test_img("foo")),
+            )],
+        );
+        let delta_layers = vec![
+            covered_delta.clone(),
+            visible_delta.clone(),
+            l0_delta.clone(),
+        ];
+
+        let image_layer = (
+            Lsn(0x40),
+            vec![(
+                Key::from_hex("620000000033333333444444445500000000").unwrap(),
+                test_img("bar"),
+            )],
+        );
+        let image_layers = vec![image_layer];
+
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_test_timeline_with_layers(
+                TimelineId::generate(),
+                Lsn(0x10),
+                14,
+                &ctx,
+                delta_layers,
+                image_layers,
+                Lsn(0x100),
+            )
+            .await
+            .unwrap();
+
+        // Layer visibility is an input to heatmap generation, so refresh it first
+        timeline.update_layer_visibility().await.unwrap();
+
+        let heatmap = timeline
+            .generate_heatmap()
+            .await
+            .expect("Infallible while timeline is not shut down");
+
+        assert_eq!(heatmap.timeline_id, timeline.timeline_id);
+
+        // L0 should come last
+        assert_eq!(heatmap.layers.last().unwrap().name, l0_delta.layer_name());
+
+        let mut last_lsn = Lsn::MAX;
+        for layer in heatmap.layers {
+            // Covered layer should be omitted
+            assert!(layer.name != covered_delta.layer_name());
+
+            let layer_lsn = match &layer.name {
+                LayerName::Delta(d) => d.lsn_range.end,
+                LayerName::Image(i) => i.lsn,
+            };
+
+            // Apart from L0s, newest Layers should come first
+            if !LayerMap::is_l0(layer.name.key_range()) {
+                assert!(layer_lsn <= last_lsn);
+                last_lsn = layer_lsn;
+            }
+        }
+    }
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {

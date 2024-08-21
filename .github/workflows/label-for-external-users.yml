@@ -4,7 +4,7 @@ on:
   issues:
     types:
       - opened
-  pull_request:
+  pull_request_target:
     types:
       - opened
 
@@ -25,7 +25,7 @@ jobs:
     - name: Check whether `${{ github.actor }}` is a member of `${{ github.repository_owner }}`
       id: check-user
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       run: |
         if gh api -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "/orgs/${GITHUB_REPOSITORY_OWNER}/members/${GITHUB_ACTOR}"; then
           is_member=true
@@ -45,10 +45,10 @@ jobs:
       issues: write        # for `gh issue edit`
 
     steps:
-    - name: Label new ${{ github.event_name }}
+    - name: Add `${{ env.LABEL }}` label
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        ITEM_NUMBER: ${{ github.event[github.event_name == 'pull_request' && 'pull_request' || 'issue'].number }}
-        GH_CLI_COMMAND: ${{ github.event_name == 'pull_request' && 'pr' || 'issue' }}
+        ITEM_NUMBER: ${{ github.event[github.event_name == 'pull_request_target' && 'pull_request' || 'issue'].number }}
+        GH_CLI_COMMAND: ${{ github.event_name == 'pull_request_target' && 'pr' || 'issue' }}
       run: |
         gh ${GH_CLI_COMMAND} --repo ${GITHUB_REPOSITORY} edit --add-label=${LABEL} ${ITEM_NUMBER}
