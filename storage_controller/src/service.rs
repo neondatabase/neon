@@ -2853,25 +2853,37 @@ impl Service {
         .await;
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
 
-        self.ensure_attached_wait(tenant_id).await?;
-
         let mut targets = {
-            let locked = self.inner.read().unwrap();
             let mut targets = Vec::new();
 
-            for (tenant_shard_id, shard) in
-                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
-            {
-                let node_id = shard.intent.get_attached().ok_or_else(|| {
-                    ApiError::InternalServerError(anyhow::anyhow!("Shard not scheduled"))
-                })?;
+            // Load the currently attached pageservers for the latest generation of each shard.  This can
+            // run concurrently with reconciliations, and it is not guaranteed that the node we find here
+            // will still be the latest when we're done: we will check generations again at the end of
+            // this function to handle that.
+            let generations = self.persistence.peek_generations(tenant_id).await?;
+            let generations = if generations.iter().any(|i| i.1.is_none()) {
+                // One or more shards is not attached to anything: maybe this is a new tenant?  Wait for
+                // it to reconcile.
+                self.ensure_attached_wait(tenant_id).await?;
+                self.persistence.peek_generations(tenant_id).await?
+            } else {
+                generations
+            };
+
+            let locked = self.inner.read().unwrap();
+            for (tenant_shard_id, generation, generation_pageserver) in generations {
+                let node_id = generation_pageserver.ok_or(ApiError::Conflict(
+                    "Tenant not currently attached".to_string(),
+                ))?;
                 let node = locked
                     .nodes
                     .get(&node_id)
-                    .expect("Pageservers may not be deleted while referenced");
-
-                targets.push((*tenant_shard_id, node.clone()));
+                    .ok_or(ApiError::Conflict(format!(
+                        "Raced with removal of node {node_id}"
+                    )))?;
+                targets.push((tenant_shard_id, node.clone(), generation));
             }
+
             targets
         };
 
@@ -2921,11 +2933,32 @@ impl Service {
         if !targets.is_empty() {
             // If we had multiple shards, issue requests for the remainder now.
             let jwt = &self.config.jwt_token;
-            self.tenant_for_shards(targets, |tenant_shard_id: TenantShardId, node: Node| {
-                let create_req = create_req.clone();
-                Box::pin(create_one(tenant_shard_id, node, jwt.clone(), create_req))
-            })
+            self.tenant_for_shards(
+                targets.iter().map(|t| (t.0, t.1.clone())).collect(),
+                |tenant_shard_id: TenantShardId, node: Node| {
+                    let create_req = create_req.clone();
+                    Box::pin(create_one(tenant_shard_id, node, jwt.clone(), create_req))
+                },
+            )
             .await?;
+        }
+
+        {
+            let mut generations = self.persistence.peek_generations(tenant_id).await?;
+            let shard_zero_generation = generations.remove(0);
+
+            if shard_zero_generation.1 != shard_zero.2
+                || generations.into_iter().map(|g| g.1).collect::<Vec<_>>()
+                    != targets.into_iter().map(|i| i.2).collect::<Vec<_>>()
+            {
+                // We raced with something that incremented the generation, and therefore cannot be
+                // confident that our actions are persistent (they might have hit an old generation).
+                //
+                // This is safe but requires a retry: ask the client to do that by giving them a 503 response.
+                return Err(ApiError::ResourceUnavailable(
+                    "Generation(s) incremented during request, please retry".into(),
+                ));
+            }
         }
 
         Ok(timeline_info)
