@@ -60,7 +60,7 @@ def test_layer_bloating(neon_env_builder: NeonEnvBuilder, vanilla_pg):
     # Wait logical replication to sync
     logical_replication_sync(vanilla_pg, endpoint)
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, timeline)
-    time.sleep(10)
+    env.pageserver.http_client().timeline_checkpoint(env.initial_tenant, timeline, compact=False)
 
     # Check layer file sizes
     timeline_path = f"{env.pageserver.workdir}/tenants/{env.initial_tenant}/timelines/{timeline}/"
