@@ -69,3 +69,5 @@ def test_layer_bloating(neon_env_builder: NeonEnvBuilder, vanilla_pg):
         if filename.startswith("00000"):
             log.info(f"layer {filename} size is {os.path.getsize(timeline_path + filename)}")
             assert os.path.getsize(timeline_path + filename) < 512_000_000
+
+    env.stop(immediate=True)
