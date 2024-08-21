@@ -7,7 +7,6 @@ use std::{net::SocketAddr, sync::Arc};
 
 use futures::future::Either;
 use itertools::Itertools;
-use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
 use proxy::metrics::{Metrics, ThreadPoolMetrics};
 use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
@@ -20,6 +19,7 @@ use futures::TryFutureExt;
 use proxy::stream::{PqStream, Stream};
 
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
 use utils::{project_git_version, sentry_init::init_sentry};
 
@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let destination: String = args.get_one::<String>("dest").unwrap().parse()?;
 
     // Configure TLS
-    let (tls_config, tls_server_end_point): (Arc<rustls::ServerConfig>, TlsServerEndPoint) = match (
+    let tls_config = match (
         args.get_one::<String>("tls-key"),
         args.get_one::<String>("tls-cert"),
     ) {
@@ -102,19 +102,14 @@ async fn main() -> anyhow::Result<()> {
                 })?
             };
 
-            // needed for channel bindings
-            let first_cert = cert_chain.first().context("missing certificate")?;
-            let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
-
-            let tls_config = rustls::ServerConfig::builder_with_protocol_versions(&[
-                &rustls::version::TLS13,
-                &rustls::version::TLS12,
-            ])
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, key)?
-            .into();
-
-            (tls_config, tls_server_end_point)
+            Arc::new(
+                rustls::ServerConfig::builder_with_protocol_versions(&[
+                    &rustls::version::TLS13,
+                    &rustls::version::TLS12,
+                ])
+                .with_no_client_auth()
+                .with_single_cert(cert_chain, key)?,
+            )
         }
         _ => bail!("tls-key and tls-cert must be specified"),
     };
@@ -129,7 +124,6 @@ async fn main() -> anyhow::Result<()> {
     let main = tokio::spawn(task_main(
         Arc::new(destination),
         tls_config,
-        tls_server_end_point,
         proxy_listener,
         cancellation_token.clone(),
     ));
@@ -151,7 +145,6 @@ async fn main() -> anyhow::Result<()> {
 async fn task_main(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
-    tls_server_end_point: TlsServerEndPoint,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -183,7 +176,7 @@ async fn task_main(
                     proxy::metrics::Protocol::SniRouter,
                     "sni",
                 );
-                handle_client(ctx, dest_suffix, tls_config, tls_server_end_point, socket).await
+                handle_client(ctx, dest_suffix, tls_config, socket).await
             }
             .unwrap_or_else(|e| {
                 // Acknowledge that the task has finished with an error.
@@ -208,8 +201,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     ctx: &RequestMonitoring,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
-    tls_server_end_point: TlsServerEndPoint,
-) -> anyhow::Result<Stream<S>> {
+) -> anyhow::Result<Box<TlsStream<S>>> {
     let mut stream = PqStream::new(Stream::from_raw(raw_stream));
 
     let msg = stream.read_startup_packet().await?;
@@ -235,13 +227,10 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 bail!("data is sent before server replied with EncryptionResponse");
             }
 
-            Ok(Stream::Tls {
-                tls: Box::new(
-                    raw.upgrade(tls_config, !ctx.has_private_peer_addr())
-                        .await?,
-                ),
-                tls_server_end_point,
-            })
+            Ok(Box::new(
+                raw.upgrade(tls_config, !ctx.has_private_peer_addr())
+                    .await?,
+            ))
         }
         unexpected => {
             info!(
@@ -259,15 +248,18 @@ async fn handle_client(
     ctx: RequestMonitoring,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
-    tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let mut tls_stream = ssl_handshake(&ctx, stream, tls_config, tls_server_end_point).await?;
+    let mut tls_stream = ssl_handshake(&ctx, stream, tls_config).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of
     //   `{k8s_service_name}--{k8s_namespace}--{port}.non-sni-domain`
-    let sni = tls_stream.sni_hostname().ok_or(anyhow!("SNI missing"))?;
+    let sni = tls_stream
+        .get_ref()
+        .1
+        .server_name()
+        .ok_or(anyhow!("SNI missing"))?;
     let dest: Vec<&str> = sni
         .split_once('.')
         .context("invalid SNI")?

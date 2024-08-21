@@ -15,6 +15,7 @@ use crate::{
     metrics::Metrics,
     proxy::ERR_INSECURE_CONNECTION,
     stream::{PqStream, Stream, StreamUpgradeError},
+    EndpointId,
 };
 
 #[derive(Error, Debug)]
@@ -58,7 +59,11 @@ impl ReportableError for HandshakeError {
 }
 
 pub enum HandshakeData<S> {
-    Startup(PqStream<Stream<S>>, StartupMessageParams),
+    Startup(
+        PqStream<Stream<S>>,
+        Option<EndpointId>,
+        StartupMessageParams,
+    ),
     Cancel(CancelKeyData),
 }
 
@@ -80,6 +85,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     const PG_PROTOCOL_LATEST: ProtocolVersion = ProtocolVersion::new(3, 0);
 
     let mut stream = PqStream::new(Stream::from_raw(stream));
+    let mut ep = None;
     loop {
         let msg = stream.read_startup_packet().await?;
         match msg {
@@ -145,11 +151,11 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         let conn_info = tls_stream.get_ref().1;
 
                         // try parse endpoint
-                        let ep = conn_info
+                        ep = conn_info
                             .server_name()
                             .and_then(|sni| endpoint_sni(sni, &tls.common_names).ok().flatten());
-                        if let Some(ep) = ep {
-                            ctx.set_endpoint_id(ep);
+                        if let Some(ep) = &ep {
+                            ctx.set_endpoint_id(ep.clone());
                         }
 
                         // check the ALPN, if exists, as required.
@@ -170,7 +176,10 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         stream = PqStream {
                             framed: Framed {
                                 stream: Stream::Tls {
+                                    #[cfg(not(target_os = "linux"))]
                                     tls: Box::new(tls_stream),
+                                    #[cfg(target_os = "linux")]
+                                    tls: {},
                                     tls_server_end_point,
                                 },
                                 read_buf,
@@ -207,7 +216,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     session_type = "normal",
                     "successful handshake"
                 );
-                break Ok(HandshakeData::Startup(stream, params));
+                break Ok(HandshakeData::Startup(stream, ep, params));
             }
             // downgrade protocol version
             FeStartupPacket::StartupMessage { params, version }
@@ -238,7 +247,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     session_type = "normal",
                     "successful handshake; unsupported minor version requested"
                 );
-                break Ok(HandshakeData::Startup(stream, params));
+                break Ok(HandshakeData::Startup(stream, ep, params));
             }
             FeStartupPacket::StartupMessage { version, .. } => {
                 warn!(

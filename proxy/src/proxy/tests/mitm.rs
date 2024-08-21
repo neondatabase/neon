@@ -43,7 +43,7 @@ async fn proxy_mitm(
         .await
         .unwrap()
         {
-            HandshakeData::Startup(stream, params) => (stream, params),
+            HandshakeData::Startup(stream, _ep, params) => (stream, params),
             HandshakeData::Cancel(_) => panic!("cancellation not supported"),
         };
 

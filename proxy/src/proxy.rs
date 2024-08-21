@@ -21,7 +21,7 @@ use crate::{
     protocol2::read_proxy_protocol,
     proxy::handshake::{handshake, HandshakeData},
     rate_limiter::EndpointRateLimiter,
-    stream::{PqStream, Stream},
+    stream::PqStream,
     EndpointCacheKey,
 };
 use futures::TryFutureExt;
@@ -191,13 +191,6 @@ impl ClientMode {
         }
     }
 
-    fn hostname<'a, S>(&'a self, s: &'a Stream<S>) -> Option<&'a str> {
-        match self {
-            ClientMode::Tcp => s.sni_hostname(),
-            ClientMode::Websockets { hostname } => hostname.as_deref(),
-        }
-    }
-
     fn handshake_tls<'a>(&self, tls: Option<&'a TlsConfig>) -> Option<&'a TlsConfig> {
         match self {
             ClientMode::Tcp => tls,
@@ -261,9 +254,9 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let record_handshake_error = !ctx.has_private_peer_addr();
     let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
     let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
-    let (mut stream, params) =
+    let (mut stream, ep, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
-            HandshakeData::Startup(stream, params) => (stream, params),
+            HandshakeData::Startup(stream, ep, params) => (stream, ep, params),
             HandshakeData::Cancel(cancel_key_data) => {
                 return Ok(cancellation_handler
                     .cancel_session(cancel_key_data, ctx.session_id())
@@ -275,15 +268,11 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     ctx.set_db_options(params.clone());
 
-    let hostname = mode.hostname(stream.get_ref());
-
-    let common_names = tls.map(|tls| &tls.common_names);
-
     // Extract credentials which we're going to use for auth.
     let result = config
         .auth_backend
         .as_ref()
-        .map(|_| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
+        .map(|_| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, ep))
         .transpose();
 
     let user_info = match result {

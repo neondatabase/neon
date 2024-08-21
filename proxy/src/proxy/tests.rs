@@ -16,6 +16,7 @@ use crate::console::messages::{ConsoleError, Details, MetricsAuxInfo, Status};
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
+use crate::stream::Stream;
 use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
@@ -180,7 +181,7 @@ async fn dummy_proxy(
     let (client, _) = read_proxy_protocol(client).await?;
     let mut stream =
         match handshake(&RequestMonitoring::test(), client, tls.as_ref(), false).await? {
-            HandshakeData::Startup(stream, _) => stream,
+            HandshakeData::Startup(stream, ..) => stream,
             HandshakeData::Cancel(_) => bail!("cancellation not supported"),
         };
 

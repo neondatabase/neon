@@ -178,7 +178,12 @@ pub enum Stream<S> {
     Raw { raw: S },
     Tls {
         /// We box [`TlsStream`] since it can be quite large.
+        #[cfg(not(target_os = "linux"))]
         tls: Box<TlsStream<S>>,
+
+        #[cfg(target_os = "linux")]
+        tls: ktls::KtlsStream<S>,
+
         /// Channel binding parameter
         tls_server_end_point: TlsServerEndPoint,
     },
@@ -190,14 +195,6 @@ impl<S> Stream<S> {
     /// Construct a new instance from a raw stream.
     pub fn from_raw(raw: S) -> Self {
         Self::Raw { raw }
-    }
-
-    /// Return SNI hostname when it's available.
-    pub fn sni_hostname(&self) -> Option<&str> {
-        match self {
-            Stream::Raw { .. } => None,
-            Stream::Tls { tls, .. } => tls.get_ref().1.server_name(),
-        }
     }
 
     pub fn tls_server_end_point(&self) -> TlsServerEndPoint {
@@ -229,14 +226,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
         record_handshake_error: bool,
     ) -> Result<TlsStream<S>, StreamUpgradeError> {
         match self {
-            Stream::Raw { raw } => Ok(tokio_rustls::TlsAcceptor::from(cfg)
-                .accept(raw)
-                .await
-                .inspect_err(|_| {
-                    if record_handshake_error {
-                        Metrics::get().proxy.tls_handshake_failures.inc();
-                    }
-                })?),
+            Stream::Raw { raw } => {
+                let stream = tokio_rustls::TlsAcceptor::from(cfg)
+                    .accept(raw)
+                    .await
+                    .inspect_err(|_| {
+                        if record_handshake_error {
+                            Metrics::get().proxy.tls_handshake_failures.inc();
+                        }
+                    })?;
+
+                Ok(stream)
+            }
             Stream::Tls { .. } => Err(StreamUpgradeError::AlreadyTls),
         }
     }

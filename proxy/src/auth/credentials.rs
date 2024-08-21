@@ -86,8 +86,7 @@ impl ComputeUserInfoMaybeEndpoint {
     pub fn parse(
         ctx: &RequestMonitoring,
         params: &StartupMessageParams,
-        sni: Option<&str>,
-        common_names: Option<&HashSet<String>>,
+        endpoint_from_domain: Option<EndpointId>,
     ) -> Result<Self, ComputeUserInfoParseError> {
         // Some parameters are stored in the startup message.
         let get_param = |key| {
@@ -111,16 +110,7 @@ impl ComputeUserInfoMaybeEndpoint {
             })
             .map(|name| name.into());
 
-        let endpoint_from_domain = if let Some(sni_str) = sni {
-            if let Some(cn) = common_names {
-                endpoint_sni(sni_str, cn)?
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
+        let is_sni = endpoint_from_domain.is_some();
         let endpoint = match (endpoint_option, endpoint_from_domain) {
             // Invariant: if we have both project name variants, they should match.
             (Some(option), Some(domain)) if option != domain => {
@@ -143,7 +133,7 @@ impl ComputeUserInfoMaybeEndpoint {
 
         let metrics = Metrics::get();
         info!(%user, "credentials");
-        if sni.is_some() {
+        if is_sni {
             info!("Connection with sni");
             metrics.proxy.accepted_connections_by_sni.inc(SniKind::Sni);
         } else if endpoint.is_some() {
@@ -255,7 +245,7 @@ mod tests {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
         let ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id, None);
 
@@ -270,7 +260,7 @@ mod tests {
             ("foo", "bar"),        // should be ignored
         ]);
         let ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id, None);
 
@@ -281,12 +271,8 @@ mod tests {
     fn parse_project_from_sni() -> anyhow::Result<()> {
         let options = StartupMessageParams::new([("user", "john_doe")]);
 
-        let sni = Some("foo.localhost");
-        let common_names = Some(["localhost".into()].into());
-
         let ctx = RequestMonitoring::test();
-        let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, Some("foo".into()))?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("foo"));
         assert_eq!(user_info.options.get_cache_key("foo"), "foo");
@@ -302,7 +288,7 @@ mod tests {
         ]);
 
         let ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("bar"));
 
@@ -317,7 +303,7 @@ mod tests {
         ]);
 
         let ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("bar"));
 
@@ -335,7 +321,7 @@ mod tests {
         ]);
 
         let ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert!(user_info.endpoint_id.is_none());
 
@@ -350,7 +336,7 @@ mod tests {
         ]);
 
         let ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert!(user_info.endpoint_id.is_none());
 
@@ -361,35 +347,10 @@ mod tests {
     fn parse_projects_identical() -> anyhow::Result<()> {
         let options = StartupMessageParams::new([("user", "john_doe"), ("options", "project=baz")]);
 
-        let sni = Some("baz.localhost");
-        let common_names = Some(["localhost".into()].into());
-
         let ctx = RequestMonitoring::test();
-        let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, Some("baz".into()))?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("baz"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn parse_multi_common_names() -> anyhow::Result<()> {
-        let options = StartupMessageParams::new([("user", "john_doe")]);
-
-        let common_names = Some(["a.com".into(), "b.com".into()].into());
-        let sni = Some("p1.a.com");
-        let ctx = RequestMonitoring::test();
-        let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
-        assert_eq!(user_info.endpoint_id.as_deref(), Some("p1"));
-
-        let common_names = Some(["a.com".into(), "b.com".into()].into());
-        let sni = Some("p1.b.com");
-        let ctx = RequestMonitoring::test();
-        let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
-        assert_eq!(user_info.endpoint_id.as_deref(), Some("p1"));
 
         Ok(())
     }
@@ -399,34 +360,13 @@ mod tests {
         let options =
             StartupMessageParams::new([("user", "john_doe"), ("options", "project=first")]);
 
-        let sni = Some("second.localhost");
-        let common_names = Some(["localhost".into()].into());
-
         let ctx = RequestMonitoring::test();
-        let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
+        let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, Some("second".into()))
             .expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
                 assert_eq!(domain, "second");
-            }
-            _ => panic!("bad error: {err:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_inconsistent_sni() {
-        let options = StartupMessageParams::new([("user", "john_doe")]);
-
-        let sni = Some("project.localhost");
-        let common_names = Some(["example.com".into()].into());
-
-        let ctx = RequestMonitoring::test();
-        let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
-            .expect_err("should fail");
-        match err {
-            UnknownCommonName { cn } => {
-                assert_eq!(cn, "localhost");
             }
             _ => panic!("bad error: {err:?}"),
         }
@@ -439,11 +379,9 @@ mod tests {
             ("options", "neon_lsn:0/2 neon_endpoint_type:read_write"),
         ]);
 
-        let sni = Some("project.localhost");
-        let common_names = Some(["localhost".into()].into());
         let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, Some("project".into()))?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("project"));
         assert_eq!(
             user_info.options.get_cache_key("project"),
