@@ -515,7 +515,7 @@ impl WalIngest {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
             // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)?
+            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)
             // do not materialize null pages because them most likely be soon replaced with real data
             && blk.bimg_len != 0
         {
@@ -618,7 +618,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -685,7 +685,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -752,7 +752,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -920,7 +920,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -1702,7 +1702,7 @@ async fn get_relsize(
     modification: &DatadirModification<'_>,
     rel: RelTag,
     ctx: &RequestContext,
-) -> anyhow::Result<BlockNumber> {
+) -> Result<BlockNumber, PageReconstructError> {
     let nblocks = if !modification
         .tline
         .get_rel_exists(rel, Version::Modified(modification), ctx)
@@ -1754,7 +1754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_relsize")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_relsize").await?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1975,7 +1975,10 @@ mod tests {
     // and then created it again within the same layer.
     #[tokio::test]
     async fn test_drop_extend() -> Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_drop_extend")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_drop_extend")
+            .await?
+            .load()
+            .await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -2046,7 +2049,10 @@ mod tests {
     // and then extended it again within the same layer.
     #[tokio::test]
     async fn test_truncate_extend() -> Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_truncate_extend")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_truncate_extend")
+            .await?
+            .load()
+            .await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -2188,7 +2194,7 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[tokio::test]
     async fn test_large_rel() -> Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_large_rel")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_large_rel").await?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -2296,7 +2302,7 @@ mod tests {
         let startpoint = Lsn::from_hex("14AEC08").unwrap();
         let _endpoint = Lsn::from_hex("1FFFF98").unwrap();
 
-        let harness = TenantHarness::create("test_ingest_real_wal").unwrap();
+        let harness = TenantHarness::create("test_ingest_real_wal").await.unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let remote_initdb_path =

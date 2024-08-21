@@ -27,8 +27,8 @@ use utils::pid_file;
 
 use metrics::set_build_info_metric;
 use safekeeper::defaults::{
-    DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR,
-    DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
+    DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
+    DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
 use safekeeper::http;
@@ -170,11 +170,6 @@ struct Args {
     /// still needed for existing replication connection.
     #[arg(long)]
     walsenders_keep_horizon: bool,
-    /// Enable partial backup. If disabled, safekeeper will not upload partial
-    /// segments to remote storage.
-    /// TODO: now partial backup is always enabled, remove this flag.
-    #[arg(long)]
-    partial_backup_enabled: bool,
     /// Controls how long backup will wait until uploading the partial segment.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_PARTIAL_BACKUP_TIMEOUT, verbatim_doc_comment)]
     partial_backup_timeout: Duration,
@@ -194,6 +189,12 @@ struct Args {
     /// Number of allowed concurrent uploads of partial segments to remote storage.
     #[arg(long, default_value = DEFAULT_PARTIAL_BACKUP_CONCURRENCY)]
     partial_backup_concurrency: usize,
+    /// How long a timeline must be resident before it is eligible for eviction.
+    /// Usually, timeline eviction has to wait for `partial_backup_timeout` before being eligible for eviction,
+    /// but if a timeline is un-evicted and then _not_ written to, it would immediately flap to evicting again,
+    /// if it weren't for `eviction_min_resident` preventing that.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_EVICTION_MIN_RESIDENT)]
+    eviction_min_resident: Duration,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -341,13 +342,13 @@ async fn main() -> anyhow::Result<()> {
         sk_auth_token,
         current_thread_runtime: args.current_thread_runtime,
         walsenders_keep_horizon: args.walsenders_keep_horizon,
-        partial_backup_enabled: true,
         partial_backup_timeout: args.partial_backup_timeout,
         disable_periodic_broker_push: args.disable_periodic_broker_push,
         enable_offload: args.enable_offload,
         delete_offloaded_wal: args.delete_offloaded_wal,
         control_file_save_interval: args.control_file_save_interval,
         partial_backup_concurrency: args.partial_backup_concurrency,
+        eviction_min_resident: args.eviction_min_resident,
     };
 
     // initialize sentry if SENTRY_DSN is provided
@@ -411,7 +412,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
     metrics::register_internal(Box::new(timeline_collector))?;
 
-    wal_backup::init_remote_storage(&conf);
+    wal_backup::init_remote_storage(&conf).await;
 
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =

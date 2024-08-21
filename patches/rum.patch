@@ -1,0 +1,54 @@
+commit 68f3b3b0d594f08aacc4a082ee210749ed5677eb
+Author: Anastasia Lubennikova <anastasia@neon.tech>
+Date:   Mon Jul 15 12:31:56 2024 +0100
+
+    Neon: fix unlogged index build patch
+
+diff --git a/src/ruminsert.c b/src/ruminsert.c
+index e8b209d..e89bf2a 100644
+--- a/src/ruminsert.c
++++ b/src/ruminsert.c
+@@ -628,6 +628,10 @@ rumbuild(Relation heap, Relation index, struct IndexInfo *indexInfo)
+ 		elog(ERROR, "index \"%s\" already contains data",
+ 			 RelationGetRelationName(index));
+ 
++#ifdef NEON_SMGR
++	smgr_start_unlogged_build(index->rd_smgr);
++#endif
++
+ 	initRumState(&buildstate.rumstate, index);
+ 	buildstate.rumstate.isBuild = true;
+ 	buildstate.indtuples = 0;
+@@ -693,6 +697,10 @@ rumbuild(Relation heap, Relation index, struct IndexInfo *indexInfo)
+ 	buildstate.buildStats.nTotalPages = RelationGetNumberOfBlocks(index);
+ 	rumUpdateStats(index, &buildstate.buildStats, buildstate.rumstate.isBuild);
+ 
++#ifdef NEON_SMGR
++	smgr_finish_unlogged_build_phase_1(index->rd_smgr);
++#endif
++
+ 	/*
+ 	 * Write index to xlog
+ 	 */
+@@ -713,6 +721,21 @@ rumbuild(Relation heap, Relation index, struct IndexInfo *indexInfo)
+ 		UnlockReleaseBuffer(buffer);
+ 	}
+ 
++#ifdef NEON_SMGR
++	{
++#if PG_VERSION_NUM >= 160000
++		RelFileLocator rlocator = RelationGetSmgr(index)->smgr_rlocator.locator;
++#else
++		RelFileNode rlocator = RelationGetSmgr(index)->smgr_rnode.node;
++#endif
++
++		SetLastWrittenLSNForBlockRange(XactLastRecEnd, rlocator, MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
++		SetLastWrittenLSNForRelation(XactLastRecEnd, rlocator, MAIN_FORKNUM);
++
++		smgr_end_unlogged_build(index->rd_smgr);
++	}
++#endif
++
+ 	/*
+ 	 * Return statistics
+ 	 */

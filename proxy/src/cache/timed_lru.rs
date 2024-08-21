@@ -58,7 +58,7 @@ impl<K: Hash + Eq, V> Cache for TimedLru<K, V> {
     type LookupInfo<Key> = LookupInfo<Key>;
 
     fn invalidate(&self, info: &Self::LookupInfo<K>) {
-        self.invalidate_raw(info)
+        self.invalidate_raw(info);
     }
 }
 

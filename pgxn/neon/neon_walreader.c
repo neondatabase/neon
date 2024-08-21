@@ -109,11 +109,12 @@ NeonWALReaderAllocate(int wal_segment_size, XLogRecPtr available_lsn, char *log_
 {
 	NeonWALReader *reader;
 
+	/*
+	 * Note: we allocate in TopMemoryContext, reusing the reader for all process
+	 * reads.
+	 */
 	reader = (NeonWALReader *)
-		palloc_extended(sizeof(NeonWALReader),
-						MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
-	if (!reader)
-		return NULL;
+		MemoryContextAllocZero(TopMemoryContext, sizeof(NeonWALReader));
 
 	reader->available_lsn = available_lsn;
 	reader->seg.ws_file = -1;
@@ -219,7 +220,8 @@ NeonWALReadRemote(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size cou
 			return NEON_WALREAD_ERROR;
 		}
 		/* we'll poll immediately */
-		state->rem_state = RS_CONNECTING_READ;
+		state->rem_state = RS_CONNECTING_WRITE;
+		return NEON_WALREAD_WOULDBLOCK;
 	}
 
 	if (state->rem_state == RS_CONNECTING_READ || state->rem_state == RS_CONNECTING_WRITE)

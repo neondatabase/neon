@@ -45,7 +45,11 @@ processing by the `purge-garbage` subcommand.
 
 Example:
 
-`env AWS_PROFILE=dev REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=${NEON_CLOUD_ADMIN_API_STAGING_KEY} CLOUD_ADMIN_API_URL=[url] cargo run --release -- find-garbage --node-kind=pageserver --depth=tenant --output-path=eu-west-1-garbage.json`
+`env AWS_PROFILE=dev REGION=eu-west-1 BUCKET=my-dev-bucket CLOUD_ADMIN_API_TOKEN=[client_key] CLOUD_ADMIN_API_URL=[url] cargo run --release -- find-garbage --node-kind=pageserver --depth=tenant --output-path=eu-west-1-garbage.json`
+
+Note that `CLOUD_ADMIN_API_TOKEN` can be obtained from https://console-stage.neon.build/app/settings/api-keys (for staging) or https://console.neon.tech/app/settings/api-keys for production. This is not the control plane admin JWT key. The env var name is confusing. Though anyone can generate that API key, you still need admin permission in order to access all projects in the region.
+
+And note that `CLOUD_ADMIN_API_URL` should include the region in the admin URL due to the control plane / console split. For example, `https://console-stage.neon.build/regions/aws-us-east-2/api/v1/admin` for the staging us-east-2 region.
 
 #### `purge-garbage`
 
@@ -61,7 +65,7 @@ to pass them on the command line
 
 Example:
 
-`env AWS_PROFILE=dev cargo run --release -- purge-garbage --node-kind=pageserver --depth=tenant --input-path=eu-west-1-garbage.json`
+`env AWS_PROFILE=dev cargo run --release -- purge-garbage --input-path=eu-west-1-garbage.json`
 
 Add the `--delete` argument before `purge-garbage` to enable deletion.  This is intentionally
 not provided inline in the example above to avoid accidents.  Without the `--delete` flag

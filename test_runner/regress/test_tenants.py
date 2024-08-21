@@ -45,17 +45,10 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     # Failure to write a config to local disk makes the pageserver assume that local disk is bad and abort the process
     pageserver_http.configure_failpoints(("tenant-config-before-write", "return"))
 
-    # Storage controller will see a torn TCP connection when the crash point is reached, and follow an unclean 500 error path
-    neon_simple_env.storage_controller.allowed_errors.extend(
-        [
-            ".*Reconcile not done yet while creating tenant.*",
-            ".*Reconcile error: receive body: error sending request.*",
-            ".*Error processing HTTP request: InternalServerError.*",
-        ]
-    )
+    tenant_id = TenantId.generate()
 
-    with pytest.raises(Exception, match="error sending request"):
-        _ = neon_simple_env.neon_cli.create_tenant()
+    with pytest.raises(requests.exceptions.ConnectionError, match="Connection aborted"):
+        neon_simple_env.pageserver.http_client().tenant_attach(tenant_id=tenant_id, generation=1)
 
     # Any files left behind on disk during failed creation do not prevent
     # a retry from succeeding.  Restart pageserver with no failpoints.

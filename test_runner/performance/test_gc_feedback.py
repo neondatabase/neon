@@ -6,21 +6,8 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-@pytest.mark.timeout(10000)
-def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
-    """
-    Test that GC is able to collect all old layers even if them are forming
-    "stairs" and there are not three delta layers since last image layer.
-
-    Information about image layers needed to collect old layers should
-    be propagated by GC to compaction task which should take in in account
-    when make a decision which new image layers needs to be created.
-
-    NB: this test demonstrates the problem. The source tree contained the
-    `gc_feedback` mechanism for about 9 months, but, there were problems
-    with it and it wasn't enabled at runtime.
-    This PR removed the code: https://github.com/neondatabase/neon/pull/6863
-    """
+def gc_feedback_impl(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker, mode: str):
+    assert mode == "normal" or mode == "with_snapshots"
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
@@ -74,6 +61,9 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
 
             physical_size = client.timeline_detail(tenant_id, timeline_id)["current_physical_size"]
             log.info(f"Physical storage size {physical_size}")
+        if mode == "with_snapshots":
+            if step == n_steps / 2:
+                env.neon_cli.create_branch("child")
 
     max_num_of_deltas_above_image = 0
     max_total_num_of_deltas = 0
@@ -149,3 +139,37 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     log.info(f"Writing layer map to {layer_map_path}")
     with layer_map_path.open("w") as f:
         f.write(json.dumps(client.timeline_layer_map_info(tenant_id, timeline_id)))
+
+
+@pytest.mark.timeout(10000)
+def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
+    """
+    Test that GC is able to collect all old layers even if them are forming
+    "stairs" and there are not three delta layers since last image layer.
+
+    Information about image layers needed to collect old layers should
+    be propagated by GC to compaction task which should take in in account
+    when make a decision which new image layers needs to be created.
+
+    NB: this test demonstrates the problem. The source tree contained the
+    `gc_feedback` mechanism for about 9 months, but, there were problems
+    with it and it wasn't enabled at runtime.
+    This PR removed the code: https://github.com/neondatabase/neon/pull/6863
+
+    And the bottom-most GC-compaction epic resolves the problem.
+    https://github.com/neondatabase/neon/issues/8002
+    """
+    gc_feedback_impl(neon_env_builder, zenbenchmark, "normal")
+
+
+@pytest.mark.timeout(10000)
+def test_gc_feedback_with_snapshots(
+    neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker
+):
+    """
+    Compared with `test_gc_feedback`, we create a branch without written data (=snapshot) in the middle
+    of the benchmark, and the   bottom-most compaction should collect as much garbage as possible below the GC
+    horizon. Ideally, there should be images (in an image layer) covering the full range at the branch point,
+    and images covering the full key range (in a delta layer) at the GC horizon.
+    """
+    gc_feedback_impl(neon_env_builder, zenbenchmark, "with_snapshots")

@@ -1,0 +1,154 @@
+name: Prepare benchmarking databases by restoring dumps
+
+on:
+  workflow_call:
+    # no inputs needed
+    
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+jobs:
+  setup-databases:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ aws-rds-postgres, aws-aurora-serverless-v2-postgres, neon ] 
+        database: [ clickbench, tpch, userexample ]
+  
+    env:
+      LD_LIBRARY_PATH: /tmp/neon/pg_install/v16/lib
+      PLATFORM: ${{ matrix.platform }}
+      PG_BINARIES: /tmp/neon/pg_install/v16/bin
+
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      options: --init
+
+    steps:
+    - name: Set up Connection String
+      id: set-up-prep-connstr
+      run: |
+        case "${PLATFORM}" in
+          neon)
+            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }} 
+            ;;
+          aws-rds-postgres)
+            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }} 
+            ;;
+          aws-aurora-serverless-v2-postgres)
+            CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_CONNSTR }} 
+            ;;
+          *)
+            echo >&2 "Unknown PLATFORM=${PLATFORM}"
+            exit 1
+            ;;
+        esac
+
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT  
+
+    - uses: actions/checkout@v4
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    # we create a table that has one row for each database that we want to restore with the status whether the restore is done    
+    - name: Create benchmark_restore_status table if it does not exist
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
+        DATABASE_NAME: ${{ matrix.database }}
+      # to avoid a race condition of multiple jobs trying to create the table at the same time, 
+      # we use an advisory lock
+      run: |
+        ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
+        SELECT pg_advisory_lock(4711);  
+        CREATE TABLE IF NOT EXISTS benchmark_restore_status (
+        databasename text primary key,
+        restore_done boolean
+        );
+        SELECT pg_advisory_unlock(4711);
+        "
+    
+    - name: Check if restore is already done
+      id: check-restore-done
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
+        DATABASE_NAME: ${{ matrix.database }}
+      run: |
+        skip=false
+        if ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -tAc "SELECT 1 FROM benchmark_restore_status WHERE databasename='${{ env.DATABASE_NAME }}' AND restore_done=true;" | grep -q 1; then
+          echo "Restore already done for database ${{ env.DATABASE_NAME }} on platform ${{ env.PLATFORM }}. Skipping this database."
+          skip=true
+        fi
+        echo "skip=${skip}" | tee -a $GITHUB_OUTPUT
+
+    - name: Check and create database if it does not exist
+      if: steps.check-restore-done.outputs.skip != 'true'
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
+        DATABASE_NAME: ${{ matrix.database }}
+      run: |
+        DB_EXISTS=$(${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -tAc "SELECT 1 FROM pg_database WHERE datname='${{ env.DATABASE_NAME }}'")
+        if [ "$DB_EXISTS" != "1" ]; then
+          echo "Database ${{ env.DATABASE_NAME }} does not exist. Creating it..."
+          ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -c "CREATE DATABASE \"${{ env.DATABASE_NAME }}\";"
+        else
+          echo "Database ${{ env.DATABASE_NAME }} already exists."
+        fi
+
+    - name: Download dump from S3 to /tmp/dumps
+      if: steps.check-restore-done.outputs.skip != 'true'
+      env:
+        DATABASE_NAME: ${{ matrix.database }}
+      run: |
+        mkdir -p /tmp/dumps
+        aws s3 cp s3://neon-github-dev/performance/pgdumps/$DATABASE_NAME/$DATABASE_NAME.pg_dump /tmp/dumps/ 
+
+    - name: Replace database name in connection string
+      if: steps.check-restore-done.outputs.skip != 'true'
+      id: replace-dbname
+      env:
+        DATABASE_NAME: ${{ matrix.database }}
+        BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
+      run: |
+        # Extract the part before the database name
+        base_connstr="${BENCHMARK_CONNSTR%/*}"
+        # Extract the query parameters (if any) after the database name
+        query_params="${BENCHMARK_CONNSTR#*\?}"
+        # Reconstruct the new connection string
+        if [ "$query_params" != "$BENCHMARK_CONNSTR" ]; then
+          new_connstr="${base_connstr}/${DATABASE_NAME}?${query_params}"
+        else
+          new_connstr="${base_connstr}/${DATABASE_NAME}"
+        fi
+        echo "database_connstr=${new_connstr}" >> $GITHUB_OUTPUT  
+
+    - name: Restore dump
+      if: steps.check-restore-done.outputs.skip != 'true'
+      env:
+        DATABASE_NAME: ${{ matrix.database }}
+        DATABASE_CONNSTR: ${{ steps.replace-dbname.outputs.database_connstr }}
+        # the following works only with larger computes: 
+        # PGOPTIONS: "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
+        # we add the || true because:
+        # the dumps were created with Neon and contain neon extensions that are not 
+        # available in RDS, so we will always report an error, but we can ignore it
+      run: |
+        ${PG_BINARIES}/pg_restore --clean --if-exists --no-owner --jobs=4 \
+        -d "${DATABASE_CONNSTR}" /tmp/dumps/${DATABASE_NAME}.pg_dump || true
+
+    - name: Update benchmark_restore_status table
+      if: steps.check-restore-done.outputs.skip != 'true'
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
+        DATABASE_NAME: ${{ matrix.database }}
+      run: |
+        ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
+        INSERT INTO benchmark_restore_status (databasename, restore_done) VALUES ('${{ env.DATABASE_NAME }}', true)
+        ON CONFLICT (databasename) DO UPDATE SET restore_done = true;
+        "

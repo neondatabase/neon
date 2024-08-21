@@ -1,8 +1,9 @@
 use pageserver_api::{
     models::{
-        LocationConfig, LocationConfigListResponse, PageserverUtilization, SecondaryProgress,
-        TenantScanRemoteStorageResponse, TenantShardSplitRequest, TenantShardSplitResponse,
-        TimelineCreateRequest, TimelineInfo, TopTenantShardsRequest, TopTenantShardsResponse,
+        detach_ancestor::AncestorDetached, LocationConfig, LocationConfigListResponse,
+        PageserverUtilization, SecondaryProgress, TenantScanRemoteStorageResponse,
+        TenantShardSplitRequest, TenantShardSplitResponse, TimelineCreateRequest, TimelineInfo,
+        TopTenantShardsRequest, TopTenantShardsResponse,
     },
     shard::TenantShardId,
 };
@@ -223,6 +224,21 @@ impl PageserverClient {
             crate::metrics::Method::Get,
             &self.node_id_label,
             self.inner.timeline_list(tenant_shard_id).await
+        )
+    }
+
+    pub(crate) async fn timeline_detach_ancestor(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<AncestorDetached> {
+        measured_request!(
+            "timeline_detach_ancestor",
+            crate::metrics::Method::Put,
+            &self.node_id_label,
+            self.inner
+                .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                .await
         )
     }
 

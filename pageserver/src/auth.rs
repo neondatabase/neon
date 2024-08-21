@@ -14,12 +14,14 @@ pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<
         }
         (Scope::PageServerApi, None) => Ok(()), // access to management api for PageServerApi scope
         (Scope::PageServerApi, Some(_)) => Ok(()), // access to tenant api using PageServerApi scope
-        (Scope::Admin | Scope::SafekeeperData | Scope::GenerationsApi, _) => Err(AuthError(
-            format!(
-                "JWT scope '{:?}' is ineligible for Pageserver auth",
-                claims.scope
-            )
-            .into(),
-        )),
+        (Scope::Admin | Scope::SafekeeperData | Scope::GenerationsApi | Scope::Scrubber, _) => {
+            Err(AuthError(
+                format!(
+                    "JWT scope '{:?}' is ineligible for Pageserver auth",
+                    claims.scope
+                )
+                .into(),
+            ))
+        }
     }
 }

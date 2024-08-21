@@ -71,8 +71,7 @@ a subdirectory for each version with naming convention `v{PG_VERSION}/`.
 Inside that dir, a `bin/postgres` binary should be present.
 `DEFAULT_PG_VERSION`: The version of Postgres to use,
 This is used to construct full path to the postgres binaries.
-Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION="14"`. Alternatively,
-you can use `--pg-version` argument.
+Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION=16`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
@@ -81,7 +80,7 @@ should go.
 Useful parameters and commands:
 
 `--preserve-database-files` to preserve pageserver (layer) and safekeer (segment) timeline files on disk
-after running a test suite. Such files might be large, so removed by default; but might be useful for debugging or creation of svg images with layer file contents.
+after running a test suite. Such files might be large, so removed by default; but might be useful for debugging or creation of svg images with layer file contents. If `NeonEnvBuilder#preserve_database_files` set to `True` for a particular test, the whole `repo` directory will be attached to Allure report (thus uploaded to S3) as `everything.tar.zst` for this test.
 
 Let stdout, stderr and `INFO` log messages go to the terminal instead of capturing them:
 `./scripts/pytest -s --log-cli-level=INFO ...`

@@ -32,6 +32,7 @@
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
 #include "utils/guc.h"
+#include "utils/guc_tables.h"
 #include "utils/wait_event.h"
 
 #include "extension_server.h"
@@ -46,6 +47,21 @@ void		_PG_init(void);
 
 static int	logical_replication_max_snap_files = 300;
 
+static int  running_xacts_overflow_policy;
+
+enum RunningXactsOverflowPolicies {
+	OP_IGNORE,
+	OP_SKIP,
+	OP_WAIT
+};
+
+static const struct config_enum_entry running_xacts_overflow_policies[] = {
+	{"ignore", OP_IGNORE, false},
+	{"skip", OP_SKIP, false},
+	{"wait", OP_WAIT, false},
+	{NULL, 0, false}
+};
+
 static void
 InitLogicalReplicationMonitor(void)
 {
@@ -53,10 +69,10 @@ InitLogicalReplicationMonitor(void)
 
 	DefineCustomIntVariable(
 							"neon.logical_replication_max_snap_files",
-							"Maximum allowed logical replication .snap files",
+							"Maximum allowed logical replication .snap files. When exceeded, slots are dropped until the limit is met. -1 disables the limit.",
 							NULL,
 							&logical_replication_max_snap_files,
-							300, 0, INT_MAX,
+							300, -1, INT_MAX,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
@@ -175,6 +191,13 @@ LogicalSlotsMonitorMain(Datum main_arg)
 	for (;;)
 	{
 		XLogRecPtr	cutoff_lsn;
+
+		/* In case of a SIGHUP, just reload the configuration. */
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
 
 		/*
 		 * If there are too many .snap files, just drop all logical slots to
@@ -414,6 +437,7 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 	restored_xids = (TransactionId *) palloc(max_xcnt * sizeof(TransactionId));
 	n_restored_xids = 0;
 	next_prepared_idx = 0;
+
 	for (TransactionId xid = from; xid != till;)
 	{
 		XLogRecPtr	xidlsn;
@@ -424,7 +448,7 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		/*
 		 * "Merge" the prepared transactions into the restored_xids array as
 		 * we go.  The prepared transactions array is sorted. This is mostly
-		 * a sanity check to ensure that all the prpeared transactions are
+		 * a sanity check to ensure that all the prepared transactions are
 		 * seen as in-progress. (There is a check after the loop that we didn't
 		 * miss any.)
 		 */
@@ -522,14 +546,23 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 			elog(LOG, "too many running xacts to restore from the CLOG; oldestXid=%u oldestActiveXid=%u nextXid %u",
 				 checkpoint->oldestXid, checkpoint->oldestActiveXid,
 				 XidFromFullTransactionId(checkpoint->nextXid));
-			goto fail;
+
+			switch (running_xacts_overflow_policy)
+			{
+				case OP_WAIT:
+					goto fail;
+				case OP_IGNORE:
+					goto success;
+				case OP_SKIP:
+					n_restored_xids = 0;
+					goto success;
+			}
 		}
 
 		restored_xids[n_restored_xids++] = xid;
 
 	skip:
 		TransactionIdAdvance(xid);
-		continue;
 	}
 
 	/* sanity check */
@@ -540,11 +573,13 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 		Assert(false);
 		goto fail;
 	}
-
+   success:
 	elog(LOG, "restored %d running xacts by scanning the CLOG; oldestXid=%u oldestActiveXid=%u nextXid %u",
 		 n_restored_xids, checkpoint->oldestXid, checkpoint->oldestActiveXid, XidFromFullTransactionId(checkpoint->nextXid));
 	*nxids = n_restored_xids;
 	*xids = restored_xids;
+	if (prepared_xids)
+		pfree(prepared_xids);
 	return true;
 
  fail:
@@ -555,6 +590,40 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 	if (prepared_xids)
 		pfree(prepared_xids);
 	return false;
+}
+
+
+/*
+ * pgbouncer is able to track GUCs reported by Postgres.
+ * But most parameters cannot be tracked this way. The only parameters that can be tracked are ones
+ * that Postgres reports to the client. Unfortunately `search_path` is not reported by Postgres:
+ * https://www.postgresql.org/message-id/flat/CAGECzQQ6xFcgrg%2Be0p9mCumtK362TiA6vTiiZKoYbS8OXggwuQ%40mail.gmail.com#be4bfd7a9cf1f0633bdb2d1790a0a1be
+ * This code sets GUC_REPORT flag for `search_path`making it possible to include it in
+ * pgbouncer's `track_extra_parameters` list.
+ *
+ * This code is inspired by how the Citus extension does this, see
+ * https://github.com/citusdata/citus/blob/2a263fe69a707d16ef24378f7650742386b0968f/src/backend/distributed/shared_library_init.c#L2694
+ */
+static void
+ReportSearchPath(void)
+{
+#if PG_VERSION_NUM >= 160000
+	int nGucs = 0;
+	struct config_generic **gucs = get_guc_variables(&nGucs);
+#else
+	struct config_generic **gucs = get_guc_variables();
+	int nGucs = GetNumConfigOptions();
+#endif
+
+	for (int i = 0; i < nGucs; i++)
+	{
+		struct config_generic *guc = (struct config_generic *) gucs[i];
+
+		if (strcmp(guc->name, "search_path") == 0)
+		{
+			guc->flags |= GUC_REPORT;
+		}
+	}
 }
 
 void
@@ -570,8 +639,9 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
-        WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	SlotFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitLogicalReplicationMonitor();
 
@@ -581,12 +651,26 @@ _PG_init(void)
 
 	restore_running_xacts_callback = RestoreRunningXactsFromClog;
 
+
+	DefineCustomEnumVariable(
+							"neon.running_xacts_overflow_policy",
+							"Action performed on snapshot overflow when restoring runnings xacts from CLOG",
+							NULL,
+							&running_xacts_overflow_policy,
+							OP_IGNORE,
+							running_xacts_overflow_policies,
+							PGC_POSTMASTER,
+							0,
+							NULL, NULL, NULL);
+
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the
 	 * extension was loaded will be removed.
 	 */
 	EmitWarningsOnPlaceholders("neon");
+
+	ReportSearchPath();
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);

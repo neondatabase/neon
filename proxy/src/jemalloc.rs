@@ -3,8 +3,8 @@ use std::marker::PhantomData;
 use measured::{
     label::NoLabels,
     metric::{
-        gauge::GaugeState, group::Encoding, group::MetricValue, name::MetricNameEncoder,
-        MetricEncoding, MetricFamilyEncoding, MetricType,
+        gauge::GaugeState, group::Encoding, name::MetricNameEncoder, MetricEncoding,
+        MetricFamilyEncoding, MetricType,
     },
     text::TextEncoder,
     LabelGroup, MetricGroup,
@@ -100,7 +100,7 @@ macro_rules! jemalloc_gauge {
                 enc: &mut TextEncoder<W>,
             ) -> Result<(), std::io::Error> {
                 if let Ok(v) = mib.read() {
-                    enc.write_metric_value(name, labels, MetricValue::Int(v as i64))?;
+                    GaugeState::new(v as i64).collect_into(&(), labels, name, enc)?;
                 }
                 Ok(())
             }

@@ -42,10 +42,9 @@ pub(super) enum ServerMessage<T> {
 
 impl<'a> ServerMessage<&'a str> {
     pub(super) fn to_reply(&self) -> BeMessage<'a> {
-        use BeAuthenticationSaslMessage::*;
         BeMessage::AuthenticationSasl(match self {
-            ServerMessage::Continue(s) => Continue(s.as_bytes()),
-            ServerMessage::Final(s) => Final(s.as_bytes()),
+            ServerMessage::Continue(s) => BeAuthenticationSaslMessage::Continue(s.as_bytes()),
+            ServerMessage::Final(s) => BeAuthenticationSaslMessage::Final(s.as_bytes()),
         })
     }
 }

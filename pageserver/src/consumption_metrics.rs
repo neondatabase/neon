@@ -1,5 +1,6 @@
 //! Periodically collect consumption metrics for all active tenants
 //! and push them to a HTTP endpoint.
+use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::size::CalculateSyntheticSizeError;
@@ -39,55 +40,73 @@ type RawMetric = (MetricsKey, (EventType, u64));
 /// for deduplication, but that is no longer needed.
 type Cache = HashMap<MetricsKey, (EventType, u64)>;
 
+pub async fn run(
+    conf: &'static PageServerConf,
+    tenant_manager: Arc<TenantManager>,
+    cancel: CancellationToken,
+) {
+    let Some(metric_collection_endpoint) = conf.metric_collection_endpoint.as_ref() else {
+        return;
+    };
+
+    let local_disk_storage = conf.workdir.join("last_consumption_metrics.json");
+
+    let metrics_ctx = RequestContext::todo_child(
+        TaskKind::MetricsCollection,
+        // This task itself shouldn't download anything.
+        // The actual size calculation does need downloads, and
+        // creates a child context with the right DownloadBehavior.
+        DownloadBehavior::Error,
+    );
+    let collect_metrics = BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+        "consumption metrics collection",
+        collect_metrics(
+            tenant_manager.clone(),
+            metric_collection_endpoint,
+            &conf.metric_collection_bucket,
+            conf.metric_collection_interval,
+            conf.id,
+            local_disk_storage,
+            cancel.clone(),
+            metrics_ctx,
+        )
+        .instrument(info_span!("metrics_collection")),
+    ));
+
+    let worker_ctx =
+        RequestContext::todo_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);
+    let synthetic_size_worker = BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
+        "synthetic size calculation",
+        calculate_synthetic_size_worker(
+            tenant_manager.clone(),
+            conf.synthetic_size_calculation_interval,
+            cancel.clone(),
+            worker_ctx,
+        )
+        .instrument(info_span!("synthetic_size_worker")),
+    ));
+
+    let (collect_metrics, synthetic_size_worker) =
+        futures::future::join(collect_metrics, synthetic_size_worker).await;
+    collect_metrics
+        .expect("unreachable: exit_on_panic_or_error would catch the panic and exit the process");
+    synthetic_size_worker
+        .expect("unreachable: exit_on_panic_or_error would catch the panic and exit the process");
+}
+
 /// Main thread that serves metrics collection
 #[allow(clippy::too_many_arguments)]
-pub async fn collect_metrics(
+async fn collect_metrics(
     tenant_manager: Arc<TenantManager>,
     metric_collection_endpoint: &Url,
     metric_collection_bucket: &Option<RemoteStorageConfig>,
     metric_collection_interval: Duration,
-    _cached_metric_collection_interval: Duration,
-    synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
     local_disk_storage: Utf8PathBuf,
     cancel: CancellationToken,
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
-    if _cached_metric_collection_interval != Duration::ZERO {
-        tracing::warn!(
-            "cached_metric_collection_interval is no longer used, please set it to zero."
-        )
-    }
-
-    // spin up background worker that caclulates tenant sizes
-    let worker_ctx =
-        ctx.detached_child(TaskKind::CalculateSyntheticSize, DownloadBehavior::Download);
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        TaskKind::CalculateSyntheticSize,
-        None,
-        None,
-        "synthetic size calculation",
-        false,
-        {
-            let tenant_manager = tenant_manager.clone();
-            async move {
-                calculate_synthetic_size_worker(
-                    tenant_manager,
-                    synthetic_size_calculation_interval,
-                    &cancel,
-                    &worker_ctx,
-                )
-                .instrument(info_span!("synthetic_size_worker"))
-                .await?;
-                Ok(())
-            }
-        },
-    );
-
     let path: Arc<Utf8PathBuf> = Arc::new(local_disk_storage);
-
-    let cancel = task_mgr::shutdown_token();
 
     let restore_and_reschedule = restore_and_reschedule(&path, metric_collection_interval);
 
@@ -103,7 +122,7 @@ pub async fn collect_metrics(
         .expect("Failed to create http client with timeout");
 
     let bucket_client = if let Some(bucket_config) = metric_collection_bucket {
-        match GenericRemoteStorage::from_config(bucket_config) {
+        match GenericRemoteStorage::from_config(bucket_config).await {
             Ok(client) => Some(client),
             Err(e) => {
                 // Non-fatal error: if we were given an invalid config, we will proceed
@@ -175,11 +194,9 @@ pub async fn collect_metrics(
             BackgroundLoopKind::ConsumptionMetricsCollectMetrics,
         );
 
-        let res = tokio::time::timeout_at(
-            started_at + metric_collection_interval,
-            task_mgr::shutdown_token().cancelled(),
-        )
-        .await;
+        let res =
+            tokio::time::timeout_at(started_at + metric_collection_interval, cancel.cancelled())
+                .await;
         if res.is_ok() {
             return Ok(());
         }
@@ -279,8 +296,8 @@ async fn reschedule(
 async fn calculate_synthetic_size_worker(
     tenant_manager: Arc<TenantManager>,
     synthetic_size_calculation_interval: Duration,
-    cancel: &CancellationToken,
-    ctx: &RequestContext,
+    cancel: CancellationToken,
+    ctx: RequestContext,
 ) -> anyhow::Result<()> {
     info!("starting calculate_synthetic_size_worker");
     scopeguard::defer! {
@@ -320,7 +337,7 @@ async fn calculate_synthetic_size_worker(
             // there is never any reason to exit calculate_synthetic_size_worker following any
             // return value -- we don't need to care about shutdown because no tenant is found when
             // pageserver is shut down.
-            calculate_and_log(&tenant, cancel, ctx).await;
+            calculate_and_log(&tenant, &cancel, &ctx).await;
         }
 
         crate::tenant::tasks::warn_when_period_overrun(

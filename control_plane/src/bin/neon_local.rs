@@ -15,13 +15,17 @@ use control_plane::local_env::{
 };
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
-use control_plane::storage_controller::StorageController;
+use control_plane::storage_controller::{
+    NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
+};
 use control_plane::{broker, local_env};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
-use pageserver_api::controller_api::{PlacementPolicy, TenantCreateRequest};
+use pageserver_api::controller_api::{
+    NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
+};
 use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
@@ -50,7 +54,7 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: &str = "15";
+const DEFAULT_PG_VERSION: &str = "16";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -1050,6 +1054,36 @@ fn get_start_timeout(args: &ArgMatches) -> &Duration {
     humantime_duration.as_ref()
 }
 
+fn storage_controller_start_args(args: &ArgMatches) -> NeonStorageControllerStartArgs {
+    let maybe_instance_id = args.get_one::<u8>("instance-id");
+
+    let base_port = args.get_one::<u16>("base-port");
+
+    if maybe_instance_id.is_some() && base_port.is_none() {
+        panic!("storage-controller start specificied instance-id but did not provide base-port");
+    }
+
+    let start_timeout = args
+        .get_one::<humantime::Duration>("start-timeout")
+        .expect("invalid value for start-timeout");
+
+    NeonStorageControllerStartArgs {
+        instance_id: maybe_instance_id.copied().unwrap_or(1),
+        base_port: base_port.copied(),
+        start_timeout: *start_timeout,
+    }
+}
+
+fn storage_controller_stop_args(args: &ArgMatches) -> NeonStorageControllerStopArgs {
+    let maybe_instance_id = args.get_one::<u8>("instance-id");
+    let immediate = args.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
+
+    NeonStorageControllerStopArgs {
+        instance_id: maybe_instance_id.copied().unwrap_or(1),
+        immediate,
+    }
+}
+
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
@@ -1111,19 +1145,14 @@ async fn handle_storage_controller(
     let svc = StorageController::from_env(env);
     match sub_match.subcommand() {
         Some(("start", start_match)) => {
-            if let Err(e) = svc.start(get_start_timeout(start_match)).await {
+            if let Err(e) = svc.start(storage_controller_start_args(start_match)).await {
                 eprintln!("start failed: {e}");
                 exit(1);
             }
         }
 
         Some(("stop", stop_match)) => {
-            let immediate = stop_match
-                .get_one::<String>("stop-mode")
-                .map(|s| s.as_str())
-                == Some("immediate");
-
-            if let Err(e) = svc.stop(immediate).await {
+            if let Err(e) = svc.stop(storage_controller_stop_args(stop_match)).await {
                 eprintln!("stop failed: {}", e);
                 exit(1);
             }
@@ -1226,7 +1255,12 @@ async fn handle_start_all(
     // Only start the storage controller if the pageserver is configured to need it
     if env.control_plane_api.is_some() {
         let storage_controller = StorageController::from_env(env);
-        if let Err(e) = storage_controller.start(retry_timeout).await {
+        if let Err(e) = storage_controller
+            .start(NeonStorageControllerStartArgs::with_default_instance_id(
+                (*retry_timeout).into(),
+            ))
+            .await
+        {
             eprintln!("storage_controller start failed: {:#}", e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1250,7 +1284,68 @@ async fn handle_start_all(
             exit(1);
         }
     }
+
+    neon_start_status_check(env, retry_timeout).await?;
+
     Ok(())
+}
+
+async fn neon_start_status_check(
+    env: &local_env::LocalEnv,
+    retry_timeout: &Duration,
+) -> anyhow::Result<()> {
+    const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+    const NOTICE_AFTER_RETRIES: Duration = Duration::from_secs(5);
+
+    if env.control_plane_api.is_none() {
+        return Ok(());
+    }
+
+    let storcon = StorageController::from_env(env);
+
+    let retries = retry_timeout.as_millis() / RETRY_INTERVAL.as_millis();
+    let notice_after_retries = retry_timeout.as_millis() / NOTICE_AFTER_RETRIES.as_millis();
+
+    println!("\nRunning neon status check");
+
+    for retry in 0..retries {
+        if retry == notice_after_retries {
+            println!("\nNeon status check has not passed yet, continuing to wait")
+        }
+
+        let mut passed = true;
+        let mut nodes = storcon.node_list().await?;
+        let mut pageservers = env.pageservers.clone();
+
+        if nodes.len() != pageservers.len() {
+            continue;
+        }
+
+        nodes.sort_by_key(|ps| ps.id);
+        pageservers.sort_by_key(|ps| ps.id);
+
+        for (idx, pageserver) in pageservers.iter().enumerate() {
+            let node = &nodes[idx];
+            if node.id != pageserver.id {
+                passed = false;
+                break;
+            }
+
+            if !matches!(node.availability, NodeAvailabilityWrapper::Active) {
+                passed = false;
+                break;
+            }
+        }
+
+        if passed {
+            println!("\nNeon started and passed status check");
+            return Ok(());
+        }
+
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+
+    anyhow::bail!("\nNeon passed status check")
 }
 
 async fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
@@ -1295,10 +1390,21 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         eprintln!("neon broker stop failed: {e:#}");
     }
 
-    if env.control_plane_api.is_some() {
+    // Stop all storage controller instances. In the most common case there's only one,
+    // but iterate though the base data directory in order to discover the instances.
+    let storcon_instances = env
+        .storage_controller_instances()
+        .await
+        .expect("Must inspect data dir");
+    for (instance_id, _instance_dir_path) in storcon_instances {
         let storage_controller = StorageController::from_env(env);
-        if let Err(e) = storage_controller.stop(immediate).await {
-            eprintln!("storage controller stop failed: {e:#}");
+        let stop_args = NeonStorageControllerStopArgs {
+            instance_id,
+            immediate,
+        };
+
+        if let Err(e) = storage_controller.stop(stop_args).await {
+            eprintln!("Storage controller instance {instance_id} stop failed: {e:#}");
         }
     }
 }
@@ -1438,6 +1544,18 @@ fn cli() -> Command {
         .action(ArgAction::SetTrue)
         .required(false);
 
+    let instance_id = Arg::new("instance-id")
+        .long("instance-id")
+        .help("Identifier used to distinguish storage controller instances (default 1)")
+        .value_parser(value_parser!(u8))
+        .required(false);
+
+    let base_port = Arg::new("base-port")
+        .long("base-port")
+        .help("Base port for the storage controller instance idenfified by instance-id (defaults to pagserver cplane api)")
+        .value_parser(value_parser!(u16))
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1546,9 +1664,12 @@ fn cli() -> Command {
                 .arg_required_else_help(true)
                 .about("Manage storage_controller")
                 .subcommand(Command::new("start").about("Start storage controller")
-                            .arg(timeout_arg.clone()))
+                            .arg(timeout_arg.clone())
+                            .arg(instance_id.clone())
+                            .arg(base_port))
                 .subcommand(Command::new("stop").about("Stop storage controller")
-                            .arg(stop_mode_arg.clone()))
+                            .arg(stop_mode_arg.clone())
+                            .arg(instance_id))
         )
         .subcommand(
             Command::new("safekeeper")

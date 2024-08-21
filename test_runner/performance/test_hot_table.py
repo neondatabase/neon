@@ -16,8 +16,8 @@ from pytest_lazyfixture import lazy_fixture
 )
 def test_hot_table(env: PgCompare):
     # Update a small table many times, then measure read performance
-    num_rows = 100000  # Slightly larger than shared buffers size  TODO validate
-    num_writes = 1000000
+    num_rows = 100000  # initial table size only about 4 MB
+    num_writes = 10000000  # write approximately 349 MB blocks > 128 MB shared_buffers
     num_reads = 10
 
     with closing(env.pg.connect()) as conn:
@@ -28,8 +28,21 @@ def test_hot_table(env: PgCompare):
             with env.record_duration("write"):
                 cur.execute("create table t (i integer primary key);")
                 cur.execute(f"insert into t values (generate_series(1,{num_rows}));")
-                for i in range(num_writes):
-                    cur.execute(f"update t set i = {i + num_rows} WHERE i = {i};")
+                # PL/pgSQL block to perform updates (and avoid latency between client and server)
+                # - however a single staement should not run into a timeout so we increase it
+                cur.execute("SET statement_timeout = '4h';")
+                cur.execute(
+                    f"""
+                DO $$
+                DECLARE
+                    r integer := {num_rows};
+                BEGIN
+                    FOR j IN 1..{num_writes} LOOP
+                        UPDATE t SET i = j + r WHERE i = j;
+                    END LOOP;
+                END $$;
+                """
+                )
 
             # Read the table
             with env.record_duration("read"):

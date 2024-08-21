@@ -270,7 +270,7 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
                         .inc(ThreadPoolWorkerId(index));
 
                     // skip for now
-                    worker.push(job)
+                    worker.push(job);
                 }
             }
 
@@ -316,6 +316,6 @@ mod tests {
             10, 114, 73, 188, 140, 222, 196, 156, 214, 184, 79, 157, 119, 242, 16, 31, 53, 242,
             178, 43, 95, 8, 225, 182, 122, 40, 219, 21, 89, 147, 64, 140,
         ];
-        assert_eq!(actual, expected)
+        assert_eq!(actual, expected);
     }
 }

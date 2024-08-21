@@ -18,21 +18,25 @@ const STORAGE_TOKEN_ALGORITHM: Algorithm = Algorithm::EdDSA;
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
-    // Provides access to all data for a specific tenant (specified in `struct Claims` below)
+    /// Provides access to all data for a specific tenant (specified in `struct Claims` below)
     // TODO: join these two?
     Tenant,
-    // Provides blanket access to all tenants on the pageserver plus pageserver-wide APIs.
-    // Should only be used e.g. for status check/tenant creation/list.
+    /// Provides blanket access to all tenants on the pageserver plus pageserver-wide APIs.
+    /// Should only be used e.g. for status check/tenant creation/list.
     PageServerApi,
-    // Provides blanket access to all data on the safekeeper plus safekeeper-wide APIs.
-    // Should only be used e.g. for status check.
-    // Currently also used for connection from any pageserver to any safekeeper.
+    /// Provides blanket access to all data on the safekeeper plus safekeeper-wide APIs.
+    /// Should only be used e.g. for status check.
+    /// Currently also used for connection from any pageserver to any safekeeper.
     SafekeeperData,
-    // The scope used by pageservers in upcalls to storage controller and cloud control plane
+    /// The scope used by pageservers in upcalls to storage controller and cloud control plane
     #[serde(rename = "generations_api")]
     GenerationsApi,
-    // Allows access to control plane managment API and some storage controller endpoints.
+    /// Allows access to control plane managment API and some storage controller endpoints.
     Admin,
+
+    /// Allows access to storage controller APIs used by the scrubber, to interrogate the state
+    /// of a tenant & post scrub results.
+    Scrubber,
 }
 
 /// JWT payload. See docs/authentication.md for the format

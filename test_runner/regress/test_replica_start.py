@@ -210,7 +210,11 @@ def test_replica_start_wait_subxids_finish(neon_simple_env: NeonEnv):
     # Start it in a separate thread, so that we can do other stuff while it's
     # blocked waiting for the startup to finish.
     wait_for_last_flush_lsn(env, primary, env.initial_tenant, env.initial_timeline)
-    secondary = env.endpoints.new_replica(origin=primary, endpoint_id="secondary")
+    secondary = env.endpoints.new_replica(
+        origin=primary,
+        endpoint_id="secondary",
+        config_lines=["neon.running_xacts_overflow_policy='wait'"],
+    )
     start_secondary_thread = threading.Thread(target=secondary.start)
     start_secondary_thread.start()
 
@@ -644,3 +648,43 @@ def test_replica_start_with_prepared_xacts_with_many_subxacts(neon_simple_env: N
     wait_replica_caughtup(primary, secondary)
     secondary_cur.execute("select count(*) from t")
     assert secondary_cur.fetchone() == (200001,)
+
+
+def test_replica_start_with_too_many_unused_xids(neon_simple_env: NeonEnv):
+    """
+    Test the CLOG-scanning mechanism at hot standby startup in the presence of
+    large number of unsued XIDs, caused by  XID alignment and frequent primary restarts
+    """
+    n_restarts = 50
+
+    # Initialize the primary and a test table
+    env = neon_simple_env
+    primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
+    with primary.cursor() as primary_cur:
+        primary_cur.execute("create table t(pk serial primary key, payload integer)")
+
+    for _ in range(n_restarts):
+        with primary.cursor() as primary_cur:
+            primary_cur.execute("insert into t (payload) values (0)")
+        # restart primary
+        primary.stop("immediate")
+        primary.start()
+
+    # Wait for the WAL to be flushed
+    wait_for_last_flush_lsn(env, primary, env.initial_tenant, env.initial_timeline)
+
+    # stop primary to check that we can start replica without it
+    primary.stop(mode="immediate")
+
+    # Create a replica. It should start up normally, because of ignore policy
+    # mechanism.
+    secondary = env.endpoints.new_replica_start(
+        origin=primary,
+        endpoint_id="secondary",
+        config_lines=["neon.running_xacts_overflow_policy='ignore'"],
+    )
+
+    # Check that replica see all changes
+    with secondary.cursor() as secondary_cur:
+        secondary_cur.execute("select count(*) from t")
+        assert secondary_cur.fetchone() == (n_restarts,)

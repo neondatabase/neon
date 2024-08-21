@@ -14,7 +14,7 @@ picked tenant (which requested on-demand activation) for around 30 seconds
 during the restart at 2024-04-03 16:37 UTC.
 
 Note that lots of shutdowns on loaded pageservers do not finish within the
-[10 second systemd enforced timeout](https://github.com/neondatabase/aws/blob/0a5280b383e43c063d43cbf87fa026543f6d6ad4/.github/ansible/systemd/pageserver.service#L16). This means we are shutting down without flushing ephemeral layers
+[10 second systemd enforced timeout](https://github.com/neondatabase/infra/blob/0a5280b383e43c063d43cbf87fa026543f6d6ad4/.github/ansible/systemd/pageserver.service#L16). This means we are shutting down without flushing ephemeral layers
 and have to reingest data in order to serve requests after restarting, potentially making first request latencies worse.
 
 This problem is not yet very acutely felt in storage controller managed pageservers since

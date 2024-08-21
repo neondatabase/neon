@@ -158,7 +158,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        _ctx: &mut RequestMonitoring,
+        _ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         Ok(CachedRoleSecret::new_uncached(
@@ -168,7 +168,7 @@ impl super::Api for Api {
 
     async fn get_allowed_ips_and_secret(
         &self,
-        _ctx: &mut RequestMonitoring,
+        _ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         Ok((
@@ -182,7 +182,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        _ctx: &mut RequestMonitoring,
+        _ctx: &RequestMonitoring,
         _user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         self.do_wake_compute().map_ok(Cached::new_uncached).await

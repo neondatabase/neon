@@ -29,16 +29,16 @@ pub(super) struct HeatMapTenant {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HeatMapTimeline {
     #[serde_as(as = "DisplayFromStr")]
-    pub(super) timeline_id: TimelineId,
+    pub(crate) timeline_id: TimelineId,
 
-    pub(super) layers: Vec<HeatMapLayer>,
+    pub(crate) layers: Vec<HeatMapLayer>,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HeatMapLayer {
-    pub(super) name: LayerName,
-    pub(super) metadata: LayerFileMetadata,
+    pub(crate) name: LayerName,
+    pub(crate) metadata: LayerFileMetadata,
 
     #[serde_as(as = "TimestampSeconds<i64>")]
     pub(super) access_time: SystemTime,

@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 import time
+import urllib.parse
 from typing import Any, List, Optional, Tuple
 
 import psycopg2
@@ -51,25 +52,6 @@ def test_proxy_select_1(static_proxy: NeonProxy):
     # with SNI
     out = static_proxy.safe_psql("select 42", host="generic-project-name.localtest.me")
     assert out[0][0] == 42
-
-
-def test_proxy_server_params(static_proxy: NeonProxy):
-    """
-    Test that server params are passing through to postgres
-    """
-
-    out = static_proxy.safe_psql(
-        "select to_json('0 seconds'::interval)", options="-c intervalstyle=iso_8601"
-    )
-    assert out[0][0] == "PT0S"
-    out = static_proxy.safe_psql(
-        "select to_json('0 seconds'::interval)", options="-c intervalstyle=sql_standard"
-    )
-    assert out[0][0] == "0"
-    out = static_proxy.safe_psql(
-        "select to_json('0 seconds'::interval)", options="-c intervalstyle=postgres"
-    )
-    assert out[0][0] == "00:00:00"
 
 
 def test_password_hack(static_proxy: NeonProxy):
@@ -292,6 +274,31 @@ def test_sql_over_http(static_proxy: NeonProxy):
     res = q("drop table t")
     assert res["command"] == "DROP"
     assert res["rowCount"] is None
+
+
+def test_sql_over_http_db_name_with_space(static_proxy: NeonProxy):
+    db = "db with spaces"
+    static_proxy.safe_psql_many(
+        (
+            f'create database "{db}"',
+            "create role http with login password 'http' superuser",
+        )
+    )
+
+    def q(sql: str, params: Optional[List[Any]] = None) -> Any:
+        params = params or []
+        connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/{urllib.parse.quote(db)}"
+        response = requests.post(
+            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+            data=json.dumps({"query": sql, "params": params}),
+            headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
+            verify=str(static_proxy.test_output_dir / "proxy.crt"),
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    rows = q("select 42 as answer")["rows"]
+    assert rows == [{"answer": 42}]
 
 
 def test_sql_over_http_output_options(static_proxy: NeonProxy):

@@ -46,7 +46,7 @@ pub trait ConnectMechanism {
     type Error: From<Self::ConnectError>;
     async fn connect_once(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError>;
@@ -58,7 +58,7 @@ pub trait ConnectMechanism {
 pub trait ComputeConnectBackend {
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
 
     fn get_keys(&self) -> Option<&ComputeCredentialKeys>;
@@ -81,7 +81,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     async fn connect_once(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
@@ -98,7 +98,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
 /// Try to connect to the compute node, retrying if necessary.
 #[tracing::instrument(skip_all)]
 pub async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     mechanism: &M,
     user_info: &B,
     allow_self_signed_compute: bool,
@@ -126,7 +126,7 @@ where
         .await
     {
         Ok(res) => {
-            ctx.latency_timer.success();
+            ctx.success();
             Metrics::get().proxy.retries_metric.observe(
                 RetriesMetricGroup {
                     outcome: ConnectOutcome::Success,
@@ -178,7 +178,7 @@ where
             .await
         {
             Ok(res) => {
-                ctx.latency_timer.success();
+                ctx.success();
                 Metrics::get().proxy.retries_metric.observe(
                     RetriesMetricGroup {
                         outcome: ConnectOutcome::Success,
@@ -209,9 +209,7 @@ where
         let wait_duration = retry_after(num_retries, connect_to_compute_retry_config);
         num_retries += 1;
 
-        let pause = ctx
-            .latency_timer
-            .pause(crate::metrics::Waiting::RetryTimeout);
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::RetryTimeout);
         time::sleep(wait_duration).await;
         drop(pause);
     }

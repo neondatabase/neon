@@ -56,7 +56,7 @@ impl<'de, Id: InternId> serde::de::Deserialize<'de> for InternedString<Id> {
         impl<'de, Id: InternId> serde::de::Visitor<'de> for Visitor<Id> {
             type Value = InternedString<Id>;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a string")
             }
 

@@ -111,7 +111,7 @@ impl TryFrom<&TimelineMetadataBodyV2> for TimelineMetadataHeader {
 #[error("re-serializing for crc32 failed")]
 struct Crc32CalculationFailed(#[source] utils::bin_ser::SerializeError);
 
-const METADATA_HDR_SIZE: usize = std::mem::size_of::<TimelineMetadataHeader>();
+const METADATA_HDR_SIZE: usize = size_of::<TimelineMetadataHeader>();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TimelineMetadataBodyV2 {
@@ -285,12 +285,15 @@ impl TimelineMetadata {
     }
 
     /// When reparenting, the `ancestor_lsn` does not change.
+    ///
+    /// Returns true if anything was changed.
     pub fn reparent(&mut self, timeline: &TimelineId) {
         assert!(self.body.ancestor_timeline.is_some());
         // no assertion for redoing this: it's fine, we may have to repeat this multiple times over
         self.body.ancestor_timeline = Some(*timeline);
     }
 
+    /// Returns true if anything was changed
     pub fn detach_from_ancestor(&mut self, branchpoint: &(TimelineId, Lsn)) {
         if let Some(ancestor) = self.body.ancestor_timeline {
             assert_eq!(ancestor, branchpoint.0);
@@ -562,7 +565,7 @@ mod tests {
         );
         let expected_bytes = vec![
             /* TimelineMetadataHeader */
-            4, 37, 101, 34, 0, 70, 0, 4, // checksum, size, format_version (4 + 2 + 2)
+            74, 104, 158, 105, 0, 70, 0, 4, // checksum, size, format_version (4 + 2 + 2)
             /* TimelineMetadataBodyV2 */
             0, 0, 0, 0, 0, 0, 2, 0, // disk_consistent_lsn (8 bytes)
             1, 0, 0, 0, 0, 0, 0, 1, 0, // prev_record_lsn (9 bytes)
@@ -571,7 +574,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, // ancestor_lsn (8 bytes)
             0, 0, 0, 0, 0, 0, 0, 0, // latest_gc_cutoff_lsn (8 bytes)
             0, 0, 0, 0, 0, 0, 0, 0, // initdb_lsn (8 bytes)
-            0, 0, 0, 15, // pg_version (4 bytes)
+            0, 0, 0, 16, // pg_version (4 bytes)
             /* padding bytes */
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

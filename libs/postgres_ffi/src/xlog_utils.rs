@@ -42,9 +42,9 @@ pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_REM_LEN_OFFS: usize = 2 + 2 + 4 + 8;
 pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
 
-pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = std::mem::size_of::<XLogPageHeaderData>();
-pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = std::mem::size_of::<XLogLongPageHeaderData>();
-pub const XLOG_SIZE_OF_XLOG_RECORD: usize = std::mem::size_of::<XLogRecord>();
+pub const XLOG_SIZE_OF_XLOG_SHORT_PHD: usize = size_of::<XLogPageHeaderData>();
+pub const XLOG_SIZE_OF_XLOG_LONG_PHD: usize = size_of::<XLogLongPageHeaderData>();
+pub const XLOG_SIZE_OF_XLOG_RECORD: usize = size_of::<XLogRecord>();
 #[allow(clippy::identity_op)]
 pub const SIZE_OF_XLOG_RECORD_DATA_HEADER_SHORT: usize = 1 * 2;
 
@@ -311,7 +311,7 @@ impl XLogLongPageHeaderData {
     }
 }
 
-pub const SIZEOF_CHECKPOINT: usize = std::mem::size_of::<CheckPoint>();
+pub const SIZEOF_CHECKPOINT: usize = size_of::<CheckPoint>();
 
 impl CheckPoint {
     pub fn encode(&self) -> Result<Bytes, SerializeError> {

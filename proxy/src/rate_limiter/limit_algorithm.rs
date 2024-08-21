@@ -237,7 +237,7 @@ impl Token {
     }
 
     pub fn release(mut self, outcome: Outcome) {
-        self.release_mut(Some(outcome))
+        self.release_mut(Some(outcome));
     }
 
     pub fn release_mut(&mut self, outcome: Option<Outcome>) {
@@ -249,7 +249,7 @@ impl Token {
 
 impl Drop for Token {
     fn drop(&mut self) {
-        self.release_mut(None)
+        self.release_mut(None);
     }
 }
 

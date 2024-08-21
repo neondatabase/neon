@@ -68,7 +68,7 @@ impl EndpointsCache {
             ready: AtomicBool::new(false),
         }
     }
-    pub async fn is_valid(&self, ctx: &mut RequestMonitoring, endpoint: &EndpointId) -> bool {
+    pub async fn is_valid(&self, ctx: &RequestMonitoring, endpoint: &EndpointId) -> bool {
         if !self.ready.load(Ordering::Acquire) {
             return true;
         }

@@ -98,7 +98,7 @@ impl ConnectionWithCredentialsProvider {
         info!("Establishing a new connection...");
         self.con = None;
         if let Some(f) = self.refresh_token_task.take() {
-            f.abort()
+            f.abort();
         }
         let mut con = self
             .get_client()
@@ -178,7 +178,7 @@ impl ConnectionWithCredentialsProvider {
         credentials_provider: Arc<CredentialsProvider>,
     ) -> anyhow::Result<()> {
         let (user, password) = credentials_provider.provide_credentials().await?;
-        redis::cmd("AUTH")
+        let _: () = redis::cmd("AUTH")
             .arg(user)
             .arg(password)
             .query_async(con)

@@ -21,6 +21,7 @@ pub mod json_ctrl;
 pub mod metrics;
 pub mod patch_control_file;
 pub mod pull_timeline;
+pub mod rate_limit;
 pub mod receive_wal;
 pub mod recovery;
 pub mod remove_wal;
@@ -53,6 +54,12 @@ pub mod defaults {
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
     pub const DEFAULT_PARTIAL_BACKUP_CONCURRENCY: &str = "5";
+    pub const DEFAULT_EVICTION_CONCURRENCY: usize = 2;
+
+    // By default, our required residency before eviction is the same as the period that passes
+    // before uploading a partial segment, so that in normal operation the eviction can happen
+    // as soon as we have done the partial segment upload.
+    pub const DEFAULT_EVICTION_MIN_RESIDENT: &str = DEFAULT_PARTIAL_BACKUP_TIMEOUT;
 }
 
 #[derive(Debug, Clone)]
@@ -86,13 +93,13 @@ pub struct SafeKeeperConf {
     pub sk_auth_token: Option<SecretString>,
     pub current_thread_runtime: bool,
     pub walsenders_keep_horizon: bool,
-    pub partial_backup_enabled: bool,
     pub partial_backup_timeout: Duration,
     pub disable_periodic_broker_push: bool,
     pub enable_offload: bool,
     pub delete_offloaded_wal: bool,
     pub control_file_save_interval: Duration,
     pub partial_backup_concurrency: usize,
+    pub eviction_min_resident: Duration,
 }
 
 impl SafeKeeperConf {
@@ -129,13 +136,13 @@ impl SafeKeeperConf {
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,
             walsenders_keep_horizon: false,
-            partial_backup_enabled: false,
             partial_backup_timeout: Duration::from_secs(0),
             disable_periodic_broker_push: false,
             enable_offload: false,
             delete_offloaded_wal: false,
             control_file_save_interval: Duration::from_secs(1),
             partial_backup_concurrency: 1,
+            eviction_min_resident: Duration::ZERO,
         }
     }
 }
@@ -166,28 +173,10 @@ pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create broker runtime")
 });
 
-pub static WAL_REMOVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("WAL remover")
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
-});
-
 pub static WAL_BACKUP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("WAL backup worker")
         .enable_all()
         .build()
         .expect("Failed to create WAL backup runtime")
-});
-
-pub static METRICS_SHIFTER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("metric shifter")
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
 });

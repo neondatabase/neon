@@ -74,6 +74,15 @@ pub fn parse_query_param<E: fmt::Display, T: FromStr<Err = E>>(
         .transpose()
 }
 
+pub fn must_parse_query_param<E: fmt::Display, T: FromStr<Err = E>>(
+    request: &Request<Body>,
+    param_name: &str,
+) -> Result<T, ApiError> {
+    parse_query_param(request, param_name)?.ok_or_else(|| {
+        ApiError::BadRequest(anyhow!("no {param_name} specified in query parameters"))
+    })
+}
+
 pub async fn ensure_no_body(request: &mut Request<Body>) -> Result<(), ApiError> {
     match request.body_mut().data().await {
         Some(_) => Err(ApiError::BadRequest(anyhow!("Unexpected request body"))),

@@ -2,13 +2,17 @@ import concurrent.futures
 import random
 import time
 from collections import defaultdict
-from typing import Any, Dict
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PageserverAvailability,
+    PageserverSchedulingPolicy,
+)
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
 
@@ -19,51 +23,14 @@ def get_consistent_node_shard_counts(env: NeonEnv, total_shards) -> defaultdict[
     This function takes into account the intersection of the intent and the observed state.
     If they do not match, it asserts out.
     """
-    tenants = env.storage_controller.tenant_list()
-
-    intent = dict()
-    observed = dict()
-
-    tenant_placement: defaultdict[str, Dict[str, Any]] = defaultdict(
-        lambda: {
-            "observed": {"attached": None, "secondary": []},
-            "intent": {"attached": None, "secondary": []},
-        }
-    )
-
-    for t in tenants:
-        for node_id, loc_state in t["observed"]["locations"].items():
-            if (
-                loc_state is not None
-                and "conf" in loc_state
-                and loc_state["conf"] is not None
-                and loc_state["conf"]["mode"]
-                in set(["AttachedSingle", "AttachedMulti", "AttachedStale"])
-            ):
-                observed[t["tenant_shard_id"]] = int(node_id)
-                tenant_placement[t["tenant_shard_id"]]["observed"]["attached"] = int(node_id)
-
-            if (
-                loc_state is not None
-                and "conf" in loc_state
-                and loc_state["conf"] is not None
-                and loc_state["conf"]["mode"] == "Secondary"
-            ):
-                tenant_placement[t["tenant_shard_id"]]["observed"]["secondary"].append(int(node_id))
-
-        if "attached" in t["intent"]:
-            intent[t["tenant_shard_id"]] = t["intent"]["attached"]
-            tenant_placement[t["tenant_shard_id"]]["intent"]["attached"] = t["intent"]["attached"]
-
-        if "secondary" in t["intent"]:
-            tenant_placement[t["tenant_shard_id"]]["intent"]["secondary"] += t["intent"][
-                "secondary"
-            ]
-
+    tenant_placement = env.storage_controller.get_tenants_placement()
     log.info(f"{tenant_placement=}")
 
     matching = {
-        tid: intent[tid] for tid in observed if tid in intent and intent[tid] == observed[tid]
+        tid: tenant_placement[tid]["intent"]["attached"]
+        for tid in tenant_placement
+        if tenant_placement[tid]["intent"]["attached"]
+        == tenant_placement[tid]["observed"]["attached"]
     }
     assert len(matching) == total_shards
 
@@ -106,7 +73,8 @@ def test_storage_controller_many_tenants(
         # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
         # TODO: tune this down as restarts get faster (https://github.com/neondatabase/neon/pull/7553), to
         # guard against regressions in restart time.
-        "max_unavailable": "300s"
+        "max_offline": "30s",
+        "max_warming_up": "300s",
     }
     neon_env_builder.control_plane_compute_hook_api = (
         compute_reconfigure_listener.control_plane_compute_hook_api
@@ -211,7 +179,11 @@ def test_storage_controller_many_tenants(
                 # A reconciler operation: migrate a shard.
                 shard_number = rng.randint(0, shard_count - 1)
                 tenant_shard_id = TenantShardId(tenant_id, shard_number, shard_count)
-                dest_ps_id = rng.choice([ps.id for ps in env.pageservers])
+
+                # Migrate it to its secondary location
+                desc = env.storage_controller.tenant_describe(tenant_id)
+                dest_ps_id = desc["shards"][shard_number]["node_secondary"][0]
+
                 f = executor.submit(
                     env.storage_controller.tenant_shard_migrate, tenant_shard_id, dest_ps_id
                 )
@@ -225,7 +197,11 @@ def test_storage_controller_many_tenants(
         for f in futs:
             f.result()
 
-    # Consistency check is safe here: all the previous operations waited for reconcile before completing
+    # Some of the operations above (notably migrations) might leave the controller in a state where it has
+    # some work to do, for example optimizing shard placement after we do a random migration. Wait for the system
+    # to reach a quiescent state before doing following checks.
+    env.storage_controller.reconcile_until_idle()
+
     env.storage_controller.consistency_check()
     check_memory()
 
@@ -274,7 +250,11 @@ def test_storage_controller_many_tenants(
         )
 
         env.storage_controller.poll_node_status(
-            ps.id, "PauseForRestart", max_attempts=24, backoff=5
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
+            max_attempts=24,
+            backoff=5,
         )
 
         shard_counts = get_consistent_node_shard_counts(env, total_shards)
@@ -285,12 +265,24 @@ def test_storage_controller_many_tenants(
         assert sum(shard_counts.values()) == total_shards
 
         ps.restart()
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=24, backoff=1)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
+            max_attempts=24,
+            backoff=1,
+        )
 
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_fill(ps_id), ps.id, max_attempts=3, backoff=2
         )
-        env.storage_controller.poll_node_status(ps.id, "Active", max_attempts=24, backoff=5)
+        env.storage_controller.poll_node_status(
+            ps.id,
+            PageserverAvailability.ACTIVE,
+            PageserverSchedulingPolicy.ACTIVE,
+            max_attempts=24,
+            backoff=5,
+        )
 
         shard_counts = get_consistent_node_shard_counts(env, total_shards)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")

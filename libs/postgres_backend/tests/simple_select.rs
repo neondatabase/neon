@@ -3,13 +3,14 @@ use once_cell::sync::Lazy;
 use postgres_backend::{AuthType, Handler, PostgresBackend, QueryError};
 use pq_proto::{BeMessage, RowDescriptor};
 use std::io::Cursor;
-use std::{future, sync::Arc};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{Config, NoTls, SimpleQueryMessage};
 use tokio_postgres_rustls::MakeRustlsConnect;
+use tokio_util::sync::CancellationToken;
 
 // generate client, server test streams
 async fn make_tcp_pair() -> (TcpStream, TcpStream) {
@@ -50,7 +51,7 @@ async fn simple_select() {
 
     tokio::spawn(async move {
         let mut handler = TestHandler {};
-        pgbackend.run(&mut handler, future::pending::<()>).await
+        pgbackend.run(&mut handler, &CancellationToken::new()).await
     });
 
     let conf = Config::new();
@@ -102,7 +103,7 @@ async fn simple_select_ssl() {
 
     tokio::spawn(async move {
         let mut handler = TestHandler {};
-        pgbackend.run(&mut handler, future::pending::<()>).await
+        pgbackend.run(&mut handler, &CancellationToken::new()).await
     });
 
     let client_cfg = rustls::ClientConfig::builder()

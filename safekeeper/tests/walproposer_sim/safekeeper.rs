@@ -181,13 +181,13 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         sk_auth_token: None,
         current_thread_runtime: false,
         walsenders_keep_horizon: false,
-        partial_backup_enabled: false,
         partial_backup_timeout: Duration::from_secs(0),
         disable_periodic_broker_push: false,
         enable_offload: false,
         delete_offloaded_wal: false,
         control_file_save_interval: Duration::from_secs(1),
         partial_backup_concurrency: 1,
+        eviction_min_resident: Duration::ZERO,
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;

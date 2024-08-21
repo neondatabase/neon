@@ -13,7 +13,10 @@ from fixtures.utils import wait_until
 # running.
 def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
+
+    # We inject a delay of 15 seconds for tenant activation below.
+    # Hence, bump the max delay here to not skip over the activation.
+    neon_env_builder.pageserver_config_override = 'background_task_maximum_delay="20s"'
 
     env = neon_env_builder.init_start()
 
@@ -70,7 +73,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     # pageserver does if a compute node connects and sends a request for the tenant
     # while it's still in Loading state. (It waits for the loading to finish, and then
     # processes the request.)
-    tenant_load_delay_ms = 5000
+    tenant_load_delay_ms = 15000
     env.pageserver.stop()
     env.pageserver.start(
         extra_env_vars={"FAILPOINTS": f"before-attaching-tenant=return({tenant_load_delay_ms})"}
@@ -156,8 +159,9 @@ def test_pageserver_chaos(
     if build_type == "debug":
         pytest.skip("times out in debug builds")
 
+    # same rationale as with the immediate stop; we might leave orphan layers behind.
+    neon_env_builder.disable_scrub_on_exit()
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
 
@@ -218,3 +222,11 @@ def test_pageserver_chaos(
         # Check that all the updates are visible
         num_updates = endpoint.safe_psql("SELECT sum(updates) FROM foo")[0][0]
         assert num_updates == i * 100000
+
+    # currently pageserver cannot tolerate the fact that "s3" goes away, and if
+    # we succeeded in a compaction before shutdown, there might be a lot of
+    # uploads pending, certainly more than what we can ingest with MOCK_S3
+    #
+    # so instead, do a fast shutdown for this one test.
+    # See https://github.com/neondatabase/neon/issues/8709
+    env.stop(immediate=True)

@@ -44,7 +44,7 @@ If you need to modify the database schema, here’s how to create a migration:
 - Use `diesel migration generate <name>` to create a new migration
 - Populate the SQL files in the `migrations/` subdirectory
 - Use `DATABASE_URL=... diesel migration run` to apply the migration you just wrote: this will update the `[schema.rs](http://schema.rs)` file automatically.
-  - This requires a running database: the easiest way to do that is to just run `cargo neon init ; cargo neon start`, which will leave a database available at `postgresql://localhost:1235/attachment_service`
+  - This requires a running database: the easiest way to do that is to just run `cargo neon init ; cargo neon start`, which will leave a database available at `postgresql://localhost:1235/storage_controller`
 - Commit the migration files and the changes to schema.rs
 - If you need to iterate, you can rewind migrations with `diesel migration revert -a` and then `diesel migration run` again.
 - The migrations are build into the storage controller binary, and automatically run at startup after it is deployed, so once you’ve committed a migration no further steps are needed.

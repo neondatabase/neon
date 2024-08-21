@@ -828,9 +828,9 @@ mod test {
         }
     }
 
-    fn setup(test_name: &str) -> anyhow::Result<TestSetup> {
+    async fn setup(test_name: &str) -> anyhow::Result<TestSetup> {
         let test_name = Box::leak(Box::new(format!("deletion_queue__{test_name}")));
-        let harness = TenantHarness::create(test_name)?;
+        let harness = TenantHarness::create(test_name).await?;
 
         // We do not load() the harness: we only need its config and remote_storage
 
@@ -844,7 +844,9 @@ mod test {
             },
             timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         };
-        let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
+        let storage = GenericRemoteStorage::from_config(&storage_config)
+            .await
+            .unwrap();
 
         let mock_control_plane = MockControlPlane::new();
 
@@ -922,7 +924,9 @@ mod test {
     #[tokio::test]
     async fn deletion_queue_smoke() -> anyhow::Result<()> {
         // Basic test that the deletion queue processes the deletions we pass into it
-        let ctx = setup("deletion_queue_smoke").expect("Failed test setup");
+        let ctx = setup("deletion_queue_smoke")
+            .await
+            .expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 
@@ -992,7 +996,9 @@ mod test {
 
     #[tokio::test]
     async fn deletion_queue_validation() -> anyhow::Result<()> {
-        let ctx = setup("deletion_queue_validation").expect("Failed test setup");
+        let ctx = setup("deletion_queue_validation")
+            .await
+            .expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 
@@ -1051,7 +1057,9 @@ mod test {
     #[tokio::test]
     async fn deletion_queue_recovery() -> anyhow::Result<()> {
         // Basic test that the deletion queue processes the deletions we pass into it
-        let mut ctx = setup("deletion_queue_recovery").expect("Failed test setup");
+        let mut ctx = setup("deletion_queue_recovery")
+            .await
+            .expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 

@@ -16,20 +16,34 @@ from pytest_lazyfixture import lazy_fixture
 )
 def test_hot_page(env: PgCompare):
     # Update the same page many times, then measure read performance
-    num_writes = 1000000
 
     with closing(env.pg.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("drop table if exists t, f;")
+            num_writes = 1000000
 
-            # Write many updates to the same row
+            # Use a PL/pgSQL block to perform many updates to the same row
+            # without depending on the latency between database client and postgres
+            # server
+            # - however a single staement should not run into a timeout so we increase it
+            cur.execute("SET statement_timeout = '4h';")
             with env.record_duration("write"):
-                cur.execute("create table t (i integer);")
-                cur.execute("insert into t values (0);")
-                for i in range(num_writes):
-                    cur.execute(f"update t set i = {i};")
+                cur.execute(
+                    f"""
+                DO $$
+                BEGIN
+                    create table t (i integer);
+                    insert into t values (0);
 
-            # Write 3-4 MB to evict t from compute cache
+                    FOR j IN 1..{num_writes} LOOP
+                        update t set i = j;
+                    END LOOP;
+                END $$;
+                """
+                )
+
+            # Write ca 350 MB to evict t from compute shared buffers (128 MB)
+            # however it will still be in LFC, so I do not really understand the point of this test
             cur.execute("create table f (i integer);")
             cur.execute("insert into f values (generate_series(1,100000));")
 

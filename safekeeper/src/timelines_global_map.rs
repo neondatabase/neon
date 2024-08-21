@@ -2,10 +2,11 @@
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 
+use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
+use crate::rate_limit::RateLimiter;
 use crate::safekeeper::ServerInfo;
 use crate::timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError};
 use crate::timelines_set::TimelinesSet;
-use crate::wal_backup_partial::RateLimiter;
 use crate::SafeKeeperConf;
 use anyhow::{bail, Context, Result};
 use camino::Utf8PathBuf;
@@ -31,7 +32,7 @@ struct GlobalTimelinesState {
     conf: Option<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
     load_lock: Arc<tokio::sync::Mutex<TimelineLoadLock>>,
-    partial_backup_rate_limiter: RateLimiter,
+    global_rate_limiter: RateLimiter,
 }
 
 // Used to prevent concurrent timeline loading.
@@ -50,7 +51,7 @@ impl GlobalTimelinesState {
         (
             self.get_conf().clone(),
             self.broker_active_set.clone(),
-            self.partial_backup_rate_limiter.clone(),
+            self.global_rate_limiter.clone(),
         )
     }
 
@@ -85,7 +86,7 @@ static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
         conf: None,
         broker_active_set: Arc::new(TimelinesSet::default()),
         load_lock: Arc::new(tokio::sync::Mutex::new(TimelineLoadLock)),
-        partial_backup_rate_limiter: RateLimiter::new(1),
+        global_rate_limiter: RateLimiter::new(1, 1),
     })
 });
 
@@ -99,7 +100,10 @@ impl GlobalTimelines {
         // lock, so use explicit block
         let tenants_dir = {
             let mut state = TIMELINES_STATE.lock().unwrap();
-            state.partial_backup_rate_limiter = RateLimiter::new(conf.partial_backup_concurrency);
+            state.global_rate_limiter = RateLimiter::new(
+                conf.partial_backup_concurrency,
+                DEFAULT_EVICTION_CONCURRENCY,
+            );
             state.conf = Some(conf);
 
             // Iterate through all directories and load tenants for all directories

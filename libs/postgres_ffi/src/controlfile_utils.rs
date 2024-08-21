@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use bytes::{Bytes, BytesMut};
 
 /// Equivalent to sizeof(ControlFileData) in C
-const SIZEOF_CONTROLDATA: usize = std::mem::size_of::<ControlFileData>();
+const SIZEOF_CONTROLDATA: usize = size_of::<ControlFileData>();
 
 impl ControlFileData {
     /// Compute the offset of the `crc` field within the `ControlFileData` struct.

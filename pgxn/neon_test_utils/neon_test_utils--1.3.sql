@@ -7,6 +7,12 @@ AS 'MODULE_PATHNAME', 'test_consume_xids'
 LANGUAGE C STRICT
 PARALLEL UNSAFE;
 
+CREATE FUNCTION test_consume_oids(oid int)
+RETURNS VOID
+AS 'MODULE_PATHNAME', 'test_consume_oids'
+LANGUAGE C STRICT
+PARALLEL UNSAFE;
+
 CREATE FUNCTION test_consume_cpu(seconds int)
 RETURNS VOID
 AS 'MODULE_PATHNAME', 'test_consume_cpu'

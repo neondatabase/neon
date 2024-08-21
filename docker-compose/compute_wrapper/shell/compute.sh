@@ -33,7 +33,7 @@ echo $result | jq .
 
 generate_id timeline_id
 PARAMS=(
-     -sb 
+     -sbf
      -X POST
      -H "Content-Type: application/json"
      -d "{\"new_timeline_id\": \"${timeline_id}\", \"pg_version\": ${PG_VERSION}}"

@@ -58,7 +58,6 @@ def test_metric_collection(
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
         metric_collection_bucket={remote_storage_to_toml_inline_table(neon_env_builder.pageserver_remote_storage)}
-        cached_metric_collection_interval="0s"
         synthetic_size_calculation_interval="3s"
         """
 
@@ -216,7 +215,6 @@ def test_metric_collection_cleans_up_tempfile(
     neon_env_builder.pageserver_config_override = f"""
         metric_collection_interval="1s"
         metric_collection_endpoint="{metric_collection_endpoint}"
-        cached_metric_collection_interval="0s"
         synthetic_size_calculation_interval="3s"
         """
 

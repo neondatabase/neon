@@ -35,15 +35,15 @@ pub struct PoolingBackend {
 impl PoolingBackend {
     pub async fn authenticate(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         config: &AuthenticationConfig,
         conn_info: &ConnInfo,
     ) -> Result<ComputeCredentials, AuthError> {
         let user_info = conn_info.user_info.clone();
         let backend = self.config.auth_backend.as_ref().map(|_| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
-        if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
-            return Err(AuthError::ip_address_not_allowed(ctx.peer_addr));
+        if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
+            return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
         }
         if !self
             .endpoint_rate_limiter
@@ -100,7 +100,7 @@ impl PoolingBackend {
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     pub async fn connect_to_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         conn_info: ConnInfo,
         keys: ComputeCredentials,
         force_new: bool,
@@ -222,7 +222,7 @@ impl ConnectMechanism for TokioMechanism {
 
     async fn connect_once(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         node_info: &CachedNodeInfo,
         timeout: Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
@@ -236,16 +236,12 @@ impl ConnectMechanism for TokioMechanism {
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
 
-        config
-            .param("client_encoding", "UTF8")
-            .expect("client encoding UTF8 is always valid");
-
-        let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(tokio_postgres::NoTls).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
-        tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
+        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
         Ok(poll_client(
             self.pool.clone(),
             ctx,

@@ -5,6 +5,8 @@
 
 use std::mem::MaybeUninit;
 
+use crate::virtual_file::owned_buffers_io::io_buf_ext::FullSlice;
+
 /// See module-level comment.
 pub struct Buffer<const N: usize> {
     allocation: Box<[u8; N]>,
@@ -60,10 +62,10 @@ impl<const N: usize> crate::virtual_file::owned_buffers_io::write::Buffer for Bu
         self.written
     }
 
-    fn flush(self) -> tokio_epoll_uring::Slice<Self> {
+    fn flush(self) -> FullSlice<Self> {
         self.invariants();
         let written = self.written;
-        tokio_epoll_uring::BoundedBuf::slice(self, 0..written)
+        FullSlice::must_new(tokio_epoll_uring::BoundedBuf::slice(self, 0..written))
     }
 
     fn reuse_after_flush(iobuf: Self::IoBuf) -> Self {

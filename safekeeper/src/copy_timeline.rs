@@ -74,10 +74,16 @@ pub async fn handle_request(request: Request) -> Result<()> {
         assert!(flush_lsn >= start_lsn);
 
         if request.until_lsn > flush_lsn {
-            bail!("requested LSN is beyond the end of the timeline");
+            bail!(format!(
+                "requested LSN {} is beyond the end of the timeline {}",
+                request.until_lsn, flush_lsn
+            ));
         }
         if request.until_lsn < start_lsn {
-            bail!("requested LSN is before the start of the timeline");
+            bail!(format!(
+                "requested LSN {} is before the start of the timeline {}",
+                request.until_lsn, start_lsn
+            ));
         }
 
         if request.until_lsn > commit_lsn {

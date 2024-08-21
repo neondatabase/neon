@@ -8,6 +8,7 @@ use std::{sync::Arc, time::SystemTime};
 use crate::{
     context::RequestContext,
     disk_usage_eviction_task::DiskUsageEvictionInfo,
+    metrics::SECONDARY_HEATMAP_TOTAL_SIZE,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
 };
 
@@ -31,6 +32,7 @@ use pageserver_api::{
 };
 use remote_storage::GenericRemoteStorage;
 
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use utils::{completion::Barrier, id::TimelineId, sync::gate::Gate};
@@ -104,6 +106,9 @@ pub(crate) struct SecondaryTenant {
 
     // Sum of layer sizes on local disk
     pub(super) resident_size_metric: UIntGauge,
+
+    // Sum of layer sizes in the most recently downloaded heatmap
+    pub(super) heatmap_total_size_metric: UIntGauge,
 }
 
 impl Drop for SecondaryTenant {
@@ -111,6 +116,7 @@ impl Drop for SecondaryTenant {
         let tenant_id = self.tenant_shard_id.tenant_id.to_string();
         let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
         let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
     }
 }
 
@@ -124,6 +130,10 @@ impl SecondaryTenant {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_id = format!("{}", tenant_shard_id.shard_slug());
         let resident_size_metric = SECONDARY_RESIDENT_PHYSICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id])
+            .unwrap();
+
+        let heatmap_total_size_metric = SECONDARY_HEATMAP_TOTAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id])
             .unwrap();
 
@@ -144,6 +154,7 @@ impl SecondaryTenant {
             progress: std::sync::Mutex::default(),
 
             resident_size_metric,
+            heatmap_total_size_metric,
         })
     }
 
@@ -293,15 +304,50 @@ impl SecondaryController {
     }
 }
 
+pub struct GlobalTasks {
+    cancel: CancellationToken,
+    uploader: JoinHandle<()>,
+    downloader: JoinHandle<()>,
+}
+
+impl GlobalTasks {
+    /// Caller is responsible for requesting shutdown via the cancellation token that was
+    /// passed to [`spawn_tasks`].
+    ///
+    /// # Panics
+    ///
+    /// This method panics if that token is not cancelled.
+    /// This is low-risk because we're calling this during process shutdown, so, a panic
+    /// will be informative but not cause undue downtime.
+    pub async fn wait(self) {
+        let Self {
+            cancel,
+            uploader,
+            downloader,
+        } = self;
+        assert!(
+            cancel.is_cancelled(),
+            "must cancel cancellation token, otherwise the tasks will not shut down"
+        );
+
+        let (uploader, downloader) = futures::future::join(uploader, downloader).await;
+        uploader.expect(
+            "unreachable: exit_on_panic_or_error would catch the panic and exit the process",
+        );
+        downloader.expect(
+            "unreachable: exit_on_panic_or_error would catch the panic and exit the process",
+        );
+    }
+}
+
 pub fn spawn_tasks(
     tenant_manager: Arc<TenantManager>,
     remote_storage: GenericRemoteStorage,
     background_jobs_can_start: Barrier,
     cancel: CancellationToken,
-) -> SecondaryController {
+) -> (SecondaryController, GlobalTasks) {
     let mgr_clone = tenant_manager.clone();
     let storage_clone = remote_storage.clone();
-    let cancel_clone = cancel.clone();
     let bg_jobs_clone = background_jobs_can_start.clone();
 
     let (download_req_tx, download_req_rx) =
@@ -309,17 +355,9 @@ pub fn spawn_tasks(
     let (upload_req_tx, upload_req_rx) =
         tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
 
-    let downloader_task_ctx = RequestContext::new(
-        TaskKind::SecondaryDownloads,
-        crate::context::DownloadBehavior::Download,
-    );
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        downloader_task_ctx.task_kind(),
-        None,
-        None,
+    let cancel_clone = cancel.clone();
+    let downloader = BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "secondary tenant downloads",
-        false,
         async move {
             downloader_task(
                 mgr_clone,
@@ -327,49 +365,41 @@ pub fn spawn_tasks(
                 download_req_rx,
                 bg_jobs_clone,
                 cancel_clone,
-                downloader_task_ctx,
+                RequestContext::new(
+                    TaskKind::SecondaryDownloads,
+                    crate::context::DownloadBehavior::Download,
+                ),
             )
             .await;
-
-            Ok(())
+            anyhow::Ok(())
         },
-    );
+    ));
 
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        TaskKind::SecondaryUploads,
-        None,
-        None,
+    let cancel_clone = cancel.clone();
+    let uploader = BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "heatmap uploads",
-        false,
         async move {
             heatmap_uploader_task(
                 tenant_manager,
                 remote_storage,
                 upload_req_rx,
                 background_jobs_can_start,
-                cancel,
+                cancel_clone,
             )
             .await;
-
-            Ok(())
+            anyhow::Ok(())
         },
-    );
+    ));
 
-    SecondaryController {
-        download_req_tx,
-        upload_req_tx,
-    }
-}
-
-/// For running with remote storage disabled: a SecondaryController that is connected to nothing.
-pub fn null_controller() -> SecondaryController {
-    let (download_req_tx, _download_req_rx) =
-        tokio::sync::mpsc::channel::<CommandRequest<DownloadCommand>>(16);
-    let (upload_req_tx, _upload_req_rx) =
-        tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
-    SecondaryController {
-        upload_req_tx,
-        download_req_tx,
-    }
+    (
+        SecondaryController {
+            upload_req_tx,
+            download_req_tx,
+        },
+        GlobalTasks {
+            cancel,
+            uploader,
+            downloader,
+        },
+    )
 }

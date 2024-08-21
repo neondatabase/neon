@@ -23,6 +23,8 @@ use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
+#[cfg_attr(target_os = "macos", allow(unused_imports))]
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
@@ -219,9 +221,7 @@ async fn download_object<'a>(
                             Ok(chunk) => chunk,
                             Err(e) => return Err(e),
                         };
-                        buffered
-                            .write_buffered(tokio_epoll_uring::BoundedBuf::slice_full(chunk), ctx)
-                            .await?;
+                        buffered.write_buffered(chunk.slice_len(), ctx).await?;
                     }
                     let size_tracking = buffered.flush_and_into_inner(ctx).await?;
                     Ok(size_tracking.into_inner())
@@ -295,10 +295,11 @@ where
         };
     }
 
-    for key in listing.keys {
-        let object_name = key
+    for object in listing.keys {
+        let object_name = object
+            .key
             .object_name()
-            .ok_or_else(|| anyhow::anyhow!("object name for key {key}"))?;
+            .ok_or_else(|| anyhow::anyhow!("object name for key {}", object.key))?;
         other_prefixes.insert(object_name.to_string());
     }
 
@@ -459,7 +460,7 @@ pub(crate) async fn download_index_part(
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
     let max_previous_generation = indices
         .into_iter()
-        .filter_map(parse_remote_index_path)
+        .filter_map(|o| parse_remote_index_path(o.key))
         .filter(|g| g <= &my_generation)
         .max();
 

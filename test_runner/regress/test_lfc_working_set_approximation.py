@@ -89,7 +89,7 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     )
     conn = endpoint.connect()
     cur = conn.cursor()
-    cur.execute("create extension neon version '1.4'")
+    cur.execute("create extension neon")
     cur.execute(
         "create table t(pk integer primary key, count integer default 0, payload text default repeat('?', 128))"
     )

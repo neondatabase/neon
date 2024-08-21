@@ -9,7 +9,7 @@ use measured::{
     metric::{
         counter::CounterState,
         gauge::GaugeState,
-        group::{Encoding, MetricValue},
+        group::Encoding,
         name::{MetricName, MetricNameEncoder},
         MetricEncoding, MetricFamilyEncoding,
     },
@@ -171,8 +171,11 @@ fn write_gauge<Enc: Encoding>(
     labels: impl LabelGroup,
     name: impl MetricNameEncoder,
     enc: &mut Enc,
-) -> Result<(), Enc::Err> {
-    enc.write_metric_value(name, labels, MetricValue::Int(x))
+) -> Result<(), Enc::Err>
+where
+    GaugeState: MetricEncoding<Enc>,
+{
+    GaugeState::new(x).collect_into(&(), labels, name, enc)
 }
 
 #[derive(Default)]
@@ -544,15 +547,6 @@ impl<T: Encoding> Encoding for Inc<T> {
     fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
         self.0.write_help(name, help)
     }
-
-    fn write_metric_value(
-        &mut self,
-        name: impl MetricNameEncoder,
-        labels: impl LabelGroup,
-        value: MetricValue,
-    ) -> Result<(), Self::Err> {
-        self.0.write_metric_value(name, labels, value)
-    }
 }
 
 impl<T: Encoding> MetricEncoding<Inc<T>> for MeasuredCounterPairState
@@ -578,15 +572,6 @@ impl<T: Encoding> Encoding for Dec<T> {
 
     fn write_help(&mut self, name: impl MetricNameEncoder, help: &str) -> Result<(), Self::Err> {
         self.0.write_help(name, help)
-    }
-
-    fn write_metric_value(
-        &mut self,
-        name: impl MetricNameEncoder,
-        labels: impl LabelGroup,
-        value: MetricValue,
-    ) -> Result<(), Self::Err> {
-        self.0.write_metric_value(name, labels, value)
     }
 }
 

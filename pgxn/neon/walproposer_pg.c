@@ -512,7 +512,7 @@ replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRe
 }
 
 /*
- * Start walsender streaming replication
+ * Start walproposer streaming replication
  */
 static void
 walprop_pg_start_streaming(WalProposer *wp, XLogRecPtr startpos)

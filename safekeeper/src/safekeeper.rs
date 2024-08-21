@@ -92,7 +92,7 @@ impl TermHistory {
     }
 
     /// Find point of divergence between leader (walproposer) term history and
-    /// safekeeper. Arguments are not symmetrics as proposer history ends at
+    /// safekeeper. Arguments are not symmetric as proposer history ends at
     /// +infinity while safekeeper at flush_lsn.
     /// C version is at walproposer SendProposerElected.
     pub fn find_highest_common_point(
@@ -701,7 +701,13 @@ where
             .with_label_values(&["handle_elected"])
             .start_timer();
 
-        info!("received ProposerElected {:?}", msg);
+        info!(
+            "received ProposerElected {:?}, term={}, last_log_term={}, flush_lsn={}",
+            msg,
+            self.state.acceptor_state.term,
+            self.get_last_log_term(),
+            self.flush_lsn()
+        );
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.start_change();
             state.acceptor_state.term = msg.term;
@@ -713,22 +719,43 @@ where
             return Ok(None);
         }
 
-        // This might happen in a rare race when another (old) connection from
-        // the same walproposer writes + flushes WAL after this connection
-        // already sent flush_lsn in VoteRequest. It is generally safe to
-        // proceed, but to prevent commit_lsn surprisingly going down we should
-        // either refuse the session (simpler) or skip the part we already have
-        // from the stream (can be implemented).
-        if msg.term == self.get_last_log_term() && self.flush_lsn() > msg.start_streaming_at {
-            bail!("refusing ProposerElected which is going to overwrite correct WAL: term={}, flush_lsn={}, start_streaming_at={}; restarting the handshake should help",
-                   msg.term, self.flush_lsn(), msg.start_streaming_at)
+        // Before truncating WAL check-cross the check divergence point received
+        // from the walproposer.
+        let sk_th = self.get_term_history();
+        let last_common_point = match TermHistory::find_highest_common_point(
+            &msg.term_history,
+            &sk_th,
+            self.flush_lsn(),
+        ) {
+            // No common point. Expect streaming from the beginning of the
+            // history like walproposer while we don't have proper init.
+            None => *msg.term_history.0.first().ok_or(anyhow::anyhow!(
+                "empty walproposer term history {:?}",
+                msg.term_history
+            ))?,
+            Some(lcp) => lcp,
+        };
+        // This is expected to happen in a rare race when another connection
+        // from the same walproposer writes + flushes WAL after this connection
+        // sent flush_lsn in VoteRequest; for instance, very late
+        // ProposerElected message delivery after another connection was
+        // established and wrote WAL. In such cases error is transient;
+        // reconnection makes safekeeper send newest term history and flush_lsn
+        // and walproposer recalculates the streaming point. OTOH repeating
+        // error indicates a serious bug.
+        if last_common_point.lsn != msg.start_streaming_at {
+            bail!("refusing ProposerElected with unexpected truncation point: lcp={:?} start_streaming_at={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
+                    last_common_point, msg.start_streaming_at,
+                    self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
+            );
         }
-        // Otherwise we must never attempt to truncate committed data.
+
+        // We are also expected to never attempt to truncate committed data.
         assert!(
             msg.start_streaming_at >= self.state.inmem.commit_lsn,
-            "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}",
-            msg.start_streaming_at,
-            self.state.inmem.commit_lsn
+            "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
+            msg.start_streaming_at, self.state.inmem.commit_lsn,
+            self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
         );
 
         // Before first WAL write initialize its segment. It makes first segment
@@ -742,9 +769,6 @@ where
                 .initialize_first_segment(msg.start_streaming_at)
                 .await?;
         }
-
-        // TODO: cross check divergence point, check if msg.start_streaming_at corresponds to
-        // intersection of our history and history from msg
 
         // truncate wal, update the LSNs
         self.wal_store.truncate_wal(msg.start_streaming_at).await?;
@@ -1069,7 +1093,7 @@ mod tests {
 
         let pem = ProposerElected {
             term: 1,
-            start_streaming_at: Lsn(1),
+            start_streaming_at: Lsn(3),
             term_history: TermHistory(vec![TermLsn {
                 term: 1,
                 lsn: Lsn(3),

@@ -14,7 +14,7 @@ use super::connect_compute::ComputeConnectBackend;
 
 pub async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     api: &B,
     config: RetryConfig,
 ) -> Result<CachedNodeInfo, WakeComputeError> {
@@ -52,9 +52,7 @@ pub async fn wake_compute<B: ComputeConnectBackend>(
 
         let wait_duration = retry_after(*num_retries, config);
         *num_retries += 1;
-        let pause = ctx
-            .latency_timer
-            .pause(crate::metrics::Waiting::RetryTimeout);
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::RetryTimeout);
         tokio::time::sleep(wait_duration).await;
         drop(pause);
     }

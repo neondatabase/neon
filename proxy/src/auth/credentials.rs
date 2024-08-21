@@ -84,15 +84,17 @@ pub fn endpoint_sni(
 
 impl ComputeUserInfoMaybeEndpoint {
     pub fn parse(
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         params: &StartupMessageParams,
         sni: Option<&str>,
         common_names: Option<&HashSet<String>>,
     ) -> Result<Self, ComputeUserInfoParseError> {
-        use ComputeUserInfoParseError::*;
-
         // Some parameters are stored in the startup message.
-        let get_param = |key| params.get(key).ok_or(MissingKey(key));
+        let get_param = |key| {
+            params
+                .get(key)
+                .ok_or(ComputeUserInfoParseError::MissingKey(key))
+        };
         let user: RoleName = get_param("user")?.into();
 
         // Project name might be passed via PG's command-line options.
@@ -122,11 +124,14 @@ impl ComputeUserInfoMaybeEndpoint {
         let endpoint = match (endpoint_option, endpoint_from_domain) {
             // Invariant: if we have both project name variants, they should match.
             (Some(option), Some(domain)) if option != domain => {
-                Some(Err(InconsistentProjectNames { domain, option }))
+                Some(Err(ComputeUserInfoParseError::InconsistentProjectNames {
+                    domain,
+                    option,
+                }))
             }
             // Invariant: project name may not contain certain characters.
             (a, b) => a.or(b).map(|name| match project_name_valid(name.as_ref()) {
-                false => Err(MalformedProjectName(name)),
+                false => Err(ComputeUserInfoParseError::MalformedProjectName(name)),
                 true => Ok(name),
             }),
         }
@@ -186,7 +191,7 @@ impl<'de> serde::de::Deserialize<'de> for IpPattern {
         impl<'de> serde::de::Visitor<'de> for StrVisitor {
             type Value = IpPattern;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(formatter, "comma separated list with ip address, ip address range, or ip address subnet mask")
             }
 
@@ -249,8 +254,8 @@ mod tests {
     fn parse_bare_minimum() -> anyhow::Result<()> {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id, None);
 
@@ -264,8 +269,8 @@ mod tests {
             ("database", "world"), // should be ignored
             ("foo", "bar"),        // should be ignored
         ]);
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id, None);
 
@@ -279,9 +284,9 @@ mod tests {
         let sni = Some("foo.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("foo"));
         assert_eq!(user_info.options.get_cache_key("foo"), "foo");
@@ -296,8 +301,8 @@ mod tests {
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("bar"));
 
@@ -311,8 +316,8 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar -c geqo=off"),
         ]);
 
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("bar"));
 
@@ -329,8 +334,8 @@ mod tests {
             ),
         ]);
 
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert!(user_info.endpoint_id.is_none());
 
@@ -344,8 +349,8 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
         ]);
 
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert!(user_info.endpoint_id.is_none());
 
@@ -359,9 +364,9 @@ mod tests {
         let sni = Some("baz.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("baz"));
 
@@ -374,16 +379,16 @@ mod tests {
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.a.com");
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("p1"));
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.b.com");
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("p1"));
 
         Ok(())
@@ -397,10 +402,9 @@ mod tests {
         let sni = Some("second.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let mut ctx = RequestMonitoring::test();
-        let err =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())
-                .expect_err("should fail");
+        let ctx = RequestMonitoring::test();
+        let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
+            .expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -417,10 +421,9 @@ mod tests {
         let sni = Some("project.localhost");
         let common_names = Some(["example.com".into()].into());
 
-        let mut ctx = RequestMonitoring::test();
-        let err =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())
-                .expect_err("should fail");
+        let ctx = RequestMonitoring::test();
+        let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
+            .expect_err("should fail");
         match err {
             UnknownCommonName { cn } => {
                 assert_eq!(cn, "localhost");
@@ -438,9 +441,9 @@ mod tests {
 
         let sni = Some("project.localhost");
         let common_names = Some(["localhost".into()].into());
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("project"));
         assert_eq!(
             user_info.options.get_cache_key("project"),

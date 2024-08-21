@@ -7,7 +7,7 @@ easier to see if you have compile errors without scrolling up.
 You may also need to run `./scripts/pysync`.
 
 Then run the tests
-`DEFAULT_PG_VERSION=15 NEON_BIN=./target/release poetry run pytest test_runner/performance`
+`DEFAULT_PG_VERSION=16 NEON_BIN=./target/release poetry run pytest test_runner/performance`
 
 Some handy pytest flags for local development:
 - `-x` tells pytest to stop on first error

@@ -59,7 +59,7 @@ impl<'a> ClientFirstMessage<'a> {
 
         // https://github.com/postgres/postgres/blob/f83908798f78c4cafda217ca875602c88ea2ae28/src/backend/libpq/auth-scram.c#L13-L14
         if !username.is_empty() {
-            tracing::warn!(username, "scram username provided, but is not expected")
+            tracing::warn!(username, "scram username provided, but is not expected");
             // TODO(conrad):
             // return None;
         }
@@ -137,7 +137,7 @@ impl<'a> ClientFinalMessage<'a> {
     /// Build a response to [`ClientFinalMessage`].
     pub fn build_server_final_message(
         &self,
-        signature_builder: SignatureBuilder,
+        signature_builder: SignatureBuilder<'_>,
         server_key: &ScramKey,
     ) -> String {
         let mut buf = String::from("v=");
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn parse_client_first_message_with_invalid_gs2_authz() {
-        assert!(ClientFirstMessage::parse("n,authzid,n=,r=nonce").is_none())
+        assert!(ClientFirstMessage::parse("n,authzid,n=,r=nonce").is_none());
     }
 
     #[test]

@@ -521,6 +521,10 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
 
         Ok(&self.historic_coverage)
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.layers.len()
+    }
 }
 
 #[test]

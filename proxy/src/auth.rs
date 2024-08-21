@@ -113,38 +113,36 @@ impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
 
 impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
-        use AuthErrorImpl::*;
         match self.0.as_ref() {
-            Link(e) => e.to_string_client(),
-            GetAuthInfo(e) => e.to_string_client(),
-            Sasl(e) => e.to_string_client(),
-            AuthFailed(_) => self.to_string(),
-            BadAuthMethod(_) => self.to_string(),
-            MalformedPassword(_) => self.to_string(),
-            MissingEndpointName => self.to_string(),
-            Io(_) => "Internal error".to_string(),
-            IpAddressNotAllowed(_) => self.to_string(),
-            TooManyConnections => self.to_string(),
-            UserTimeout(_) => self.to_string(),
+            AuthErrorImpl::Link(e) => e.to_string_client(),
+            AuthErrorImpl::GetAuthInfo(e) => e.to_string_client(),
+            AuthErrorImpl::Sasl(e) => e.to_string_client(),
+            AuthErrorImpl::AuthFailed(_) => self.to_string(),
+            AuthErrorImpl::BadAuthMethod(_) => self.to_string(),
+            AuthErrorImpl::MalformedPassword(_) => self.to_string(),
+            AuthErrorImpl::MissingEndpointName => self.to_string(),
+            AuthErrorImpl::Io(_) => "Internal error".to_string(),
+            AuthErrorImpl::IpAddressNotAllowed(_) => self.to_string(),
+            AuthErrorImpl::TooManyConnections => self.to_string(),
+            AuthErrorImpl::UserTimeout(_) => self.to_string(),
         }
     }
 }
 
 impl ReportableError for AuthError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
-        use AuthErrorImpl::*;
         match self.0.as_ref() {
-            Link(e) => e.get_error_kind(),
-            GetAuthInfo(e) => e.get_error_kind(),
-            Sasl(e) => e.get_error_kind(),
-            AuthFailed(_) => crate::error::ErrorKind::User,
-            BadAuthMethod(_) => crate::error::ErrorKind::User,
-            MalformedPassword(_) => crate::error::ErrorKind::User,
-            MissingEndpointName => crate::error::ErrorKind::User,
-            Io(_) => crate::error::ErrorKind::ClientDisconnect,
-            IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
-            TooManyConnections => crate::error::ErrorKind::RateLimit,
-            UserTimeout(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::Link(e) => e.get_error_kind(),
+            AuthErrorImpl::GetAuthInfo(e) => e.get_error_kind(),
+            AuthErrorImpl::Sasl(e) => e.get_error_kind(),
+            AuthErrorImpl::AuthFailed(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::BadAuthMethod(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::MalformedPassword(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::MissingEndpointName => crate::error::ErrorKind::User,
+            AuthErrorImpl::Io(_) => crate::error::ErrorKind::ClientDisconnect,
+            AuthErrorImpl::IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::TooManyConnections => crate::error::ErrorKind::RateLimit,
+            AuthErrorImpl::UserTimeout(_) => crate::error::ErrorKind::User,
         }
     }
 }

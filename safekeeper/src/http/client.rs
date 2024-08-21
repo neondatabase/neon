@@ -10,7 +10,7 @@
 use reqwest::{IntoUrl, Method, StatusCode};
 use utils::{
     http::error::HttpErrorBody,
-    id::{TenantId, TimelineId},
+    id::{NodeId, TenantId, TimelineId},
     logging::SecretString,
 };
 
@@ -97,10 +97,11 @@ impl Client {
         &self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        stream_to: NodeId,
     ) -> Result<reqwest::Response> {
         let uri = format!(
-            "{}/v1/tenant/{}/timeline/{}/snapshot",
-            self.mgmt_api_endpoint, tenant_id, timeline_id
+            "{}/v1/tenant/{}/timeline/{}/snapshot/{}",
+            self.mgmt_api_endpoint, tenant_id, timeline_id, stream_to.0
         );
         self.get(&uri).await
     }

@@ -52,17 +52,17 @@ struct RequestId(String);
 /// There could be other ways to implement similar functionality:
 ///
 /// * procmacros placed on top of all handler methods
-/// With all the drawbacks of procmacros, brings no difference implementation-wise,
-/// and little code reduction compared to the existing approach.
+///   With all the drawbacks of procmacros, brings no difference implementation-wise,
+///   and little code reduction compared to the existing approach.
 ///
 /// * Another `TraitExt` with e.g. the `get_with_span`, `post_with_span` methods to do similar logic,
-/// implemented for [`RouterBuilder`].
-/// Could be simpler, but we don't want to depend on [`routerify`] more, targeting to use other library later.
+///   implemented for [`RouterBuilder`].
+///   Could be simpler, but we don't want to depend on [`routerify`] more, targeting to use other library later.
 ///
 /// * In theory, a span guard could've been created in a pre-request middleware and placed into a global collection, to be dropped
-/// later, in a post-response middleware.
-/// Due to suspendable nature of the futures, would give contradictive results which is exactly the opposite of what `tracing-futures`
-/// tries to achive with its `.instrument` used in the current approach.
+///   later, in a post-response middleware.
+///   Due to suspendable nature of the futures, would give contradictive results which is exactly the opposite of what `tracing-futures`
+///   tries to achive with its `.instrument` used in the current approach.
 ///
 /// If needed, a declarative macro to substitute the |r| ... closure boilerplate could be introduced.
 pub async fn request_span<R, H>(request: Request<Body>, handler: H) -> R::Output

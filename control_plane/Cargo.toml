@@ -40,6 +40,7 @@ safekeeper_api.workspace = true
 postgres_connection.workspace = true
 storage_broker.workspace = true
 utils.workspace = true
+whoami.workspace = true
 
 compute_api.workspace = true
 workspace_hack.workspace = true

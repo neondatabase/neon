@@ -44,7 +44,7 @@ jobs:
             grep -ERl $PAT .github/workflows |\
             while read -r f
             do
-              l=$(grep -nE $PAT .github/workflows/release.yml | awk -F: '{print $1}' | head -1)
+              l=$(grep -nE $PAT $f | awk -F: '{print $1}' | head -1)
               echo "::error file=$f,line=$l::Please use 'ubuntu-22.04' instead of 'ubuntu-latest'"
             done
             exit 1

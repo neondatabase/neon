@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import random
 import time
+from typing import TYPE_CHECKING
 
-from fixtures.neon_fixtures import NeonEnv
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 def test_physical_replication(neon_simple_env: NeonEnv):

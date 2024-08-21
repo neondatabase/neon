@@ -14,7 +14,7 @@ from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 
 """
 Usage:
-DEFAULT_PG_VERSION=15 BUILD_TYPE=debug NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 INTERACTIVE=true \
+DEFAULT_PG_VERSION=16 BUILD_TYPE=debug NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 INTERACTIVE=true \
     ./scripts/pytest --timeout 0 test_runner/performance/pageserver/interactive/test_many_small_tenants.py
 """
 

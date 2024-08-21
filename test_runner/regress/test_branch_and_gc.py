@@ -65,8 +65,8 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
             "compaction_period": "1 s",
             "compaction_threshold": "2",
             "image_creation_threshold": "1",
-            # set PITR interval to be small, so we can do GC
-            "pitr_interval": "1 s",
+            # Disable PITR, this test will set an explicit space-based GC limit
+            "pitr_interval": "0 s",
         }
     )
 

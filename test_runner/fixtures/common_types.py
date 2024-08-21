@@ -143,6 +143,9 @@ class TimelineId(Id):
     def __repr__(self) -> str:
         return f'TimelineId("{self.id.hex()}")'
 
+    def __str__(self) -> str:
+        return self.id.hex()
+
 
 # Workaround for compat with python 3.9, which does not have `typing.Self`
 TTenantShardId = TypeVar("TTenantShardId", bound="TenantShardId")

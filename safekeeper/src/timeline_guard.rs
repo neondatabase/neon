@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::timeline_manager::ManagerCtlMessage;
 
@@ -23,7 +23,7 @@ impl Drop for ResidenceGuard {
             .manager_tx
             .send(ManagerCtlMessage::GuardDrop(self.guard_id));
         if let Err(e) = res {
-            warn!("failed to send GuardDrop message: {:?}", e);
+            debug!("failed to send GuardDrop message: {:?}", e);
         }
     }
 }

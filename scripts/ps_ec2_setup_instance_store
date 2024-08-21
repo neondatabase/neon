@@ -44,7 +44,7 @@ run the following commands from the top of the neon.git checkout
 
     # test suite run
     export TEST_OUTPUT="$TEST_OUTPUT"
-    DEFAULT_PG_VERSION=15 BUILD_TYPE=release ./scripts/pytest test_runner/performance/test_latency.py
+    DEFAULT_PG_VERSION=16 BUILD_TYPE=release ./scripts/pytest test_runner/performance/test_latency.py
 
     # for interactive use
     export NEON_REPO_DIR="$NEON_REPO_DIR"
