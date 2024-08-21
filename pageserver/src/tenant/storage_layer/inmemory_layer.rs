@@ -283,7 +283,7 @@ impl InMemoryLayer {
 
         struct ValueRead {
             entry_lsn: Lsn,
-            read: vectored_dio_read::ValueRead<Vec<u8>>,
+            read: vectored_dio_read::LogicalRead<Vec<u8>>,
         }
         let mut reads: HashMap<Key, Vec<ValueRead>> = HashMap::new();
 
@@ -303,7 +303,7 @@ impl InMemoryLayer {
                 for (entry_lsn, index_value) in slice.iter().rev() {
                     reads.entry(key).or_default().push(ValueRead {
                         entry_lsn: *entry_lsn,
-                        read: vectored_dio_read::ValueRead::new(
+                        read: vectored_dio_read::LogicalRead::new(
                             index_value.pos,
                             Vec::with_capacity(index_value.len as usize),
                         ),
