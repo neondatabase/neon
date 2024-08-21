@@ -1971,11 +1971,7 @@ impl Timeline {
             .unwrap();
         // We don't want any of the produced layers to cover the full key range (i.e., MIN..MAX) b/c it will then be recognized
         // as an L0 layer.
-        let hack_end_key = {
-            let mut key = Key::MAX;
-            key.field6 -= 1;
-            key
-        };
+        let hack_end_key = Key::NON_L0_MAX;
         let mut delta_layers = Vec::new();
         let mut image_layers = Vec::new();
         for resident_layer in &downloaded_layers {
