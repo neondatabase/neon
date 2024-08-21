@@ -1296,6 +1296,8 @@ def test_lagging_sk(neon_env_builder: NeonEnvBuilder):
     # Check that WALs are the same.
     cmp_sk_wal([sk1, sk2, sk3], tenant_id, timeline_id)
 
+    env.stop(immediate=True)
+
 
 # Smaller version of test_one_sk_down testing peer recovery in isolation: that
 # it works without compute at all.
