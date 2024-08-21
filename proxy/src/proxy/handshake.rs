@@ -32,6 +32,10 @@ pub enum HandshakeError {
     #[error("{0}")]
     StreamUpgradeError(#[from] StreamUpgradeError),
 
+    #[cfg(target_os = "linux")]
+    #[error("{0}")]
+    KtlsUpgradeError(#[from] ktls::Error),
+
     #[error("{0}")]
     Io(#[from] std::io::Error),
 
@@ -119,6 +123,9 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                             ));
                         };
 
+                        #[cfg(target_os = "linux")]
+                        let raw = ktls::CorkStream::new(raw);
+
                         let mut read_buf = read_buf.reader();
                         let mut res = Ok(());
                         let accept = tokio_rustls::TlsAcceptor::from(tls.to_server_config())
@@ -179,7 +186,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                                     #[cfg(not(target_os = "linux"))]
                                     tls: Box::new(tls_stream),
                                     #[cfg(target_os = "linux")]
-                                    tls: {},
+                                    tls: ktls::config_ktls_server(tls_stream)?,
                                     tls_server_end_point,
                                 },
                                 read_buf,

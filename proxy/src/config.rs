@@ -110,13 +110,19 @@ pub fn configure_tls(
 
     let cert_resolver = Arc::new(cert_resolver);
 
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    #[cfg(target_os = "linux")]
+    let provider = {
+        let mut provider = provider;
+        let compat = ktls::CompatibleCiphers::new()?;
+        provider.cipher_suites.retain(|s| compat.is_supported(s));
+    };
+
     // allow TLS 1.2 to be compatible with older client libraries
-    let mut config = rustls::ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS13,
-        &rustls::version::TLS12,
-    ])
-    .with_no_client_auth()
-    .with_cert_resolver(cert_resolver.clone());
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+        .with_no_client_auth()
+        .with_cert_resolver(cert_resolver.clone());
 
     config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];
 

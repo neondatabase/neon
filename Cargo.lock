@@ -5894,9 +5894,9 @@ dependencies = [
 
 [[package]]
 name = "sha2-asm"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f27ba7066011e3fb30d808b51affff34f0a66d3a03a58edd787c6e420e40e44e"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
 dependencies = [
  "cc",
 ]
@@ -7863,6 +7863,8 @@ dependencies = [
  "reqwest 0.11.19",
  "reqwest 0.12.4",
  "rustls 0.21.11",
+ "rustls-pki-types",
+ "rustls-webpki 0.102.6",
  "scopeguard",
  "serde",
  "serde_json",
