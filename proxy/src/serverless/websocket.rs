@@ -51,6 +51,12 @@ impl<S> AsRawFd for WebSocketRw<S> {
         unreachable!("ktls should not need to be used for websocket rw")
     }
 }
+#[cfg(all(target_os = "linux", not(test)))]
+impl<S: ktls::AsyncReadReady> AsRawFd for ChainRW<S> {
+    fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        unreachable!("ktls should not need to be used for websocket rw")
+    }
+}
 
 impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
     fn poll_write(

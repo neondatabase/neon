@@ -9,6 +9,7 @@ pub mod retry;
 pub mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
 pub use copy_bidirectional::ErrorSource;
+use handshake::KtlsAsyncReadReady;
 
 use crate::{
     auth,
@@ -232,7 +233,7 @@ impl ReportableError for ClientRequestError {
     }
 }
 
-pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + AsRawFd>(
+pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady>(
     config: &'static ProxyConfig,
     ctx: &RequestMonitoring,
     cancellation_handler: Arc<CancellationHandlerMain>,

@@ -73,17 +73,30 @@ pub enum HandshakeData<S> {
     Cancel(CancelKeyData),
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
+pub trait KtlsAsyncReadReady {}
+#[cfg(all(target_os = "linux", not(test)))]
+pub trait KtlsAsyncReadReady: ktls::AsyncReadReady {}
+
+#[cfg(any(not(target_os = "linux"), test))]
+impl<K: AsyncRead> KtlsAsyncReadReady for K {}
+#[cfg(all(target_os = "linux", not(test)))]
+impl<K: ktls::AsyncReadReady> KtlsAsyncReadReady for K {}
+
 /// Establish a (most probably, secure) connection with the client.
 /// For better testing experience, `stream` can be any object satisfying the traits.
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
-pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin + AsRawFd>(
+pub async fn handshake<S>(
     ctx: &RequestMonitoring,
     stream: S,
     mut tls: Option<&TlsConfig>,
     record_handshake_error: bool,
-) -> Result<HandshakeData<S>, HandshakeError> {
+) -> Result<HandshakeData<S>, HandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + AsRawFd + KtlsAsyncReadReady,
+{
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
 
