@@ -24,8 +24,6 @@ humantime-serde.workspace = true
 chrono.workspace = true
 itertools.workspace = true
 
-workspace_hack.workspace = true
-
 [dev-dependencies]
 bincode.workspace = true
 rand.workspace = true

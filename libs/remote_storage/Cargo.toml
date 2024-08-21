@@ -32,7 +32,7 @@ scopeguard.workspace = true
 metrics.workspace = true
 utils.workspace = true
 pin-project-lite.workspace = true
-workspace_hack.workspace = true
+
 azure_core.workspace = true
 azure_identity.workspace = true
 azure_storage.workspace = true

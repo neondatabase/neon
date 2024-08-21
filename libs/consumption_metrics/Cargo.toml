@@ -11,5 +11,3 @@ rand.workspace = true
 serde.workspace = true
 serde_with.workspace = true
 utils.workspace = true
-
-workspace_hack.workspace = true

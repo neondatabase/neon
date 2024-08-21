@@ -54,7 +54,6 @@ walkdir.workspace = true
 pq_proto.workspace = true
 postgres_connection.workspace = true
 metrics.workspace = true
-workspace_hack.workspace = true
 
 const_format.workspace = true
 
