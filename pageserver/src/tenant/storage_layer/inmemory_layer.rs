@@ -315,7 +315,7 @@ impl InMemoryLayer {
             }
         }
 
-        // Execute the read.
+        // Execute the reads.
         let f = vectored_dio_read::execute(
             &inner.file,
             reads
@@ -348,6 +348,8 @@ impl InMemoryLayer {
                             // TODO: metric to see if we fetched more values than necessary
                             continue 'next_key;
                         }
+
+                        // process the next value in the next iteration of the loop
                     }
                 }
             }
