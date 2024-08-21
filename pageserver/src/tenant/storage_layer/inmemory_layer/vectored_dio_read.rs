@@ -666,6 +666,35 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_batch_breaks_if_chunk_is_not_interesting() {
+        let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
+
+        assert!(MAX_CHUNK_BATCH_SIZE > 10, "test assumption");
+        let file = InMemoryFile::new_random(3 * DIO_CHUNK_SIZE);
+
+        let a = file.test_value_read(0, 1); // chunk 0
+        let b = file.test_value_read(2 * DIO_CHUNK_SIZE as u32, 1); // chunk 2
+
+        let recorder = RecorderFile::new(&file);
+
+        execute_and_validate_test_value_reads(&recorder, vec![a, b], &ctx).await;
+
+        let recorded = recorder.recorded.borrow();
+
+        assert_eq!(recorded.len(), 2);
+        {
+            let RecordedRead { pos, req_len, .. } = &recorded[0];
+            assert_eq!(*pos, 0);
+            assert_eq!(*req_len, DIO_CHUNK_SIZE);
+        }
+        {
+            let RecordedRead { pos, req_len, .. } = &recorded[1];
+            assert_eq!(*pos, 2 * DIO_CHUNK_SIZE as u32);
+            assert_eq!(*req_len, DIO_CHUNK_SIZE);
+        }
+    }
+
     struct ExpectedRead {
         expect_pos: u32,
         expect_len: usize,
