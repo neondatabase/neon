@@ -329,7 +329,7 @@ impl InMemoryLayer {
         // Process results into the reconstruct state
         'next_key: for (key, value_reads) in reads {
             for ValueRead { entry_lsn, read } in value_reads {
-                match read.into_result() {
+                match read.into_result().expect("we run execute() above") {
                     Err(e) => {
                         reconstruct_state.on_key_error(key, PageReconstructError::from(anyhow!(e)));
                         continue 'next_key;
