@@ -19,19 +19,22 @@ use crate::compute::ComputeNode;
 /// Spawns a background thread to periodically renew LSN leases for static compute.
 /// Do nothing if the compute is not in static mode.
 pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
-    let (tenant_id, timline_id, lsn) = {
+    let (tenant_id, timeline_id, lsn) = {
         let state = compute.state.lock().unwrap();
-        let spec = state.pspec.as_ref().expect("spec must be set");
+        let spec = state.pspec.as_ref().expect("Spec must be set");
         match spec.spec.mode {
             ComputeMode::Static(lsn) => (spec.tenant_id, spec.timeline_id, lsn),
             _ => return,
         }
     };
     let compute = compute.clone();
+
+    let span = tracing::info_span!("lsn_lease_bg_task", %tenant_id, %timeline_id, %lsn);
     thread::spawn(move || {
-        if let Err(e) = lsn_lease_bg_task(compute, tenant_id, timline_id, lsn) {
+        let _entered = span.entered();
+        if let Err(e) = lsn_lease_bg_task(compute, tenant_id, timeline_id, lsn) {
             // TODO: might need stronger error feedback than logging an warning.
-            warn!("lsn_lease_bg_task failed: {e}");
+            warn!("Request failed: {e}");
         }
     });
 }
@@ -45,9 +48,7 @@ fn lsn_lease_bg_task(
 ) -> Result<()> {
     loop {
         let valid_until = acquire_lsn_lease_with_retry(&compute, tenant_id, timeline_id, lsn)
-            .with_context(|| {
-                format!("failed to get lsn lease for {tenant_id}/{timeline_id}@{lsn}")
-            })?;
+            .with_context(|| format!("Unable to get lsn lease"))?;
         let valid_duration = valid_until
             .duration_since(SystemTime::now())
             .unwrap_or(Duration::ZERO);
@@ -58,7 +59,7 @@ fn lsn_lease_bg_task(
             .max(valid_duration / 2);
 
         info!(
-            "lsn_lease_request succeeded, sleeping for {} seconds",
+            "Succeeded, sleeping for {} seconds",
             sleep_duration.as_secs()
         );
         thread::sleep(sleep_duration);
@@ -87,7 +88,7 @@ fn acquire_lsn_lease_with_retry(
 
             conn_strings
                 .map(|connstr| {
-                    let mut config = postgres::Config::from_str(connstr).expect("invalid connstr");
+                    let mut config = postgres::Config::from_str(connstr).expect("Invalid connstr");
                     if let Some(storage_auth_token) = &spec.storage_auth_token {
                         info!("Got storage auth token from spec file");
                         config.password(storage_auth_token.clone());
@@ -132,7 +133,6 @@ fn try_acquire_lsn_lease(
     ) -> Result<SystemTime> {
         let mut client = config.connect(NoTls)?;
         let cmd = format!("lease lsn {} {} {} ", tenant_shard_id, timeline_id, lsn);
-        info!("lsn_lease_request: {}", cmd);
         let res = client.simple_query(&cmd)?;
         let msg = match res.first() {
             Some(msg) => msg,

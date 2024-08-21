@@ -140,7 +140,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             "image_creation_threshold": "1",
             "image_layer_creation_check_threshold": "0",
             # Short lease length to fit test.
-            "lsn_lease_length": "2s",
+            "lsn_lease_length": "3s",
         },
         initial_tenant_shard_count=2,
     )
