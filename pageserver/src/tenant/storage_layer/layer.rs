@@ -35,6 +35,8 @@ mod tests;
 #[cfg(test)]
 mod failpoints;
 
+pub const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
+
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///

@@ -7,6 +7,7 @@ use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
 use crate::tenant::storage_layer::Layer;
 use crate::{config::PageServerConf, context::RequestContext, repository::Value, tenant::Timeline};
 
+use super::layer::S3_UPLOAD_LIMIT;
 use super::{
     DeltaLayerWriter, ImageLayerWriter, PersistentLayerDesc, PersistentLayerKey, ResidentLayer,
 };
@@ -292,7 +293,7 @@ impl SplitDeltaLayerWriter {
                     self.generated_layers
                         .push(SplitWriterResult::Produced(delta_layer));
                 }
-            } else if self.inner.estimated_size() >= u32::MAX as u64 {
+            } else if self.inner.estimated_size() >= S3_UPLOAD_LIMIT {
                 // We have to produce a very large file b/c a key is updated too often.
                 anyhow::bail!(
                     "a single key is updated too often: key={}, estimated_size={}, and the layer file cannot be produced",
