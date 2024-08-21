@@ -356,6 +356,17 @@ files:
           from pg_replication_slots
           where slot_type = 'logical';
 
+      - metric_name: compute_subscriptions_count
+        type: gauge
+        help: 'Number of logical replication subscriptions grouped by enabled/disabled'
+        key_labels:
+          - enabled
+        values: [subscriptions_count]
+        query: |
+          select subenabled::text as enabled, count(*) as subscriptions_count
+          from pg_subscription
+          group by subenabled;
+
       - metric_name: retained_wal
         type: gauge
         help: 'Retained WAL in inactive replication slots'
