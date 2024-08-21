@@ -23,10 +23,8 @@ def test_layer_bloating(neon_env_builder: NeonEnvBuilder, vanilla_pg):
         }
     )
 
-    timeline = env.neon_cli.create_branch("test_logical_replication", "empty")
-    endpoint = env.endpoints.create_start(
-        "test_logical_replication", config_lines=["log_statement=all"]
-    )
+    timeline = env.initial_timeline
+    endpoint = env.endpoints.create_start("main", config_lines=["log_statement=all"])
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
