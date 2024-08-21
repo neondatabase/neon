@@ -346,19 +346,19 @@ impl StorageController {
 
             if !tokio::fs::try_exists(&pg_data_path).await? {
                 let initdb_args = ["-D", pg_data_path.as_ref(), "--username", USER_NAME];
-            tracing::info!(
-                "Initializing storage controller database with args: {:?}",
-                initdb_args
-            );
+                tracing::info!(
+                    "Initializing storage controller database with args: {:?}",
+                    initdb_args
+                );
 
-            // Initialize empty database
-            let initdb_path = pg_bin_dir.join("initdb");
-            let mut child = Command::new(&initdb_path)
-                .envs(vec![
-                    ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                    ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                ])
-                .args(initdb_args)
+                // Initialize empty database
+                let initdb_path = pg_bin_dir.join("initdb");
+                let mut child = Command::new(&initdb_path)
+                    .envs(vec![
+                        ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+                        ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+                    ])
+                    .args(initdb_args)
                     .spawn()
                     .expect("Failed to spawn initdb");
                 let status = child.wait().await?;
@@ -388,13 +388,13 @@ impl StorageController {
                 "-l",
                 pg_log_path.as_ref(),
                 "-U",
-            USER_NAME,
-            "start",
+                USER_NAME,
+                "start",
             ];
-        tracing::info!(
-            "Starting storage controller database with args: {:?}",
-            db_start_args
-        );
+            tracing::info!(
+                "Starting storage controller database with args: {:?}",
+                db_start_args
+            );
 
             background_process::start_process(
                 "storage_controller_db",
