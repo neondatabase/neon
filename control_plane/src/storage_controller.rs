@@ -43,7 +43,7 @@ pub struct StorageController {
 
 const COMMAND: &str = "storage_controller";
 
-const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 17;
+const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 
 const DB_NAME: &str = "storage_controller";
 const USER_NAME: &str = "ana";

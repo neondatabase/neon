@@ -6,6 +6,7 @@ ARG REPOSITORY=neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG DEFAULT_PG_VERSION=17
+ARG STABLE_PG_VERSION=16
 
 # Build Postgres
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
@@ -30,7 +31,7 @@ FROM $REPOSITORY/$IMAGE:$TAG AS build
 WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
-ARG DEFAULT_PG_VERSION
+ARG STABLE_PG_VERSION
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
@@ -42,7 +43,7 @@ COPY --chown=nonroot . .
 
 ARG ADDITIONAL_RUSTFLAGS
 RUN set -e \
-    && PQ_LIB_DIR=$(pwd)/pg_install/v${DEFAULT_PG_VERSION}/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
+    && PQ_LIB_DIR=$(pwd)/pg_install/v${STABLE_PG_VERSION}/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
