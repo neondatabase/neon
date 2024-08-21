@@ -845,6 +845,12 @@ impl Tenant {
                         });
                     };
 
+                // TODO: should also be rejecting tenant conf changes that violate this check.
+                if let Err(e) = crate::tenant::storage_layer::inmemory_layer::InMemoryLayerIndexValue::does_timeline_should_roll_prevent_failure(tenant_clone.get_checkpoint_distance()) {
+                    make_broken(&tenant_clone, anyhow::anyhow!(e), BrokenVerbosity::Error);
+                    return Ok(());
+                }
+
                 let mut init_order = init_order;
                 // take the completion because initial tenant loading will complete when all of
                 // these tasks complete.

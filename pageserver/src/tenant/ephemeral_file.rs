@@ -4,6 +4,7 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
+use crate::tenant::storage_layer::inmemory_layer::InMemoryLayerIndexValueUnpacked;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
@@ -229,34 +230,21 @@ impl EphemeralFile {
         buf: &[u8],
         will_init: bool,
         ctx: &RequestContext,
-    ) -> Result<InMemoryLayerIndexValue, io::Error> {
+    ) -> anyhow::Result<InMemoryLayerIndexValue> {
         let pos = self.bytes_written;
-        let len = u32::try_from(buf.len()).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                anyhow::anyhow!(
-                    "EphemeralFile::write_blob value too large: {}: {e}",
-                    buf.len()
-                ),
-            )
+        let index_value = InMemoryLayerIndexValue::new(InMemoryLayerIndexValueUnpacked {
+            pos: self.bytes_written,
+            len: buf.len(),
+            will_init,
         })?;
-        pos.checked_add(len).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "EphemeralFile::write_blob: overflow",
-            )
-        })?;
-
+        debug_assert_eq!(index_value.unpack().pos, pos);
+        debug_assert_eq!(index_value.unpack().len as usize, buf.len());
         self.buffered_writer
             .write_buffered_borrowed(buf, ctx)
             .await?;
-        self.bytes_written += len;
+        self.bytes_written += index_value.unpack().len; // index_value is checked for overflow in release mode
 
-        Ok(InMemoryLayerIndexValue {
-            pos,
-            len,
-            will_init,
-        })
+        Ok(index_value)
     }
 }
 
@@ -373,11 +361,12 @@ mod tests {
         for i in 0..write_nbytes {
             assert_eq!(
                 index_values[i],
-                InMemoryLayerIndexValue {
+                InMemoryLayerIndexValue::new(InMemoryLayerIndexValueUnpacked {
                     pos: i as u32,
                     len: 1,
                     will_init: i % 2 == 0,
-                }
+                })
+                .unwrap()
             );
             let buf = Vec::with_capacity(1);
             let (buf_slice, nread) = file

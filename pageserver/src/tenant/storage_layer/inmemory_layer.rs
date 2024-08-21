@@ -12,7 +12,7 @@ use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
@@ -37,6 +37,8 @@ use tokio::sync::{RwLock, RwLockWriteGuard};
 use super::{
     DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
 };
+
+mod vectored_dio_read;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct InMemoryLayerFileId(page_cache::FileId);
@@ -88,11 +90,133 @@ pub struct InMemoryLayerInner {
 
     resource_units: GlobalResourceUnits,
 }
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct InMemoryLayerIndexValue {
+
+/// Support the same max blob length as blob_io, because ultimately
+/// all the InMemoryLayer contents end up being written into a delta layer,
+/// using the [`crate::tenant::blob_io`].
+const MAX_SUPPORTED_BLOB_LEN: usize = crate::tenant::blob_io::MAX_SUPPORTED_BLOB_LEN;
+const MAX_SUPPORTED_BLOB_LEN_BITS: usize = {
+    let trailing_ones = MAX_SUPPORTED_BLOB_LEN.trailing_ones() as usize;
+    let leading_zeroes = MAX_SUPPORTED_BLOB_LEN.leading_zeros() as usize;
+    assert!(trailing_ones + leading_zeroes == std::mem::size_of::<usize>() * 8);
+    trailing_ones
+};
+
+/// See [`InMemoryLayerInner::index`].
+///
+/// For space-efficiency, this value is a bitfield.
+///
+/// Layout:
+/// - 1 bit: `will_init`
+/// - [`MAX_SUPPORTED_BLOB_LEN_BITS`]: `len`
+/// - [`MAX_SUPPORTED_POS_BITS`]: `pos`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InMemoryLayerIndexValue(u64);
+
+impl InMemoryLayerIndexValue {
+    /// Derive remaining space for pos.
+    /// TODO: define and enforce a hard limit at the [`Timline::should_roll`] level.
+    /// => see also [`Self::does_timeline_should_roll_prevent_failure`]
+    const MAX_SUPPORTED_POS_BITS: usize = {
+        let remainder = 64 - 1 - MAX_SUPPORTED_BLOB_LEN_BITS;
+        if remainder < 32 {
+            panic!("pos can be u32 as per type system, support that");
+        }
+        remainder
+    };
+
+    // Layout
+    const WILL_INIT_RANGE: Range<usize> = 0..1;
+    const LEN_RANGE: Range<usize> =
+        Self::WILL_INIT_RANGE.end..Self::WILL_INIT_RANGE.end + MAX_SUPPORTED_BLOB_LEN_BITS;
+    const POS_RANGE: Range<usize> =
+        Self::LEN_RANGE.end..Self::LEN_RANGE.end + Self::MAX_SUPPORTED_POS_BITS;
+    const _ASSERT: () = {
+        if Self::POS_RANGE.end != 64 {
+            panic!("we don't want undefined bits for our own sanity")
+        }
+    };
+
+    /// Call this with the checkpoint distance enforced by Timeline::should_roll to check whether
+    /// [`Self`] can accomodate large enough values.
+    ///
+    /// TODO: this check should happen much earlier, ideally at the type system level.
+    /// When cleaning this up, also look into the s3 max file size check that is performed in delta layer writer.
+    /// See also [`Self::MAX_SUPPORTED_POS_BITS`].
+    pub(crate) fn does_timeline_should_roll_prevent_failure(
+        checkpoint_distance: u64,
+    ) -> anyhow::Result<()> {
+        // keep these checks concsistent with Self::new()
+        let checkpoint_distance = u32::try_from(checkpoint_distance)
+            .context("checkpoint distance doesn't fit into u32")?;
+        checkpoint_distance
+            .checked_add(MAX_SUPPORTED_BLOB_LEN as u32)
+            .context("checkpoint distane + max supported blob len would not fit")?;
+        Ok(())
+    }
+
+    /// Checks that the `len` is within the supported range
+    /// and that `pos + len` fits within a u32.
+    pub(crate) fn new(unpacked: InMemoryLayerIndexValueUnpacked<usize>) -> anyhow::Result<Self> {
+        let InMemoryLayerIndexValueUnpacked {
+            pos,
+            len,
+            will_init,
+        } = unpacked;
+
+        if len > MAX_SUPPORTED_BLOB_LEN {
+            anyhow::bail!(
+                "len exceeds the maximum supported length: len={len} max={MAX_SUPPORTED_BLOB_LEN}",
+            );
+        }
+        const _: () = {
+            if MAX_SUPPORTED_BLOB_LEN > u32::MAX as usize {
+                panic!()
+            }
+        };
+        let len = u32::try_from(len).expect("see const assertion above");
+
+        pos.checked_add(len).ok_or_else(|| {
+            anyhow::anyhow!("pos + len overflows u32, not representable in EphemeralFile")
+        })?;
+
+        let mut data: u64 = 0;
+        use bit_field::BitField;
+        data.set_bits(Self::WILL_INIT_RANGE, if will_init { 1 } else { 0 });
+        data.set_bits(Self::LEN_RANGE, len as u64);
+        data.set_bits(Self::POS_RANGE, pos as u64);
+
+        Ok(Self(data))
+    }
+
+    #[inline]
+    pub(crate) fn unpack(&self) -> InMemoryLayerIndexValueUnpacked<u32> {
+        use bit_field::BitField;
+        InMemoryLayerIndexValueUnpacked {
+            will_init: self.0.get_bits(Self::WILL_INIT_RANGE) != 0,
+            len: self.0.get_bits(Self::LEN_RANGE) as u32,
+            pos: self.0.get_bits(Self::POS_RANGE) as u32,
+        }
+    }
+}
+
+/// Unpacked representation of the bitfielded [`InMemoryLayerIndexValue`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct InMemoryLayerIndexValueUnpacked<L> {
+    pub(crate) will_init: bool,
+    pub(crate) len: L,
     pub(crate) pos: u32,
-    pub(crate) len: u32,
-    pub(crate) will_init: bool, // XXX this blows up the size, can we shrink down `len`?
+}
+
+impl InMemoryLayerIndexValueUnpacked<u32> {
+    #[cfg(test)]
+    pub(crate) fn as_usize(&self) -> InMemoryLayerIndexValueUnpacked<usize> {
+        InMemoryLayerIndexValueUnpacked {
+            will_init: self.will_init,
+            len: self.len as usize,
+            pos: self.pos,
+        }
+    }
 }
 
 impl std::fmt::Debug for InMemoryLayerInner {
@@ -302,14 +426,19 @@ impl InMemoryLayer {
                 let slice = vec_map.slice_range(lsn_range);
 
                 for (entry_lsn, index_value) in slice.iter().rev() {
+                    let InMemoryLayerIndexValueUnpacked {
+                        pos,
+                        len,
+                        will_init,
+                    } = index_value.unpack();
                     reads.entry(key).or_default().push(ValueRead {
                         entry_lsn: *entry_lsn,
                         read: vectored_dio_read::LogicalRead::new(
-                            index_value.pos,
-                            Vec::with_capacity(index_value.len as usize),
+                            pos,
+                            Vec::with_capacity(len as usize),
                         ),
                     });
-                    if index_value.will_init {
+                    if will_init {
                         break;
                     }
                 }
@@ -594,20 +723,23 @@ impl InMemoryLayer {
 
                 for (key, vec_map) in inner.index.iter() {
                     // Write all page versions
-                    for (lsn, entry) in vec_map.as_slice() {
-                        let InMemoryLayerIndexValue {
+                    for (lsn, entry) in vec_map
+                        .as_slice()
+                        .iter()
+                        .map(|(lsn, entry)| (lsn, entry.unpack()))
+                    {
+                        let InMemoryLayerIndexValueUnpacked {
                             pos,
                             len,
                             will_init,
                         } = entry;
-                        let buf =
-                            Bytes::slice(&file_contents, *pos as usize..(*pos + *len) as usize);
+                        let buf = Bytes::slice(&file_contents, pos as usize..(pos + len) as usize);
                         let (_buf, res) = delta_layer_writer
                             .put_value_bytes(
                                 Key::from_compact(*key),
                                 *lsn,
                                 buf.slice_len(),
-                                *will_init,
+                                will_init,
                                 ctx,
                             )
                             .await;
@@ -634,4 +766,63 @@ impl InMemoryLayer {
     }
 }
 
-mod vectored_dio_read;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_index_value() {
+        use InMemoryLayerIndexValueUnpacked as Unpacked;
+        let roundtrip = |input| {
+            let res = InMemoryLayerIndexValue::new(input).expect("this tests expects no errors");
+            assert_eq!(res.unpack().as_usize(), input);
+        };
+
+        // will_init
+        roundtrip(Unpacked {
+            will_init: false,
+            len: 0,
+            pos: 0,
+        });
+        roundtrip(Unpacked {
+            will_init: true,
+            len: 0,
+            pos: 0,
+        });
+
+        // len
+        roundtrip(Unpacked {
+            will_init: false,
+            len: MAX_SUPPORTED_BLOB_LEN,
+            pos: 0,
+        });
+        let too_large = Unpacked {
+            will_init: false,
+            len: MAX_SUPPORTED_BLOB_LEN + 1,
+            pos: 0,
+        };
+        assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+
+        // pos
+        roundtrip(Unpacked {
+            will_init: false,
+            len: 0,
+            pos: {
+                let max_as_per_supported_bits: usize =
+                    (1 << InMemoryLayerIndexValue::MAX_SUPPORTED_POS_BITS) - 1;
+                if max_as_per_supported_bits < u32::MAX as usize {
+                    panic!("current implementation has space for `pos` values > u32::MAX")
+                }
+                u32::MAX // but at the type system level, we enforce u32::MAX
+            },
+        });
+
+        // pos + len
+        let too_large = Unpacked {
+            will_init: false,
+            len: 1,
+            pos: u32::MAX,
+        };
+        assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+    }
+}
