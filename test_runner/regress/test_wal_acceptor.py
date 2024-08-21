@@ -254,6 +254,10 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
     assert max(init_m[2].flush_lsns) <= min(final_m[2].flush_lsns) < middle_lsn
     assert max(init_m[2].commit_lsns) <= min(final_m[2].commit_lsns) < middle_lsn
 
+    # Test timeline_list endpoint.
+    http_cli = env.safekeepers[0].http_client()
+    assert len(http_cli.timeline_list()) == 3
+
 
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
 # times, with fault_probability chance of getting a wal acceptor down or up

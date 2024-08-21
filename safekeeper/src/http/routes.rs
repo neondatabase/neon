@@ -114,6 +114,16 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
     })
 }
 
+/// List all (not deleted) timelines.
+async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    let res: Vec<TenantTimelineId> = GlobalTimelines::get_all()
+        .iter()
+        .map(|tli| tli.ttid)
+        .collect();
+    json_response(StatusCode::OK, res)
+}
+
 /// Report info about timeline.
 async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
@@ -561,6 +571,9 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         // Will be used in the future instead of implicit timeline creation
         .post("/v1/tenant/timeline", |r| {
             request_span(r, timeline_create_handler)
+        })
+        .get("/v1/tenant/timeline", |r| {
+            request_span(r, timeline_list_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
             request_span(r, timeline_status_handler)
