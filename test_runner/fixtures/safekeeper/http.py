@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pytest
 import requests
 
-from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TenantTimelineId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 
@@ -143,6 +143,12 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
+
+    def timeline_list(self) -> List[TenantTimelineId]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/timeline")
+        res.raise_for_status()
+        resj = res.json()
+        return [TenantTimelineId.from_json(ttidj) for ttidj in resj]
 
     def timeline_create(
         self,
