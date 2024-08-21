@@ -114,6 +114,9 @@ rsa = "0.9"
 
 workspace_hack.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ktls = "6"
+
 [dev-dependencies]
 camino-tempfile.workspace = true
 fallible-iterator.workspace = true
