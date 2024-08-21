@@ -97,7 +97,7 @@ where
         (reads, Some(Vec::from_iter(assert)))
     };
     #[cfg(not(debug_assertions))]
-    let (reads, assert_logical_reads) = (reads, None);
+    let (reads, assert_logical_reads): (_, Option<Vec<&'a LogicalRead<B>>>) = (reads, None);
 
     // Plan which parts of which chunks need to be appended to which buffer
     let mut by_chunk: BTreeMap<u32, Vec<Interest<B>>> = BTreeMap::new();
