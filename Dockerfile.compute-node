@@ -136,7 +136,7 @@ RUN case "${PG_VERSION}" in "v17") \
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
-    get https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
+    wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
     echo "cac297c07d34460887c4f3b522b35c470138760fe358e351ad1db4edb6ee306e pgrouting.tar.gz" | sha256sum --check && \
     mkdir pgrouting-src && cd pgrouting-src && tar xzf ../pgrouting.tar.gz --strip-components=1 -C . && \
     mkdir build && cd build && \
