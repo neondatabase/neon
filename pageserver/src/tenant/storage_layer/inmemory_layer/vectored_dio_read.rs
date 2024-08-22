@@ -13,7 +13,18 @@ use crate::{
 
 /// The file interface we require. At runtime, this is a [`crate::tenant::ephemeral_file::EphemeralFile`].
 pub trait File: Send {
-    async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
+    /// Attempt to read the bytes in `self` in range `[start,start+dst.bytes_total())`
+    /// and return the number of bytes read (let's call it `nread`).
+    /// The bytes read are placed in `dst`, i.e., `&dst[..nread]` will contain the read bytes.
+    ///
+    /// The only reason why the read may be short (i.e., `nread != dst.bytes_total()`)
+    /// is if the file is shorter than `start+dst.len()`.
+    ///
+    /// This is unlike [`std::os::unix::fs::File::read_exact_at`] which returns an
+    /// [`std::io::ErrorKind::UnexpectedEof`] error if the file is shorter than `start+dst.len()`.
+    ///
+    /// No guarantees are made about the remaining bytes in `dst` in case of a short read.
+    async fn read_exact_at_eof_ok<'a, 'b, B: IoBufMut + Send>(
         &'b self,
         start: u64,
         dst: Slice<B>,
@@ -228,7 +239,8 @@ where
             .expect("we produce chunk_nos by dividing by DIO_CHUNK_SIZE earlier");
         let io_buf = get_io_buffer(nchunks).slice_full();
         let req_len = io_buf.len();
-        let (io_buf_slice, nread) = match file.read_at_to_end(read_offset, io_buf, ctx).await {
+        let (io_buf_slice, nread) = match file.read_exact_at_eof_ok(read_offset, io_buf, ctx).await
+        {
             Ok(t) => t,
             Err(e) => {
                 let e = Arc::new(e);
@@ -442,7 +454,7 @@ mod tests {
         let file = InMemoryFile::new_random(10);
         let test_read = |pos, len| {
             let buf = vec![0; len];
-            let fut = file.read_at_to_end(pos, buf.slice_full(), &ctx);
+            let fut = file.read_exact_at_eof_ok(pos, buf.slice_full(), &ctx);
             use futures::FutureExt;
             let (slice, nread) = fut
                 .now_or_never()
@@ -460,7 +472,7 @@ mod tests {
     }
 
     impl File for InMemoryFile {
-        async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
+        async fn read_exact_at_eof_ok<'a, 'b, B: IoBufMut + Send>(
             &'b self,
             start: u64,
             mut dst: Slice<B>,
@@ -591,13 +603,13 @@ mod tests {
     }
 
     impl<'x> File for RecorderFile<'x> {
-        async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
+        async fn read_exact_at_eof_ok<'a, 'b, B: IoBufMut + Send>(
             &'b self,
             start: u64,
             dst: Slice<B>,
             ctx: &'a RequestContext,
         ) -> std::io::Result<(Slice<B>, usize)> {
-            let (dst, nread) = self.file.read_at_to_end(start, dst, ctx).await?;
+            let (dst, nread) = self.file.read_exact_at_eof_ok(start, dst, ctx).await?;
             self.recorded.borrow_mut().push(RecordedRead {
                 pos: start,
                 req_len: dst.bytes_total(),
@@ -721,7 +733,7 @@ mod tests {
     }
 
     impl File for MockFile {
-        async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
+        async fn read_exact_at_eof_ok<'a, 'b, B: IoBufMut + Send>(
             &'b self,
             start: u64,
             mut dst: Slice<B>,
@@ -766,7 +778,7 @@ mod tests {
 
         let buf = Vec::with_capacity(512);
         let (buf, nread) = mock_file
-            .read_at_to_end(0, buf.slice_full(), &ctx)
+            .read_exact_at_eof_ok(0, buf.slice_full(), &ctx)
             .await
             .unwrap();
         assert_eq!(nread, 512);
@@ -774,7 +786,7 @@ mod tests {
 
         let buf = Vec::with_capacity(512);
         let (buf, nread) = mock_file
-            .read_at_to_end(512, buf.slice_full(), &ctx)
+            .read_exact_at_eof_ok(512, buf.slice_full(), &ctx)
             .await
             .unwrap();
         assert_eq!(nread, 512);
@@ -782,7 +794,7 @@ mod tests {
 
         let buf = Vec::with_capacity(512);
         let (buf, nread) = mock_file
-            .read_at_to_end(1024, buf.slice_full(), &ctx)
+            .read_exact_at_eof_ok(1024, buf.slice_full(), &ctx)
             .await
             .unwrap();
         assert_eq!(nread, 10);
@@ -790,7 +802,7 @@ mod tests {
 
         let buf = Vec::with_capacity(1024);
         let err = mock_file
-            .read_at_to_end(2048, buf.slice_full(), &ctx)
+            .read_exact_at_eof_ok(2048, buf.slice_full(), &ctx)
             .await
             .err()
             .unwrap();

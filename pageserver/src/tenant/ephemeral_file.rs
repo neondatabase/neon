@@ -5,6 +5,7 @@ use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
+use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
@@ -13,7 +14,7 @@ use bytes::BytesMut;
 use camino::Utf8PathBuf;
 use num_traits::Num;
 use pageserver_api::shard::TenantShardId;
-use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
+use tokio_epoll_uring::{BoundedBuf, Slice};
 use tracing::error;
 
 use std::io;
@@ -107,42 +108,62 @@ impl EphemeralFile {
     }
 
     pub(crate) async fn load_to_vec(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
-        let size = usize::try_from(self.len()).unwrap();
+        let size = self.len().into_usize();
         let vec = Vec::with_capacity(size);
-
-        // read from disk what we've already flushed
-        let file_size_tracker = self.buffered_writer.as_inner();
-        let flushed_offset = usize::try_from(file_size_tracker.bytes_written()).unwrap();
-        let flushed_range = 0..flushed_offset;
-        let file: &VirtualFile = file_size_tracker.as_inner();
-        let mut vec = file
-            .read_exact_at(
-                vec.slice(0..(flushed_range.end - flushed_range.start)),
-                u64::try_from(flushed_range.start).unwrap(),
-                ctx,
-            )
-            .await?
-            .into_inner();
-
-        // copy from in-memory buffer what we haven't flushed yet but would return when accessed via read_blk
-        let buffer = self.buffered_writer.inspect_buffer();
-        let buffered = &buffer[0..buffer.pending()];
-        vec.extend_from_slice(buffered);
-        assert_eq!(vec.len(), size);
+        let (slice, nread) = self.read_exact_at_eof_ok(0, vec.slice_full(), ctx).await?;
+        assert_eq!(nread, size);
+        let vec = slice.into_inner();
+        assert_eq!(vec.len(), nread);
+        assert_eq!(vec.capacity(), size, "we shouldn't be reallocating");
         Ok(vec)
     }
 
-    /// Fill dst will dst.bytes_total() bytes from the bytes written to the buffered writer from offset `start` and later.
-    /// If `dst` is larger than the available bytes, the read will be short.
-    /// The read will never be short for other reasons.
-    /// The number of bytes read into `dst` is returned as part of the result tuple.
-    /// No guarantees are made about the remaining bytes in `dst`, i.e., assume their contents are random.
-    pub(crate) async fn read_at_to_end<B: IoBufMut + Send>(
-        &self,
-        start: u64,
-        dst: Slice<B>,
+    /// Returns the offset at which the first byte of the input was written, for use
+    /// in constructing indices over the written value.
+    ///
+    /// Panics if the write is short because there's no way we can recover from that.
+    /// TODO: make upstack handle this as an error.
+    pub(crate) async fn write_raw(
+        &mut self,
+        srcbuf: &[u8],
         ctx: &RequestContext,
-    ) -> std::io::Result<(Slice<B>, usize)> {
+    ) -> std::io::Result<u64> {
+        let pos = self.bytes_written;
+
+        let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
+                    srcbuf_len = srcbuf.len(),
+                ),
+            )
+        })?;
+
+        // Write the payload
+        let nwritten = self
+            .buffered_writer
+            .write_buffered_borrowed(srcbuf, ctx)
+            .await?;
+        assert_eq!(
+            nwritten,
+            srcbuf.len(),
+            "buffered writer has no short writes"
+        );
+
+        self.bytes_written = new_bytes_written;
+
+        Ok(pos)
+    }
+}
+
+impl super::storage_layer::inmemory_layer::vectored_dio_read::File for EphemeralFile {
+    async fn read_exact_at_eof_ok<'a, 'b, B: tokio_epoll_uring::IoBufMut + Send>(
+        &'b self,
+        start: u64,
+        dst: tokio_epoll_uring::Slice<B>,
+        ctx: &'a RequestContext,
+    ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
         let file_size_tracking_writer = self.buffered_writer.as_inner();
         let flushed_offset = file_size_tracking_writer.bytes_written();
 
@@ -213,44 +234,6 @@ impl EphemeralFile {
         // TODO: in debug mode, randomize the remaining bytes in `dst` to catch bugs
 
         Ok((dst, (end - start).into_usize()))
-    }
-
-    /// Returns the offset at which the first byte of the input was written, for use
-    /// in constructing indices over the written value.
-    ///
-    /// Panics if the write is short because there's no way we can recover from that.
-    /// TODO: make upstack handle this as an error.
-    pub(crate) async fn write_raw(
-        &mut self,
-        srcbuf: &[u8],
-        ctx: &RequestContext,
-    ) -> std::io::Result<u64> {
-        let pos = self.bytes_written;
-
-        let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
-                    srcbuf_len = srcbuf.len(),
-                ),
-            )
-        })?;
-
-        // Write the payload
-        let nwritten = self
-            .buffered_writer
-            .write_buffered_borrowed(srcbuf, ctx)
-            .await?;
-        assert_eq!(
-            nwritten,
-            srcbuf.len(),
-            "buffered writer has no short writes"
-        );
-
-        self.bytes_written = new_bytes_written;
-
-        Ok(pos)
     }
 }
 
@@ -365,7 +348,7 @@ mod tests {
             assert_eq!(value_offsets[i], i.into_u64());
             let buf = Vec::with_capacity(1);
             let (buf_slice, nread) = file
-                .read_at_to_end(i.into_u64(), buf.slice_full(), &ctx)
+                .read_exact_at_eof_ok(i.into_u64(), buf.slice_full(), &ctx)
                 .await
                 .unwrap();
             let buf = buf_slice.into_inner();
@@ -456,7 +439,11 @@ mod tests {
             let content = &content;
             async move {
                 let (buf, nread) = file
-                    .read_at_to_end(start.into_u64(), Vec::with_capacity(len).slice_full(), ctx)
+                    .read_exact_at_eof_ok(
+                        start.into_u64(),
+                        Vec::with_capacity(len).slice_full(),
+                        ctx,
+                    )
                     .await
                     .unwrap();
                 assert_eq!(nread, len);

@@ -39,7 +39,7 @@ use super::{
     DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
 };
 
-mod vectored_dio_read;
+pub(crate) mod vectored_dio_read;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub(crate) struct InMemoryLayerFileId(page_cache::FileId);
@@ -449,16 +449,7 @@ impl InMemoryLayer {
         }
 
         // Execute the reads.
-        impl vectored_dio_read::File for EphemeralFile {
-            async fn read_at_to_end<'a, 'b, B: tokio_epoll_uring::IoBufMut + Send>(
-                &'b self,
-                start: u64,
-                dst: tokio_epoll_uring::Slice<B>,
-                ctx: &'a RequestContext,
-            ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-                EphemeralFile::read_at_to_end(self, start, dst, ctx).await
-            }
-        }
+
         let f = vectored_dio_read::execute(
             &inner.file,
             reads
