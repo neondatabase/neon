@@ -447,7 +447,10 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
+    maintenance_tasks.spawn(proxy::handle_signals(
+        cancellation_token.clone(),
+        || async { Ok(()) },
+    ));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {

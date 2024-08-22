@@ -1,11 +1,19 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    pin::pin,
+    sync::Arc,
+    time::Duration,
+};
 
+use anyhow::{bail, ensure};
 use dashmap::DashMap;
+use futures::future::Either;
 use proxy::{
-    auth::backend::local::LocalBackend,
+    auth::backend::local::{JwksRoleSettings, LocalBackend, JWKS_ROLE_MAP},
     cancellation::CancellationHandlerMain,
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
-    console::locks::ApiLocks,
+    console::{locks::ApiLocks, messages::JwksRoleMapping},
     http::health_server::AppMetrics,
     metrics::{Metrics, ThreadPoolMetrics},
     rate_limiter::{BucketRateLimiter, EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo},
@@ -19,7 +27,7 @@ project_build_tag!(BUILD_TAG);
 use clap::Parser;
 use tokio::{net::TcpListener, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info, warn};
 use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
 
 #[global_allocator]
@@ -64,6 +72,9 @@ struct LocalProxyCliArgs {
     /// Address of the postgres server
     #[clap(long, default_value = "127.0.0.1:5432")]
     compute: SocketAddr,
+    /// File address of the local proxy config file
+    #[clap(long, default_value = "./localproxy.json")]
+    config_path: PathBuf,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -123,7 +134,9 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone()));
+    maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone(), move || {
+        refresh_config(args.config_path.clone())
+    }));
     maintenance_tasks.spawn(proxy::http::health_server::task_main(
         metrics_listener,
         AppMetrics {
@@ -145,7 +158,14 @@ async fn main() -> anyhow::Result<()> {
         endpoint_rate_limiter,
     );
 
-    task.await?;
+    match futures::future::select(pin!(maintenance_tasks.join_next()), pin!(task)).await {
+        // exit immediately on maintenance task completion
+        Either::Left((Some(res), _)) => match proxy::flatten_err(res)? {},
+        // exit with error immediately if all maintenance tasks have ceased (should be caught by branch above)
+        Either::Left((None, _)) => bail!("no maintenance tasks running. invalid state"),
+        // exit immediately on client task error
+        Either::Right((res, _)) => res?,
+    }
 
     Ok(())
 }
@@ -212,4 +232,81 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES,
         )?,
     })))
+}
+
+async fn refresh_config(path: PathBuf) -> anyhow::Result<()> {
+    match refresh_config_inner(&path).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            error!(error=?e, ?path, "could not read config file");
+            Ok(())
+        }
+    }
+}
+
+async fn refresh_config_inner(path: &Path) -> anyhow::Result<()> {
+    let bytes = tokio::fs::read(&path).await?;
+    let mut data: JwksRoleMapping = serde_json::from_slice(&bytes)?;
+
+    let mut settings = None;
+
+    for mapping in data.roles.values_mut() {
+        for jwks in &mut mapping.jwks {
+            ensure!(
+                jwks.jwks_url.has_authority()
+                    && (jwks.jwks_url.scheme() == "http" || jwks.jwks_url.scheme() == "https"),
+                "Invalid JWKS url. Must be HTTP",
+            );
+
+            ensure!(
+                jwks.jwks_url
+                    .host()
+                    .is_some_and(|h| h != url::Host::Domain("")),
+                "Invalid JWKS url. No domain listed",
+            );
+
+            // clear username, password and ports
+            jwks.jwks_url.set_port(None).expect(
+                "url can be a base and has a valid host and is not a file. should not error",
+            );
+            jwks.jwks_url.set_username("").expect(
+                "url can be a base and has a valid host and is not a file. should not error",
+            );
+            jwks.jwks_url.set_password(None).expect(
+                "url can be a base and has a valid host and is not a file. should not error",
+            );
+
+            // clear query params
+            jwks.jwks_url.set_fragment(None);
+            jwks.jwks_url.query_pairs_mut().clear().finish();
+
+            if jwks.jwks_url.scheme() != "https" {
+                // local testing is hard if we need to set up https support.
+                if cfg!(not(feature = "testing")) {
+                    jwks.jwks_url
+                        .set_scheme("https")
+                        .expect("should not error to set the scheme to https if it was http");
+                } else {
+                    warn!(scheme = jwks.jwks_url.scheme(), "JWKS url is not HTTPS");
+                }
+            }
+
+            let (pr, br) = settings.get_or_insert((jwks.project_id, jwks.branch_id));
+            ensure!(
+                *pr == jwks.project_id,
+                "inconsistent project IDs configured"
+            );
+            ensure!(*br == jwks.branch_id, "inconsistent branch IDs configured");
+        }
+    }
+
+    if let Some((project_id, branch_id)) = settings {
+        JWKS_ROLE_MAP.store(Some(Arc::new(JwksRoleSettings {
+            roles: data.roles,
+            project_id,
+            branch_id,
+        })));
+    }
+
+    Ok(())
 }
