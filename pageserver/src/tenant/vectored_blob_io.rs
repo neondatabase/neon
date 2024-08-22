@@ -206,13 +206,15 @@ impl VectoredReadBuilderInner {
     pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
         tracing::trace!(start, end, "trying to extend");
         let size = (end - start) as usize;
-        if self.end == start && {
+        let not_limited_by_max_read_size = || {
             if let Some(max_read_size) = self.max_read_size {
                 self.size() + size <= max_read_size
             } else {
                 true
             }
-        } {
+        };
+
+        if self.end == start && not_limited_by_max_read_size() {
             self.end = end;
             self.blobs_at
                 .append(start, (end, meta))
@@ -282,31 +284,35 @@ impl ChunkedVectoredReadBuilderInner {
         }
     }
 
-    /// Returns the end offset of the last blob.
-    pub(crate) fn last_end_offset(&self) -> u64 {
-        // SAFETY(unwrap): `self.blobs_at` always has a least one entry since construction.
-        let (_, (end, _)) = self.blobs_at.as_slice().last().unwrap();
-        *end
-    }
-
-    /// Attempts to extend the current read with a new blob if:
-    ///
-    /// - The start offset matches with the current end of the vectored read
-    /// - The end block number matches the current end block number.
+    /// Attempts to extend the current read with a new blob if the new blob resides in the same or the immediate next chunk.
     ///
     /// The resulting size also must be below the max read size.
     pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
         tracing::trace!(start, end, "trying to extend");
         let start_blk_no = start as usize / self.chunk_size;
         let end_blk_no = div_round_up(end as usize, self.chunk_size);
-        if (self.last_end_offset() == start || self.end_blk_no == start_blk_no + 1) && {
+
+        let not_limited_by_max_read_size = || {
             if let Some(max_read_size) = self.max_read_size {
                 let coalesced_size = (end_blk_no - self.start_blk_no) * self.chunk_size;
                 coalesced_size <= max_read_size
             } else {
                 true
             }
-        } {
+        };
+
+        /// Returns true if the second block starts in the same block or the immediate next block where the first block ended.
+        ///
+        /// Note: This automatically handles the case where two blocks are adjacent to each other,
+        /// whether they starts on chunk size boundary or not.
+        fn is_adjacent_chunk_read(first_end_blk_no: usize, second_start_blk_no: usize) -> bool {
+            // 1. first.end & second.start are in the same block
+            first_end_blk_no == second_start_blk_no + 1 ||
+            // 2. first.end ends one block before second.start
+            first_end_blk_no == second_start_blk_no
+        }
+
+        if is_adjacent_chunk_read(self.end_blk_no, start_blk_no) && not_limited_by_max_read_size() {
             self.end_blk_no = end_blk_no;
             self.blobs_at
                 .append(start, (end, meta))
