@@ -2234,6 +2234,11 @@ impl Timeline {
 
                 handles: Default::default(),
             };
+
+            if aux_file_policy == Some(AuxFilePolicy::V1) {
+                warn!("this timeline is using deprecated aux file policy V1");
+            }
+
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
 
