@@ -1,13 +1,13 @@
 import json
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pytest
 import requests
 
-from fixtures.common_types import Lsn, TenantId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TenantTimelineId, TimelineId
 from fixtures.log_helper import log
+from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 
 
 # Walreceiver as returned by sk's timeline status endpoint.
@@ -31,15 +31,26 @@ class SafekeeperTimelineStatus:
     walreceivers: List[Walreceiver]
 
 
-@dataclass
-class SafekeeperMetrics:
+class SafekeeperMetrics(Metrics):
+    # Helpers to get metrics from tests without hardcoding the metric names there.
     # These are metrics from Prometheus which uses float64 internally.
     # As a consequence, values may differ from real original int64s.
-    flush_lsn_inexact: Dict[Tuple[TenantId, TimelineId], int] = field(default_factory=dict)
-    commit_lsn_inexact: Dict[Tuple[TenantId, TimelineId], int] = field(default_factory=dict)
+
+    def __init__(self, m: Metrics):
+        self.metrics = m.metrics
+
+    def flush_lsn_inexact(self, tenant_id: TenantId, timeline_id: TimelineId):
+        return self.query_one(
+            "safekeeper_flush_lsn", {"tenant_id": str(tenant_id), "timeline_id": str(timeline_id)}
+        ).value
+
+    def commit_lsn_inexact(self, tenant_id: TenantId, timeline_id: TimelineId):
+        return self.query_one(
+            "safekeeper_commit_lsn", {"tenant_id": str(tenant_id), "timeline_id": str(timeline_id)}
+        ).value
 
 
-class SafekeeperHttpClient(requests.Session):
+class SafekeeperHttpClient(requests.Session, MetricsGetter):
     HTTPError = requests.HTTPError
 
     def __init__(self, port: int, auth_token: Optional[str] = None, is_testing_enabled=False):
@@ -133,6 +144,12 @@ class SafekeeperHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def timeline_list(self) -> List[TenantTimelineId]:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/timeline")
+        res.raise_for_status()
+        resj = res.json()
+        return [TenantTimelineId.from_json(ttidj) for ttidj in resj]
+
     def timeline_create(
         self,
         tenant_id: TenantId,
@@ -209,28 +226,11 @@ class SafekeeperHttpClient(requests.Session):
         return res_json
 
     def get_metrics_str(self) -> str:
+        """You probably want to use get_metrics() instead."""
         request_result = self.get(f"http://localhost:{self.port}/metrics")
         request_result.raise_for_status()
         return request_result.text
 
     def get_metrics(self) -> SafekeeperMetrics:
-        all_metrics_text = self.get_metrics_str()
-
-        metrics = SafekeeperMetrics()
-        for match in re.finditer(
-            r'^safekeeper_flush_lsn{tenant_id="([0-9a-f]+)",timeline_id="([0-9a-f]+)"} (\S+)$',
-            all_metrics_text,
-            re.MULTILINE,
-        ):
-            metrics.flush_lsn_inexact[(TenantId(match.group(1)), TimelineId(match.group(2)))] = int(
-                match.group(3)
-            )
-        for match in re.finditer(
-            r'^safekeeper_commit_lsn{tenant_id="([0-9a-f]+)",timeline_id="([0-9a-f]+)"} (\S+)$',
-            all_metrics_text,
-            re.MULTILINE,
-        ):
-            metrics.commit_lsn_inexact[
-                (TenantId(match.group(1)), TimelineId(match.group(2)))
-            ] = int(match.group(3))
-        return metrics
+        res = self.get_metrics_str()
+        return SafekeeperMetrics(parse_metrics(res))

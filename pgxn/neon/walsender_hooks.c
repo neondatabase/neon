@@ -20,6 +20,7 @@
 #include "utils/guc.h"
 #include "postmaster/interrupt.h"
 
+#include "neon.h"
 #include "neon_walreader.h"
 #include "walproposer.h"
 
@@ -181,6 +182,13 @@ NeonWALReadSegmentClose(XLogReaderState *xlogreader)
 void
 NeonOnDemandXLogReaderRoutines(XLogReaderRoutine *xlr)
 {
+	/*
+	 * If safekeepers are not configured, assume we don't need neon_walreader,
+	 * i.e. running neon fork locally.
+	 */
+	if (wal_acceptors_list[0] == '\0')
+		return;
+
 	if (!wal_reader)
 	{
 		XLogRecPtr	epochStartLsn = pg_atomic_read_u64(&GetWalpropShmemState()->propEpochStartLsn);

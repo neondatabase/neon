@@ -1,5 +1,13 @@
 FROM debian:bullseye-slim
 
+# Use ARG as a build-time environment variable here to allow.
+# It's not supposed to be set outside.
+# Alternatively it can be obtained using the following command
+# ```
+# . /etc/os-release && echo "${VERSION_CODENAME}"
+# ```
+ARG DEBIAN_VERSION_CODENAME=bullseye
+
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
 SHELL ["/bin/bash", "-c"]
@@ -50,7 +58,7 @@ RUN set -e \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
-ENV PROTOC_VERSION 25.1
+ENV PROTOC_VERSION=25.1
 RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
     && unzip -q protoc.zip -d protoc \
     && mv protoc/bin/protoc /usr/local/bin/protoc \
@@ -66,11 +74,23 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
 # LLVM
 ENV LLVM_VERSION=18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
-    && echo "deb http://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && echo "deb http://apt.llvm.org/${DEBIAN_VERSION_CODENAME}/ llvm-toolchain-${DEBIAN_VERSION_CODENAME}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
     && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Install docker
+RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+    && apt update \
+    && apt install -y docker-ce docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Configure sudo & docker
+RUN usermod -aG sudo nonroot && \
+    echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
+    usermod -aG docker nonroot
 
 # AWS CLI
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "awscliv2.zip" \
@@ -79,7 +99,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
     && rm awscliv2.zip
 
 # Mold: A Modern Linker
-ENV MOLD_VERSION v2.31.0
+ENV MOLD_VERSION=v2.33.0
 RUN set -e \
     && git clone https://github.com/rui314/mold.git \
     && mkdir mold/build \
@@ -148,7 +168,7 @@ USER nonroot:nonroot
 WORKDIR /home/nonroot
 
 # Python
-ENV PYTHON_VERSION=3.9.18 \
+ENV PYTHON_VERSION=3.9.19 \
     PYENV_ROOT=/home/nonroot/.pyenv \
     PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
 RUN set -e \
@@ -172,9 +192,14 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.79.0
+ENV RUSTC_VERSION=1.80.1
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
+ARG RUSTFILT_VERSION=0.2.1
+ARG CARGO_HAKARI_VERSION=0.9.30
+ARG CARGO_DENY_VERSION=0.16.1
+ARG CARGO_HACK_VERSION=0.6.31
+ARG CARGO_NEXTEST_VERSION=0.9.72
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -183,15 +208,13 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
     rustup component add llvm-tools-preview rustfmt clippy && \
-    cargo install --git https://github.com/paritytech/cachepot && \
-    cargo install rustfilt && \
-    cargo install cargo-hakari && \
-    cargo install cargo-deny --locked && \
-    cargo install cargo-hack && \
-    cargo install cargo-nextest && \
+    cargo install rustfilt            --version ${RUSTFILT_VERSION} && \
+    cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} && \
+    cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \
+    cargo install cargo-hack          --version ${CARGO_HACK_VERSION} && \
+    cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
-ENV RUSTC_WRAPPER=cachepot
 
 # Show versions
 RUN whoami \

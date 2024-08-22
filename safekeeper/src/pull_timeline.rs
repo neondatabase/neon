@@ -11,13 +11,8 @@ use std::{
     io::{self, ErrorKind},
     sync::Arc,
 };
-use tokio::{
-    fs::{File, OpenOptions},
-    io::AsyncWrite,
-    sync::mpsc,
-    task,
-};
-use tokio_tar::{Archive, Builder};
+use tokio::{fs::OpenOptions, io::AsyncWrite, sync::mpsc, task};
+use tokio_tar::{Archive, Builder, Header};
 use tokio_util::{
     io::{CopyToBytes, SinkWriter},
     sync::PollSender,
@@ -32,13 +27,15 @@ use crate::{
         routes::TimelineStatus,
     },
     safekeeper::Term,
+    state::TimelinePersistentState,
     timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError, WalResidentTimeline},
+    wal_backup,
     wal_storage::{self, open_wal_file, Storage},
     GlobalTimelines, SafeKeeperConf,
 };
 use utils::{
     crashsafe::{durable_rename, fsync_async_opt},
-    id::{TenantId, TenantTimelineId, TimelineId},
+    id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     logging::SecretString,
     lsn::Lsn,
     pausable_failpoint,
@@ -46,8 +43,13 @@ use utils::{
 
 /// Stream tar archive of timeline to tx.
 #[instrument(name = "snapshot", skip_all, fields(ttid = %tli.ttid))]
-pub async fn stream_snapshot(tli: WalResidentTimeline, tx: mpsc::Sender<Result<Bytes>>) {
-    if let Err(e) = stream_snapshot_guts(tli, tx.clone()).await {
+pub async fn stream_snapshot(
+    tli: WalResidentTimeline,
+    source: NodeId,
+    destination: NodeId,
+    tx: mpsc::Sender<Result<Bytes>>,
+) {
+    if let Err(e) = stream_snapshot_guts(tli, source, destination, tx.clone()).await {
         // Error type/contents don't matter as they won't can't reach the client
         // (hyper likely doesn't do anything with it), but http stream will be
         // prematurely terminated. It would be nice to try to send the error in
@@ -81,6 +83,8 @@ impl Drop for SnapshotContext {
 
 pub async fn stream_snapshot_guts(
     tli: WalResidentTimeline,
+    source: NodeId,
+    destination: NodeId,
     tx: mpsc::Sender<Result<Bytes>>,
 ) -> Result<()> {
     // tokio-tar wants Write implementor, but we have mpsc tx <Result<Bytes>>;
@@ -104,7 +108,7 @@ pub async fn stream_snapshot_guts(
     // which is also likely suboptimal.
     let mut ar = Builder::new_non_terminated(pinned_writer);
 
-    let bctx = tli.start_snapshot(&mut ar).await?;
+    let bctx = tli.start_snapshot(&mut ar, source, destination).await?;
     pausable_failpoint!("sk-snapshot-after-list-pausable");
 
     let tli_dir = tli.get_timeline_dir();
@@ -158,13 +162,43 @@ impl WalResidentTimeline {
     async fn start_snapshot<W: AsyncWrite + Unpin + Send>(
         &self,
         ar: &mut tokio_tar::Builder<W>,
+        source: NodeId,
+        destination: NodeId,
     ) -> Result<SnapshotContext> {
         let mut shared_state = self.write_shared_state().await;
         let wal_seg_size = shared_state.get_wal_seg_size();
 
-        let cf_path = self.get_timeline_dir().join(CONTROL_FILE_NAME);
-        let mut cf = File::open(cf_path).await?;
-        ar.append_file(CONTROL_FILE_NAME, &mut cf).await?;
+        let mut control_store = TimelinePersistentState::clone(shared_state.sk.state());
+        // Modify the partial segment of the in-memory copy for the control file to
+        // point to the destination safekeeper.
+        let replace = control_store
+            .partial_backup
+            .replace_uploaded_segment(source, destination)?;
+
+        if let Some(replace) = replace {
+            // The deserialized control file has an uploaded partial. We upload a copy
+            // of it to object storage for the destination safekeeper and send an updated
+            // control file in the snapshot.
+            tracing::info!(
+                "Replacing uploaded partial segment in in-mem control file: {replace:?}"
+            );
+
+            let remote_timeline_path = wal_backup::remote_timeline_path(&self.tli.ttid)?;
+            wal_backup::copy_partial_segment(
+                &replace.previous.remote_path(&remote_timeline_path),
+                &replace.current.remote_path(&remote_timeline_path),
+            )
+            .await?;
+        }
+
+        let buf = control_store
+            .write_to_buf()
+            .with_context(|| "failed to serialize control store")?;
+        let mut header = Header::new_gnu();
+        header.set_size(buf.len().try_into().expect("never breaches u64"));
+        ar.append_data(&mut header, CONTROL_FILE_NAME, buf.as_slice())
+            .await
+            .with_context(|| "failed to append to archive")?;
 
         // We need to stream since the oldest segment someone (s3 or pageserver)
         // still needs. This duplicates calc_horizon_lsn logic.
@@ -342,7 +376,7 @@ async fn pull_timeline(
     let client = Client::new(host.clone(), sk_auth_token.clone());
     // Request stream with basebackup archive.
     let bb_resp = client
-        .snapshot(status.tenant_id, status.timeline_id)
+        .snapshot(status.tenant_id, status.timeline_id, conf.my_id)
         .await?;
 
     // Make Stream of Bytes from it...

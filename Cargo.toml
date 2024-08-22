@@ -13,9 +13,9 @@ members = [
     "safekeeper",
     "storage_broker",
     "storage_controller",
+    "storage_controller/client",
     "storage_scrubber",
     "workspace_hack",
-    "trace",
     "libs/compute_api",
     "libs/pageserver_api",
     "libs/postgres_ffi",
@@ -84,7 +84,6 @@ enumset = "1.0.12"
 fail = "0.5.0"
 fallible-iterator = "0.2"
 framed-websockets = { version = "0.1.0", git = "https://github.com/neondatabase/framed-websockets" }
-fs2 = "0.4.3"
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
@@ -111,8 +110,8 @@ lasso = "0.7"
 leaky-bucket = "1.0.1"
 libc = "0.2"
 md5 = "0.7.0"
-measured = { version = "0.0.21", features=["lasso"] }
-measured-process = { version = "0.0.21" }
+measured = { version = "0.0.22", features=["lasso"] }
+measured-process = { version = "0.0.22" }
 memoffset = "0.8"
 nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
@@ -127,7 +126,7 @@ parquet = { version = "51.0.0", default-features = false, features = ["zstd"] }
 parquet_derive = "51.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
-procfs = "0.14"
+procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
@@ -184,14 +183,17 @@ tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.21.0"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+try-lock = "0.2.5"
 twox-hash = { version = "1.6.3", default-features = false }
+typed-json = "0.1"
 url = "2.2"
 urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
 rustls-native-certs = "0.7"
 x509-parser = "0.15"
+whoami = "1.5.1"
 
 ## TODO replace this with tracing
 env_logger = "0.10"
@@ -202,9 +204,6 @@ postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="
 postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-
-## Other git libraries
-heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
 
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
@@ -221,6 +220,7 @@ remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
 desim = { version = "0.1", path = "./libs/desim" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
+storage_controller_client = { path = "./storage_controller/client" }
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }

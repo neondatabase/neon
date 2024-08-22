@@ -26,7 +26,6 @@
 #include "miscadmin.h"
 #include "pagestore_client.h"
 #include "common/hashfn.h"
-#include "lib/hyperloglog.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include RELFILEINFO_HDR
@@ -40,6 +39,10 @@
 #include "utils/dynahash.h"
 #include "utils/guc.h"
 
+#include "hll.h"
+
+#define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "Assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
+
 /*
  * Local file cache is used to temporary store relations pages in local file system.
  * All blocks of all relations are stored inside one file and addressed using shared hash map.
@@ -50,20 +53,43 @@
  *
  * Cache is always reconstructed at node startup, so we do not need to save mapping somewhere and worry about
  * its consistency.
+
+ *
+ * ## Holes
+ *
+ * The LFC can be resized on the fly, up to a maximum size that's determined
+ * at server startup (neon.max_file_cache_size). After server startup, we
+ * expand the underlying file when needed, until it reaches the soft limit
+ * (neon.file_cache_size_limit). If the soft limit is later reduced, we shrink
+ * the LFC by punching holes in the underlying file with a
+ * fallocate(FALLOC_FL_PUNCH_HOLE) call. The nominal size of the file doesn't
+ * shrink, but the disk space it uses does.
+ *
+ * Each hole is tracked by a dummy FileCacheEntry, which are kept in the
+ * 'holes' linked list. They are entered into the chunk hash table, with a
+ * special key where the blockNumber is used to store the 'offset' of the
+ * hole, and all other fields are zero. Holes are never looked up in the hash
+ * table, we only enter them there to have a FileCacheEntry that we can keep
+ * in the linked list. If the soft limit is raised again, we reuse the holes
+ * before extending the nominal size of the file.
  */
 
 /* Local file storage allocation chunk.
- * Should be power of two and not less than 32. Using larger than page chunks can
+ * Should be power of two. Using larger than page chunks can
  * 1. Reduce hash-map memory footprint: 8TB database contains billion pages
  *    and size of hash entry is 40 bytes, so we need 40Gb just for hash map.
  *    1Mb chunks can reduce hash map size to 320Mb.
  * 2. Improve access locality, subsequent pages will be allocated together improving seqscan speed
  */
 #define BLOCKS_PER_CHUNK	128 /* 1Mb chunk */
+/*
+ * Smaller chunk seems to be better for OLTP workload
+ */
+// #define BLOCKS_PER_CHUNK	8 /* 64kb chunk */
 #define MB					((uint64)1024*1024)
 
-#define HYPER_LOG_LOG_BIT_WIDTH   10
 #define SIZE_MB_TO_CHUNKS(size) ((uint32)((size) * MB / BLCKSZ / BLOCKS_PER_CHUNK))
+#define CHUNK_BITMAP_SIZE ((BLOCKS_PER_CHUNK + 31) / 32)
 
 typedef struct FileCacheEntry
 {
@@ -71,8 +97,8 @@ typedef struct FileCacheEntry
 	uint32		hash;
 	uint32		offset;
 	uint32		access_count;
-	uint32		bitmap[BLOCKS_PER_CHUNK / 32];
-	dlist_node	lru_node;		/* LRU list node */
+	uint32		bitmap[CHUNK_BITMAP_SIZE];
+	dlist_node	list_node;		/* LRU/holes list node */
 } FileCacheEntry;
 
 typedef struct FileCacheControl
@@ -87,8 +113,8 @@ typedef struct FileCacheControl
 	uint64		writes;
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
-	hyperLogLogState wss_estimation; /* estimation of wroking set size */
-	uint8_t		hyperloglog_hashes[(1 << HYPER_LOG_LOG_BIT_WIDTH) + 1];
+	dlist_head  holes;          /* double linked list of punched holes */
+	HyperLogLogState wss_estimation; /* estimation of working set size */
 } FileCacheControl;
 
 static HTAB *lfc_hash;
@@ -136,6 +162,7 @@ lfc_disable(char const *op)
 		lfc_ctl->used = 0;
 		lfc_ctl->limit = 0;
 		dlist_init(&lfc_ctl->lru);
+		dlist_init(&lfc_ctl->holes);
 
 		if (lfc_desc > 0)
 		{
@@ -215,18 +242,18 @@ lfc_shmem_startup(void)
 	if (!found)
 	{
 		int			fd;
-		uint32		lfc_size = SIZE_MB_TO_CHUNKS(lfc_max_size);
+		uint32		n_chunks = SIZE_MB_TO_CHUNKS(lfc_max_size);
 
 		lfc_lock = (LWLockId) GetNamedLWLockTranche("lfc_lock");
 		info.keysize = sizeof(BufferTag);
 		info.entrysize = sizeof(FileCacheEntry);
 
 		/*
-		 * lfc_size+1 because we add new element to hash table before eviction
+		 * n_chunks+1 because we add new element to hash table before eviction
 		 * of victim
 		 */
 		lfc_hash = ShmemInitHash("lfc_hash",
-								 lfc_size + 1, lfc_size + 1,
+								 n_chunks + 1, n_chunks + 1,
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
 		lfc_ctl->generation = 0;
@@ -236,14 +263,10 @@ lfc_shmem_startup(void)
 		lfc_ctl->misses = 0;
 		lfc_ctl->writes = 0;
 		dlist_init(&lfc_ctl->lru);
+		dlist_init(&lfc_ctl->holes);
 
 		/* Initialize hyper-log-log structure for estimating working set size */
-		initHyperLogLog(&lfc_ctl->wss_estimation, HYPER_LOG_LOG_BIT_WIDTH);
-
-		/* We need hashes in shared memory */
-		pfree(lfc_ctl->wss_estimation.hashesArr);
-		memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
-		lfc_ctl->wss_estimation.hashesArr = lfc_ctl->hyperloglog_hashes;
+		initSHLL(&lfc_ctl->wss_estimation);
 
 		/* Recreate file cache on restart */
 		fd = BasicOpenFile(lfc_path, O_RDWR | O_CREAT | O_TRUNC);
@@ -316,14 +339,31 @@ lfc_change_limit_hook(int newval, void *extra)
 		 * Shrink cache by throwing away least recently accessed chunks and
 		 * returning their space to file system
 		 */
-		FileCacheEntry *victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
+		FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
+		FileCacheEntry *hole;
+		uint32		offset = victim->offset;
+		uint32		hash;
+		bool		found;
+		BufferTag	holetag;
 
-		Assert(victim->access_count == 0);
+		CriticalAssert(victim->access_count == 0);
 #ifdef FALLOC_FL_PUNCH_HOLE
 		if (fallocate(lfc_desc, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) victim->offset * BLOCKS_PER_CHUNK * BLCKSZ, BLOCKS_PER_CHUNK * BLCKSZ) < 0)
 			neon_log(LOG, "Failed to punch hole in file: %m");
 #endif
+		/* We remove the old entry, and re-enter a hole to the hash table */
 		hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
+
+		memset(&holetag, 0, sizeof(holetag));
+		holetag.blockNum = offset;
+		hash = get_hash_value(lfc_hash, &holetag);
+		hole = hash_search_with_hash_value(lfc_hash, &holetag, hash, HASH_ENTER, &found);
+		hole->hash = hash;
+		hole->offset = offset;
+		hole->access_count = 0;
+		CriticalAssert(!found);
+		dlist_push_tail(&lfc_ctl->holes, &hole->list_node);
+
 		lfc_ctl->used -= 1;
 	}
 	lfc_ctl->limit = new_size;
@@ -415,6 +455,8 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
+
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
@@ -446,6 +488,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	tag.forkNum = forkNum;
 	tag.blockNum = (blkno & ~(BLOCKS_PER_CHUNK - 1));
 
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -476,7 +519,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	{
 		bool		has_remaining_pages;
 
-		for (int i = 0; i < (BLOCKS_PER_CHUNK / 32); i++)
+		for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
 		{
 			if (entry->bitmap[i] != 0)
 			{
@@ -491,8 +534,8 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 		 */
 		if (!has_remaining_pages)
 		{
-			dlist_delete(&entry->lru_node);
-			dlist_push_head(&lfc_ctl->lru, &entry->lru_node);
+			dlist_delete(&entry->list_node);
+			dlist_push_head(&lfc_ctl->lru, &entry->list_node);
 		}
 	}
 
@@ -531,6 +574,8 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
+
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -545,7 +590,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	/* Approximate working set */
 	tag.blockNum = blkno;
-	addHyperLogLog(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
+	addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
 
 	if (entry == NULL || (entry->bitmap[chunk_offs >> 5] & (1 << (chunk_offs & 31))) == 0)
 	{
@@ -557,7 +602,7 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	}
 	/* Unlink entry from LRU list to pin it for the duration of IO operation */
 	if (entry->access_count++ == 0)
-		dlist_delete(&entry->lru_node);
+		dlist_delete(&entry->list_node);
 	generation = lfc_ctl->generation;
 	entry_offset = entry->offset;
 
@@ -575,12 +620,12 @@ lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	if (lfc_ctl->generation == generation)
 	{
-		Assert(LFC_ENABLED());
+		CriticalAssert(LFC_ENABLED());
 		lfc_ctl->hits += 1;
 		pgBufferUsage.file_cache.hits += 1;
-		Assert(entry->access_count > 0);
+		CriticalAssert(entry->access_count > 0);
 		if (--entry->access_count == 0)
-			dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
+			dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
 	}
 	else
 		result = false;
@@ -619,6 +664,8 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 	tag.forkNum = forkNum;
 	tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
 	CopyNRelFileInfoToBufTag(tag, rinfo);
+
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 	hash = get_hash_value(lfc_hash, &tag);
 
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
@@ -638,7 +685,7 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 		 * operation
 		 */
 		if (entry->access_count++ == 0)
-			dlist_delete(&entry->lru_node);
+			dlist_delete(&entry->list_node);
 	}
 	else
 	{
@@ -661,12 +708,25 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 		if (lfc_ctl->used >= lfc_ctl->limit && !dlist_is_empty(&lfc_ctl->lru))
 		{
 			/* Cache overflow: evict least recently used chunk */
-			FileCacheEntry *victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
+			FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
 
-			Assert(victim->access_count == 0);
+			CriticalAssert(victim->access_count == 0);
 			entry->offset = victim->offset; /* grab victim's chunk */
 			hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
 			neon_log(DEBUG2, "Swap file cache page");
+		}
+		else if (!dlist_is_empty(&lfc_ctl->holes))
+		{
+			/* We can reuse a hole that was left behind when the LFC was shrunk previously */
+			FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
+			uint32		offset = hole->offset;
+			bool		found;
+
+			hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &found);
+			CriticalAssert(found);
+
+			lfc_ctl->used += 1;
+			entry->offset = offset;	/* reuse the hole */
 		}
 		else
 		{
@@ -695,11 +755,11 @@ lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, const void 
 
 		if (lfc_ctl->generation == generation)
 		{
-			Assert(LFC_ENABLED());
+			CriticalAssert(LFC_ENABLED());
 			/* Place entry to the head of LRU list */
-			Assert(entry->access_count > 0);
+			CriticalAssert(entry->access_count > 0);
 			if (--entry->access_count == 0)
-				dlist_push_tail(&lfc_ctl->lru, &entry->lru_node);
+				dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
 
 			entry->bitmap[chunk_offs >> 5] |= (1 << (chunk_offs & 31));
 		}
@@ -714,7 +774,6 @@ typedef struct
 } NeonGetStatsCtx;
 
 #define NUM_NEON_GET_STATS_COLS	2
-#define NUM_NEON_GET_STATS_ROWS	3
 
 PG_FUNCTION_INFO_V1(neon_get_lfc_stats);
 Datum
@@ -750,7 +809,6 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 						   INT8OID, -1, 0);
 
 		fctx->tupdesc = BlessTupleDesc(tupledesc);
-		funcctx->max_calls = NUM_NEON_GET_STATS_ROWS;
 		funcctx->user_fctx = fctx;
 
 		/* Return to original context when allocating transient memory */
@@ -783,6 +841,11 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 			key = "file_cache_writes";
 			if (lfc_ctl)
 				value = lfc_ctl->writes;
+			break;
+		case 4:
+			key = "file_cache_size";
+			if (lfc_ctl)
+				value = lfc_ctl->size;
 			break;
 		default:
 			SRF_RETURN_DONE(funcctx);
@@ -907,7 +970,7 @@ local_cache_pages(PG_FUNCTION_ARGS)
 				hash_seq_init(&status, lfc_hash);
 				while ((entry = hash_seq_search(&status)) != NULL)
 				{
-					for (int i = 0; i < BLOCKS_PER_CHUNK / 32; i++)
+					for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
 						n_pages += pg_popcount32(entry->bitmap[i]);
 				}
 			}
@@ -986,20 +1049,38 @@ local_cache_pages(PG_FUNCTION_ARGS)
 		SRF_RETURN_DONE(funcctx);
 }
 
+PG_FUNCTION_INFO_V1(approximate_working_set_size_seconds);
+
+Datum
+approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
+{
+	if (lfc_size_limit != 0)
+	{
+		int32 dc;
+		time_t duration = PG_ARGISNULL(0) ? (time_t)-1 : PG_GETARG_INT32(0);
+		LWLockAcquire(lfc_lock, LW_SHARED);
+		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration);
+		LWLockRelease(lfc_lock);
+		PG_RETURN_INT32(dc);
+	}
+	PG_RETURN_NULL();
+}
+
 PG_FUNCTION_INFO_V1(approximate_working_set_size);
 
 Datum
 approximate_working_set_size(PG_FUNCTION_ARGS)
 {
-	int32 dc = -1;
 	if (lfc_size_limit != 0)
 	{
+		int32 dc;
 		bool reset = PG_GETARG_BOOL(0);
 		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
-		dc = (int32) estimateHyperLogLog(&lfc_ctl->wss_estimation);
+		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, (time_t)-1);
 		if (reset)
-			memset(lfc_ctl->hyperloglog_hashes, 0, sizeof lfc_ctl->hyperloglog_hashes);
+			memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
 		LWLockRelease(lfc_lock);
+		PG_RETURN_INT32(dc);
 	}
-	PG_RETURN_INT32(dc);
+	PG_RETURN_NULL();
 }

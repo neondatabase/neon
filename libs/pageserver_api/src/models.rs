@@ -5,10 +5,10 @@ pub mod utilization;
 pub use utilization::PageserverUtilization;
 
 use std::{
-    borrow::Cow,
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
+    str::FromStr,
     sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use utils::{
     completion,
-    history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
     serde_system_time,
@@ -228,6 +227,11 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LsnLeaseRequest {
+    pub lsn: Lsn,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TenantShardSplitRequest {
     pub new_shard_count: u8,
@@ -288,7 +292,6 @@ pub struct TenantConfig {
     pub walreceiver_connect_timeout: Option<String>,
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
-    pub trace_read_requests: Option<bool>,
     pub eviction_policy: Option<EvictionPolicy>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
@@ -430,6 +433,41 @@ impl EvictionPolicy {
 pub enum CompactionAlgorithm {
     Legacy,
     Tiered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageCompressionAlgorithm {
+    // Disabled for writes, support decompressing during read path
+    Disabled,
+    /// Zstandard compression. Level 0 means and None mean the same (default level). Levels can be negative as well.
+    /// For details, see the [manual](http://facebook.github.io/zstd/zstd_manual.html).
+    Zstd {
+        level: Option<i8>,
+    },
+}
+
+impl FromStr for ImageCompressionAlgorithm {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut components = s.split(['(', ')']);
+        let first = components
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("empty string"))?;
+        match first {
+            "disabled" => Ok(ImageCompressionAlgorithm::Disabled),
+            "zstd" => {
+                let level = if let Some(v) = components.next() {
+                    let v: i8 = v.parse()?;
+                    Some(v)
+                } else {
+                    None
+                };
+
+                Ok(ImageCompressionAlgorithm::Zstd { level })
+            }
+            _ => anyhow::bail!("invalid specifier '{first}'"),
+        }
+    }
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -599,6 +637,13 @@ pub struct TenantInfo {
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
     pub generation: u32,
+
+    /// Opaque explanation if gc is being blocked.
+    ///
+    /// Only looked up for the individual tenant detail, not the listing. This is purely for
+    /// debugging, not included in openapi.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_blocking: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -609,6 +654,17 @@ pub struct TenantDetails {
     pub walredo: Option<WalRedoManagerStatus>,
 
     pub timelines: Vec<TimelineId>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TimelineArchivalState {
+    Archived,
+    Unarchived,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct TimelineArchivalConfigRequest {
+    pub state: TimelineArchivalState,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -643,6 +699,16 @@ pub struct TimelineInfo {
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
 
+    /// How many bytes of WAL are within this branch's pitr_interval.  If the pitr_interval goes
+    /// beyond the branch's branch point, we only count up to the branch point.
+    pub pitr_history_size: u64,
+
+    /// Whether this branch's branch point is within its ancestor's PITR interval (i.e. any
+    /// ancestor data used by this branch would have been retained anyway).  If this is false, then
+    /// this branch may be imposing a cost on the ancestor by causing it to retain layers that it would
+    /// otherwise be able to GC.
+    pub within_ancestor_pitr: bool,
+
     pub timeline_dir_layer_file_size_sum: Option<u64>,
 
     pub wal_source_connstr: Option<String>,
@@ -665,58 +731,7 @@ pub struct LayerMapInfo {
     pub historic_layers: Vec<HistoricLayerInfo>,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, enum_map::Enum)]
-#[repr(usize)]
-pub enum LayerAccessKind {
-    GetValueReconstructData,
-    Iter,
-    KeyIter,
-    Dump,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayerAccessStatFullDetails {
-    pub when_millis_since_epoch: u64,
-    pub task_kind: Cow<'static, str>,
-    pub access_kind: LayerAccessKind,
-}
-
-/// An event that impacts the layer's residence status.
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayerResidenceEvent {
-    /// The time when the event occurred.
-    /// NB: this timestamp is captured while the residence status changes.
-    /// So, it might be behind/ahead of the actual residence change by a short amount of time.
-    ///
-    #[serde(rename = "timestamp_millis_since_epoch")]
-    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
-    pub timestamp: SystemTime,
-    /// The new residence status of the layer.
-    pub status: LayerResidenceStatus,
-    /// The reason why we had to record this event.
-    pub reason: LayerResidenceEventReason,
-}
-
-/// The reason for recording a given [`LayerResidenceEvent`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum LayerResidenceEventReason {
-    /// The layer map is being populated, e.g. during timeline load or attach.
-    /// This includes [`RemoteLayer`] objects created in [`reconcile_with_remote`].
-    /// We need to record such events because there is no persistent storage for the events.
-    ///
-    // https://github.com/rust-lang/rust/issues/74481
-    /// [`RemoteLayer`]: ../../tenant/storage_layer/struct.RemoteLayer.html
-    /// [`reconcile_with_remote`]: ../../tenant/struct.Timeline.html#method.reconcile_with_remote
-    LayerLoad,
-    /// We just created the layer (e.g., freeze_and_flush or compaction).
-    /// Such layers are always [`LayerResidenceStatus::Resident`].
-    LayerCreate,
-    /// We on-demand downloaded or evicted the given layer.
-    ResidenceChange,
-}
-
-/// The residence status of the layer, after the given [`LayerResidenceEvent`].
+/// The residence status of a layer
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LayerResidenceStatus {
     /// Residence status for a layer file that exists locally.
@@ -726,23 +741,16 @@ pub enum LayerResidenceStatus {
     Evicted,
 }
 
-impl LayerResidenceEvent {
-    pub fn new(status: LayerResidenceStatus, reason: LayerResidenceEventReason) -> Self {
-        Self {
-            status,
-            reason,
-            timestamp: SystemTime::now(),
-        }
-    }
-}
-
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerAccessStats {
-    pub access_count_by_access_kind: HashMap<LayerAccessKind, u64>,
-    pub task_kind_access_flag: Vec<Cow<'static, str>>,
-    pub first: Option<LayerAccessStatFullDetails>,
-    pub accesses_history: HistoryBufferWithDropCounter<LayerAccessStatFullDetails, 16>,
-    pub residence_events_history: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
+    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    pub access_time: SystemTime,
+
+    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    pub residence_time: SystemTime,
+
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -939,6 +947,8 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
+    use std::path::PathBuf;
+
     #[derive(
         Copy,
         Clone,
@@ -956,6 +966,53 @@ pub mod virtual_file {
         StdFs,
         #[cfg(target_os = "linux")]
         TokioEpollUring,
+    }
+
+    /// Direct IO modes for a pageserver.
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+    pub enum DirectIoMode {
+        /// Direct IO disabled (uses usual buffered IO).
+        #[default]
+        Disabled,
+        /// Direct IO disabled (performs checks and perf simulations).
+        Evaluate {
+            /// Alignment check level
+            alignment_check: DirectIoAlignmentCheckLevel,
+            /// Latency padded for performance simulation.
+            latency_padding: DirectIoLatencyPadding,
+        },
+        /// Direct IO enabled.
+        Enabled {
+            /// Actions to perform on alignment error.
+            on_alignment_error: DirectIoOnAlignmentErrorAction,
+        },
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum DirectIoAlignmentCheckLevel {
+        #[default]
+        Error,
+        Log,
+        None,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum DirectIoOnAlignmentErrorAction {
+        Error,
+        #[default]
+        FallbackToBuffered,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
+    #[serde(tag = "type", rename_all = "kebab-case")]
+    pub enum DirectIoLatencyPadding {
+        /// Pad virtual file operations with IO to a fake file.
+        FakeFileRW { path: PathBuf },
+        #[default]
+        None,
     }
 }
 
@@ -1426,6 +1483,7 @@ mod tests {
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
             generation: 1,
+            gc_blocking: None,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1448,6 +1506,7 @@ mod tests {
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
             generation: 1,
+            gc_blocking: None,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -1612,6 +1671,27 @@ mod tests {
         assert_eq!(
             AuxFilePolicy::from_str("cross-validation").unwrap(),
             AuxFilePolicy::CrossValidation
+        );
+    }
+
+    #[test]
+    fn test_image_compression_algorithm_parsing() {
+        use ImageCompressionAlgorithm::*;
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("disabled").unwrap(),
+            Disabled
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd").unwrap(),
+            Zstd { level: None }
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd(18)").unwrap(),
+            Zstd { level: Some(18) }
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd(-3)").unwrap(),
+            Zstd { level: Some(-3) }
         );
     }
 }

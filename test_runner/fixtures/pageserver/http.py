@@ -61,6 +61,7 @@ class HistoricLayerInfo:
     remote: bool
     # None for image layers, true if pageserver thinks this is an L0 delta layer
     l0: Optional[bool]
+    visible: bool
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
@@ -79,6 +80,7 @@ class HistoricLayerInfo:
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
             l0=l0_ness,
+            visible=d["access_stats"]["visible"],
         )
 
 
@@ -116,6 +118,9 @@ class LayerMapInfo:
 
     def image_layers(self) -> List[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Image"]
+
+    def delta_l0_layers(self) -> List[HistoricLayerInfo]:
+        return [x for x in self.historic_layers if x.kind == "Delta" and x.l0]
 
     def historic_by_name(self) -> Set[str]:
         return set(x.layer_file_name for x in self.historic_layers)
@@ -172,6 +177,21 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
 
+    def without_status_retrying(self) -> PageserverHttpClient:
+        retries = Retry(
+            status=0,
+            connect=5,
+            read=False,
+            backoff_factor=0.2,
+            status_forcelist=[],
+            allowed_methods=None,
+            remove_headers_on_redirect=[],
+        )
+
+        return PageserverHttpClient(
+            self.port, self.is_testing_enabled_or_skip, self.auth_token, retries
+        )
+
     @property
     def base_url(self) -> str:
         return f"http://localhost:{self.port}"
@@ -223,8 +243,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def tenant_attach(
         self,
         tenant_id: Union[TenantId, TenantShardId],
+        generation: int,
         config: None | Dict[str, Any] = None,
-        generation: Optional[int] = None,
     ):
         config = config or {}
 
@@ -340,6 +360,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(url)
         self.verbose_error(res)
         return (res.status_code, res.json())
+
+    def tenant_secondary_status(self, tenant_id: Union[TenantId, TenantShardId]):
+        url = f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/status"
+        res = self.get(url)
+        self.verbose_error(res)
+        return res.json()
 
     def set_tenant_config(self, tenant_id: Union[TenantId, TenantShardId], config: dict[str, Any]):
         assert "tenant_id" not in config.keys()
@@ -538,6 +564,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, dict)
         return res_json
 
+    def timeline_block_gc(self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/block_gc",
+        )
+        log.info(f"Got GC request response code: {res.status_code}")
+        self.verbose_error(res)
+
+    def timeline_unblock_gc(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+    ):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/unblock_gc",
+        )
+        log.info(f"Got GC request response code: {res.status_code}")
+        self.verbose_error(res)
+
     def timeline_compact(
         self,
         tenant_id: Union[TenantId, TenantShardId],
@@ -599,6 +641,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         return res_json
 
+    def timeline_lsn_lease(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
+    ):
+        data = {
+            "lsn": str(lsn),
+        }
+
+        log.info(f"Requesting lsn lease for {lsn=}, {tenant_id=}, {timeline_id=}")
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/lsn_lease",
+            json=data,
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
     def timeline_get_timestamp_of_lsn(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
     ):
@@ -628,6 +686,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_repartition=False,
         force_image_layer_creation=False,
         wait_until_uploaded=False,
+        compact: Optional[bool] = None,
+        **kwargs,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -638,10 +698,14 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
 
+        if compact is not None:
+            query["compact"] = "true" if compact else "false"
+
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
             params=query,
+            **kwargs,
         )
         log.info(f"Got checkpoint request response code: {res.status_code}")
         self.verbose_error(res)
@@ -798,6 +862,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
         batch_size: int | None = None,
+        **kwargs,
     ) -> Set[TimelineId]:
         params = {}
         if batch_size is not None:
@@ -805,6 +870,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/detach_ancestor",
             params=params,
+            **kwargs,
         )
         self.verbose_error(res)
         json = res.json()

@@ -21,8 +21,6 @@ def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
         [
             # eviction might be the first one after an attach to access the layers
             ".*unexpectedly on-demand downloading remote layer .* for task kind Eviction",
-            # detach can happen before we get to validate the generation number
-            ".*deletion backend: Dropped remote consistent LSN updates for tenant.*",
         ]
     )
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
@@ -58,10 +56,6 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
 
     env.pageserver.allowed_errors.extend(
         [
-            # This fixture detaches the tenant, and tests using it will tend to re-attach it
-            # shortly after. There may be un-processed deletion_queue validations from the
-            # initial attachment
-            ".*Dropped remote consistent LSN updates.*",
             # This fixture is for tests that will intentionally generate 400 responses
             ".*Error processing HTTP request: Bad request",
         ]
@@ -174,7 +168,6 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "refill_amount": 1000,
             "max": 1000,
         },
-        "trace_read_requests": True,
         "walreceiver_connect_timeout": "13m",
         "image_layer_creation_check_threshold": 1,
         "switch_aux_file_policy": "cross-validation",

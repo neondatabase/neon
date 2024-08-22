@@ -427,12 +427,17 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		values[n_pgsql_params] = NULL;
 
 		shard->conn = PQconnectStartParams(keywords, values, 1);
-		if (!shard->conn)
+		if (PQstatus(shard->conn) == CONNECTION_BAD)
 		{
-			neon_shard_log(shard_no, elevel, "Failed to connect to pageserver: out of memory");
+			char	   *msg = pchomp(PQerrorMessage(shard->conn));
+			CLEANUP_AND_DISCONNECT(shard);
+			ereport(elevel,
+					(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
+						errmsg(NEON_TAG "[shard %d] could not establish connection to pageserver", shard_no),
+						errdetail_internal("%s", msg)));
+			pfree(msg);
 			return false;
 		}
-
 		shard->state = PS_Connecting_Startup;
 		/* fallthrough */
 	}

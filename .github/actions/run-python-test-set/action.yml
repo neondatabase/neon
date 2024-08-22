@@ -43,7 +43,7 @@ inputs:
   pg_version:
     description: 'Postgres version to use for tests'
     required: false
-    default: 'v14'
+    default: 'v16'
   benchmark_durations:
     description: 'benchmark durations JSON'
     required: false
@@ -83,7 +83,6 @@ runs:
       uses: actions/checkout@v4
       with:
         submodules: true
-        fetch-depth: 1
 
     - name: Cache poetry deps
       uses: actions/cache@v4
@@ -115,6 +114,7 @@ runs:
         export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
         export DEFAULT_PG_VERSION=${PG_VERSION#v}
         export LD_LIBRARY_PATH=${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/lib
+        export BENCHMARK_CONNSTR=${BENCHMARK_CONNSTR:-}
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
@@ -130,8 +130,8 @@ runs:
           exit 1
         fi
         if [[ "${{ inputs.run_in_parallel }}" == "true" ]]; then
-          # -n16 uses sixteen processes to run tests via pytest-xdist
-          EXTRA_PARAMS="-n16 $EXTRA_PARAMS"
+          # -n sets the number of parallel processes that pytest-xdist will run
+          EXTRA_PARAMS="-n12 $EXTRA_PARAMS"
 
           # --dist=loadgroup points tests marked with @pytest.mark.xdist_group
           # to the same worker to make @pytest.mark.order work with xdist
@@ -169,17 +169,23 @@ runs:
           EXTRA_PARAMS="--durations-path $TEST_OUTPUT/benchmark_durations.json $EXTRA_PARAMS"
         fi
 
-        if [[ "${{ inputs.build_type }}" == "debug" ]]; then
+        if [[ $BUILD_TYPE == "debug" && $RUNNER_ARCH == 'X64' ]]; then
           cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-        elif [[ "${{ inputs.build_type }}" == "release" ]]; then
-          cov_prefix=()
         else
           cov_prefix=()
         fi
 
         # Wake up the cluster if we use remote neon instance
         if [ "${{ inputs.build_type }}" = "remote" ] && [ -n "${BENCHMARK_CONNSTR}" ]; then
-          ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/psql ${BENCHMARK_CONNSTR} -c "SELECT version();"
+          QUERIES=("SELECT version()")
+          if [[ "${PLATFORM}" = "neon"* ]]; then
+            QUERIES+=("SHOW neon.tenant_id")
+            QUERIES+=("SHOW neon.timeline_id")
+          fi
+
+          for q in "${QUERIES[@]}"; do
+            ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/psql ${BENCHMARK_CONNSTR} -c "${q}"
+          done
         fi
 
         # Run the tests.

@@ -13,11 +13,11 @@ rustls.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 
 pq_proto.workspace = true
-workspace_hack.workspace = true
 
 [dev-dependencies]
 once_cell.workspace = true

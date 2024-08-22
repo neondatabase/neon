@@ -35,6 +35,7 @@ PG_MODULE_MAGIC;
 extern void _PG_init(void);
 
 PG_FUNCTION_INFO_V1(test_consume_xids);
+PG_FUNCTION_INFO_V1(test_consume_oids);
 PG_FUNCTION_INFO_V1(test_consume_cpu);
 PG_FUNCTION_INFO_V1(test_consume_memory);
 PG_FUNCTION_INFO_V1(test_release_memory);
@@ -42,6 +43,8 @@ PG_FUNCTION_INFO_V1(clear_buffer_cache);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
 PG_FUNCTION_INFO_V1(neon_xlogflush);
+PG_FUNCTION_INFO_V1(trigger_panic);
+PG_FUNCTION_INFO_V1(trigger_segfault);
 
 /*
  * Linkage to functions in neon module.
@@ -71,6 +74,21 @@ _PG_init(void)
 }
 
 #define neon_read_at_lsn neon_read_at_lsn_ptr
+
+/*
+ * test_consume_oids(int4), for rapidly consuming OIDs, to test wraparound.
+ * Unlike test_consume_xids which is passed number of xids to be consumed,
+ * this function is given the target Oid.
+ */
+Datum
+test_consume_oids(PG_FUNCTION_ARGS)
+{
+	int32 oid = PG_GETARG_INT32(0);
+
+	while (oid != GetNewObjectId());
+
+	PG_RETURN_VOID();
+}
 
 /*
  * test_consume_xids(int4), for rapidly consuming XIDs, to test wraparound.
@@ -488,4 +506,25 @@ neon_xlogflush(PG_FUNCTION_ARGS)
 
 	XLogFlush(lsn);
 	PG_RETURN_VOID();
+}
+
+/*
+ * Function to trigger panic.
+ */
+Datum
+trigger_panic(PG_FUNCTION_ARGS)
+{
+    elog(PANIC, "neon_test_utils: panic");
+    PG_RETURN_VOID();
+}
+
+/*
+ * Function to trigger a segfault.
+ */
+Datum
+trigger_segfault(PG_FUNCTION_ARGS)
+{
+    int *ptr = NULL;
+    *ptr = 42;
+    PG_RETURN_VOID();
 }

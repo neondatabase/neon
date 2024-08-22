@@ -2,10 +2,11 @@
 //! All timelines should always be present in this map, this is done by loading them
 //! all from the disk on startup and keeping them in memory.
 
+use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
+use crate::rate_limit::RateLimiter;
 use crate::safekeeper::ServerInfo;
 use crate::timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError};
 use crate::timelines_set::TimelinesSet;
-use crate::wal_backup_partial::RateLimiter;
 use crate::SafeKeeperConf;
 use anyhow::{bail, Context, Result};
 use camino::Utf8PathBuf;
@@ -15,16 +16,23 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::*;
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 
 struct GlobalTimelinesState {
     timelines: HashMap<TenantTimelineId, Arc<Timeline>>,
+
+    // A tombstone indicates this timeline used to exist has been deleted.  These are used to prevent
+    // on-demand timeline creation from recreating deleted timelines.  This is only soft-enforced, as
+    // this map is dropped on restart.
+    tombstones: HashMap<TenantTimelineId, Instant>,
+
     conf: Option<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
     load_lock: Arc<tokio::sync::Mutex<TimelineLoadLock>>,
-    partial_backup_rate_limiter: RateLimiter,
+    global_rate_limiter: RateLimiter,
 }
 
 // Used to prevent concurrent timeline loading.
@@ -43,7 +51,7 @@ impl GlobalTimelinesState {
         (
             self.get_conf().clone(),
             self.broker_active_set.clone(),
-            self.partial_backup_rate_limiter.clone(),
+            self.global_rate_limiter.clone(),
         )
     }
 
@@ -64,15 +72,21 @@ impl GlobalTimelinesState {
             .cloned()
             .ok_or(TimelineError::NotFound(*ttid))
     }
+
+    fn delete(&mut self, ttid: TenantTimelineId) {
+        self.timelines.remove(&ttid);
+        self.tombstones.insert(ttid, Instant::now());
+    }
 }
 
 static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
     Mutex::new(GlobalTimelinesState {
         timelines: HashMap::new(),
+        tombstones: HashMap::new(),
         conf: None,
         broker_active_set: Arc::new(TimelinesSet::default()),
         load_lock: Arc::new(tokio::sync::Mutex::new(TimelineLoadLock)),
-        partial_backup_rate_limiter: RateLimiter::new(1),
+        global_rate_limiter: RateLimiter::new(1, 1),
     })
 });
 
@@ -86,7 +100,10 @@ impl GlobalTimelines {
         // lock, so use explicit block
         let tenants_dir = {
             let mut state = TIMELINES_STATE.lock().unwrap();
-            state.partial_backup_rate_limiter = RateLimiter::new(conf.partial_backup_concurrency);
+            state.global_rate_limiter = RateLimiter::new(
+                conf.partial_backup_concurrency,
+                DEFAULT_EVICTION_CONCURRENCY,
+            );
             state.conf = Some(conf);
 
             // Iterate through all directories and load tenants for all directories
@@ -198,11 +215,17 @@ impl GlobalTimelines {
                 let tli = Arc::new(timeline);
 
                 // TODO: prevent concurrent timeline creation/loading
-                TIMELINES_STATE
-                    .lock()
-                    .unwrap()
-                    .timelines
-                    .insert(ttid, tli.clone());
+                {
+                    let mut state = TIMELINES_STATE.lock().unwrap();
+
+                    // We may be have been asked to load a timeline that was previously deleted (e.g. from `pull_timeline.rs`).  We trust
+                    // that the human doing this manual intervention knows what they are doing, and remove its tombstone.
+                    if state.tombstones.remove(&ttid).is_some() {
+                        warn!("Un-deleted timeline {ttid}");
+                    }
+
+                    state.timelines.insert(ttid, tli.clone());
+                }
 
                 tli.bootstrap(&conf, broker_active_set, partial_backup_rate_limiter);
 
@@ -229,7 +252,7 @@ impl GlobalTimelines {
 
     /// Create a new timeline with the given id. If the timeline already exists, returns
     /// an existing timeline.
-    pub async fn create(
+    pub(crate) async fn create(
         ttid: TenantTimelineId,
         server_info: ServerInfo,
         commit_lsn: Lsn,
@@ -241,6 +264,11 @@ impl GlobalTimelines {
                 // Timeline already exists, return it.
                 return Ok(timeline);
             }
+
+            if state.tombstones.contains_key(&ttid) {
+                anyhow::bail!("Timeline {ttid} is deleted, refusing to recreate");
+            }
+
             state.get_dependencies()
         };
 
@@ -300,17 +328,19 @@ impl GlobalTimelines {
     /// Get a timeline from the global map. If it's not present, it doesn't exist on disk,
     /// or was corrupted and couldn't be loaded on startup. Returned timeline is always valid,
     /// i.e. loaded in memory and not cancelled.
-    pub fn get(ttid: TenantTimelineId) -> Result<Arc<Timeline>, TimelineError> {
-        let res = TIMELINES_STATE.lock().unwrap().get(&ttid);
-
-        match res {
+    pub(crate) fn get(ttid: TenantTimelineId) -> Result<Arc<Timeline>, TimelineError> {
+        let tli_res = {
+            let state = TIMELINES_STATE.lock().unwrap();
+            state.get(&ttid)
+        };
+        match tli_res {
             Ok(tli) => {
                 if tli.is_cancelled() {
                     return Err(TimelineError::Cancelled(ttid));
                 }
                 Ok(tli)
             }
-            _ => res,
+            _ => tli_res,
         }
     }
 
@@ -339,12 +369,26 @@ impl GlobalTimelines {
 
     /// Cancels timeline, then deletes the corresponding data directory.
     /// If only_local, doesn't remove WAL segments in remote storage.
-    pub async fn delete(
+    pub(crate) async fn delete(
         ttid: &TenantTimelineId,
         only_local: bool,
     ) -> Result<TimelineDeleteForceResult> {
-        let tli_res = TIMELINES_STATE.lock().unwrap().get(ttid);
-        match tli_res {
+        let tli_res = {
+            let state = TIMELINES_STATE.lock().unwrap();
+
+            if state.tombstones.contains_key(ttid) {
+                // Presence of a tombstone guarantees that a previous deletion has completed and there is no work to do.
+                info!("Timeline {ttid} was already deleted");
+                return Ok(TimelineDeleteForceResult {
+                    dir_existed: false,
+                    was_active: false,
+                });
+            }
+
+            state.get(ttid)
+        };
+
+        let result = match tli_res {
             Ok(timeline) => {
                 let was_active = timeline.broker_active.load(Ordering::Relaxed);
 
@@ -353,11 +397,6 @@ impl GlobalTimelines {
 
                 info!("deleting timeline {}, only_local={}", ttid, only_local);
                 let dir_existed = timeline.delete(&mut shared_state, only_local).await?;
-
-                // Remove timeline from the map.
-                // FIXME: re-enable it once we fix the issue with recreation of deleted timelines
-                // https://github.com/neondatabase/neon/issues/3146
-                // TIMELINES_STATE.lock().unwrap().timelines.remove(ttid);
 
                 Ok(TimelineDeleteForceResult {
                     dir_existed,
@@ -374,7 +413,14 @@ impl GlobalTimelines {
                     was_active: false,
                 })
             }
-        }
+        };
+
+        // Finalize deletion, by dropping Timeline objects and storing smaller tombstones.  The tombstones
+        // are used to prevent still-running computes from re-creating the same timeline when they send data,
+        // and to speed up repeated deletion calls by avoiding re-listing objects.
+        TIMELINES_STATE.lock().unwrap().delete(*ttid);
+
+        result
     }
 
     /// Deactivates and deletes all timelines for the tenant. Returns map of all timelines which
@@ -420,18 +466,19 @@ impl GlobalTimelines {
             tenant_id,
         ))?;
 
-        // FIXME: we temporarily disabled removing timelines from the map, see `delete_force`
-        // let tlis_after_delete = Self::get_all_for_tenant(*tenant_id);
-        // if !tlis_after_delete.is_empty() {
-        //     // Some timelines were created while we were deleting them, returning error
-        //     // to the caller, so it can retry later.
-        //     bail!(
-        //         "failed to delete all timelines for tenant {}: some timelines were created while we were deleting them",
-        //         tenant_id
-        //     );
-        // }
-
         Ok(deleted)
+    }
+
+    pub fn housekeeping(tombstone_ttl: &Duration) {
+        let mut state = TIMELINES_STATE.lock().unwrap();
+
+        // We keep tombstones long enough to have a good chance of preventing rogue computes from re-creating deleted
+        // timelines.  If a compute kept running for longer than this TTL (or across a safekeeper restart) then they
+        // may recreate a deleted timeline.
+        let now = Instant::now();
+        state
+            .tombstones
+            .retain(|_, v| now.duration_since(*v) < *tombstone_ttl);
     }
 }
 

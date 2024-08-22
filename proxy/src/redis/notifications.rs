@@ -108,7 +108,6 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
     }
     #[tracing::instrument(skip(self, msg), fields(session_id = tracing::field::Empty))]
     async fn handle_message(&self, msg: redis::Msg) -> anyhow::Result<()> {
-        use Notification::*;
         let payload: String = msg.get_payload()?;
         tracing::debug!(?payload, "received a message payload");
 
@@ -124,10 +123,10 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
         };
         tracing::debug!(?msg, "received a message");
         match msg {
-            Cancel(cancel_session) => {
+            Notification::Cancel(cancel_session) => {
                 tracing::Span::current().record(
                     "session_id",
-                    &tracing::field::display(cancel_session.session_id),
+                    tracing::field::display(cancel_session.session_id),
                 );
                 Metrics::get()
                     .proxy
@@ -153,12 +152,12 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
             }
             _ => {
                 invalidate_cache(self.cache.clone(), msg.clone());
-                if matches!(msg, AllowedIpsUpdate { .. }) {
+                if matches!(msg, Notification::AllowedIpsUpdate { .. }) {
                     Metrics::get()
                         .proxy
                         .redis_events_count
                         .inc(RedisEventsCount::AllowedIpsUpdate);
-                } else if matches!(msg, PasswordUpdate { .. }) {
+                } else if matches!(msg, Notification::PasswordUpdate { .. }) {
                     Metrics::get()
                         .proxy
                         .redis_events_count
@@ -180,16 +179,16 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
 }
 
 fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
-    use Notification::*;
     match msg {
-        AllowedIpsUpdate { allowed_ips_update } => {
-            cache.invalidate_allowed_ips_for_project(allowed_ips_update.project_id)
+        Notification::AllowedIpsUpdate { allowed_ips_update } => {
+            cache.invalidate_allowed_ips_for_project(allowed_ips_update.project_id);
         }
-        PasswordUpdate { password_update } => cache.invalidate_role_secret_for_project(
-            password_update.project_id,
-            password_update.role_name,
-        ),
-        Cancel(_) => unreachable!("cancel message should be handled separately"),
+        Notification::PasswordUpdate { password_update } => cache
+            .invalidate_role_secret_for_project(
+                password_update.project_id,
+                password_update.role_name,
+            ),
+        Notification::Cancel(_) => unreachable!("cancel message should be handled separately"),
     }
 }
 

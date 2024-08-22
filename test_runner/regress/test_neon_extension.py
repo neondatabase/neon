@@ -24,7 +24,7 @@ def test_neon_extension(neon_env_builder: NeonEnvBuilder):
             # IMPORTANT:
             # If the version has changed, the test should be updated.
             # Ensure that the default version is also updated in the neon.control file
-            assert cur.fetchone() == ("1.3",)
+            assert cur.fetchone() == ("1.4",)
             cur.execute("SELECT * from neon.NEON_STAT_FILE_CACHE")
             res = cur.fetchall()
             log.info(res)
@@ -48,10 +48,10 @@ def test_neon_extension_compatibility(neon_env_builder: NeonEnvBuilder):
             # IMPORTANT:
             # If the version has changed, the test should be updated.
             # Ensure that the default version is also updated in the neon.control file
-            assert cur.fetchone() == ("1.3",)
+            assert cur.fetchone() == ("1.4",)
             cur.execute("SELECT * from neon.NEON_STAT_FILE_CACHE")
-            all_versions = ["1.3", "1.2", "1.1", "1.0"]
-            current_version = "1.3"
+            all_versions = ["1.4", "1.3", "1.2", "1.1", "1.0"]
+            current_version = "1.4"
             for idx, begin_version in enumerate(all_versions):
                 for target_version in all_versions[idx + 1 :]:
                     if current_version != begin_version:

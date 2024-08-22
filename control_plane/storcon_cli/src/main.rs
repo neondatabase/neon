@@ -14,15 +14,15 @@ use pageserver_api::{
     },
     shard::{ShardStripeSize, TenantShardId},
 };
-use pageserver_client::mgmt_api::{self, ResponseErrorMessageExt};
+use pageserver_client::mgmt_api::{self};
 use reqwest::{Method, StatusCode, Url};
-use serde::{de::DeserializeOwned, Serialize};
 use utils::id::{NodeId, TenantId};
 
 use pageserver_api::controller_api::{
     NodeConfigureRequest, NodeRegisterRequest, NodeSchedulingPolicy, PlacementPolicy,
     TenantShardMigrateRequest, TenantShardMigrateResponse,
 };
+use storage_controller_client::control_api::Client;
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -55,6 +55,10 @@ enum Command {
         /// Scheduling policy controls whether tenant shards may be scheduled onto this node.
         #[arg(long)]
         scheduling: Option<NodeSchedulingPolicy>,
+    },
+    NodeDelete {
+        #[arg(long)]
+        node_id: NodeId,
     },
     /// Modify a tenant's policies in the storage controller
     TenantPolicy {
@@ -245,64 +249,6 @@ impl FromStr for NodeAvailabilityArg {
     }
 }
 
-struct Client {
-    base_url: Url,
-    jwt_token: Option<String>,
-    client: reqwest::Client,
-}
-
-impl Client {
-    fn new(base_url: Url, jwt_token: Option<String>) -> Self {
-        Self {
-            base_url,
-            jwt_token,
-            client: reqwest::ClientBuilder::new()
-                .build()
-                .expect("Failed to construct http client"),
-        }
-    }
-
-    /// Simple HTTP request wrapper for calling into storage controller
-    async fn dispatch<RQ, RS>(
-        &self,
-        method: Method,
-        path: String,
-        body: Option<RQ>,
-    ) -> mgmt_api::Result<RS>
-    where
-        RQ: Serialize + Sized,
-        RS: DeserializeOwned + Sized,
-    {
-        // The configured URL has the /upcall path prefix for pageservers to use: we will strip that out
-        // for general purpose API access.
-        let url = Url::from_str(&format!(
-            "http://{}:{}/{path}",
-            self.base_url.host_str().unwrap(),
-            self.base_url.port().unwrap()
-        ))
-        .unwrap();
-
-        let mut builder = self.client.request(method, url);
-        if let Some(body) = body {
-            builder = builder.json(&body)
-        }
-        if let Some(jwt_token) = &self.jwt_token {
-            builder = builder.header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {jwt_token}"),
-            );
-        }
-
-        let response = builder.send().await.map_err(mgmt_api::Error::ReceiveBody)?;
-        let response = response.error_from_body().await?;
-
-        response
-            .json()
-            .await
-            .map_err(pageserver_client::mgmt_api::Error::ReceiveBody)
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -337,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::TenantCreate { tenant_id } => {
             storcon_client
-                .dispatch(
+                .dispatch::<_, ()>(
                     Method::POST,
                     "v1/tenant".to_string(),
                     Some(TenantCreateRequest {
@@ -357,13 +303,16 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Delete status: {}", status);
         }
         Command::Nodes {} => {
-            let resp = storcon_client
+            let mut resp = storcon_client
                 .dispatch::<(), Vec<NodeDescribeResponse>>(
                     Method::GET,
                     "control/v1/node".to_string(),
                     None,
                 )
                 .await?;
+
+            resp.sort_by(|a, b| a.listen_http_addr.cmp(&b.listen_http_addr));
+
             let mut table = comfy_table::Table::new();
             table.set_header(["Id", "Hostname", "Scheduling", "Availability"]);
             for node in resp {
@@ -395,13 +344,16 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Command::Tenants {} => {
-            let resp = storcon_client
+            let mut resp = storcon_client
                 .dispatch::<(), Vec<TenantDescribeResponse>>(
                     Method::GET,
                     "control/v1/tenant".to_string(),
                     None,
                 )
                 .await?;
+
+            resp.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
+
             let mut table = comfy_table::Table::new();
             table.set_header([
                 "TenantId",
@@ -650,6 +602,11 @@ async fn main() -> anyhow::Result<()> {
                 .dispatch::<(), ()>(Method::POST, format!("debug/v1/node/{node_id}/drop"), None)
                 .await?;
         }
+        Command::NodeDelete { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(Method::DELETE, format!("control/v1/node/{node_id}"), None)
+                .await?;
+        }
         Command::TenantSetTimeBasedEviction {
             tenant_id,
             period,
@@ -665,6 +622,7 @@ async fn main() -> anyhow::Result<()> {
                                 threshold: threshold.into(),
                             },
                         )),
+                        heatmap_period: Some("300s".to_string()),
                         ..Default::default()
                     },
                 })

@@ -42,10 +42,9 @@ pub enum Error {
 
 impl UserFacingError for Error {
     fn to_string_client(&self) -> String {
-        use Error::*;
         match self {
-            ChannelBindingFailed(m) => m.to_string(),
-            ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
+            Self::ChannelBindingFailed(m) => (*m).to_string(),
+            Self::ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
             _ => "authentication protocol violation".to_string(),
         }
     }

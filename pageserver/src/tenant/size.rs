@@ -3,6 +3,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use tenant_size_model::svg::SvgBranchKind;
 use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -87,6 +88,9 @@ impl SegmentMeta {
             LsnKind::BranchPoint => true,
             LsnKind::GcCutOff => true,
             LsnKind::BranchEnd => false,
+            LsnKind::LeasePoint => true,
+            LsnKind::LeaseStart => false,
+            LsnKind::LeaseEnd => false,
         }
     }
 }
@@ -103,6 +107,21 @@ pub enum LsnKind {
     GcCutOff,
     /// Last record LSN
     BranchEnd,
+    /// A LSN lease is granted here.
+    LeasePoint,
+    /// A lease starts from here.
+    LeaseStart,
+    /// Last record LSN for the lease (should have the same LSN as the previous [`LsnKind::LeaseStart`]).
+    LeaseEnd,
+}
+
+impl From<LsnKind> for SvgBranchKind {
+    fn from(kind: LsnKind) -> Self {
+        match kind {
+            LsnKind::LeasePoint | LsnKind::LeaseStart | LsnKind::LeaseEnd => SvgBranchKind::Lease,
+            _ => SvgBranchKind::Timeline,
+        }
+    }
 }
 
 /// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
@@ -116,19 +135,20 @@ pub struct TimelineInputs {
     ancestor_lsn: Lsn,
     last_record: Lsn,
     latest_gc_cutoff: Lsn,
-    horizon_cutoff: Lsn,
-    pitr_cutoff: Lsn,
 
     /// Cutoff point based on GC settings
-    next_gc_cutoff: Lsn,
+    next_pitr_cutoff: Lsn,
 
     /// Cutoff point calculated from the user-supplied 'max_retention_period'
     retention_param_cutoff: Option<Lsn>,
+
+    /// Lease points on the timeline
+    lease_points: Vec<Lsn>,
 }
 
 /// Gathers the inputs for the tenant sizing model.
 ///
-/// Tenant size does not consider the latest state, but only the state until next_gc_cutoff, which
+/// Tenant size does not consider the latest state, but only the state until next_pitr_cutoff, which
 /// is updated on-demand, during the start of this calculation and separate from the
 /// [`TimelineInputs::latest_gc_cutoff`].
 ///
@@ -136,11 +156,8 @@ pub struct TimelineInputs {
 ///
 /// ```text
 /// 0-----|---------|----|------------| · · · · · |·> lsn
-///   initdb_lsn  branchpoints*  next_gc_cutoff  latest
+///   initdb_lsn  branchpoints*  next_pitr_cutoff  latest
 /// ```
-///
-/// Until gc_horizon_cutoff > `Timeline::last_record_lsn` for any of the tenant's timelines, the
-/// tenant size will be zero.
 pub(super) async fn gather_inputs(
     tenant: &Tenant,
     limit: &Arc<Semaphore>,
@@ -150,7 +167,7 @@ pub(super) async fn gather_inputs(
     cancel: &CancellationToken,
     ctx: &RequestContext,
 ) -> Result<ModelInputs, CalculateSyntheticSizeError> {
-    // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
+    // refresh is needed to update [`timeline::GcCutoffs`]
     tenant.refresh_gc_info(cancel, ctx).await?;
 
     // Collect information about all the timelines
@@ -214,27 +231,32 @@ pub(super) async fn gather_inputs(
         // we don't consider the `Timeline::disk_consistent_lsn` at all, because we are not
         // actually removing files.
         //
-        // We only consider [`GcInfo::pitr_cutoff`], and not [`GcInfo::horizon_cutoff`], because from
+        // We only consider [`timeline::GcCutoffs::time`], and not [`timeline::GcCutoffs::space`], because from
         // a user's perspective they have only requested retention up to the time bound (pitr_cutoff), rather
-        // than a space bound (horizon cutoff).  This means that if someone drops a database and waits for their
+        // than our internal space cutoff.  This means that if someone drops a database and waits for their
         // PITR interval, they will see synthetic size decrease, even if we are still storing data inside
-        // horizon_cutoff.
-        let pitr_cutoff = gc_info.cutoffs.pitr;
-        let horizon_cutoff = gc_info.cutoffs.horizon;
-        let mut next_gc_cutoff = pitr_cutoff;
+        // the space cutoff.
+        let mut next_pitr_cutoff = gc_info.cutoffs.time;
 
         // If the caller provided a shorter retention period, use that instead of the GC cutoff.
         let retention_param_cutoff = if let Some(max_retention_period) = max_retention_period {
             let param_cutoff = Lsn(last_record_lsn.0.saturating_sub(max_retention_period));
-            if next_gc_cutoff < param_cutoff {
-                next_gc_cutoff = param_cutoff;
+            if next_pitr_cutoff < param_cutoff {
+                next_pitr_cutoff = param_cutoff;
             }
             Some(param_cutoff)
         } else {
             None
         };
 
-        // next_gc_cutoff in parent branch are not of interest (right now at least), nor do we
+        let lease_points = gc_info
+            .leases
+            .keys()
+            .filter(|&&lsn| lsn > ancestor_lsn)
+            .copied()
+            .collect::<Vec<_>>();
+
+        // next_pitr_cutoff in parent branch are not of interest (right now at least), nor do we
         // want to query any logical size before initdb_lsn.
         let branch_start_lsn = cmp::max(ancestor_lsn, timeline.initdb_lsn);
 
@@ -242,11 +264,13 @@ pub(super) async fn gather_inputs(
         let mut lsns: Vec<(Lsn, LsnKind)> = gc_info
             .retain_lsns
             .iter()
-            .filter(|&&lsn| lsn > ancestor_lsn)
+            .filter(|(lsn, _child_id)| lsn > &ancestor_lsn)
             .copied()
             // this assumes there are no other retain_lsns than the branchpoints
-            .map(|lsn| (lsn, LsnKind::BranchPoint))
+            .map(|(lsn, _child_id)| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
+
+        lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));
 
         drop(gc_info);
 
@@ -260,10 +284,10 @@ pub(super) async fn gather_inputs(
             )
         }
 
-        // Add a point for the GC cutoff
-        let branch_start_needed = next_gc_cutoff <= branch_start_lsn;
+        // Add a point for the PITR cutoff
+        let branch_start_needed = next_pitr_cutoff <= branch_start_lsn;
         if !branch_start_needed {
-            lsns.push((next_gc_cutoff, LsnKind::GcCutOff));
+            lsns.push((next_pitr_cutoff, LsnKind::GcCutOff));
         }
 
         lsns.sort_unstable();
@@ -296,17 +320,56 @@ pub(super) async fn gather_inputs(
             if kind == LsnKind::BranchPoint {
                 branchpoint_segments.insert((timeline_id, lsn), segments.len());
             }
+
             segments.push(SegmentMeta {
                 segment: Segment {
                     parent: Some(parent),
                     lsn: lsn.0,
                     size: None,
-                    needed: lsn > next_gc_cutoff,
+                    needed: lsn > next_pitr_cutoff,
                 },
                 timeline_id: timeline.timeline_id,
                 kind,
             });
-            parent += 1;
+
+            parent = segments.len() - 1;
+
+            if kind == LsnKind::LeasePoint {
+                // Needs `LeaseStart` and `LeaseEnd` as well to model lease as a read-only branch that never writes data
+                // (i.e. it's lsn has not advanced from ancestor_lsn), and therefore the three segments have the same LSN
+                // value. Without the other two segments, the calculation code would not count the leased LSN as a point
+                // to be retained.
+                // Did not use `BranchStart` or `BranchEnd` so we can differentiate branches and leases during debug.
+                //
+                // Alt Design: rewrite the entire calculation code to be independent of timeline id. Both leases and
+                // branch points can be given a synthetic id so we can unite them.
+                let mut lease_parent = parent;
+
+                // Start of a lease.
+                segments.push(SegmentMeta {
+                    segment: Segment {
+                        parent: Some(lease_parent),
+                        lsn: lsn.0,
+                        size: None,                     // Filled in later, if necessary
+                        needed: lsn > next_pitr_cutoff, // only needed if the point is within rentention.
+                    },
+                    timeline_id: timeline.timeline_id,
+                    kind: LsnKind::LeaseStart,
+                });
+                lease_parent += 1;
+
+                // End of the lease.
+                segments.push(SegmentMeta {
+                    segment: Segment {
+                        parent: Some(lease_parent),
+                        lsn: lsn.0,
+                        size: None,   // Filled in later, if necessary
+                        needed: true, // everything at the lease LSN must be readable => is needed
+                    },
+                    timeline_id: timeline.timeline_id,
+                    kind: LsnKind::LeaseEnd,
+                });
+            }
         }
 
         // Current end of the timeline
@@ -328,10 +391,9 @@ pub(super) async fn gather_inputs(
             last_record: last_record_lsn,
             // this is not used above, because it might not have updated recently enough
             latest_gc_cutoff: *timeline.get_latest_gc_cutoff_lsn(),
-            horizon_cutoff,
-            pitr_cutoff,
-            next_gc_cutoff,
+            next_pitr_cutoff,
             retention_param_cutoff,
+            lease_points,
         });
     }
 
@@ -671,30 +733,27 @@ fn verify_size_for_multiple_branches() {
       "ancestor_lsn": "0/18D3D98",
       "last_record": "0/2230CD0",
       "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/2210CD0",
-      "pitr_cutoff": "0/2210CD0",
-      "next_gc_cutoff": "0/2210CD0",
-      "retention_param_cutoff": null
+      "next_pitr_cutoff": "0/2210CD0",
+      "retention_param_cutoff": null,
+      "lease_points": []
     },
     {
       "timeline_id": "454626700469f0a9914949b9d018e876",
       "ancestor_lsn": "0/176D998",
       "last_record": "0/1837770",
       "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/1817770",
-      "pitr_cutoff": "0/1817770",
-      "next_gc_cutoff": "0/1817770",
-      "retention_param_cutoff": null
+      "next_pitr_cutoff": "0/1817770",
+      "retention_param_cutoff": null,
+      "lease_points": []
     },
     {
       "timeline_id": "cb5e3cbe60a4afc00d01880e1a37047f",
       "ancestor_lsn": "0/0",
       "last_record": "0/18D3D98",
       "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/18B3D98",
-      "pitr_cutoff": "0/18B3D98",
-      "next_gc_cutoff": "0/18B3D98",
-      "retention_param_cutoff": null
+      "next_pitr_cutoff": "0/18B3D98",
+      "retention_param_cutoff": null,
+      "lease_points": []
     }
   ]
 }
@@ -746,10 +805,9 @@ fn verify_size_for_one_branch() {
       "ancestor_lsn": "0/0",
       "last_record": "47/280A5860",
       "latest_gc_cutoff": "47/240A5860",
-      "horizon_cutoff": "47/240A5860",
-      "pitr_cutoff": "47/240A5860",
-      "next_gc_cutoff": "47/240A5860",
-      "retention_param_cutoff": "0/0"
+      "next_pitr_cutoff": "47/240A5860",
+      "retention_param_cutoff": "0/0",
+      "lease_points": []
     }
   ]
 }"#;

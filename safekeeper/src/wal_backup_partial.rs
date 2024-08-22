@@ -17,49 +17,23 @@
 //! file. Code updates state in the control file before doing any S3 operations.
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
-
-use std::sync::Arc;
-
 use camino::Utf8PathBuf;
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 
 use tracing::{debug, error, info, instrument, warn};
-use utils::lsn::Lsn;
+use utils::{id::NodeId, lsn::Lsn};
 
 use crate::{
     metrics::{MISC_OPERATION_SECONDS, PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
+    rate_limit::{rand_duration, RateLimiter},
     safekeeper::Term,
     timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
     wal_backup::{self, remote_timeline_path},
     SafeKeeperConf,
 };
-
-#[derive(Clone)]
-pub struct RateLimiter {
-    semaphore: Arc<tokio::sync::Semaphore>,
-}
-
-impl RateLimiter {
-    pub fn new(permits: usize) -> Self {
-        Self {
-            semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
-        }
-    }
-
-    async fn acquire_owned(&self) -> tokio::sync::OwnedSemaphorePermit {
-        let _timer = MISC_OPERATION_SECONDS
-            .with_label_values(&["partial_permit_acquire"])
-            .start_timer();
-        self.semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore is closed")
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UploadStatus {
@@ -107,6 +81,12 @@ pub struct State {
     pub segments: Vec<PartialRemoteSegment>,
 }
 
+#[derive(Debug)]
+pub(crate) struct ReplaceUploadedSegment {
+    pub(crate) previous: PartialRemoteSegment,
+    pub(crate) current: PartialRemoteSegment,
+}
+
 impl State {
     /// Find an Uploaded segment. There should be only one Uploaded segment at a time.
     pub(crate) fn uploaded_segment(&self) -> Option<PartialRemoteSegment> {
@@ -114,6 +94,54 @@ impl State {
             .iter()
             .find(|seg| seg.status == UploadStatus::Uploaded)
             .cloned()
+    }
+
+    /// Replace the name of the Uploaded segment (if one exists) in order to match
+    /// it with `destination` safekeeper. Returns a description of the change or None
+    /// wrapped in anyhow::Result.
+    pub(crate) fn replace_uploaded_segment(
+        &mut self,
+        source: NodeId,
+        destination: NodeId,
+    ) -> anyhow::Result<Option<ReplaceUploadedSegment>> {
+        let current = self
+            .segments
+            .iter_mut()
+            .find(|seg| seg.status == UploadStatus::Uploaded);
+
+        let current = match current {
+            Some(some) => some,
+            None => {
+                return anyhow::Ok(None);
+            }
+        };
+
+        // Sanity check that the partial segment we are replacing is belongs
+        // to the `source` SK.
+        if !current
+            .name
+            .ends_with(format!("sk{}.partial", source.0).as_str())
+        {
+            anyhow::bail!(
+                "Partial segment name ({}) doesn't match self node id ({})",
+                current.name,
+                source
+            );
+        }
+
+        let previous = current.clone();
+
+        let new_name = current.name.replace(
+            format!("_sk{}", source.0).as_str(),
+            format!("_sk{}", destination.0).as_str(),
+        );
+
+        current.name = new_name;
+
+        anyhow::Ok(Some(ReplaceUploadedSegment {
+            previous,
+            current: current.clone(),
+        }))
     }
 }
 
@@ -289,6 +317,18 @@ impl PartialBackup {
             })
             .collect();
 
+        if new_segments.len() == 1 {
+            // we have an uploaded segment, it must not be deleted from remote storage
+            segments_to_delete.retain(|name| name != &new_segments[0].name);
+        } else {
+            // there should always be zero or one uploaded segment
+            assert!(
+                new_segments.is_empty(),
+                "too many uploaded segments: {:?}",
+                new_segments
+            );
+        }
+
         info!("deleting objects: {:?}", segments_to_delete);
         let mut objects_to_delete = vec![];
         for seg in segments_to_delete.iter() {
@@ -340,6 +380,7 @@ pub async fn main_task(
 ) -> Option<PartialRemoteSegment> {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
+    let mut first_iteration = true;
 
     let (_, persistent_state) = tli.get_state().await;
     let mut commit_lsn_rx = tli.get_commit_lsn_watch_rx();
@@ -407,6 +448,15 @@ pub async fn main_task(
             }
         }
 
+        // smoothing the load after restart, by sleeping for a random time.
+        // if this is not the first iteration, we will wait for the full await_duration
+        let await_duration = if first_iteration {
+            first_iteration = false;
+            rand_duration(&await_duration)
+        } else {
+            await_duration
+        };
+
         // fixing the segno and waiting some time to prevent reuploading the same segment too often
         let pending_segno = backup.segno(flush_lsn_rx.borrow().lsn);
         let timeout = tokio::time::sleep(await_duration);
@@ -442,7 +492,7 @@ pub async fn main_task(
         }
 
         // limit concurrent uploads
-        let _upload_permit = limiter.acquire_owned().await;
+        let _upload_permit = limiter.acquire_partial_backup().await;
 
         let prepared = backup.prepare_upload().await;
         if let Some(seg) = &uploaded_segment {

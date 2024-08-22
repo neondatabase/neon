@@ -11,7 +11,5 @@ postgres.workspace = true
 tokio-postgres.workspace = true
 url.workspace = true
 
-workspace_hack.workspace = true
-
 [dev-dependencies]
 once_cell.workspace = true

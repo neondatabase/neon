@@ -41,18 +41,28 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     neon_simple_env.storage_controller.allowed_errors.extend(error_regexes)
 
     pageserver_http = neon_simple_env.pageserver.http_client()
-    pageserver_http.configure_failpoints(("tenant-config-before-write", "return"))
-    with pytest.raises(Exception, match="tenant-config-before-write"):
-        _ = neon_simple_env.neon_cli.create_tenant()
 
+    # Failure to write a config to local disk makes the pageserver assume that local disk is bad and abort the process
+    pageserver_http.configure_failpoints(("tenant-config-before-write", "return"))
+
+    tenant_id = TenantId.generate()
+
+    with pytest.raises(requests.exceptions.ConnectionError, match="Connection aborted"):
+        neon_simple_env.pageserver.http_client().tenant_attach(tenant_id=tenant_id, generation=1)
+
+    # Any files left behind on disk during failed creation do not prevent
+    # a retry from succeeding.  Restart pageserver with no failpoints.
+    neon_simple_env.pageserver.running = False
+    neon_simple_env.pageserver.start()
+
+    # The failed creation should not be present in list of tenants, as when we start up we'll see
+    # an empty tenant dir with no config in it.
+    neon_simple_env.pageserver.allowed_errors.append(".*Failed to load tenant config.*")
     new_tenants = sorted(
         map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
     )
     assert initial_tenants == new_tenants, "should not create new tenants"
 
-    # Any files left behind on disk during failed creation do not prevent
-    # a retry from succeeding.
-    pageserver_http.configure_failpoints(("tenant-config-before-write", "off"))
     neon_simple_env.neon_cli.create_tenant()
 
 
@@ -368,10 +378,6 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     # Tenant creation requests which arrive out of order will generate complaints about
     # generation nubmers out of order.
     env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
-
-    # Our multiple creation requests will advance generation quickly, and when we skip
-    # a generation number we can generate these warnings
-    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates for tenant .+")
 
     # Timeline::flush_and_shutdown cannot tell if it is hitting a failure because of
     # an incomplete attach, or some other problem.  In the field this should be rare,

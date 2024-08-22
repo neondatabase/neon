@@ -3,7 +3,7 @@ use std::{str::FromStr, time::Duration};
 use pageserver_api::{
     controller_api::{
         NodeAvailability, NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy,
-        TenantLocateResponseShard, UtilizationScore,
+        TenantLocateResponseShard,
     },
     shard::TenantShardId,
 };
@@ -46,6 +46,8 @@ pub(crate) struct Node {
 /// whether/how they changed it.
 pub(crate) enum AvailabilityTransition {
     ToActive,
+    ToWarmingUpFromActive,
+    ToWarmingUpFromOffline,
     ToOffline,
     Unchanged,
 }
@@ -90,22 +92,34 @@ impl Node {
         }
     }
 
+    pub(crate) fn get_availability(&self) -> NodeAvailability {
+        self.availability
+    }
+
     pub(crate) fn set_availability(&mut self, availability: NodeAvailability) {
+        use AvailabilityTransition::*;
+        use NodeAvailability::WarmingUp;
+
         match self.get_availability_transition(availability) {
-            AvailabilityTransition::ToActive => {
+            ToActive => {
                 // Give the node a new cancellation token, effectively resetting it to un-cancelled.  Any
                 // users of previously-cloned copies of the node will still see the old cancellation
                 // state.  For example, Reconcilers in flight will have to complete and be spawned
                 // again to realize that the node has become available.
                 self.cancel = CancellationToken::new();
             }
-            AvailabilityTransition::ToOffline => {
+            ToOffline | ToWarmingUpFromActive => {
                 // Fire the node's cancellation token to cancel any in-flight API requests to it
                 self.cancel.cancel();
             }
-            AvailabilityTransition::Unchanged => {}
+            Unchanged | ToWarmingUpFromOffline => {}
         }
-        self.availability = availability;
+
+        if let (WarmingUp(crnt), WarmingUp(proposed)) = (self.availability, availability) {
+            self.availability = WarmingUp(std::cmp::max(crnt, proposed));
+        } else {
+            self.availability = availability;
+        }
     }
 
     /// Without modifying the availability of the node, convert the intended availability
@@ -120,16 +134,10 @@ impl Node {
         match (self.availability, availability) {
             (Offline, Active(_)) => ToActive,
             (Active(_), Offline) => ToOffline,
-            // Consider the case when the storage controller handles the re-attach of a node
-            // before the heartbeats detect that the node is back online. We still need
-            // [`Service::node_configure`] to attempt reconciliations for shards with an
-            // unknown observed location.
-            // The unsavoury match arm below handles this situation.
-            (Active(lhs), Active(rhs))
-                if lhs == UtilizationScore::worst() && rhs < UtilizationScore::worst() =>
-            {
-                ToActive
-            }
+            (Active(_), WarmingUp(_)) => ToWarmingUpFromActive,
+            (WarmingUp(_), Offline) => ToOffline,
+            (WarmingUp(_), Active(_)) => ToActive,
+            (Offline, WarmingUp(_)) => ToWarmingUpFromOffline,
             _ => Unchanged,
         }
     }
@@ -147,7 +155,7 @@ impl Node {
     pub(crate) fn may_schedule(&self) -> MaySchedule {
         let score = match self.availability {
             NodeAvailability::Active(score) => score,
-            NodeAvailability::Offline => return MaySchedule::No,
+            NodeAvailability::Offline | NodeAvailability::WarmingUp(_) => return MaySchedule::No,
         };
 
         match self.scheduling {
@@ -226,7 +234,7 @@ impl Node {
         fn is_fatal(e: &mgmt_api::Error) -> bool {
             use mgmt_api::Error::*;
             match e {
-                ReceiveBody(_) | ReceiveErrorBody(_) => false,
+                SendRequest(_) | ReceiveBody(_) | ReceiveErrorBody(_) => false,
                 ApiError(StatusCode::SERVICE_UNAVAILABLE, _)
                 | ApiError(StatusCode::GATEWAY_TIMEOUT, _)
                 | ApiError(StatusCode::REQUEST_TIMEOUT, _) => false,

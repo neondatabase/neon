@@ -17,13 +17,11 @@ from performance.pageserver.util import (
 @pytest.mark.parametrize("duration", [30])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
 @pytest.mark.parametrize("n_tenants", [10])
-@pytest.mark.parametrize("get_vectored_impl", ["sequential", "vectored"])
 @pytest.mark.timeout(1000)
 def test_basebackup_with_high_slru_count(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    get_vectored_impl: str,
     n_tenants: int,
     pgbench_scale: int,
     duration: int,
@@ -46,8 +44,7 @@ def test_basebackup_with_high_slru_count(
     page_cache_size = 16384
     max_file_descriptors = 500000
     neon_env_builder.pageserver_config_override = (
-        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}; "
-        f"get_vectored_impl='{get_vectored_impl}'; validate_vectored_get=false"
+        f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}"
     )
     params.update(
         {
@@ -86,10 +83,6 @@ def setup_tenant_template(env: NeonEnv, n_txns: int):
 
     template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
     env.pageserver.tenant_detach(template_tenant)
-    env.pageserver.allowed_errors.append(
-        # tenant detach causes this because the underlying attach-hook removes the tenant from storage controller entirely
-        ".*Dropped remote consistent LSN updates.*",
-    )
     env.pageserver.tenant_attach(template_tenant, config)
 
     ps_http = env.pageserver.http_client()

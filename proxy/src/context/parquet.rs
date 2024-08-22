@@ -14,30 +14,27 @@ use parquet::{
     record::RecordWriter,
 };
 use pq_proto::StartupMessageParams;
-use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
+use remote_storage::{GenericRemoteStorage, RemotePath, RemoteStorageConfig, TimeoutOrCancel};
 use serde::ser::SerializeMap;
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
 use utils::backoff;
 
-use crate::{
-    config::{remote_storage_from_toml, OptRemoteStorageConfig},
-    context::LOG_CHAN_DISCONNECT,
-};
+use crate::{config::remote_storage_from_toml, context::LOG_CHAN_DISCONNECT};
 
-use super::{RequestMonitoring, LOG_CHAN};
+use super::{RequestMonitoringInner, LOG_CHAN};
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct ParquetUploadArgs {
     /// Storage location to upload the parquet files to.
     /// Encoded as toml (same format as pageservers), eg
     /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
-    #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
-    parquet_upload_remote_storage: OptRemoteStorageConfig,
+    #[clap(long, value_parser = remote_storage_from_toml)]
+    parquet_upload_remote_storage: Option<RemoteStorageConfig>,
 
-    #[clap(long, default_value = "{}", value_parser = remote_storage_from_toml)]
-    parquet_upload_disconnect_events_remote_storage: OptRemoteStorageConfig,
+    #[clap(long, value_parser = remote_storage_from_toml)]
+    parquet_upload_disconnect_events_remote_storage: Option<RemoteStorageConfig>,
 
     /// How many rows to include in a row group
     #[clap(long, default_value_t = 8192)]
@@ -121,8 +118,8 @@ impl<'a> serde::Serialize for Options<'a> {
     }
 }
 
-impl From<&RequestMonitoring> for RequestData {
-    fn from(value: &RequestMonitoring) -> Self {
+impl From<&RequestMonitoringInner> for RequestData {
+    fn from(value: &RequestMonitoringInner) -> Self {
         Self {
             session_id: value.session_id,
             peer_addr: value.peer_addr.to_string(),
@@ -184,8 +181,9 @@ pub async fn worker(
     let rx = futures::stream::poll_fn(move |cx| rx.poll_recv(cx));
     let rx = rx.map(RequestData::from);
 
-    let storage =
-        GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?;
+    let storage = GenericRemoteStorage::from_config(&remote_storage_config)
+        .await
+        .context("remote storage init")?;
 
     let properties = WriterProperties::builder()
         .set_data_page_size_limit(config.parquet_upload_page_size)
@@ -220,6 +218,7 @@ pub async fn worker(
 
         let storage_disconnect =
             GenericRemoteStorage::from_config(&disconnect_events_storage_config)
+                .await
                 .context("remote storage for disconnect events init")?;
         let parquet_config_disconnect = parquet_config.clone();
         tokio::try_join!(
@@ -548,7 +547,9 @@ mod tests {
             },
             timeout: std::time::Duration::from_secs(120),
         };
-        let storage = GenericRemoteStorage::from_config(&remote_storage_config).unwrap();
+        let storage = GenericRemoteStorage::from_config(&remote_storage_config)
+            .await
+            .unwrap();
 
         worker_inner(storage, rx, config).await.unwrap();
 
@@ -735,7 +736,7 @@ mod tests {
                 while let Some(r) = s.next().await {
                     tx.send(r).unwrap();
                 }
-                time::sleep(time::Duration::from_secs(70)).await
+                time::sleep(time::Duration::from_secs(70)).await;
             }
         });
 

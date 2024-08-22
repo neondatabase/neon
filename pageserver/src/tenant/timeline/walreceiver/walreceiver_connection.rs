@@ -26,9 +26,9 @@ use tracing::{debug, error, info, trace, warn, Instrument};
 use super::TaskStateUpdate;
 use crate::{
     context::RequestContext,
-    metrics::{LIVE_CONNECTIONS_COUNT, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
-    task_mgr::TaskKind,
-    task_mgr::WALRECEIVER_RUNTIME,
+    metrics::{LIVE_CONNECTIONS, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
+    pgdatadir_mapping::DatadirModification,
+    task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
@@ -208,14 +208,9 @@ pub(super) async fn handle_walreceiver_connection(
         .instrument(tracing::info_span!("poller")),
     );
 
-    // Immediately increment the gauge, then create a job to decrement it on task exit.
-    // One of the pros of `defer!` is that this will *most probably*
-    // get called, even in presence of panics.
-    let gauge = LIVE_CONNECTIONS_COUNT.with_label_values(&["wal_receiver"]);
-    gauge.inc();
-    scopeguard::defer! {
-        gauge.dec();
-    }
+    let _guard = LIVE_CONNECTIONS
+        .with_label_values(&["wal_receiver"])
+        .guard();
 
     let identify = identify_system(&replication_client).await?;
     info!("{identify:?}");
@@ -340,6 +335,9 @@ pub(super) async fn handle_walreceiver_connection(
                             filtered_records += 1;
                         }
 
+                        // FIXME: this cannot be made pausable_failpoint without fixing the
+                        // failpoint library; in tests, the added amount of debugging will cause us
+                        // to timeout the tests.
                         fail_point!("walreceiver-after-ingest");
 
                         last_rec_lsn = lsn;
@@ -347,7 +345,10 @@ pub(super) async fn handle_walreceiver_connection(
                         // Commit every ingest_batch_size records. Even if we filtered out
                         // all records, we still need to call commit to advance the LSN.
                         uncommitted_records += 1;
-                        if uncommitted_records >= ingest_batch_size {
+                        if uncommitted_records >= ingest_batch_size
+                            || modification.approx_pending_bytes()
+                                > DatadirModification::MAX_PENDING_BYTES
+                        {
                             WAL_INGEST
                                 .records_committed
                                 .inc_by(uncommitted_records - filtered_records);

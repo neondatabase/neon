@@ -265,15 +265,19 @@ paths:
           type: string
           format: hex
     post:
-      description: Obtain lease for the given LSN
-      parameters:
-        - name: lsn
-          in: query
-          required: true
-          schema:
-            type: string
-            format: hex
-          description: A LSN to obtain the lease for
+      description: Obtains a lease for the given LSN.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+               - lsn
+              properties:
+                lsn:
+                  description: A LSN to obtain the lease for.
+                  type: string
+                  format: hex
       responses:
         "200":
           description: OK
@@ -304,6 +308,45 @@ paths:
             application/json:
               schema:
                 type: string
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/block_gc:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Persistently add a gc blocking at the tenant level because of this timeline
+      responses:
+        "200":
+          description: OK
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/unblock_gc:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Persistently remove a tenant level gc blocking for this timeline
+      responses:
+        "200":
+          description: OK
+
   /v1/tenant/{tenant_shard_id}/location_config:
     parameters:
       - name: tenant_shard_id
@@ -373,7 +416,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ConflictError"
 
-  /v1/tenant/{tenant_id}/{timeline_id}/preserve_initdb_archive:
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/preserve_initdb_archive:
     parameters:
       - name: tenant_id
         in: path
@@ -392,6 +435,51 @@ paths:
       responses:
         "202":
           description: Tenant scheduled to load successfully
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/archival_config:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      description: |
+        Either archives or unarchives the given timeline.
+        An archived timeline may not have any non-archived children.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArchivalConfigRequest"
+      responses:
+        "200":
+          description: Timeline (un)archived successfully
+        "409":
+          description: |
+            The tenant/timeline is already being modified, perhaps by a concurrent call to this API
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/synthetic_size:
     parameters:
@@ -425,7 +513,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/SyntheticSizeResponse"
             text/html:
-              description: SVG representation of the tenant and it's timelines.
+              schema:
+                type: string
+                description: SVG representation of the tenant and its timelines.
         "401":
           description: Unauthorized Error
           content:
@@ -564,7 +654,7 @@ paths:
           type: string
       - name: timeline_id
         in: path
-        ŕequired: true
+        required: true
         schema:
           type: string
 
@@ -770,15 +860,13 @@ components:
     TenantCreateRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
+        - $ref: '#/components/schemas/TenantLoadRequest'
         - type: object
           required:
             - new_tenant_id
           properties:
             new_tenant_id:
               type: string
-            generation:
-              type: integer
-              description: Attachment generation number.
     TenantLoadRequest:
       type: object
       properties:
@@ -842,6 +930,15 @@ components:
         warm:
           type: boolean
           description: Whether to poll remote storage for layers to download.  If false, secondary locations don't download anything.
+    ArchivalConfigRequest:
+      type: object
+      required:
+        - state
+      properties:
+        state:
+          description: The archival state of a timeline
+          type: string
+          enum: ["Archived", "Unarchived"]
     TenantConfig:
       type: object
       properties:
@@ -869,8 +966,6 @@ components:
           type: string
         max_lsn_wal_lag:
           type: integer
-        trace_read_requests:
-          type: boolean
         heatmap_period:
           type: string
     TenantConfigResponse:
@@ -1104,7 +1199,7 @@ components:
         reparented_timelines:
           type: array
           description: Set of reparented timeline ids
-          properties:
+          items:
             type: string
             format: hex
             description: TimelineId

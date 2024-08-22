@@ -9,7 +9,7 @@ use crate::proxy::retry::CouldRetry;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ConsoleError {
     pub error: Box<str>,
     #[serde(skip)]
@@ -22,16 +22,15 @@ impl ConsoleError {
         self.status
             .as_ref()
             .and_then(|s| s.details.error_info.as_ref())
-            .map(|e| e.reason)
-            .unwrap_or(Reason::Unknown)
+            .map_or(Reason::Unknown, |e| e.reason)
     }
+
     pub fn get_user_facing_message(&self) -> String {
         use super::provider::errors::REQUEST_FAILED;
         self.status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
-            .map(|m| m.message.clone().into())
-            .unwrap_or_else(|| {
+            .map_or_else(|| {
                 // Ask @neondatabase/control-plane for review before adding more.
                 match self.http_status_code {
                     http::StatusCode::NOT_FOUND => {
@@ -48,19 +47,18 @@ impl ConsoleError {
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 }
-            })
+            }, |m| m.message.clone().into())
     }
 }
 
 impl Display for ConsoleError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let msg = self
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg: &str = self
             .status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
-            .map(|m| m.message.as_ref())
-            .unwrap_or_else(|| &self.error);
-        write!(f, "{}", msg)
+            .map_or_else(|| self.error.as_ref(), |m| m.message.as_ref());
+        write!(f, "{msg}")
     }
 }
 
@@ -82,41 +80,19 @@ impl CouldRetry for ConsoleError {
             .details
             .error_info
             .map_or(Reason::Unknown, |e| e.reason);
-        match reason {
-            // not a transitive error
-            Reason::RoleProtected => false,
-            // on retry, it will still not be found
-            Reason::ResourceNotFound
-            | Reason::ProjectNotFound
-            | Reason::EndpointNotFound
-            | Reason::BranchNotFound => false,
-            // we were asked to go away
-            Reason::RateLimitExceeded
-            | Reason::NonDefaultBranchComputeTimeExceeded
-            | Reason::ActiveTimeQuotaExceeded
-            | Reason::ComputeTimeQuotaExceeded
-            | Reason::WrittenDataQuotaExceeded
-            | Reason::DataTransferQuotaExceeded
-            | Reason::LogicalSizeQuotaExceeded => false,
-            // transitive error. control plane is currently busy
-            // but might be ready soon
-            Reason::RunningOperations => true,
-            Reason::ConcurrencyLimitReached => true,
-            Reason::LockAlreadyTaken => true,
-            // unknown error. better not retry it.
-            Reason::Unknown => false,
-        }
+
+        reason.can_retry()
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Status {
     pub code: Box<str>,
     pub message: Box<str>,
     pub details: Details,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Details {
     pub error_info: Option<ErrorInfo>,
     pub retry_info: Option<RetryInfo>,
@@ -199,6 +175,34 @@ impl Reason {
                 | Reason::BranchNotFound
         )
     }
+
+    pub fn can_retry(&self) -> bool {
+        match self {
+            // do not retry role protected errors
+            // not a transitive error
+            Reason::RoleProtected => false,
+            // on retry, it will still not be found
+            Reason::ResourceNotFound
+            | Reason::ProjectNotFound
+            | Reason::EndpointNotFound
+            | Reason::BranchNotFound => false,
+            // we were asked to go away
+            Reason::RateLimitExceeded
+            | Reason::NonDefaultBranchComputeTimeExceeded
+            | Reason::ActiveTimeQuotaExceeded
+            | Reason::ComputeTimeQuotaExceeded
+            | Reason::WrittenDataQuotaExceeded
+            | Reason::DataTransferQuotaExceeded
+            | Reason::LogicalSizeQuotaExceeded => false,
+            // transitive error. control plane is currently busy
+            // but might be ready soon
+            Reason::RunningOperations
+            | Reason::ConcurrencyLimitReached
+            | Reason::LockAlreadyTaken => true,
+            // unknown error. better not retry it.
+            Reason::Unknown => false,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Deserialize)]
@@ -206,7 +210,7 @@ pub struct RetryInfo {
     pub retry_delay_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct UserFacingMessage {
     pub message: Box<str>,
 }
@@ -280,7 +284,7 @@ pub struct DatabaseInfo {
 
 // Manually implement debug to omit sensitive info.
 impl fmt::Debug for DatabaseInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatabaseInfo")
             .field("host", &self.host)
             .field("port", &self.port)
@@ -367,7 +371,7 @@ mod tests {
                 }
             }
         });
-        let _: KickSession = serde_json::from_str(&json.to_string())?;
+        let _: KickSession<'_> = serde_json::from_str(&json.to_string())?;
 
         Ok(())
     }

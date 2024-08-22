@@ -24,7 +24,7 @@ impl<C: Cache> Cache for &C {
     type LookupInfo<Key> = C::LookupInfo<Key>;
 
     fn invalidate(&self, info: &Self::LookupInfo<Self::Key>) {
-        C::invalidate(self, info)
+        C::invalidate(self, info);
     }
 }
 
@@ -51,6 +51,13 @@ impl<C: Cache, V> Cached<C, V> {
             },
             self.value,
         )
+    }
+
+    pub fn map<U>(self, f: impl FnOnce(V) -> U) -> Cached<C, U> {
+        Cached {
+            token: self.token,
+            value: f(self.value),
+        }
     }
 
     /// Drop this entry from a cache if it's still there.

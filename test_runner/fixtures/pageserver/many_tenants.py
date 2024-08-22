@@ -1,5 +1,4 @@
 import concurrent.futures
-import time
 from typing import Any, Callable, Dict, Tuple
 
 import fixtures.pageserver.remote_storage
@@ -8,9 +7,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-)
-from fixtures.pageserver.utils import (
-    wait_until_tenant_state,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 
@@ -42,46 +38,37 @@ def single_timeline(
 
     log.info("detach template tenant form pageserver")
     env.pageserver.tenant_detach(template_tenant)
-    env.pageserver.allowed_errors.append(
-        # tenant detach causes this because the underlying attach-hook removes the tenant from storage controller entirely
-        ".*Dropped remote consistent LSN updates.*",
-    )
 
     log.info(f"duplicating template tenant {ncopies} times in S3")
     tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, ncopies)
+
+    # In theory we could just attach all the tenants, force on-demand downloads via mgmt API, and be done.
+    # However, on-demand downloads are quite slow ATM.
+    # => do the on-demand downloads in Python.
+    log.info("python-side on-demand download the layer files into local tenant dir")
+    tenant_timelines = list(map(lambda tenant: (tenant, template_timeline), tenants))
+    fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(
+        env, tenant_timelines
+    )
 
     log.info("attach duplicated tenants to pageserver")
     # In theory we could just attach all the tenants, force on-demand downloads via mgmt API, and be done.
     # However, on-demand downloads are quite slow ATM.
     # => do the on-demand downloads in Python.
     assert ps_http.tenant_list() == []
-    # make the attach fail after it created enough on-disk state to retry loading
-    # the tenant next startup, but before it can start background loops that would start download
-    ps_http.configure_failpoints(("attach-before-activate", "return"))
-    env.pageserver.allowed_errors.append(
-        ".*attach failed, setting tenant state to Broken: attach-before-activate.*"
-    )
 
-    def attach_broken(tenant):
+    def attach(tenant):
         env.pageserver.tenant_attach(
             tenant,
             config=template_config.copy(),
             generation=100,
             override_storage_controller_generation=True,
         )
-        time.sleep(0.1)
-        wait_until_tenant_state(ps_http, tenant, "Broken", 10)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=22) as executor:
-        executor.map(attach_broken, tenants)
+        executor.map(attach, tenants)
 
-    env.pageserver.stop(
-        immediate=True
-    )  # clears the failpoint as a side-effect; immediate to avoid hitting neon_local's timeout
-    tenant_timelines = list(map(lambda tenant: (tenant, template_timeline), tenants))
-    log.info("python-side on-demand download the layer files into local tenant dir")
-    fixtures.pageserver.remote_storage.copy_all_remote_layer_files_to_local_tenant_dir(
-        env, tenant_timelines
-    )
+    # Benchmarks will start the pageserver explicitly themselves
+    env.pageserver.stop()
 
     return env

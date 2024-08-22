@@ -42,7 +42,11 @@ class PgCompare(ABC):
         pass
 
     @abstractmethod
-    def flush(self):
+    def flush(self, compact: bool = False, gc: bool = False):
+        pass
+
+    @abstractmethod
+    def compact(self):
         pass
 
     @abstractmethod
@@ -109,8 +113,6 @@ class NeonCompare(PgCompare):
 
         # Create tenant
         tenant_conf: Dict[str, str] = {}
-        if False:  # TODO add pytest setting for this
-            tenant_conf["trace_read_requests"] = "true"
         self.tenant, _ = self.env.neon_cli.create_tenant(conf=tenant_conf)
 
         # Create timeline
@@ -131,13 +133,16 @@ class NeonCompare(PgCompare):
     def pg_bin(self) -> PgBin:
         return self._pg_bin
 
-    def flush(self):
+    def flush(self, compact: bool = True, gc: bool = True):
         wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
+        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline, compact=compact)
+        if gc:
+            self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 
     def compact(self):
-        self.pageserver_http_client.timeline_compact(self.tenant, self.timeline)
+        self.pageserver_http_client.timeline_compact(
+            self.tenant, self.timeline, wait_until_uploaded=True
+        )
 
     def report_peak_memory_use(self):
         self.zenbenchmark.record(
@@ -217,8 +222,11 @@ class VanillaCompare(PgCompare):
     def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
-    def flush(self):
+    def flush(self, compact: bool = False, gc: bool = False):
         self.cur.execute("checkpoint")
+
+    def compact(self):
+        pass
 
     def report_peak_memory_use(self):
         pass  # TODO find something
@@ -266,6 +274,9 @@ class RemoteCompare(PgCompare):
 
     def flush(self):
         # TODO: flush the remote pageserver
+        pass
+
+    def compact(self):
         pass
 
     def report_peak_memory_use(self):

@@ -5,14 +5,13 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{models::ImageCompressionAlgorithm, shard::TenantShardId};
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use serde;
 use serde::de::IntoDeserializer;
+use serde::{self, Deserialize};
 use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
-use utils::id::ConnectionId;
 use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
@@ -30,9 +29,10 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::tenant::timeline::GetVectoredImpl;
+use crate::l0_flush::L0FlushConfig;
+use crate::tenant::config::TenantConfOpt;
+use crate::tenant::timeline::compaction::CompactL0Phase1ValueAccess;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
-use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
 use crate::{tenant::config::TenantConf, virtual_file};
@@ -52,7 +52,7 @@ pub mod defaults {
     };
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
-    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
+    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
@@ -68,7 +68,6 @@ pub mod defaults {
         super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
@@ -84,13 +83,15 @@ pub mod defaults {
     #[cfg(not(target_os = "linux"))]
     pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
 
-    pub const DEFAULT_GET_VECTORED_IMPL: &str = "sequential";
+    pub const DEFAULT_GET_VECTORED_IMPL: &str = "vectored";
 
-    pub const DEFAULT_GET_IMPL: &str = "legacy";
+    pub const DEFAULT_GET_IMPL: &str = "vectored";
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
-    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
+    pub const DEFAULT_IMAGE_COMPRESSION: &str = "zstd(1)";
+
+    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
@@ -120,7 +121,6 @@ pub mod defaults {
 #concurrent_tenant_warmup = '{DEFAULT_CONCURRENT_TENANT_WARMUP}'
 
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
-#cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
 #synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
 
 #disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
@@ -131,13 +131,7 @@ pub mod defaults {
 
 #virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
 
-#get_vectored_impl = '{DEFAULT_GET_VECTORED_IMPL}'
-
-#get_impl = '{DEFAULT_GET_IMPL}'
-
 #max_vectored_read_bytes = '{DEFAULT_MAX_VECTORED_READ_BYTES}'
-
-#validate_vectored_get = '{DEFAULT_VALIDATE_VECTORED_GET}'
 
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -159,7 +153,7 @@ pub mod defaults {
 
 #ephemeral_bytes_per_memory_kb = {DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB}
 
-[remote_storage]
+#[remote_storage]
 
 "#
     );
@@ -235,7 +229,6 @@ pub struct PageServerConf {
     // How often to collect metrics and send them to the metrics endpoint.
     pub metric_collection_interval: Duration,
     // How often to send unchanged cached metrics to the metrics endpoint.
-    pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
@@ -277,13 +270,9 @@ pub struct PageServerConf {
 
     pub virtual_file_io_engine: virtual_file::IoEngineKind,
 
-    pub get_vectored_impl: GetVectoredImpl,
-
-    pub get_impl: GetImpl,
-
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
-    pub validate_vectored_get: bool,
+    pub image_compression: ImageCompressionAlgorithm,
 
     /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
     /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
@@ -291,6 +280,15 @@ pub struct PageServerConf {
     ///
     /// Setting this to zero disables limits on total ephemeral layer size.
     pub ephemeral_bytes_per_memory_kb: usize,
+
+    pub l0_flush: L0FlushConfig,
+
+    /// This flag is temporary and will be removed after gradual rollout.
+    /// See <https://github.com/neondatabase/neon/issues/8184>.
+    pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
+
+    /// Direct IO settings
+    pub virtual_file_direct_io: virtual_file::DirectIoMode,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -352,8 +350,6 @@ struct PageServerConfigBuilder {
     auth_validation_public_key_path: BuilderValue<Option<Utf8PathBuf>>,
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
-    id: BuilderValue<NodeId>,
-
     broker_endpoint: BuilderValue<Uri>,
     broker_keepalive_interval: BuilderValue<Duration>,
 
@@ -363,7 +359,6 @@ struct PageServerConfigBuilder {
     concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
 
     metric_collection_interval: BuilderValue<Duration>,
-    cached_metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
     metric_collection_bucket: BuilderValue<Option<RemoteStorageConfig>>,
@@ -387,18 +382,24 @@ struct PageServerConfigBuilder {
 
     virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
 
-    get_vectored_impl: BuilderValue<GetVectoredImpl>,
-
-    get_impl: BuilderValue<GetImpl>,
-
     max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
 
-    validate_vectored_get: BuilderValue<bool>,
+    image_compression: BuilderValue<ImageCompressionAlgorithm>,
 
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
+
+    l0_flush: BuilderValue<L0FlushConfig>,
+
+    compact_level0_phase1_value_access: BuilderValue<CompactL0Phase1ValueAccess>,
+
+    virtual_file_direct_io: BuilderValue<virtual_file::DirectIoMode>,
 }
 
 impl PageServerConfigBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
     #[inline(always)]
     fn default_values() -> Self {
         use self::BuilderValue::*;
@@ -424,7 +425,6 @@ impl PageServerConfigBuilder {
             pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
-            id: NotSet,
             broker_endpoint: Set(storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint")),
@@ -443,10 +443,6 @@ impl PageServerConfigBuilder {
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
             .expect("cannot parse default metric collection interval")),
-            cached_metric_collection_interval: Set(humantime::parse_duration(
-                DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL,
-            )
-            .expect("cannot parse default cached_metric_collection_interval")),
             synthetic_size_calculation_interval: Set(humantime::parse_duration(
                 DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL,
             )
@@ -477,13 +473,14 @@ impl PageServerConfigBuilder {
 
             virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
 
-            get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
-            get_impl: Set(DEFAULT_GET_IMPL.parse().unwrap()),
             max_vectored_read_bytes: Set(MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
-            validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
+            image_compression: Set(DEFAULT_IMAGE_COMPRESSION.parse().unwrap()),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
+            l0_flush: Set(L0FlushConfig::default()),
+            compact_level0_phase1_value_access: Set(CompactL0Phase1ValueAccess::default()),
+            virtual_file_direct_io: Set(virtual_file::DirectIoMode::default()),
         }
     }
 }
@@ -556,10 +553,6 @@ impl PageServerConfigBuilder {
         self.broker_keepalive_interval = BuilderValue::Set(broker_keepalive_interval)
     }
 
-    pub fn id(&mut self, node_id: NodeId) {
-        self.id = BuilderValue::Set(node_id)
-    }
-
     pub fn log_format(&mut self, log_format: LogFormat) {
         self.log_format = BuilderValue::Set(log_format)
     }
@@ -574,14 +567,6 @@ impl PageServerConfigBuilder {
 
     pub fn metric_collection_interval(&mut self, metric_collection_interval: Duration) {
         self.metric_collection_interval = BuilderValue::Set(metric_collection_interval)
-    }
-
-    pub fn cached_metric_collection_interval(
-        &mut self,
-        cached_metric_collection_interval: Duration,
-    ) {
-        self.cached_metric_collection_interval =
-            BuilderValue::Set(cached_metric_collection_interval)
     }
 
     pub fn metric_collection_endpoint(&mut self, metric_collection_endpoint: Option<Url>) {
@@ -651,27 +636,31 @@ impl PageServerConfigBuilder {
         self.virtual_file_io_engine = BuilderValue::Set(value);
     }
 
-    pub fn get_vectored_impl(&mut self, value: GetVectoredImpl) {
-        self.get_vectored_impl = BuilderValue::Set(value);
-    }
-
-    pub fn get_impl(&mut self, value: GetImpl) {
-        self.get_impl = BuilderValue::Set(value);
-    }
-
     pub fn get_max_vectored_read_bytes(&mut self, value: MaxVectoredReadBytes) {
         self.max_vectored_read_bytes = BuilderValue::Set(value);
     }
 
-    pub fn get_validate_vectored_get(&mut self, value: bool) {
-        self.validate_vectored_get = BuilderValue::Set(value);
+    pub fn get_image_compression(&mut self, value: ImageCompressionAlgorithm) {
+        self.image_compression = BuilderValue::Set(value);
     }
 
     pub fn get_ephemeral_bytes_per_memory_kb(&mut self, value: usize) {
         self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
     }
 
-    pub fn build(self) -> anyhow::Result<PageServerConf> {
+    pub fn l0_flush(&mut self, value: L0FlushConfig) {
+        self.l0_flush = BuilderValue::Set(value);
+    }
+
+    pub fn compact_level0_phase1_value_access(&mut self, value: CompactL0Phase1ValueAccess) {
+        self.compact_level0_phase1_value_access = BuilderValue::Set(value);
+    }
+
+    pub fn virtual_file_direct_io(&mut self, value: virtual_file::DirectIoMode) {
+        self.virtual_file_direct_io = BuilderValue::Set(value);
+    }
+
+    pub fn build(self, id: NodeId) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
         macro_rules! conf {
@@ -704,12 +693,10 @@ impl PageServerConfigBuilder {
                 pg_auth_type,
                 auth_validation_public_key_path,
                 remote_storage_config,
-                id,
                 broker_endpoint,
                 broker_keepalive_interval,
                 log_format,
                 metric_collection_interval,
-                cached_metric_collection_interval,
                 metric_collection_endpoint,
                 metric_collection_bucket,
                 synthetic_size_calculation_interval,
@@ -723,14 +710,16 @@ impl PageServerConfigBuilder {
                 heatmap_upload_concurrency,
                 secondary_download_concurrency,
                 ingest_batch_size,
-                get_vectored_impl,
-                get_impl,
                 max_vectored_read_bytes,
-                validate_vectored_get,
+                image_compression,
                 ephemeral_bytes_per_memory_kb,
+                l0_flush,
+                compact_level0_phase1_value_access,
+                virtual_file_direct_io,
             }
             CUSTOM LOGIC
             {
+                id: id,
                 // TenantConf is handled separately
                 default_tenant_conf: TenantConf::default(),
                 concurrent_tenant_warmup: ConfigurableSemaphore::new({
@@ -846,22 +835,6 @@ impl PageServerConf {
         )
     }
 
-    pub fn traces_path(&self) -> Utf8PathBuf {
-        self.workdir.join("traces")
-    }
-
-    pub fn trace_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-        connection_id: &ConnectionId,
-    ) -> Utf8PathBuf {
-        self.traces_path()
-            .join(tenant_shard_id.to_string())
-            .join(timeline_id.to_string())
-            .join(connection_id.to_string())
-    }
-
     /// Turns storage remote path of a file into its local path.
     pub fn local_path(&self, remote_path: &RemotePath) -> Utf8PathBuf {
         remote_path.with_base(&self.workdir)
@@ -891,8 +864,12 @@ impl PageServerConf {
     /// validating the input and failing on errors.
     ///
     /// This leaves any options not present in the file in the built-in defaults.
-    pub fn parse_and_validate(toml: &Document, workdir: &Utf8Path) -> anyhow::Result<Self> {
-        let mut builder = PageServerConfigBuilder::default();
+    pub fn parse_and_validate(
+        node_id: NodeId,
+        toml: &Document,
+        workdir: &Utf8Path,
+    ) -> anyhow::Result<Self> {
+        let mut builder = PageServerConfigBuilder::new();
         builder.workdir(workdir.to_owned());
 
         let mut t_conf = TenantConfOpt::default();
@@ -918,12 +895,11 @@ impl PageServerConf {
                 "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
                 "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
-                    builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
+                    builder.remote_storage_config(Some(RemoteStorageConfig::from_toml(item).context("remote_storage")?))
                 }
                 "tenant_config" => {
                     t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
-                "id" => builder.id(NodeId(parse_toml_u64(key, item)?)),
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
                 "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
@@ -940,13 +916,12 @@ impl PageServerConf {
                     NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
                 }),
                 "metric_collection_interval" => builder.metric_collection_interval(parse_toml_duration(key, item)?),
-                "cached_metric_collection_interval" => builder.cached_metric_collection_interval(parse_toml_duration(key, item)?),
                 "metric_collection_endpoint" => {
                     let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
                     builder.metric_collection_endpoint(Some(endpoint));
                 },
                 "metric_collection_bucket" => {
-                    builder.metric_collection_bucket(RemoteStorageConfig::from_toml(item)?)
+                    builder.metric_collection_bucket(Some(RemoteStorageConfig::from_toml(item)?))
                 }
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
@@ -989,29 +964,32 @@ impl PageServerConf {
                 "virtual_file_io_engine" => {
                     builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
                 }
-                "get_vectored_impl" => {
-                    builder.get_vectored_impl(parse_toml_from_str("get_vectored_impl", item)?)
-                }
-                "get_impl" => {
-                    builder.get_impl(parse_toml_from_str("get_impl", item)?)
-                }
                 "max_vectored_read_bytes" => {
                     let bytes = parse_toml_u64("max_vectored_read_bytes", item)? as usize;
                     builder.get_max_vectored_read_bytes(
                         MaxVectoredReadBytes(
                             NonZeroUsize::new(bytes).expect("Max byte size of vectored read must be greater than 0")))
                 }
-                "validate_vectored_get" => {
-                    builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
+                "image_compression" => {
+                    builder.get_image_compression(parse_toml_from_str("image_compression", item)?)
                 }
                 "ephemeral_bytes_per_memory_kb" => {
                     builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
+                }
+                "l0_flush" => {
+                    builder.l0_flush(utils::toml_edit_ext::deserialize_item(item).context("l0_flush")?)
+                }
+                "compact_level0_phase1_value_access" => {
+                    builder.compact_level0_phase1_value_access(utils::toml_edit_ext::deserialize_item(item).context("compact_level0_phase1_value_access")?)
+                }
+                "virtual_file_direct_io" => {
+                    builder.virtual_file_direct_io(utils::toml_edit_ext::deserialize_item(item).context("virtual_file_direct_io")?)
                 }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
 
-        let mut conf = builder.build().context("invalid config")?;
+        let mut conf = builder.build(node_id).context("invalid config")?;
 
         if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
@@ -1067,7 +1045,6 @@ impl PageServerConf {
             eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
             ),
             metric_collection_interval: Duration::from_secs(60),
-            cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
             metric_collection_bucket: None,
             synthetic_size_calculation_interval: Duration::from_secs(60),
@@ -1082,16 +1059,23 @@ impl PageServerConf {
             secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-            get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-            get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
             max_vectored_read_bytes: MaxVectoredReadBytes(
                 NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                     .expect("Invalid default constant"),
             ),
-            validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+            image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+            l0_flush: L0FlushConfig::default(),
+            compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+            virtual_file_direct_io: virtual_file::DirectIoMode::default(),
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageserverIdentity {
+    pub id: NodeId,
 }
 
 // Helper functions to parse a toml Item
@@ -1241,10 +1225,8 @@ max_file_descriptors = 333
 
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zzzz'
-id = 10
 
 metric_collection_interval = '222 s'
-cached_metric_collection_interval = '22200 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
 
@@ -1259,12 +1241,11 @@ background_task_maximum_delay = '334 s'
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
         // we have to create dummy values to overcome the validation errors
-        let config_string = format!(
-            "pg_distrib_dir='{pg_distrib_dir}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
-        );
+        let config_string =
+            format!("pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",);
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
             .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
@@ -1300,9 +1281,6 @@ background_task_maximum_delay = '334 s'
                 metric_collection_interval: humantime::parse_duration(
                     defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
                 )?,
-                cached_metric_collection_interval: humantime::parse_duration(
-                    defaults::DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL
-                )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
                 metric_collection_bucket: None,
                 synthetic_size_calculation_interval: humantime::parse_duration(
@@ -1321,14 +1299,15 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                l0_flush: L0FlushConfig::default(),
+                compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1347,7 +1326,7 @@ background_task_maximum_delay = '334 s'
         );
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
             .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
@@ -1379,7 +1358,6 @@ background_task_maximum_delay = '334 s'
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
                 metric_collection_interval: Duration::from_secs(222),
-                cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 metric_collection_bucket: None,
                 synthetic_size_calculation_interval: Duration::from_secs(333),
@@ -1394,14 +1372,15 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: 100,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
+                l0_flush: L0FlushConfig::default(),
+                compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -1436,12 +1415,13 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for the local FS");
+            let parsed_remote_storage_config =
+                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
+                    })
+                    .remote_storage_config
+                    .expect("Should have remote storage config for the local FS");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -1497,12 +1477,13 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for S3");
+            let parsed_remote_storage_config =
+                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
+                    })
+                    .remote_storage_config
+                    .expect("Should have remote storage config for S3");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -1521,34 +1502,6 @@ broker_endpoint = '{broker_endpoint}'
                 "Remote storage config should correctly parse the S3 config"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_tenant_config() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-
-        let broker_endpoint = "http://127.0.0.1:7777";
-        let trace_read_requests = true;
-
-        let config_string = format!(
-            r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{pg_distrib_dir}'
-broker_endpoint = '{broker_endpoint}'
-
-[tenant_config]
-trace_read_requests = {trace_read_requests}"#,
-        );
-
-        let toml = config_string.parse()?;
-
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
-        assert_eq!(
-            conf.default_tenant_conf.trace_read_requests, trace_read_requests,
-            "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
-        );
-
         Ok(())
     }
 
@@ -1592,7 +1545,6 @@ trace_read_requests = {trace_read_requests}"#,
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [disk_usage_based_eviction]
 max_usage_pct = 80
@@ -1609,7 +1561,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse()?;
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        let conf = PageServerConf::parse_and_validate(NodeId(333), &toml, &workdir)?;
 
         assert_eq!(conf.pg_distrib_dir, pg_distrib_dir);
         assert_eq!(
@@ -1625,7 +1577,11 @@ threshold = "20m"
                 .evictions_low_residence_duration_metric_threshold,
             Duration::from_secs(20 * 60)
         );
-        assert_eq!(conf.id, NodeId(222));
+
+        // Assert that the node id provided by the indentity file (threaded
+        // through the call to [`PageServerConf::parse_and_validate`] is
+        // used.
+        assert_eq!(conf.id, NodeId(333));
         assert_eq!(
             conf.disk_usage_based_eviction,
             Some(DiskUsageEvictionTaskConfig {
@@ -1634,7 +1590,7 @@ threshold = "20m"
                 period: Duration::from_secs(10),
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
-                eviction_order: crate::disk_usage_eviction_task::EvictionOrder::AbsoluteAccessed,
+                eviction_order: Default::default(),
             })
         );
 
@@ -1658,7 +1614,6 @@ threshold = "20m"
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [tenant_config]
 evictions_low_residence_duration_metric_threshold = "20m"
@@ -1670,7 +1625,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse().unwrap();
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+        let conf = PageServerConf::parse_and_validate(NodeId(222), &toml, &workdir).unwrap();
 
         match &conf.default_tenant_conf.eviction_policy {
             EvictionPolicy::OnlyImitiate(t) => {
@@ -1679,6 +1634,19 @@ threshold = "20m"
             }
             other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
+    }
+
+    #[test]
+    fn empty_remote_storage_is_error() {
+        let tempdir = tempdir().unwrap();
+        let (workdir, _) = prepare_fs(&tempdir).unwrap();
+        let input = r#"
+remote_storage = {}
+        "#;
+        let doc = toml_edit::Document::from_str(input).unwrap();
+        let err = PageServerConf::parse_and_validate(NodeId(222), &doc, &workdir)
+            .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
+        assert!(format!("{err}").contains("remote_storage"), "{err}");
     }
 
     fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {
