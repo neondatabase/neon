@@ -194,6 +194,29 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             # generates use old not_modified_since LSNs, older than
             # the GC cutoff, but new request LSNs. (In protocol
             # version 1 there was only one LSN, and this failed.)
+            secondary.clear_shared_buffers(cursor=s_cur)
+            log_replica_lag(primary, secondary)
+            s_cur.execute("SELECT COUNT(*) FROM test")
+            log_replica_lag(primary, secondary)
+            res = s_cur.fetchone()
+            assert res[0] == 10000
+
+            env.safekeepers[0].stop()
+
+            # Restart the pageserver and run GC again: the standby_horizon should still be enforced
+            env.pageserver.stop()
+            env.pageserver.start()
+            for tenant_shard_id, pageserver in shards:
+                client = pageserver.http_client()
+                client.timeline_checkpoint(tenant_shard_id, timeline_id)
+                client.timeline_compact(tenant_shard_id, timeline_id)
+                client.timeline_gc(tenant_shard_id, timeline_id, 0)
+
+            # Re-execute the query. The GetPage requests that this
+            # generates use old not_modified_since LSNs, older than
+            # the GC cutoff, but new request LSNs. (In protocol
+            # version 1 there was only one LSN, and this failed.)
+            secondary.clear_shared_buffers(cursor=s_cur)
             log_replica_lag(primary, secondary)
             s_cur.execute("SELECT COUNT(*) FROM test")
             log_replica_lag(primary, secondary)
