@@ -170,8 +170,11 @@ impl VectoredReadBuilder {
 }
 
 pub(crate) struct VectoredReadBuilderInner {
+    /// Start offset of the read.
     start: u64,
+    // End offset of the read.
     end: u64,
+    /// Blobs (metadata, end offset) ordered by blobs start offset.
     blobs_at: VecMap<u64, (u64, BlobMeta)>,
     max_read_size: Option<usize>,
 }
@@ -247,6 +250,7 @@ pub(crate) struct ChunkedVectoredReadBuilderInner {
     /// Blobs (metadata, end offset) ordered by blobs start offset.
     blobs_at: VecMap<u64, (u64, BlobMeta)>,
     max_read_size: Option<usize>,
+    /// Chunk size reads are coalesced into.
     chunk_size: usize,
 }
 
