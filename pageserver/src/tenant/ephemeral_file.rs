@@ -149,7 +149,7 @@ impl EphemeralFile {
         let buffer = self.buffered_writer.inspect_buffer();
         let buffered = &buffer[0..buffer.pending()];
 
-        let dst_cap = dst.bytes_total().as_u64();
+        let dst_cap = dst.bytes_total().into_u64();
         let end = {
             // saturating_add is correct here because the max file size is u64::MAX, so,
             // if start + dst.len() > u64::MAX, then we know it will be a short read
@@ -179,11 +179,7 @@ impl EphemeralFile {
             let file: &VirtualFile = file_size_tracking_writer.as_inner();
             let bounds = dst.bounds();
             let slice = file
-                .read_exact_at(
-                    dst.slice(0..written_range.len().as_usize()),
-                    start as u64,
-                    ctx,
-                )
+                .read_exact_at(dst.slice(0..written_range.len().into_usize()), start, ctx)
                 .await?;
             Slice::from_buf_bounds(Slice::into_inner(slice), bounds)
         } else {
@@ -195,17 +191,17 @@ impl EphemeralFile {
                 .0
                 .checked_sub(flushed_offset)
                 .unwrap()
-                .as_usize();
+                .into_usize();
             let to_copy =
-                &buffered[offset_in_buffer..(offset_in_buffer + buffered_range.len().as_usize())];
+                &buffered[offset_in_buffer..(offset_in_buffer + buffered_range.len().into_usize())];
             let bounds = dst.bounds();
             let mut view = dst.slice(
-                written_range.len().as_usize()
+                written_range.len().into_usize()
                     ..written_range
                         .len()
                         .checked_add(buffered_range.len())
                         .unwrap()
-                        .as_usize(),
+                        .into_usize(),
             );
             view.as_mut_rust_slice_full_zeroed()
                 .copy_from_slice(to_copy);
@@ -216,7 +212,7 @@ impl EphemeralFile {
 
         // TODO: in debug mode, randomize the remaining bytes in `dst` to catch bugs
 
-        Ok((dst, (end - start).as_usize()))
+        Ok((dst, (end - start).into_usize()))
     }
 
     /// Returns the offset at which the first byte of the input was written, for use
@@ -231,7 +227,7 @@ impl EphemeralFile {
     ) -> std::io::Result<u64> {
         let pos = self.bytes_written;
 
-        let new_bytes_written = pos.checked_add(srcbuf.len().as_u64()).ok_or_else(|| {
+        let new_bytes_written = pos.checked_add(srcbuf.len().into_u64()).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!(
@@ -366,10 +362,10 @@ mod tests {
 
         assert!(file.len() as usize == write_nbytes);
         for i in 0..write_nbytes {
-            assert_eq!(value_offsets[i], i.as_u64());
+            assert_eq!(value_offsets[i], i.into_u64());
             let buf = Vec::with_capacity(1);
             let (buf_slice, nread) = file
-                .read_at_to_end(i.as_u64(), buf.slice_full(), &ctx)
+                .read_at_to_end(i.into_u64(), buf.slice_full(), &ctx)
                 .await
                 .unwrap();
             let buf = buf_slice.into_inner();

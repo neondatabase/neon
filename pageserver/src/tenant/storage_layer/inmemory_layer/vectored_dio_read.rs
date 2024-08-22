@@ -132,14 +132,14 @@ where
 
         // plan which chunks we need to read from
         let mut remaining = req_len;
-        let mut chunk_no = *pos / (DIO_CHUNK_SIZE.as_u64());
-        let mut offset_in_chunk = pos.as_usize() % DIO_CHUNK_SIZE;
+        let mut chunk_no = *pos / (DIO_CHUNK_SIZE.into_u64());
+        let mut offset_in_chunk = pos.into_usize() % DIO_CHUNK_SIZE;
         while remaining > 0 {
             let remaining_in_chunk = std::cmp::min(remaining, DIO_CHUNK_SIZE - offset_in_chunk);
             by_chunk.entry(chunk_no).or_default().push(Interest {
                 logical_read,
-                offset_in_chunk: offset_in_chunk.as_u64(),
-                len: remaining_in_chunk.as_u64(),
+                offset_in_chunk: offset_in_chunk.into_u64(),
+                len: remaining_in_chunk.into_u64(),
             });
             offset_in_chunk = 0;
             chunk_no += 1;
@@ -196,7 +196,7 @@ where
                             offset_in_physical_read: i
                                 .checked_mul(DIO_CHUNK_SIZE)
                                 .unwrap()
-                                .as_u64()
+                                .into_u64()
                                 + offset_in_chunk,
                             len,
                         }
@@ -228,7 +228,7 @@ where
             continue;
         }
         let read_offset = start_chunk_no
-            .checked_mul(DIO_CHUNK_SIZE.as_u64())
+            .checked_mul(DIO_CHUNK_SIZE.into_u64())
             .expect("we produce chunk_nos by dividing by DIO_CHUNK_SIZE earlier");
         let io_buf = get_io_buffer(nchunks).slice_full();
         let req_len = io_buf.len();
@@ -540,7 +540,7 @@ mod tests {
     async fn test_blackbox() {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let cs = DIO_CHUNK_SIZE;
-        let cs_u64 = cs.as_u64();
+        let cs_u64 = cs.into_u64();
 
         let file = InMemoryFile::new_random(10 * cs);
 
@@ -623,8 +623,8 @@ mod tests {
 
         let file = InMemoryFile::new_random(2 * DIO_CHUNK_SIZE);
 
-        let a = file.test_logical_read(DIO_CHUNK_SIZE.as_u64(), 10);
-        let b = file.test_logical_read(DIO_CHUNK_SIZE.as_u64() + 30, 20);
+        let a = file.test_logical_read(DIO_CHUNK_SIZE.into_u64(), 10);
+        let b = file.test_logical_read(DIO_CHUNK_SIZE.into_u64() + 30, 20);
 
         let recorder = RecorderFile::new(&file);
 
@@ -633,7 +633,7 @@ mod tests {
         let recorded = recorder.recorded.borrow();
         assert_eq!(recorded.len(), 1);
         let RecordedRead { pos, req_len, .. } = &recorded[0];
-        assert_eq!(*pos, DIO_CHUNK_SIZE.as_u64());
+        assert_eq!(*pos, DIO_CHUNK_SIZE.into_u64());
         assert_eq!(*req_len, DIO_CHUNK_SIZE);
     }
 
@@ -649,7 +649,7 @@ mod tests {
         let mut test_logical_reads = Vec::new();
         for i in 3..3 + MAX_CHUNK_BATCH_SIZE + MAX_CHUNK_BATCH_SIZE / 2 {
             test_logical_reads
-                .push(file.test_logical_read(i.as_u64() * DIO_CHUNK_SIZE.as_u64() + 10, 1));
+                .push(file.test_logical_read(i.into_u64() * DIO_CHUNK_SIZE.into_u64() + 10, 1));
         }
 
         let recorder = RecorderFile::new(&file);
@@ -678,7 +678,7 @@ mod tests {
         let file = InMemoryFile::new_random(3 * DIO_CHUNK_SIZE);
 
         let a = file.test_logical_read(0, 1); // chunk 0
-        let b = file.test_logical_read(2 * DIO_CHUNK_SIZE.as_u64(), 1); // chunk 2
+        let b = file.test_logical_read(2 * DIO_CHUNK_SIZE.into_u64(), 1); // chunk 2
 
         let recorder = RecorderFile::new(&file);
 
@@ -694,7 +694,7 @@ mod tests {
         }
         {
             let RecordedRead { pos, req_len, .. } = &recorded[1];
-            assert_eq!(*pos, 2 * DIO_CHUNK_SIZE.as_u64());
+            assert_eq!(*pos, 2 * DIO_CHUNK_SIZE.into_u64());
             assert_eq!(*req_len, DIO_CHUNK_SIZE);
         }
     }
@@ -814,19 +814,21 @@ mod tests {
         let test_logical_reads = vec![
             // read spanning two batches
             TestLogicalRead::new(
-                DIO_CHUNK_SIZE.as_u64() / 2,
+                DIO_CHUNK_SIZE.into_u64() / 2,
                 MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE,
                 Err("foo".to_owned()),
             ),
             // second read in failing chunk
             TestLogicalRead::new(
-                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE).as_u64() + DIO_CHUNK_SIZE.as_u64() - 10,
+                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE).into_u64() + DIO_CHUNK_SIZE.into_u64() - 10,
                 5,
                 Err("foo".to_owned()),
             ),
             // read unaffected
             TestLogicalRead::new(
-                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE).as_u64() + 2 * DIO_CHUNK_SIZE.as_u64() + 10,
+                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE).into_u64()
+                    + 2 * DIO_CHUNK_SIZE.into_u64()
+                    + 10,
                 5,
                 Ok(vec![1; 5]),
             ),
@@ -837,8 +839,8 @@ mod tests {
         for test_logical_reads in test_logical_read_perms {
             let file = mock_file!(
                 0, MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE => Ok(vec![0; MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE]),
-                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE).as_u64(), DIO_CHUNK_SIZE => Err("foo".to_owned()),
-                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE + 2*DIO_CHUNK_SIZE).as_u64(), DIO_CHUNK_SIZE => Ok(vec![1; DIO_CHUNK_SIZE]),
+                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE).into_u64(), DIO_CHUNK_SIZE => Err("foo".to_owned()),
+                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE + 2*DIO_CHUNK_SIZE).into_u64(), DIO_CHUNK_SIZE => Ok(vec![1; DIO_CHUNK_SIZE]),
             );
             execute_and_validate_test_logical_reads(&file, test_logical_reads, &ctx).await;
         }
@@ -852,7 +854,7 @@ mod tests {
     fn setup_short_chunk_read_tests() -> TestShortReadsSetup {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         assert!(DIO_CHUNK_SIZE > 20, "test assumption");
-        let written = (2 * DIO_CHUNK_SIZE - 10).as_u64();
+        let written = (2 * DIO_CHUNK_SIZE - 10).into_u64();
         let file = InMemoryFile::new_random(written as usize);
         TestShortReadsSetup { ctx, file, written }
     }
@@ -874,7 +876,7 @@ mod tests {
         let recorded = recorder.recorded.borrow();
         assert_eq!(recorded.len(), 1);
         let RecordedRead { pos, req_len, res } = &recorded[0];
-        assert_eq!(*pos, DIO_CHUNK_SIZE.as_u64());
+        assert_eq!(*pos, DIO_CHUNK_SIZE.into_u64());
         assert_eq!(*req_len, DIO_CHUNK_SIZE);
         assert_eq!(res, &file.content[DIO_CHUNK_SIZE..(written as usize)]);
     }
@@ -911,7 +913,7 @@ mod tests {
             let recorded = recorder.recorded.borrow();
             assert_eq!(recorded.len(), 1);
             let RecordedRead { pos, req_len, res } = &recorded[0];
-            assert_eq!(*pos, DIO_CHUNK_SIZE.as_u64());
+            assert_eq!(*pos, DIO_CHUNK_SIZE.into_u64());
             assert_eq!(*req_len, DIO_CHUNK_SIZE);
             assert_eq!(res, &file.content[DIO_CHUNK_SIZE..(written as usize)]);
         }

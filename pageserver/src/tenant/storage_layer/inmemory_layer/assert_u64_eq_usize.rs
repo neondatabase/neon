@@ -5,24 +5,26 @@ pub(crate) const _ASSERT_U64_EQ_USIZE: () = {
 };
 
 pub(crate) trait U64IsUsize {
-    fn as_usize(self) -> usize;
+    fn into_usize(self) -> usize;
 }
 
 impl U64IsUsize for u64 {
     #[inline(always)]
-    fn as_usize(self) -> usize {
+    fn into_usize(self) -> usize {
+        #[allow(clippy::let_unit_value)]
         let _ = _ASSERT_U64_EQ_USIZE;
         self as usize
     }
 }
 
 pub(crate) trait UsizeIsU64 {
-    fn as_u64(self) -> u64;
+    fn into_u64(self) -> u64;
 }
 
 impl UsizeIsU64 for usize {
     #[inline(always)]
-    fn as_u64(self) -> u64 {
+    fn into_u64(self) -> u64 {
+        #[allow(clippy::let_unit_value)]
         let _ = _ASSERT_U64_EQ_USIZE;
         self as u64
     }

@@ -173,7 +173,7 @@ impl InMemoryLayerIndexValue {
             .checked_add(batch_offset)
             .ok_or_else(|| anyhow::anyhow!("base_offset + batch_offset overflows u64: base_offset={base_offset} batch_offset={batch_offset}"))?;
 
-        if pos.as_usize() > Self::MAX_SUPPORTED_POS {
+        if pos.into_usize() > Self::MAX_SUPPORTED_POS {
             anyhow::bail!(
                 "base_offset+batch_offset exceeds the maximum supported value: base_offset={base_offset} batch_offset={batch_offset} (+)={pos} max={max}",
                 max = Self::MAX_SUPPORTED_POS
@@ -189,7 +189,7 @@ impl InMemoryLayerIndexValue {
         let mut data: u64 = 0;
         use bit_field::BitField;
         data.set_bits(Self::WILL_INIT_RANGE, if will_init { 1 } else { 0 });
-        data.set_bits(Self::LEN_RANGE, len.as_u64());
+        data.set_bits(Self::LEN_RANGE, len.into_u64());
         data.set_bits(Self::POS_RANGE, pos);
 
         Ok(Self(data))
@@ -658,7 +658,7 @@ impl InMemoryLayer {
                     value: InMemoryLayerIndexValue::new(InMemoryLayerIndexValueNewArgs {
                         base_offset,
                         batch_offset: pos,
-                        len: len.as_usize(),
+                        len: len.into_usize(),
                         will_init,
                     })?,
                 })
@@ -669,7 +669,7 @@ impl InMemoryLayer {
         inner.file.write_raw(&serialized_batch.raw, ctx).await?;
         let new_size = inner.file.len();
         let expected_new_len = base_offset
-            .checked_add(serialized_batch.raw.len().as_u64())
+            .checked_add(serialized_batch.raw.len().into_u64())
             // write_raw would error if we were to overflow u64.
             // also InMemoryLayerIndexValue and higher levels in
             //the code don't allow the file to grow that large
@@ -870,13 +870,13 @@ mod tests {
                 for will_init in [true, false] {
                     let expect = Unpacked {
                         will_init,
-                        len: len.as_u64(),
-                        pos: pos.as_u64(),
+                        len: len.into_u64(),
+                        pos: pos.into_u64(),
                     };
                     roundtrip(
                         Args {
                             will_init,
-                            base_offset: pos.as_u64(),
+                            base_offset: pos.into_u64(),
                             batch_offset: 0,
                             len,
                         },
@@ -886,7 +886,7 @@ mod tests {
                         Args {
                             will_init,
                             base_offset: 0,
-                            batch_offset: pos.as_u64(),
+                            batch_offset: pos.into_u64(),
                             len,
                         },
                         expect,
@@ -909,7 +909,7 @@ mod tests {
             let too_large = Args {
                 will_init: false,
                 len: 0,
-                base_offset: MAX_SUPPORTED_POS.as_u64() + 1,
+                base_offset: MAX_SUPPORTED_POS.into_u64() + 1,
                 batch_offset: 0,
             };
             assert!(InMemoryLayerIndexValue::new(too_large).is_err());
@@ -917,7 +917,7 @@ mod tests {
                 will_init: false,
                 len: 0,
                 base_offset: 0,
-                batch_offset: MAX_SUPPORTED_POS.as_u64() + 1,
+                batch_offset: MAX_SUPPORTED_POS.into_u64() + 1,
             };
             assert!(InMemoryLayerIndexValue::new(too_large).is_err());
         }
@@ -927,15 +927,15 @@ mod tests {
             let too_large = Args {
                 will_init: false,
                 len: 0,
-                base_offset: MAX_SUPPORTED_POS.as_u64(),
+                base_offset: MAX_SUPPORTED_POS.into_u64(),
                 batch_offset: 1,
             };
             assert!(InMemoryLayerIndexValue::new(too_large).is_err());
             let too_large = Args {
                 will_init: false,
                 len: 0,
-                base_offset: MAX_SUPPORTED_POS.as_u64() - 1,
-                batch_offset: MAX_SUPPORTED_POS.as_u64() - 1,
+                base_offset: MAX_SUPPORTED_POS.into_u64() - 1,
+                batch_offset: MAX_SUPPORTED_POS.into_u64() - 1,
             };
             assert!(InMemoryLayerIndexValue::new(too_large).is_err());
         }
@@ -947,13 +947,13 @@ mod tests {
                 Args {
                     will_init: false,
                     len,
-                    base_offset: MAX_SUPPORTED_POS.as_u64(),
+                    base_offset: MAX_SUPPORTED_POS.into_u64(),
                     batch_offset: 0,
                 },
                 Unpacked {
                     will_init: false,
                     len: len as u64,
-                    pos: MAX_SUPPORTED_POS.as_u64(),
+                    pos: MAX_SUPPORTED_POS.into_u64(),
                 },
             );
             roundtrip(
@@ -961,12 +961,12 @@ mod tests {
                     will_init: false,
                     len,
                     base_offset: 0,
-                    batch_offset: MAX_SUPPORTED_POS.as_u64(),
+                    batch_offset: MAX_SUPPORTED_POS.into_u64(),
                 },
                 Unpacked {
                     will_init: false,
                     len: len as u64,
-                    pos: MAX_SUPPORTED_POS.as_u64(),
+                    pos: MAX_SUPPORTED_POS.into_u64(),
                 },
             );
         }
