@@ -12,5 +12,5 @@
 	branch = REL_16_STABLE_neon
 [submodule "vendor/postgres-v17"]
 	path = vendor/postgres-v17
-	url = git@github.com:neondatabase/postgres.git
+	url = https://github.com/neondatabase/postgres.git
 	branch = REL_17_STABLE_neon
