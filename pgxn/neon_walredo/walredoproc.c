@@ -100,6 +100,9 @@
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "storage/dsm.h"
+#if PG_MAJORVERSION_NUM >= 17
+#include "storage/dsm_registry.h"
+#endif
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "storage/pmsignal.h"
@@ -518,6 +521,7 @@ CreateFakeSharedMemoryAndSemaphores()
 	 * Set up xlog, clog, and buffers
 	 */
 #if PG_MAJORVERSION_NUM >= 17
+	DSMRegistryShmemInit();
 	VarsupShmemInit();
 #endif
 	XLOGShmemInit();
