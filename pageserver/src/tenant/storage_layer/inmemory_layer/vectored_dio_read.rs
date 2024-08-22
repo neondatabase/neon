@@ -11,7 +11,7 @@ use crate::{
     context::RequestContext,
 };
 
-/// The file interface we require. At runtime, this is a [`crate::virtual_file::VirtualFile`].
+/// The file interface we require. At runtime, this is a [`crate::tenant::ephemeral_file::EphemeralFile`].
 pub trait File: Send {
     async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
         &'b self,
