@@ -2,6 +2,7 @@ mod classic;
 mod hacks;
 pub mod jwt;
 mod link;
+pub mod local;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 use ipnet::{Ipv4Net, Ipv6Net};
 pub use link::LinkAuthError;
+use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
 use tracing::{info, warn};
@@ -16,11 +18,13 @@ use tracing::{info, warn};
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{validate_password_and_exchange, AuthError};
 use crate::cache::Cached;
+use crate::compute::ConnCfg;
 use crate::console::errors::GetAuthInfoError;
+use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::{AuthSecret, NodeInfo};
 use crate::context::RequestMonitoring;
-use crate::intern::EndpointIdInt;
+use crate::intern::{BranchIdTag, EndpointIdInt, EndpointIdTag, InternId, ProjectIdTag};
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
@@ -68,6 +72,8 @@ pub enum BackendType<'a, T, D> {
     Console(MaybeOwned<'a, ConsoleBackend>, T),
     /// Authentication via a web browser.
     Link(MaybeOwned<'a, url::ApiUrl>, D),
+    /// Local proxy uses configured auth credentials and does not wake compute
+    Local(MaybeOwned<'a, LocalBackend>),
 }
 
 pub trait TestBackend: Send + Sync + 'static {
@@ -93,6 +99,7 @@ impl std::fmt::Display for BackendType<'_, (), ()> {
                 ConsoleBackend::Test(_) => fmt.debug_tuple("Test").finish(),
             },
             Self::Link(url, _) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+            Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
     }
 }
@@ -104,6 +111,7 @@ impl<T, D> BackendType<'_, T, D> {
         match self {
             Self::Console(c, x) => BackendType::Console(MaybeOwned::Borrowed(c), x),
             Self::Link(c, x) => BackendType::Link(MaybeOwned::Borrowed(c), x),
+            Self::Local(l) => BackendType::Local(MaybeOwned::Borrowed(l)),
         }
     }
 }
@@ -116,6 +124,7 @@ impl<'a, T, D> BackendType<'a, T, D> {
         match self {
             Self::Console(c, x) => BackendType::Console(c, f(x)),
             Self::Link(c, x) => BackendType::Link(c, x),
+            Self::Local(l) => BackendType::Local(l),
         }
     }
 }
@@ -126,6 +135,7 @@ impl<'a, T, D, E> BackendType<'a, Result<T, E>, D> {
         match self {
             Self::Console(c, x) => x.map(|x| BackendType::Console(c, x)),
             Self::Link(c, x) => Ok(BackendType::Link(c, x)),
+            Self::Local(l) => Ok(BackendType::Local(l)),
         }
     }
 }
@@ -157,6 +167,7 @@ impl ComputeUserInfo {
 pub enum ComputeCredentialKeys {
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
+    None,
 }
 
 impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
@@ -401,6 +412,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
         match self {
             Self::Console(_, user_info) => user_info.endpoint_id.clone(),
             Self::Link(_, _) => Some("link".into()),
+            Self::Local(_) => Some("local".into()),
         }
     }
 
@@ -409,6 +421,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
         match self {
             Self::Console(_, user_info) => &user_info.user,
             Self::Link(_, _) => "link",
+            Self::Local(_) => "local",
         }
     }
 
@@ -450,6 +463,9 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
 
                 BackendType::Link(url, info)
             }
+            Self::Local(_) => {
+                return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
+            }
         };
 
         info!("user successfully authenticated");
@@ -465,6 +481,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
         match self {
             Self::Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
             Self::Link(_, _) => Ok(Cached::new_uncached(None)),
+            Self::Local(_) => Ok(Cached::new_uncached(None)),
         }
     }
 
@@ -475,6 +492,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
         match self {
             Self::Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             Self::Link(_, _) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
+            Self::Local(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
     }
 }
@@ -488,6 +506,20 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
         match self {
             Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
             Self::Link(_, info) => Ok(Cached::new_uncached(info.clone())),
+            Self::Local(local) => Ok(Cached::new_uncached(NodeInfo {
+                config: {
+                    let mut cfg = ConnCfg::new();
+                    cfg.host(&local.postgres.to_string());
+                    cfg
+                },
+                aux: MetricsAuxInfo {
+                    endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),
+                    project_id: ProjectIdTag::get_interner().get_or_intern("local"),
+                    branch_id: BranchIdTag::get_interner().get_or_intern("local"),
+                    cold_start_info: ColdStartInfo::WarmCached,
+                },
+                allow_self_signed_compute: false,
+            })),
         }
     }
 
@@ -495,6 +527,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
         match self {
             Self::Console(_, creds) => &creds.keys,
             Self::Link(_, _) => &ComputeCredentialKeys::None,
+            Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
 }
@@ -508,6 +541,21 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
         match self {
             Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
             Self::Link(_, _) => unreachable!("link auth flow doesn't support waking the compute"),
+            Self::Local(local) => Ok(Cached::new_uncached(NodeInfo {
+                config: {
+                    let mut cfg = ConnCfg::new();
+                    cfg.host(&local.postgres.ip().to_string());
+                    cfg.port(local.postgres.port());
+                    cfg
+                },
+                aux: MetricsAuxInfo {
+                    endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),
+                    project_id: ProjectIdTag::get_interner().get_or_intern("local"),
+                    branch_id: BranchIdTag::get_interner().get_or_intern("local"),
+                    cold_start_info: ColdStartInfo::WarmCached,
+                },
+                allow_self_signed_compute: false,
+            })),
         }
     }
 
@@ -515,6 +563,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
         match self {
             Self::Console(_, creds) => &creds.keys,
             Self::Link(_, _) => &ComputeCredentialKeys::None,
+            Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
 }
