@@ -621,6 +621,21 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
 
+    def timeline_archival_config(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+        config: dict[str, Any],
+    ):
+        log.info(
+            f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
+        )
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
+            json=config.copy(),
+        )
+        self.verbose_error(res)
+
     def timeline_get_lsn_by_timestamp(
         self,
         tenant_id: Union[TenantId, TenantShardId],
