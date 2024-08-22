@@ -726,9 +726,16 @@ impl Timeline {
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let current_policy = self.last_aux_file_policy.load();
         match current_policy {
-            Some(AuxFilePolicy::V1) | None => {
-                warn!("this timeline is using deprecated aux file policy V1");
+            Some(AuxFilePolicy::V1) => {
+                warn!("this timeline is using deprecated aux file policy V1 (policy=V1)");
                 self.list_aux_files_v1(lsn, ctx).await
+            }
+            None => {
+                let res = self.list_aux_files_v1(lsn, ctx).await?;
+                if !res.is_empty() {
+                    warn!("this timeline is using deprecated aux file policy V1 (policy=None)");
+                }
+                Ok(res)
             }
             Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
             Some(AuxFilePolicy::CrossValidation) => {
