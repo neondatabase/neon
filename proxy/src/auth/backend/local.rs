@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr};
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use arc_swap::ArcSwapOption;
 
 use crate::{
@@ -31,10 +31,10 @@ pub struct JwksRoleSettings {
 impl FetchAuthRules for StaticAuthRules {
     async fn fetch_auth_rules(&self, role_name: RoleName) -> anyhow::Result<Vec<AuthRule>> {
         let mappings = JWKS_ROLE_MAP.load();
-        let Some(mappings) = &*mappings else {
-            bail!("missing")
-        };
-        let role_mappings = mappings.roles.get(&role_name).context("missing")?;
+        let role_mappings = mappings
+            .as_deref()
+            .and_then(|m| m.roles.get(&role_name))
+            .context("JWKs settings for this role were not configured")?;
         let mut rules = vec![];
         for setting in &role_mappings.jwks {
             rules.push(AuthRule {
