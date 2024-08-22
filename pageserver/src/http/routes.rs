@@ -405,6 +405,8 @@ async fn build_timeline_info_common(
     let current_logical_size = timeline.get_current_logical_size(logical_size_task_priority, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
+    // Report is_archived = false if the timeline is still loading
+    let is_archived = timeline.is_archived().unwrap_or(false);
     let remote_consistent_lsn_projected = timeline
         .get_remote_consistent_lsn_projected()
         .unwrap_or(Lsn(0));
@@ -445,6 +447,7 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
+        is_archived,
 
         walreceiver_status,
 
