@@ -305,6 +305,7 @@ impl NodeInfo {
         match keys {
             ComputeCredentialKeys::Password(password) => self.config.password(password),
             ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
+            ComputeCredentialKeys::None => &mut self.config,
         };
     }
 }

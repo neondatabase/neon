@@ -289,7 +289,7 @@ async fn auth_quirks(
             ctx.set_endpoint_id(res.info.endpoint.clone());
             let password = match res.keys {
                 ComputeCredentialKeys::Password(p) => p,
-                ComputeCredentialKeys::AuthKeys(_) => {
+                ComputeCredentialKeys::AuthKeys(_) | ComputeCredentialKeys::None => {
                     unreachable!("password hack should return a password")
                 }
             };
@@ -491,10 +491,10 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
         }
     }
 
-    fn get_keys(&self) -> Option<&ComputeCredentialKeys> {
+    fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
-            Self::Console(_, creds) => Some(&creds.keys),
-            Self::Link(_, _) => None,
+            Self::Console(_, creds) => &creds.keys,
+            Self::Link(_, _) => &ComputeCredentialKeys::None,
         }
     }
 }
@@ -511,10 +511,10 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
         }
     }
 
-    fn get_keys(&self) -> Option<&ComputeCredentialKeys> {
+    fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
-            Self::Console(_, creds) => Some(&creds.keys),
-            Self::Link(_, _) => None,
+            Self::Console(_, creds) => &creds.keys,
+            Self::Link(_, _) => &ComputeCredentialKeys::None,
         }
     }
 }
