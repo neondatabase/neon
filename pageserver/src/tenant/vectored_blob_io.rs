@@ -989,4 +989,12 @@ mod tests {
         round_trip_test_compressed(&blobs, true).await?;
         Ok(())
     }
+
+    #[test]
+    fn test_div_round_up() {
+        const CHUNK_SIZE: usize = 512;
+        assert_eq!(1, div_round_up(200, CHUNK_SIZE));
+        assert_eq!(1, div_round_up(CHUNK_SIZE, CHUNK_SIZE));
+        assert_eq!(2, div_round_up(CHUNK_SIZE + 1, CHUNK_SIZE));
+    }
 }
