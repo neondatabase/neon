@@ -213,7 +213,7 @@ where
     drop(by_chunk);
 
     // Execute physical reads and fill the logical read buffers
-    // TODO: prefetch
+    // TODO: pipelined reads; prefetch;
     let get_io_buffer = |nchunks| Vec::with_capacity(nchunks * DIO_CHUNK_SIZE);
     for PhysicalRead {
         start_chunk_no,
