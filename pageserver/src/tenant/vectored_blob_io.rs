@@ -734,6 +734,63 @@ mod tests {
     }
 
     #[test]
+    fn planner_chunked_coalesce_all_test() {
+        use crate::virtual_file;
+
+        const CHUNK_SIZE: u64 = 512;
+        virtual_file::set_io_buffer_alignment(CHUNK_SIZE as usize).unwrap();
+        let max_read_size = CHUNK_SIZE as usize * 8;
+        let key = Key::MIN;
+        let lsn = Lsn(0);
+
+        let blob_descriptions = [
+            (key, lsn, 0, BlobFlag::None),                // Read 1 BEGIN
+            (key, lsn, CHUNK_SIZE / 4, BlobFlag::Ignore), // Gap
+            (key, lsn, CHUNK_SIZE / 2, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE - 2, BlobFlag::Ignore), // Gap
+            (key, lsn, CHUNK_SIZE, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 2 - 1, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 2 + 1, BlobFlag::Ignore), // Gap
+            (key, lsn, CHUNK_SIZE * 3 + 1, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 5 + 1, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 6 + 1, BlobFlag::Ignore), // skipped chunk size, but not a chunk: should coalesce.
+            (key, lsn, CHUNK_SIZE * 7 + 1, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 8, BlobFlag::None), // Read 2 BEGIN (b/c max_read_size)
+            (key, lsn, CHUNK_SIZE * 9, BlobFlag::Ignore), // ==== skipped a chunk
+            (key, lsn, CHUNK_SIZE * 10, BlobFlag::None), // Read 3 BEGIN (cannot coalesce)
+        ];
+
+        let ranges = [
+            &[
+                blob_descriptions[0],
+                blob_descriptions[2],
+                blob_descriptions[4],
+                blob_descriptions[5],
+                blob_descriptions[7],
+                blob_descriptions[8],
+                blob_descriptions[10],
+            ],
+            &blob_descriptions[11..12],
+            &blob_descriptions[13..],
+        ];
+
+        let mut planner = VectoredReadPlanner::new(max_read_size);
+        for (key, lsn, offset, flag) in blob_descriptions.clone() {
+            planner.handle(key, lsn, offset, flag);
+        }
+
+        planner.handle_range_end(652 * 1024);
+
+        let reads = planner.finish();
+
+        assert_eq!(reads.len(), ranges.len());
+
+        for (idx, read) in reads.iter().enumerate() {
+            validate_read(read, ranges[idx]);
+        }
+    }
+
+    #[test]
     fn planner_max_read_size_test() {
         let max_read_size = 128 * 1024;
         let key = Key::MIN;
