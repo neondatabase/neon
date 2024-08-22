@@ -33,7 +33,13 @@ use super::backend::HttpConnError;
 pub struct ConnInfo {
     pub user_info: ComputeUserInfo,
     pub dbname: DbName,
-    pub password: SmallVec<[u8; 16]>,
+    pub auth: AuthData,
+}
+
+#[derive(Debug, Clone)]
+pub enum AuthData {
+    Password(SmallVec<[u8; 16]>),
+    Jwt(String),
 }
 
 impl ConnInfo {
@@ -778,7 +784,7 @@ mod tests {
                 options: Default::default(),
             },
             dbname: "dbname".into(),
-            password: "password".as_bytes().into(),
+            auth: AuthData::Password("password".as_bytes().into()),
         };
         let ep_pool = Arc::downgrade(
             &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
@@ -836,7 +842,7 @@ mod tests {
                 options: Default::default(),
             },
             dbname: "dbname".into(),
-            password: "password".as_bytes().into(),
+            auth: AuthData::Password("password".as_bytes().into()),
         };
         let ep_pool = Arc::downgrade(
             &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),

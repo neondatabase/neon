@@ -56,6 +56,7 @@ use crate::DbName;
 use crate::RoleName;
 
 use super::backend::PoolingBackend;
+use super::conn_pool::AuthData;
 use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
 use super::http_util::json_response;
@@ -179,10 +180,23 @@ fn get_conn_info(
     }
     ctx.set_user(username.clone());
 
-    let password = connection_url
-        .password()
-        .ok_or(ConnInfoError::MissingPassword)?;
-    let password = urlencoding::decode_binary(password.as_bytes());
+    let auth = if let Some(auth) = headers.get("Authorization") {
+        let auth = auth
+            .to_str()
+            .map_err(|_| ConnInfoError::InvalidHeader("Authorization"))?;
+        AuthData::Jwt(
+            auth.strip_prefix("Bearer ")
+                .ok_or(ConnInfoError::MissingPassword)?
+                .into(),
+        )
+    } else if let Some(pass) = connection_url.password() {
+        AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
+            std::borrow::Cow::Borrowed(b) => b.into(),
+            std::borrow::Cow::Owned(b) => b.into(),
+        })
+    } else {
+        return Err(ConnInfoError::MissingPassword);
+    };
 
     let endpoint = match connection_url.host() {
         Some(url::Host::Domain(hostname)) => {
@@ -225,10 +239,7 @@ fn get_conn_info(
     Ok(ConnInfo {
         user_info,
         dbname,
-        password: match password {
-            std::borrow::Cow::Borrowed(b) => b.into(),
-            std::borrow::Cow::Owned(b) => b.into(),
-        },
+        auth,
     })
 }
 
@@ -550,9 +561,24 @@ async fn handle_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let keys = backend
-                .authenticate(ctx, &config.authentication_config, &conn_info)
-                .await?;
+            let keys = match &conn_info.auth {
+                AuthData::Password(pw) => {
+                    backend
+                        .authenticate_with_password(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.user_info,
+                            pw,
+                        )
+                        .await?
+                }
+                AuthData::Jwt(jwt) => {
+                    backend
+                        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
+                        .await?
+                }
+            };
+
             let client = backend
                 .connect_to_compute(ctx, conn_info, keys, !allow_pool)
                 .await?;
