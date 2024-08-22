@@ -72,9 +72,9 @@ fn acquire_lsn_lease_with_retry(
     timeline_id: TimelineId,
     lsn: Lsn,
 ) -> Result<SystemTime> {
-    let mut attempts = 0;
-    let mut retry_period_ms = 500.0;
-    const MAX_RETRY_DURATION: Duration = Duration::from_secs(60);
+    let mut attempts = 0usize;
+    let mut retry_period_ms: f64 = 500.0;
+    const MAX_RETRY_PERIOD_MS: f64 = 60.0 * 1000.0;
 
     loop {
         // Note: List of pageservers is dynamic, need to re-read configs before each attempt.
@@ -109,10 +109,10 @@ fn acquire_lsn_lease_with_retry(
             }
             Err(e) => {
                 warn!("Failed to acquire lsn lease: {e} (attempt {attempts}");
-                thread::sleep(
-                    Duration::from_millis(retry_period_ms as u64).min(MAX_RETRY_DURATION),
-                );
+
+                thread::sleep(Duration::from_millis(retry_period_ms as u64));
                 retry_period_ms *= 1.5;
+                retry_period_ms = retry_period_ms.min(MAX_RETRY_PERIOD_MS);
             }
         }
         attempts += 1;
