@@ -131,6 +131,11 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
         # set PITR interval to be small, so we can do GC
         "pitr_interval": "0 s",
     }
+
+    # Make sure that standby_horizon feedback still works when the standby and
+    # the pageserver might be connected to different safekeepers
+    neon_env_builder.num_safekeepers = 3
+
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
     timeline_id = env.initial_timeline
     tenant_id = env.initial_tenant
