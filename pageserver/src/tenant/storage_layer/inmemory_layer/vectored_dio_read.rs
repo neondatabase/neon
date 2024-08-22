@@ -11,10 +11,6 @@ use crate::{
     context::RequestContext,
 };
 
-mod sealed {
-    pub trait Sealed {}
-}
-
 /// The file interface we require. At runtime, this is a [`crate::virtual_file::VirtualFile`].
 pub trait File: Send {
     async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
@@ -58,7 +54,7 @@ impl<B: Buffer> LogicalRead<B> {
 }
 
 /// The buffer into which a [`LogicalRead`] result is placed.
-pub trait Buffer: sealed::Sealed + std::ops::Deref<Target = [u8]> {
+pub trait Buffer: std::ops::Deref<Target = [u8]> {
     /// Immutable.
     fn cap(&self) -> usize;
     /// Changes only through [`Self::extend_from_slice`].
@@ -387,7 +383,6 @@ impl<T> RwLockRefCell<T> {
     }
 }
 
-impl sealed::Sealed for Vec<u8> {}
 impl Buffer for Vec<u8> {
     fn cap(&self) -> usize {
         self.capacity()
