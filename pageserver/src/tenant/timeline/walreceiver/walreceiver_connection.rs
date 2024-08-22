@@ -27,8 +27,8 @@ use super::TaskStateUpdate;
 use crate::{
     context::RequestContext,
     metrics::{LIVE_CONNECTIONS, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
-    task_mgr::TaskKind,
-    task_mgr::WALRECEIVER_RUNTIME,
+    pgdatadir_mapping::DatadirModification,
+    task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
@@ -345,7 +345,10 @@ pub(super) async fn handle_walreceiver_connection(
                         // Commit every ingest_batch_size records. Even if we filtered out
                         // all records, we still need to call commit to advance the LSN.
                         uncommitted_records += 1;
-                        if uncommitted_records >= ingest_batch_size {
+                        if uncommitted_records >= ingest_batch_size
+                            || modification.approx_pending_bytes()
+                                > DatadirModification::MAX_PENDING_BYTES
+                        {
                             WAL_INGEST
                                 .records_committed
                                 .inc_by(uncommitted_records - filtered_records);
