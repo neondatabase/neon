@@ -97,7 +97,7 @@ impl VectoredReadCoalesceMode {
 }
 
 pub(crate) enum VectoredReadBuilder {
-    Unconstrained(VectoredReadBuilderInner),
+    Adajacent(AdjacentVectoredReadBuilderInner),
     Chunked(ChunkedVectoredReadBuilderInner),
 }
 
@@ -110,9 +110,14 @@ impl VectoredReadBuilder {
         mode: VectoredReadCoalesceMode,
     ) -> Self {
         match mode {
-            VectoredReadCoalesceMode::AdjacentOnly => Self::Unconstrained(
-                VectoredReadBuilderInner::new(start_offset, end_offset, meta, Some(max_read_size)),
-            ),
+            VectoredReadCoalesceMode::AdjacentOnly => {
+                Self::Adajacent(AdjacentVectoredReadBuilderInner::new(
+                    start_offset,
+                    end_offset,
+                    meta,
+                    Some(max_read_size),
+                ))
+            }
             VectoredReadCoalesceMode::Chunked(chunk_size) => {
                 Self::Chunked(ChunkedVectoredReadBuilderInner::new(
                     start_offset,
@@ -132,8 +137,8 @@ impl VectoredReadBuilder {
         mode: VectoredReadCoalesceMode,
     ) -> Self {
         match mode {
-            VectoredReadCoalesceMode::AdjacentOnly => Self::Unconstrained(
-                VectoredReadBuilderInner::new(start_offset, end_offset, meta, None),
+            VectoredReadCoalesceMode::AdjacentOnly => Self::Adajacent(
+                AdjacentVectoredReadBuilderInner::new(start_offset, end_offset, meta, None),
             ),
             VectoredReadCoalesceMode::Chunked(chunk_size) => {
                 Self::Chunked(ChunkedVectoredReadBuilderInner::new(
@@ -149,27 +154,27 @@ impl VectoredReadBuilder {
 
     pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
         match self {
-            VectoredReadBuilder::Unconstrained(builder) => builder.extend(start, end, meta),
+            VectoredReadBuilder::Adajacent(builder) => builder.extend(start, end, meta),
             VectoredReadBuilder::Chunked(builder) => builder.extend(start, end, meta),
         }
     }
 
     pub(crate) fn build(self) -> VectoredRead {
         match self {
-            VectoredReadBuilder::Unconstrained(builder) => builder.build(),
+            VectoredReadBuilder::Adajacent(builder) => builder.build(),
             VectoredReadBuilder::Chunked(builder) => builder.build(),
         }
     }
 
     pub(crate) fn size(&self) -> usize {
         match self {
-            VectoredReadBuilder::Unconstrained(builder) => builder.size(),
+            VectoredReadBuilder::Adajacent(builder) => builder.size(),
             VectoredReadBuilder::Chunked(builder) => builder.size(),
         }
     }
 }
 
-pub(crate) struct VectoredReadBuilderInner {
+pub(crate) struct AdjacentVectoredReadBuilderInner {
     /// Start offset of the read.
     start: u64,
     // End offset of the read.
@@ -179,7 +184,7 @@ pub(crate) struct VectoredReadBuilderInner {
     max_read_size: Option<usize>,
 }
 
-impl VectoredReadBuilderInner {
+impl AdjacentVectoredReadBuilderInner {
     /// Start building a new vectored read.
     ///
     /// Note that by design, this does not check against reading more than `max_read_size` to
