@@ -5932,7 +5932,7 @@ mod tests {
             .await
             .unwrap();
 
-        // the default aux file policy to switch is v1 if not set by the admins
+        // the default aux file policy to switch is v2 if not set by the admins
         assert_eq!(
             harness.tenant_conf.switch_aux_file_policy,
             AuxFilePolicy::default_tenant_config()
@@ -5979,8 +5979,8 @@ mod tests {
         );
         assert_eq!(
             tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V1),
-            "aux file is written with switch_aux_file_policy unset (which is v1), so we should keep v1"
+            Some(AuxFilePolicy::V2),
+            "aux file is written with switch_aux_file_policy unset (which is v2), so we should use v2 there"
         );
 
         // we can read everything from the storage
@@ -6002,8 +6002,8 @@ mod tests {
 
         assert_eq!(
             tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V1),
-            "keep v1 storage format when new files are written"
+            Some(AuxFilePolicy::V2),
+            "keep v2 storage format when new files are written"
         );
 
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
@@ -6019,7 +6019,7 @@ mod tests {
 
         // child copies the last flag even if that is not on remote storage yet
         assert_eq!(child.get_switch_aux_file_policy(), AuxFilePolicy::V2);
-        assert_eq!(child.last_aux_file_policy.load(), Some(AuxFilePolicy::V1));
+        assert_eq!(child.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
 
         let files = child.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(files.get("pg_logical/mappings/test1"), None);
