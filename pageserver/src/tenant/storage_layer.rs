@@ -2,7 +2,7 @@
 
 pub mod delta_layer;
 pub mod image_layer;
-pub(crate) mod inmemory_layer;
+pub mod inmemory_layer;
 pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;

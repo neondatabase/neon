@@ -4,14 +4,14 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
-use crate::tenant::storage_layer::inmemory_layer::InMemoryLayerIndexValueUnpacked;
+use crate::tenant::storage_layer::inmemory_layer::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::{self, owned_buffers_io, VirtualFile};
-use anyhow::Context;
 use bytes::BytesMut;
 use camino::Utf8PathBuf;
+use num_traits::Num;
 use pageserver_api::shard::TenantShardId;
 use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 use tracing::error;
@@ -24,7 +24,7 @@ pub struct EphemeralFile {
     _tenant_shard_id: TenantShardId,
     _timeline_id: TimelineId,
     page_cache_file_id: page_cache::FileId,
-    bytes_written: u32,
+    bytes_written: u64,
     buffered_writer: owned_buffers_io::write::BufferedWriter<
         BytesMut,
         size_tracking_writer::Writer<VirtualFile>,
@@ -32,8 +32,6 @@ pub struct EphemeralFile {
     /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
     _gate_guard: utils::sync::gate::GateGuard,
 }
-
-use super::storage_layer::inmemory_layer::InMemoryLayerIndexValue;
 
 const TAIL_SZ: usize = 64 * 1024;
 
@@ -100,7 +98,7 @@ impl Drop for EphemeralFile {
 }
 
 impl EphemeralFile {
-    pub(crate) fn len(&self) -> u32 {
+    pub(crate) fn len(&self) -> u64 {
         self.bytes_written
     }
 
@@ -141,32 +139,21 @@ impl EphemeralFile {
     /// No guarantees are made about the remaining bytes in `dst`, i.e., assume their contents are random.
     pub(crate) async fn read_at_to_end<B: IoBufMut + Send>(
         &self,
-        start: u32,
+        start: u64,
         dst: Slice<B>,
         ctx: &RequestContext,
     ) -> std::io::Result<(Slice<B>, usize)> {
         let file_size_tracking_writer = self.buffered_writer.as_inner();
-        let flushed_offset = u32::try_from(file_size_tracking_writer.bytes_written())
-            .expect("we don't allow writing more than u32::MAX bytes");
+        let flushed_offset = file_size_tracking_writer.bytes_written();
 
         let buffer = self.buffered_writer.inspect_buffer();
         let buffered = &buffer[0..buffer.pending()];
 
-        let dst_cap = u32::try_from(dst.bytes_total())
-            .with_context(|| {
-                format!(
-                    "read_aligned: dst.bytes_total() is too large: {}",
-                    dst.len()
-                )
-            })
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let dst_cap = dst.bytes_total().as_u64();
         let end = {
-            let mut end = start
-                .checked_add(dst_cap)
-                .with_context(|| {
-                    format!("read_aligned: offset + dst.bytes_total() is too large: {start} + {dst_cap}",)
-                })
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            // saturating_add is correct here because the max file size is u64::MAX, so,
+            // if start + dst.len() > u64::MAX, then we know it will be a short read
+            let mut end: u64 = start.saturating_add(dst_cap);
             if end > self.bytes_written {
                 end = self.bytes_written;
             }
@@ -175,11 +162,11 @@ impl EphemeralFile {
 
         // inclusive, exclusive
         #[derive(Debug)]
-        struct Range(u32, u32);
-        impl Range {
-            fn len(&self) -> u32 {
+        struct Range<N>(N, N);
+        impl<N: Num + Clone + Copy + PartialOrd + Ord> Range<N> {
+            fn len(&self) -> N {
                 if self.0 > self.1 {
-                    0
+                    N::zero()
                 } else {
                     self.1 - self.0
                 }
@@ -193,7 +180,7 @@ impl EphemeralFile {
             let bounds = dst.bounds();
             let slice = file
                 .read_exact_at(
-                    dst.slice(0..written_range.len() as usize),
+                    dst.slice(0..written_range.len().as_usize()),
                     start as u64,
                     ctx,
                 )
@@ -204,14 +191,21 @@ impl EphemeralFile {
         };
 
         let dst = if buffered_range.len() > 0 {
-            let offset_in_buffer =
-                usize::try_from(buffered_range.0.checked_sub(flushed_offset).unwrap()).unwrap();
+            let offset_in_buffer = buffered_range
+                .0
+                .checked_sub(flushed_offset)
+                .unwrap()
+                .as_usize();
             let to_copy =
-                &buffered[offset_in_buffer..(offset_in_buffer + buffered_range.len() as usize)];
+                &buffered[offset_in_buffer..(offset_in_buffer + buffered_range.len().as_usize())];
             let bounds = dst.bounds();
             let mut view = dst.slice(
-                written_range.len() as usize
-                    ..written_range.len() as usize + buffered_range.len() as usize,
+                written_range.len().as_usize()
+                    ..written_range
+                        .len()
+                        .checked_add(buffered_range.len())
+                        .unwrap()
+                        .as_usize(),
             );
             view.as_mut_rust_slice_full_zeroed()
                 .copy_from_slice(to_copy);
@@ -222,29 +216,45 @@ impl EphemeralFile {
 
         // TODO: in debug mode, randomize the remaining bytes in `dst` to catch bugs
 
-        Ok((dst, (end - start) as usize))
+        Ok((dst, (end - start).as_usize()))
     }
 
-    pub(crate) async fn write_blob(
+    /// Returns the offset at which the first byte of the input was written, for use
+    /// in constructing indices over the written value.
+    ///
+    /// Panics if the write is short because there's no way we can recover from that.
+    /// TODO: make upstack handle this as an error.
+    pub(crate) async fn write_raw(
         &mut self,
-        buf: &[u8],
-        will_init: bool,
+        srcbuf: &[u8],
         ctx: &RequestContext,
-    ) -> anyhow::Result<InMemoryLayerIndexValue> {
+    ) -> std::io::Result<u64> {
         let pos = self.bytes_written;
-        let index_value = InMemoryLayerIndexValue::new(InMemoryLayerIndexValueUnpacked {
-            pos: self.bytes_written,
-            len: buf.len(),
-            will_init,
-        })?;
-        debug_assert_eq!(index_value.unpack().pos, pos);
-        debug_assert_eq!(index_value.unpack().len as usize, buf.len());
-        self.buffered_writer
-            .write_buffered_borrowed(buf, ctx)
-            .await?;
-        self.bytes_written += index_value.unpack().len; // index_value is checked for overflow in release mode
 
-        Ok(index_value)
+        let new_bytes_written = pos.checked_add(srcbuf.len().as_u64()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "write would grow EphemeralFile beyond u64::MAX: len={pos} writen={srcbuf_len}",
+                    srcbuf_len = srcbuf.len(),
+                ),
+            )
+        })?;
+
+        // Write the payload
+        let nwritten = self
+            .buffered_writer
+            .write_buffered_borrowed(srcbuf, ctx)
+            .await?;
+        assert_eq!(
+            nwritten,
+            srcbuf.len(),
+            "buffered writer has no short writes"
+        );
+
+        self.bytes_written = new_bytes_written;
+
+        Ok(pos)
     }
 }
 
@@ -348,29 +358,18 @@ mod tests {
             .take(write_nbytes)
             .collect();
 
-        let mut index_values = Vec::new();
+        let mut value_offsets = Vec::new();
         for i in 0..write_nbytes {
-            let index_value = file
-                .write_blob(&content[i..i + 1], i % 2 == 0, &ctx)
-                .await
-                .unwrap();
-            index_values.push(index_value);
+            let off = file.write_raw(&content[i..i + 1], &ctx).await.unwrap();
+            value_offsets.push(off);
         }
 
         assert!(file.len() as usize == write_nbytes);
         for i in 0..write_nbytes {
-            assert_eq!(
-                index_values[i],
-                InMemoryLayerIndexValue::new(InMemoryLayerIndexValueUnpacked {
-                    pos: i as u32,
-                    len: 1,
-                    will_init: i % 2 == 0,
-                })
-                .unwrap()
-            );
+            assert_eq!(value_offsets[i], i.as_u64());
             let buf = Vec::with_capacity(1);
             let (buf_slice, nread) = file
-                .read_at_to_end(i as u32, buf.slice_full(), &ctx)
+                .read_at_to_end(i.as_u64(), buf.slice_full(), &ctx)
                 .await
                 .unwrap();
             let buf = buf_slice.into_inner();

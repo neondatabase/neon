@@ -13,6 +13,7 @@ use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
 use anyhow::{anyhow, Context, Result};
+use assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
@@ -32,12 +33,13 @@ use std::fmt::Write;
 use std::ops::Range;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::RwLock;
 
 use super::{
     DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
 };
 
+pub(crate) mod assert_u64_eq_usize;
 mod vectored_dio_read;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -124,6 +126,7 @@ impl InMemoryLayerIndexValue {
         }
         remainder
     };
+    const MAX_SUPPORTED_POS: usize = (1 << Self::MAX_SUPPORTED_POS_BITS) - 1;
 
     // Layout
     const WILL_INIT_RANGE: Range<usize> = 0..1;
@@ -157,66 +160,67 @@ impl InMemoryLayerIndexValue {
 
     /// Checks that the `len` is within the supported range
     /// and that `pos + len` fits within a u32.
-    pub(crate) fn new(unpacked: InMemoryLayerIndexValueUnpacked<usize>) -> anyhow::Result<Self> {
-        let InMemoryLayerIndexValueUnpacked {
-            pos,
+    #[inline(always)]
+    fn new(arg: InMemoryLayerIndexValueNewArgs) -> anyhow::Result<Self> {
+        let InMemoryLayerIndexValueNewArgs {
+            base_offset,
+            batch_offset,
             len,
             will_init,
-        } = unpacked;
+        } = arg;
+
+        let pos = base_offset
+            .checked_add(batch_offset)
+            .ok_or_else(|| anyhow::anyhow!("base_offset + batch_offset overflows u64: base_offset={base_offset} batch_offset={batch_offset}"))?;
+
+        if pos.as_usize() > Self::MAX_SUPPORTED_POS {
+            anyhow::bail!(
+                "base_offset+batch_offset exceeds the maximum supported value: base_offset={base_offset} batch_offset={batch_offset} (+)={pos} max={max}",
+                max = Self::MAX_SUPPORTED_POS
+            );
+        }
 
         if len > MAX_SUPPORTED_BLOB_LEN {
             anyhow::bail!(
                 "len exceeds the maximum supported length: len={len} max={MAX_SUPPORTED_BLOB_LEN}",
             );
         }
-        const _: () = {
-            if MAX_SUPPORTED_BLOB_LEN > u32::MAX as usize {
-                panic!()
-            }
-        };
-        let len = u32::try_from(len).expect("see const assertion above");
-
-        pos.checked_add(len).ok_or_else(|| {
-            anyhow::anyhow!("pos + len overflows u32, not representable in EphemeralFile")
-        })?;
 
         let mut data: u64 = 0;
         use bit_field::BitField;
         data.set_bits(Self::WILL_INIT_RANGE, if will_init { 1 } else { 0 });
-        data.set_bits(Self::LEN_RANGE, len as u64);
-        data.set_bits(Self::POS_RANGE, pos as u64);
+        data.set_bits(Self::LEN_RANGE, len.as_u64());
+        data.set_bits(Self::POS_RANGE, pos);
 
         Ok(Self(data))
     }
 
-    #[inline]
-    pub(crate) fn unpack(&self) -> InMemoryLayerIndexValueUnpacked<u32> {
+    #[inline(always)]
+    fn unpack(&self) -> InMemoryLayerIndexValueUnpacked {
         use bit_field::BitField;
         InMemoryLayerIndexValueUnpacked {
             will_init: self.0.get_bits(Self::WILL_INIT_RANGE) != 0,
-            len: self.0.get_bits(Self::LEN_RANGE) as u32,
-            pos: self.0.get_bits(Self::POS_RANGE) as u32,
+            len: self.0.get_bits(Self::LEN_RANGE),
+            pos: self.0.get_bits(Self::POS_RANGE),
         }
     }
+}
+
+/// Args to [`InMemoryLayerIndexValue::new`].
+#[derive(Clone, Copy)]
+struct InMemoryLayerIndexValueNewArgs {
+    base_offset: u64,
+    batch_offset: u64,
+    len: usize,
+    will_init: bool,
 }
 
 /// Unpacked representation of the bitfielded [`InMemoryLayerIndexValue`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct InMemoryLayerIndexValueUnpacked<L> {
-    pub(crate) will_init: bool,
-    pub(crate) len: L,
-    pub(crate) pos: u32,
-}
-
-impl InMemoryLayerIndexValueUnpacked<u32> {
-    #[cfg(test)]
-    pub(crate) fn as_usize(&self) -> InMemoryLayerIndexValueUnpacked<usize> {
-        InMemoryLayerIndexValueUnpacked {
-            will_init: self.will_init,
-            len: self.len as usize,
-            pos: self.pos,
-        }
-    }
+struct InMemoryLayerIndexValueUnpacked {
+    will_init: bool,
+    len: u64,
+    pos: u64,
 }
 
 impl std::fmt::Debug for InMemoryLayerInner {
@@ -359,7 +363,7 @@ impl InMemoryLayer {
         }
     }
 
-    pub(crate) fn try_len(&self) -> Option<u32> {
+    pub(crate) fn try_len(&self) -> Option<u64> {
         self.inner.try_read().map(|i| i.file.len()).ok()
     }
 
@@ -446,6 +450,16 @@ impl InMemoryLayer {
         }
 
         // Execute the reads.
+        impl vectored_dio_read::File for EphemeralFile {
+            async fn read_at_to_end<'a, 'b, B: tokio_epoll_uring::IoBufMut + Send>(
+                &'b self,
+                start: u64,
+                dst: tokio_epoll_uring::Slice<B>,
+                ctx: &'a RequestContext,
+            ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
+                EphemeralFile::read_at_to_end(self, start, dst, ctx).await
+            }
+        }
         let f = vectored_dio_read::execute(
             &inner.file,
             reads
@@ -491,14 +505,65 @@ impl InMemoryLayer {
     }
 }
 
-impl vectored_dio_read::File for EphemeralFile {
-    async fn read_at_to_end<'a, 'b, B: tokio_epoll_uring::IoBufMut + Send>(
-        &'b self,
-        start: u32,
-        dst: tokio_epoll_uring::Slice<B>,
-        ctx: &'a RequestContext,
-    ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-        EphemeralFile::read_at_to_end(self, start, dst, ctx).await
+/// Offset of a particular Value within a serialized batch.
+struct SerializedBatchOffset {
+    key: CompactKey,
+    lsn: Lsn,
+    // TODO: separate type when we start serde-serializing this value, to avoid coupling
+    // in-memory representation to serialization format.
+    value: InMemoryLayerIndexValue,
+}
+
+pub struct SerializedBatch {
+    /// Blobs serialized in EphemeralFile's native format, ready for passing to [`EphemeralFile::write_raw`].
+    pub(crate) raw: Vec<u8>,
+
+    /// Index of values in [`Self::raw`], using offsets relative to the start of the buffer.
+    offsets: Vec<SerializedBatchOffset>,
+
+    /// The highest LSN of any value in the batch
+    pub(crate) max_lsn: Lsn,
+}
+
+impl SerializedBatch {
+    pub fn from_values(batch: Vec<(CompactKey, Lsn, usize, Value)>) -> Self {
+        // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
+        // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
+        let buffer_size = batch.iter().map(|i| i.2).sum::<usize>() + 4 * batch.len();
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
+
+        let mut offsets: Vec<SerializedBatchOffset> = Vec::with_capacity(batch.len());
+        let mut max_lsn: Lsn = Lsn(0);
+        for (key, lsn, val_ser_size, val) in batch {
+            let relative_off = cursor.position();
+
+            val.ser_into(&mut cursor)
+                .expect("Writing into in-memory buffer is infallible");
+
+            offsets.push(SerializedBatchOffset {
+                key,
+                lsn,
+                value: InMemoryLayerIndexValue::new(InMemoryLayerIndexValueNewArgs {
+                    base_offset: 0,
+                    batch_offset: relative_off,
+                    len: val_ser_size,
+                    will_init: val.will_init(),
+                })
+                .expect("higher-level code ensures that values are within supported ranges"),
+            });
+            max_lsn = std::cmp::max(max_lsn, lsn);
+        }
+
+        let buffer = cursor.into_inner();
+
+        // Assert that we didn't do any extra allocations while building buffer.
+        debug_assert!(buffer.len() <= buffer_size);
+
+        Self {
+            raw: buffer,
+            offsets,
+            max_lsn,
+        }
     }
 }
 
@@ -562,55 +627,66 @@ impl InMemoryLayer {
         })
     }
 
-    // Write operations
-
-    /// Common subroutine of the public put_wal_record() and put_page_image() functions.
-    /// Adds the page version to the in-memory tree
-    pub async fn put_value(
+    /// Write path.
+    ///
+    /// Errors are not retryable, the [`InMemoryLayer`] must be discarded, and not be read from.
+    /// The reason why it's not retryable is that the [`EphemeralFile`] writes are not retryable.
+    /// TODO: it can be made retryable if we aborted the process on EphemeralFile write errors.
+    pub async fn put_batch(
         &self,
-        key: CompactKey,
-        lsn: Lsn,
-        buf: &[u8],
-        will_init: bool,
+        serialized_batch: SerializedBatch,
         ctx: &RequestContext,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
-        self.put_value_locked(&mut inner, key, lsn, buf, will_init, ctx)
-            .await
-    }
 
-    async fn put_value_locked(
-        &self,
-        locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
-        key: CompactKey,
-        lsn: Lsn,
-        buf: &[u8],
-        will_init: bool,
-        ctx: &RequestContext,
-    ) -> Result<()> {
-        trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
+        let base_offset = inner.file.len();
 
-        let entry = locked_inner
-            .file
-            .write_blob(
-                buf,
-                will_init,
-                &RequestContextBuilder::extend(ctx)
-                    .page_content_kind(PageContentKind::InMemoryLayer)
-                    .build(),
-            )
-            .await?;
+        // Add the base_offset to the batch's index values which are relative to the batch start.
+        let index_values: Vec<SerializedBatchOffset> = serialized_batch
+            .offsets
+            .into_iter()
+            .map(|SerializedBatchOffset { key, lsn, value }| {
+                let InMemoryLayerIndexValueUnpacked {
+                    will_init,
+                    len,
+                    pos,
+                } = value.unpack();
+                anyhow::Ok(SerializedBatchOffset {
+                    key,
+                    lsn,
+                    value: InMemoryLayerIndexValue::new(InMemoryLayerIndexValueNewArgs {
+                        base_offset,
+                        batch_offset: pos,
+                        len: len.as_usize(),
+                        will_init,
+                    })?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let vec_map = locked_inner.index.entry(key).or_default();
-        let old = vec_map.append_or_update_last(lsn, entry).unwrap().0;
-        if old.is_some() {
-            // We already had an entry for this LSN. That's odd..
-            warn!("Key {} at {} already exists", key, lsn);
+        // Write the batch to the file
+        inner.file.write_raw(&serialized_batch.raw, ctx).await?;
+        let new_size = inner.file.len();
+        let expected_new_len = base_offset
+            .checked_add(serialized_batch.raw.len().as_u64())
+            // write_raw would error if we were to overflow u64.
+            // also InMemoryLayerIndexValue and higher levels in
+            //the code don't allow the file to grow that large
+            .unwrap();
+        assert_eq!(new_size, expected_new_len);
+
+        // Update the index with the new values
+        for SerializedBatchOffset { key, lsn, value } in index_values {
+            let vec_map = inner.index.entry(key).or_default();
+            let old = vec_map.append_or_update_last(lsn, value).unwrap().0;
+            if old.is_some() {
+                // We already had an entry for this LSN. That's odd..
+                warn!("Key {} at {} already exists", key, lsn);
+            }
         }
 
-        let size = locked_inner.file.len();
-        locked_inner.resource_units.maybe_publish_size(size as u64);
+        inner.resource_units.maybe_publish_size(new_size);
 
         Ok(())
     }
@@ -772,57 +848,127 @@ mod tests {
 
     #[test]
     fn test_index_value() {
+        const MAX_SUPPORTED_POS: usize = InMemoryLayerIndexValue::MAX_SUPPORTED_POS;
+        use InMemoryLayerIndexValueNewArgs as Args;
         use InMemoryLayerIndexValueUnpacked as Unpacked;
-        let roundtrip = |input| {
-            let res = InMemoryLayerIndexValue::new(input).expect("this tests expects no errors");
-            assert_eq!(res.unpack().as_usize(), input);
+
+        let roundtrip = |args, expect: Unpacked| {
+            let res = InMemoryLayerIndexValue::new(args).expect("this tests expects no errors");
+            let InMemoryLayerIndexValueUnpacked {
+                will_init,
+                len,
+                pos,
+            } = res.unpack();
+            assert_eq!(will_init, expect.will_init);
+            assert_eq!(len, expect.len);
+            assert_eq!(pos, expect.pos);
         };
 
-        // will_init
-        roundtrip(Unpacked {
-            will_init: false,
-            len: 0,
-            pos: 0,
-        });
-        roundtrip(Unpacked {
-            will_init: true,
-            len: 0,
-            pos: 0,
-        });
+        // basic roundtrip
+        for pos in [0, MAX_SUPPORTED_POS] {
+            for len in [0, MAX_SUPPORTED_BLOB_LEN] {
+                for will_init in [true, false] {
+                    let expect = Unpacked {
+                        will_init,
+                        len: len.as_u64(),
+                        pos: pos.as_u64(),
+                    };
+                    roundtrip(
+                        Args {
+                            will_init,
+                            base_offset: pos.as_u64(),
+                            batch_offset: 0,
+                            len,
+                        },
+                        expect,
+                    );
+                    roundtrip(
+                        Args {
+                            will_init,
+                            base_offset: 0,
+                            batch_offset: pos.as_u64(),
+                            len,
+                        },
+                        expect,
+                    );
+                }
+            }
+        }
 
-        // len
-        roundtrip(Unpacked {
-            will_init: false,
-            len: MAX_SUPPORTED_BLOB_LEN,
-            pos: 0,
-        });
-        let too_large = Unpacked {
+        // too-large len
+        let too_large = Args {
             will_init: false,
             len: MAX_SUPPORTED_BLOB_LEN + 1,
-            pos: 0,
+            base_offset: 0,
+            batch_offset: 0,
         };
         assert!(InMemoryLayerIndexValue::new(too_large).is_err());
 
-        // pos
-        roundtrip(Unpacked {
-            will_init: false,
-            len: 0,
-            pos: {
-                let max_as_per_supported_bits: usize =
-                    (1 << InMemoryLayerIndexValue::MAX_SUPPORTED_POS_BITS) - 1;
-                if max_as_per_supported_bits < u32::MAX as usize {
-                    panic!("current implementation has space for `pos` values > u32::MAX")
-                }
-                u32::MAX // but at the type system level, we enforce u32::MAX
-            },
-        });
+        // too-large pos
+        {
+            let too_large = Args {
+                will_init: false,
+                len: 0,
+                base_offset: MAX_SUPPORTED_POS.as_u64() + 1,
+                batch_offset: 0,
+            };
+            assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+            let too_large = Args {
+                will_init: false,
+                len: 0,
+                base_offset: 0,
+                batch_offset: MAX_SUPPORTED_POS.as_u64() + 1,
+            };
+            assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+        }
 
-        // pos + len
-        let too_large = Unpacked {
-            will_init: false,
-            len: 1,
-            pos: u32::MAX,
-        };
-        assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+        // too large (base_offset + batch_offset)
+        {
+            let too_large = Args {
+                will_init: false,
+                len: 0,
+                base_offset: MAX_SUPPORTED_POS.as_u64(),
+                batch_offset: 1,
+            };
+            assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+            let too_large = Args {
+                will_init: false,
+                len: 0,
+                base_offset: MAX_SUPPORTED_POS.as_u64() - 1,
+                batch_offset: MAX_SUPPORTED_POS.as_u64() - 1,
+            };
+            assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+        }
+
+        // valid special cases
+        // - area past the max supported pos that is accessible by len
+        for len in [1, MAX_SUPPORTED_BLOB_LEN] {
+            roundtrip(
+                Args {
+                    will_init: false,
+                    len,
+                    base_offset: MAX_SUPPORTED_POS.as_u64(),
+                    batch_offset: 0,
+                },
+                Unpacked {
+                    will_init: false,
+                    len: len as u64,
+                    pos: MAX_SUPPORTED_POS.as_u64(),
+                },
+            );
+            roundtrip(
+                Args {
+                    will_init: false,
+                    len,
+                    base_offset: 0,
+                    batch_offset: MAX_SUPPORTED_POS.as_u64(),
+                },
+                Unpacked {
+                    will_init: false,
+                    len: len as u64,
+                    pos: MAX_SUPPORTED_POS.as_u64(),
+                },
+            );
+        }
     }
 }

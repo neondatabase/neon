@@ -6,7 +6,10 @@ use std::{
 use itertools::Itertools;
 use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 
-use crate::context::RequestContext;
+use crate::{
+    context::RequestContext,
+    tenant::storage_layer::inmemory_layer::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64},
+};
 
 mod sealed {
     pub trait Sealed {}
@@ -16,7 +19,7 @@ mod sealed {
 pub trait File: Send {
     async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
         &'b self,
-        start: u32,
+        start: u64,
         dst: Slice<B>,
         ctx: &'a RequestContext,
     ) -> std::io::Result<(Slice<B>, usize)>;
@@ -24,7 +27,7 @@ pub trait File: Send {
 
 /// A logical read from [`File`]. See [`Self::new`].
 pub struct LogicalRead<B: Buffer> {
-    pos: u32,
+    pos: u64,
     state: RwLockRefCell<LogicalReadState<B>>,
 }
 
@@ -38,7 +41,7 @@ enum LogicalReadState<B: Buffer> {
 
 impl<B: Buffer> LogicalRead<B> {
     /// Create a new [`LogicalRead`] from [`File`] of the data in the file in range `[ pos, pos + buf.cap() )`.
-    pub fn new(pos: u32, buf: B) -> Self {
+    pub fn new(pos: u64, buf: B) -> Self {
         Self {
             pos,
             state: RwLockRefCell::new(LogicalReadState::NotStarted(buf)),
@@ -100,11 +103,11 @@ where
     let (reads, assert_logical_reads): (_, Option<Vec<&'a LogicalRead<B>>>) = (reads, None);
 
     // Plan which parts of which chunks need to be appended to which buffer
-    let mut by_chunk: BTreeMap<u32, Vec<Interest<B>>> = BTreeMap::new();
+    let mut by_chunk: BTreeMap<u64, Vec<Interest<B>>> = BTreeMap::new();
     struct Interest<'a, B: Buffer> {
         logical_read: &'a LogicalRead<B>,
-        offset_in_chunk: u32,
-        len: u32,
+        offset_in_chunk: u64,
+        len: u64,
     }
     for logical_read in reads {
         let LogicalRead { pos, state } = logical_read;
@@ -129,14 +132,14 @@ where
 
         // plan which chunks we need to read from
         let mut remaining = req_len;
-        let mut chunk_no = *pos / (DIO_CHUNK_SIZE as u32);
-        let mut offset_in_chunk = usize::try_from(*pos % (DIO_CHUNK_SIZE as u32)).unwrap();
+        let mut chunk_no = *pos / (DIO_CHUNK_SIZE.as_u64());
+        let mut offset_in_chunk = pos.as_usize() % DIO_CHUNK_SIZE;
         while remaining > 0 {
             let remaining_in_chunk = std::cmp::min(remaining, DIO_CHUNK_SIZE - offset_in_chunk);
             by_chunk.entry(chunk_no).or_default().push(Interest {
                 logical_read,
-                offset_in_chunk: offset_in_chunk as u32,
-                len: remaining_in_chunk as u32,
+                offset_in_chunk: offset_in_chunk.as_u64(),
+                len: remaining_in_chunk.as_u64(),
             });
             offset_in_chunk = 0;
             chunk_no += 1;
@@ -149,20 +152,20 @@ where
     // However, we can merge adjacent chunks into batches of MAX_CHUNK_BATCH_SIZE
     // so we issue fewer IOs = fewer roundtrips = lower overall latency.
     struct PhysicalRead<'a, B: Buffer> {
-        start_chunk_no: u32,
-        nchunks: u32,
+        start_chunk_no: u64,
+        nchunks: usize,
         dsts: Vec<MergedInterest<'a, B>>,
     }
     struct MergedInterest<'a, B: Buffer> {
         logical_read: &'a LogicalRead<B>,
-        offset_in_physical_read: u32,
-        len: u32,
+        offset_in_physical_read: u64,
+        len: u64,
     }
     let mut physical_reads: Vec<PhysicalRead<B>> = Vec::new();
     let mut by_chunk = by_chunk.into_iter().peekable();
     loop {
         let mut last_chunk_no = None;
-        let to_merge: Vec<(u32, Vec<Interest<B>>)> = by_chunk
+        let to_merge: Vec<(u64, Vec<Interest<B>>)> = by_chunk
             .peeking_take_while(|(chunk_no, _)| {
                 if let Some(last_chunk_no) = last_chunk_no {
                     if *chunk_no != last_chunk_no + 1 {
@@ -177,7 +180,7 @@ where
         let Some(start_chunk_no) = to_merge.first().map(|(chunk_no, _)| *chunk_no) else {
             break;
         };
-        let nchunks = to_merge.len() as u32;
+        let nchunks = to_merge.len();
         let dsts = to_merge
             .into_iter()
             .enumerate()
@@ -190,7 +193,10 @@ where
                           }| {
                         MergedInterest {
                             logical_read,
-                            offset_in_physical_read: i as u32 * DIO_CHUNK_SIZE as u32
+                            offset_in_physical_read: i
+                                .checked_mul(DIO_CHUNK_SIZE)
+                                .unwrap()
+                                .as_u64()
                                 + offset_in_chunk,
                             len,
                         }
@@ -208,7 +214,7 @@ where
 
     // Execute physical reads and fill the logical read buffers
     // TODO: prefetch
-    let get_io_buffer = |nchunks| Vec::with_capacity(nchunks as usize * (DIO_CHUNK_SIZE));
+    let get_io_buffer = |nchunks| Vec::with_capacity(nchunks * DIO_CHUNK_SIZE);
     for PhysicalRead {
         start_chunk_no,
         nchunks,
@@ -221,13 +227,12 @@ where
         if all_done {
             continue;
         }
-        let read_offset = start_chunk_no * DIO_CHUNK_SIZE as u32;
+        let read_offset = start_chunk_no
+            .checked_mul(DIO_CHUNK_SIZE.as_u64())
+            .expect("we produce chunk_nos by dividing by DIO_CHUNK_SIZE earlier");
         let io_buf = get_io_buffer(nchunks).slice_full();
         let req_len = io_buf.len();
-        let (io_buf_slice, nread) = match file
-            .read_at_to_end(start_chunk_no * DIO_CHUNK_SIZE as u32, io_buf, ctx)
-            .await
-        {
+        let (io_buf_slice, nread) = match file.read_at_to_end(read_offset, io_buf, ctx).await {
             Ok(t) => t,
             Err(e) => {
                 let e = Arc::new(e);
@@ -431,7 +436,7 @@ mod tests {
                     .collect(),
             }
         }
-        fn test_logical_read(&self, pos: u32, len: usize) -> TestLogicalRead {
+        fn test_logical_read(&self, pos: u64, len: usize) -> TestLogicalRead {
             let expected_result = if pos as usize + len > self.content.len() {
                 Err("InMemoryFile short read".to_string())
             } else {
@@ -467,7 +472,7 @@ mod tests {
     impl File for InMemoryFile {
         async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
             &'b self,
-            start: u32,
+            start: u64,
             mut dst: Slice<B>,
             _ctx: &'a RequestContext,
         ) -> std::io::Result<(Slice<B>, usize)> {
@@ -490,13 +495,13 @@ mod tests {
 
     #[derive(Clone)]
     struct TestLogicalRead {
-        pos: u32,
+        pos: u64,
         len: usize,
         expected_result: Result<Vec<u8>, String>,
     }
 
     impl TestLogicalRead {
-        fn new(pos: u32, len: usize, expected_result: Result<Vec<u8>, String>) -> Self {
+        fn new(pos: u64, len: usize, expected_result: Result<Vec<u8>, String>) -> Self {
             Self {
                 pos,
                 len,
@@ -535,7 +540,7 @@ mod tests {
     async fn test_blackbox() {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let cs = DIO_CHUNK_SIZE;
-        let cs_u32 = u32::try_from(cs).unwrap();
+        let cs_u64 = cs.as_u64();
 
         let file = InMemoryFile::new_random(10 * cs);
 
@@ -545,12 +550,12 @@ mod tests {
             file.test_logical_read(1, 2),
             // gap
             // spans adjacent chunks
-            file.test_logical_read(cs_u32 - 1, 2),
+            file.test_logical_read(cs_u64 - 1, 2),
             // gap
             //  tail of chunk 3, all of chunk 4, and 2 bytes of chunk 5
-            file.test_logical_read(3 * cs_u32 - 1, cs + 2),
+            file.test_logical_read(3 * cs_u64 - 1, cs + 2),
             // gap
-            file.test_logical_read(5 * cs_u32, 1),
+            file.test_logical_read(5 * cs_u64, 1),
         ];
         let num_test_logical_reads = test_logical_reads.len();
         let test_logical_reads_perms = test_logical_reads
@@ -581,7 +586,7 @@ mod tests {
     }
 
     struct RecordedRead {
-        pos: u32,
+        pos: u64,
         req_len: usize,
         res: Vec<u8>,
     }
@@ -598,7 +603,7 @@ mod tests {
     impl<'x> File for RecorderFile<'x> {
         async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
             &'b self,
-            start: u32,
+            start: u64,
             dst: Slice<B>,
             ctx: &'a RequestContext,
         ) -> std::io::Result<(Slice<B>, usize)> {
@@ -618,8 +623,8 @@ mod tests {
 
         let file = InMemoryFile::new_random(2 * DIO_CHUNK_SIZE);
 
-        let a = file.test_logical_read(DIO_CHUNK_SIZE as u32, 10);
-        let b = file.test_logical_read(DIO_CHUNK_SIZE as u32 + 30, 20);
+        let a = file.test_logical_read(DIO_CHUNK_SIZE.as_u64(), 10);
+        let b = file.test_logical_read(DIO_CHUNK_SIZE.as_u64() + 30, 20);
 
         let recorder = RecorderFile::new(&file);
 
@@ -628,7 +633,7 @@ mod tests {
         let recorded = recorder.recorded.borrow();
         assert_eq!(recorded.len(), 1);
         let RecordedRead { pos, req_len, .. } = &recorded[0];
-        assert_eq!(*pos, DIO_CHUNK_SIZE as u32);
+        assert_eq!(*pos, DIO_CHUNK_SIZE.as_u64());
         assert_eq!(*req_len, DIO_CHUNK_SIZE);
     }
 
@@ -644,7 +649,7 @@ mod tests {
         let mut test_logical_reads = Vec::new();
         for i in 3..3 + MAX_CHUNK_BATCH_SIZE + MAX_CHUNK_BATCH_SIZE / 2 {
             test_logical_reads
-                .push(file.test_logical_read(i as u32 * DIO_CHUNK_SIZE as u32 + 10, 1));
+                .push(file.test_logical_read(i.as_u64() * DIO_CHUNK_SIZE.as_u64() + 10, 1));
         }
 
         let recorder = RecorderFile::new(&file);
@@ -673,7 +678,7 @@ mod tests {
         let file = InMemoryFile::new_random(3 * DIO_CHUNK_SIZE);
 
         let a = file.test_logical_read(0, 1); // chunk 0
-        let b = file.test_logical_read(2 * DIO_CHUNK_SIZE as u32, 1); // chunk 2
+        let b = file.test_logical_read(2 * DIO_CHUNK_SIZE.as_u64(), 1); // chunk 2
 
         let recorder = RecorderFile::new(&file);
 
@@ -689,13 +694,13 @@ mod tests {
         }
         {
             let RecordedRead { pos, req_len, .. } = &recorded[1];
-            assert_eq!(*pos, 2 * DIO_CHUNK_SIZE as u32);
+            assert_eq!(*pos, 2 * DIO_CHUNK_SIZE.as_u64());
             assert_eq!(*req_len, DIO_CHUNK_SIZE);
         }
     }
 
     struct ExpectedRead {
-        expect_pos: u32,
+        expect_pos: u64,
         expect_len: usize,
         respond: Result<Vec<u8>, String>,
     }
@@ -728,7 +733,7 @@ mod tests {
     impl File for MockFile {
         async fn read_at_to_end<'a, 'b, B: IoBufMut + Send>(
             &'b self,
-            start: u32,
+            start: u64,
             mut dst: Slice<B>,
             _ctx: &'a RequestContext,
         ) -> std::io::Result<(Slice<B>, usize)> {
@@ -809,19 +814,19 @@ mod tests {
         let test_logical_reads = vec![
             // read spanning two batches
             TestLogicalRead::new(
-                DIO_CHUNK_SIZE as u32 / 2,
+                DIO_CHUNK_SIZE.as_u64() / 2,
                 MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE,
                 Err("foo".to_owned()),
             ),
             // second read in failing chunk
             TestLogicalRead::new(
-                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE) as u32 + DIO_CHUNK_SIZE as u32 - 10,
+                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE).as_u64() + DIO_CHUNK_SIZE.as_u64() - 10,
                 5,
                 Err("foo".to_owned()),
             ),
             // read unaffected
             TestLogicalRead::new(
-                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE) as u32 + 2 * DIO_CHUNK_SIZE as u32 + 10,
+                (MAX_CHUNK_BATCH_SIZE * DIO_CHUNK_SIZE).as_u64() + 2 * DIO_CHUNK_SIZE.as_u64() + 10,
                 5,
                 Ok(vec![1; 5]),
             ),
@@ -832,8 +837,8 @@ mod tests {
         for test_logical_reads in test_logical_read_perms {
             let file = mock_file!(
                 0, MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE => Ok(vec![0; MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE]),
-                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Err("foo".to_owned()),
-                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE + 2*DIO_CHUNK_SIZE) as u32, DIO_CHUNK_SIZE => Ok(vec![1; DIO_CHUNK_SIZE]),
+                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE).as_u64(), DIO_CHUNK_SIZE => Err("foo".to_owned()),
+                (MAX_CHUNK_BATCH_SIZE*DIO_CHUNK_SIZE + 2*DIO_CHUNK_SIZE).as_u64(), DIO_CHUNK_SIZE => Ok(vec![1; DIO_CHUNK_SIZE]),
             );
             execute_and_validate_test_logical_reads(&file, test_logical_reads, &ctx).await;
         }
@@ -842,12 +847,12 @@ mod tests {
     struct TestShortReadsSetup {
         ctx: RequestContext,
         file: InMemoryFile,
-        written: u32,
+        written: u64,
     }
     fn setup_short_chunk_read_tests() -> TestShortReadsSetup {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         assert!(DIO_CHUNK_SIZE > 20, "test assumption");
-        let written = (2 * DIO_CHUNK_SIZE - 10) as u32;
+        let written = (2 * DIO_CHUNK_SIZE - 10).as_u64();
         let file = InMemoryFile::new_random(written as usize);
         TestShortReadsSetup { ctx, file, written }
     }
@@ -869,7 +874,7 @@ mod tests {
         let recorded = recorder.recorded.borrow();
         assert_eq!(recorded.len(), 1);
         let RecordedRead { pos, req_len, res } = &recorded[0];
-        assert_eq!(*pos, DIO_CHUNK_SIZE as u32);
+        assert_eq!(*pos, DIO_CHUNK_SIZE.as_u64());
         assert_eq!(*req_len, DIO_CHUNK_SIZE);
         assert_eq!(res, &file.content[DIO_CHUNK_SIZE..(written as usize)]);
     }
@@ -882,10 +887,16 @@ mod tests {
         // the logical reads end in the unwritten range.
         //
         // All should fail with UnexpectedEof and have the same IO pattern.
-        async fn the_impl(offset_delta: i32) {
+        async fn the_impl(offset_delta: i64) {
             let TestShortReadsSetup { ctx, file, written } = setup_short_chunk_read_tests();
 
-            let offset = (written as i32 + offset_delta) as u32;
+            let offset = u64::try_from(
+                i64::try_from(written)
+                    .unwrap()
+                    .checked_add(offset_delta)
+                    .unwrap(),
+            )
+            .unwrap();
             let a = file.test_logical_read(offset, 5);
             let recorder = RecorderFile::new(&file);
             let a_vr = a.make_logical_read();
@@ -900,7 +911,7 @@ mod tests {
             let recorded = recorder.recorded.borrow();
             assert_eq!(recorded.len(), 1);
             let RecordedRead { pos, req_len, res } = &recorded[0];
-            assert_eq!(*pos, DIO_CHUNK_SIZE as u32);
+            assert_eq!(*pos, DIO_CHUNK_SIZE.as_u64());
             assert_eq!(*req_len, DIO_CHUNK_SIZE);
             assert_eq!(res, &file.content[DIO_CHUNK_SIZE..(written as usize)]);
         }
