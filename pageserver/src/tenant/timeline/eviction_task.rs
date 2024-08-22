@@ -30,7 +30,8 @@ use crate::{
     pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
+        storage_layer::LayerVisibilityHint, tasks::BackgroundLoopKind, timeline::EvictionError,
+        LogicalSizeCalculationCause, Tenant,
     },
 };
 
@@ -59,13 +60,12 @@ impl Timeline {
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             &format!(
                 "layer eviction for {}/{}",
                 self.tenant_shard_id, self.timeline_id
             ),
-            false,
             async move {
                 tokio::select! {
                     _ = self_clone.cancel.cancelled() => { return Ok(()); }
@@ -214,51 +214,60 @@ impl Timeline {
         let mut js = tokio::task::JoinSet::new();
         {
             let guard = self.layers.read().await;
-            let layers = guard.layer_map();
-            for layer in layers.iter_historic_layers() {
-                let layer = guard.get_from_desc(&layer);
 
-                // guard against eviction while we inspect it; it might be that eviction_task and
-                // disk_usage_eviction_task both select the same layers to be evicted, and
-                // seemingly free up double the space. both succeeding is of no consequence.
+            guard
+                .likely_resident_layers()
+                .filter(|layer| {
+                    let last_activity_ts = layer.latest_activity();
 
-                if !layer.is_likely_resident() {
-                    continue;
-                }
+                    let no_activity_for = match now.duration_since(last_activity_ts) {
+                        Ok(d) => d,
+                        Err(_e) => {
+                            // We reach here if `now` < `last_activity_ts`, which can legitimately
+                            // happen if there is an access between us getting `now`, and us getting
+                            // the access stats from the layer.
+                            //
+                            // The other reason why it can happen is system clock skew because
+                            // SystemTime::now() is not monotonic, so, even if there is no access
+                            // to the layer after we get `now` at the beginning of this function,
+                            // it could be that `now`  < `last_activity_ts`.
+                            //
+                            // To distinguish the cases, we would need to record `Instant`s in the
+                            // access stats (i.e., monotonic timestamps), but then, the timestamps
+                            // values in the access stats would need to be `Instant`'s, and hence
+                            // they would be meaningless outside of the pageserver process.
+                            // At the time of writing, the trade-off is that access stats are more
+                            // valuable than detecting clock skew.
+                            return false;
+                        }
+                    };
 
-                let last_activity_ts = layer.access_stats().latest_activity_or_now();
-
-                let no_activity_for = match now.duration_since(last_activity_ts) {
-                    Ok(d) => d,
-                    Err(_e) => {
-                        // We reach here if `now` < `last_activity_ts`, which can legitimately
-                        // happen if there is an access between us getting `now`, and us getting
-                        // the access stats from the layer.
-                        //
-                        // The other reason why it can happen is system clock skew because
-                        // SystemTime::now() is not monotonic, so, even if there is no access
-                        // to the layer after we get `now` at the beginning of this function,
-                        // it could be that `now`  < `last_activity_ts`.
-                        //
-                        // To distinguish the cases, we would need to record `Instant`s in the
-                        // access stats (i.e., monotonic timestamps), but then, the timestamps
-                        // values in the access stats would need to be `Instant`'s, and hence
-                        // they would be meaningless outside of the pageserver process.
-                        // At the time of writing, the trade-off is that access stats are more
-                        // valuable than detecting clock skew.
-                        continue;
+                    match layer.visibility() {
+                        LayerVisibilityHint::Visible => {
+                            // Usual case: a visible layer might be read any time, and we will keep it
+                            // resident until it hits our configured TTL threshold.
+                            no_activity_for > p.threshold
+                        }
+                        LayerVisibilityHint::Covered => {
+                            // Covered layers: this is probably a layer that was recently covered by
+                            // an image layer during compaction.  We don't evict it immediately, but
+                            // it doesn't stay resident for the full `threshold`: we just keep it
+                            // for a shorter time in case
+                            // - it is used for Timestamp->LSN lookups
+                            // - a new branch is created in recent history which will read this layer
+                            no_activity_for > p.period
+                        }
                     }
-                };
-
-                if no_activity_for > p.threshold {
+                })
+                .cloned()
+                .for_each(|layer| {
                     js.spawn(async move {
                         layer
                             .evict_and_wait(std::time::Duration::from_secs(5))
                             .await
                     });
                     stats.candidates += 1;
-                }
-            }
+                });
         };
 
         let join_all = async move {

@@ -382,17 +382,6 @@ pub enum DeletionQueueError {
 }
 
 impl DeletionQueueClient {
-    pub(crate) fn broken() -> Self {
-        // Channels whose receivers are immediately dropped.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (executor_tx, _executor_rx) = tokio::sync::mpsc::channel(1);
-        Self {
-            tx,
-            executor_tx,
-            lsn_table: Arc::default(),
-        }
-    }
-
     /// This is cancel-safe.  If you drop the future before it completes, the message
     /// is not pushed, although in the context of the deletion queue it doesn't matter: once
     /// we decide to do a deletion the decision is always final.
@@ -839,9 +828,9 @@ mod test {
         }
     }
 
-    fn setup(test_name: &str) -> anyhow::Result<TestSetup> {
+    async fn setup(test_name: &str) -> anyhow::Result<TestSetup> {
         let test_name = Box::leak(Box::new(format!("deletion_queue__{test_name}")));
-        let harness = TenantHarness::create(test_name)?;
+        let harness = TenantHarness::create(test_name).await?;
 
         // We do not load() the harness: we only need its config and remote_storage
 
@@ -850,10 +839,14 @@ mod test {
         std::fs::create_dir_all(remote_fs_dir)?;
         let remote_fs_dir = harness.conf.workdir.join("remote_fs").canonicalize_utf8()?;
         let storage_config = RemoteStorageConfig {
-            storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            storage: RemoteStorageKind::LocalFs {
+                local_path: remote_fs_dir.clone(),
+            },
             timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
         };
-        let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
+        let storage = GenericRemoteStorage::from_config(&storage_config)
+            .await
+            .unwrap();
 
         let mock_control_plane = MockControlPlane::new();
 
@@ -931,7 +924,9 @@ mod test {
     #[tokio::test]
     async fn deletion_queue_smoke() -> anyhow::Result<()> {
         // Basic test that the deletion queue processes the deletions we pass into it
-        let ctx = setup("deletion_queue_smoke").expect("Failed test setup");
+        let ctx = setup("deletion_queue_smoke")
+            .await
+            .expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 
@@ -1001,7 +996,9 @@ mod test {
 
     #[tokio::test]
     async fn deletion_queue_validation() -> anyhow::Result<()> {
-        let ctx = setup("deletion_queue_validation").expect("Failed test setup");
+        let ctx = setup("deletion_queue_validation")
+            .await
+            .expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 
@@ -1060,7 +1057,9 @@ mod test {
     #[tokio::test]
     async fn deletion_queue_recovery() -> anyhow::Result<()> {
         // Basic test that the deletion queue processes the deletions we pass into it
-        let mut ctx = setup("deletion_queue_recovery").expect("Failed test setup");
+        let mut ctx = setup("deletion_queue_recovery")
+            .await
+            .expect("Failed test setup");
         let client = ctx.deletion_queue.new_client();
         client.recover(HashMap::new())?;
 

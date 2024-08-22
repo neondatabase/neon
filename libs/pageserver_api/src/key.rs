@@ -22,6 +22,11 @@ pub struct Key {
     pub field6: u32,
 }
 
+/// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
+/// a struct of fields.
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd)]
+pub struct CompactKey(i128);
+
 /// The storage key size.
 pub const KEY_SIZE: usize = 18;
 
@@ -29,7 +34,7 @@ pub const KEY_SIZE: usize = 18;
 /// See [`Key::to_i128`] for more information on the encoding.
 pub const METADATA_KEY_SIZE: usize = 16;
 
-/// The key prefix start range for the metadata keys. All keys with the first byte >= 0x40 is a metadata key.
+/// The key prefix start range for the metadata keys. All keys with the first byte >= 0x60 is a metadata key.
 pub const METADATA_KEY_BEGIN_PREFIX: u8 = 0x60;
 pub const METADATA_KEY_END_PREFIX: u8 = 0x7F;
 
@@ -107,7 +112,10 @@ impl Key {
     /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
-        assert!(self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
+        assert!(
+            self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222,
+            "invalid key: {self}",
+        );
         (((self.field1 & 0x7F) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)
@@ -125,6 +133,14 @@ impl Key {
             field5: (x >> 32) as u8,
             field6: x as u32,
         }
+    }
+
+    pub fn to_compact(&self) -> CompactKey {
+        CompactKey(self.to_i128())
+    }
+
+    pub fn from_compact(k: CompactKey) -> Self {
+        Self::from_i128(k.0)
     }
 
     pub const fn next(&self) -> Key {
@@ -160,8 +176,9 @@ impl Key {
         key
     }
 
-    /// Convert a 18B slice to a key. This function should not be used for metadata keys because field2 is handled differently.
-    /// Use [`Key::from_i128`] instead if you want to handle 16B keys (i.e., metadata keys).
+    /// Convert a 18B slice to a key. This function should not be used for 16B metadata keys because `field2` is handled differently.
+    /// Use [`Key::from_i128`] instead if you want to handle 16B keys (i.e., metadata keys). There are some restrictions on `field2`,
+    /// and therefore not all 18B slices are valid page server keys.
     pub fn from_slice(b: &[u8]) -> Self {
         Key {
             field1: b[0],
@@ -173,7 +190,7 @@ impl Key {
         }
     }
 
-    /// Convert a key to a 18B slice. This function should not be used for metadata keys because field2 is handled differently.
+    /// Convert a key to a 18B slice. This function should not be used for getting a 16B metadata key because `field2` is handled differently.
     /// Use [`Key::to_i128`] instead if you want to get a 16B key (i.e., metadata keys).
     pub fn write_to_byte_slice(&self, buf: &mut [u8]) {
         buf[0] = self.field1;
@@ -192,6 +209,13 @@ impl fmt::Display for Key {
             "{:02X}{:08X}{:08X}{:08X}{:02X}{:08X}",
             self.field1, self.field2, self.field3, self.field4, self.field5, self.field6
         )
+    }
+}
+
+impl fmt::Display for CompactKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let k = Key::from_compact(*self);
+        k.fmt(f)
     }
 }
 

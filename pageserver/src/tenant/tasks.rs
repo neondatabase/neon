@@ -61,21 +61,12 @@ impl BackgroundLoopKind {
     }
 }
 
-static PERMIT_GAUGES: once_cell::sync::Lazy<
-    enum_map::EnumMap<BackgroundLoopKind, metrics::IntCounterPair>,
-> = once_cell::sync::Lazy::new(|| {
-    enum_map::EnumMap::from_array(std::array::from_fn(|i| {
-        let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
-        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE.with_label_values(&[kind.into()])
-    }))
-});
-
 /// Cancellation safe.
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
 ) -> tokio::sync::SemaphorePermit<'static> {
-    let _guard = PERMIT_GAUGES[loop_kind].guard();
+    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE.measure_acquisition(loop_kind);
 
     pausable_failpoint!(
         "initial-size-calculation-permit-pause",
@@ -98,10 +89,9 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("compactor for tenant {tenant_shard_id}"),
-        false,
         {
             let tenant = Arc::clone(tenant);
             let background_jobs_can_start = background_jobs_can_start.cloned();
@@ -122,10 +112,9 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("garbage collector for tenant {tenant_shard_id}"),
-        false,
         {
             let tenant = Arc::clone(tenant);
             let background_jobs_can_start = background_jobs_can_start.cloned();
@@ -146,10 +135,9 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::IngestHousekeeping,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("ingest housekeeping for tenant {tenant_shard_id}"),
-        false,
         {
             let tenant = Arc::clone(tenant);
             let background_jobs_can_start = background_jobs_can_start.cloned();
@@ -213,24 +201,28 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 Duration::from_secs(10)
             } else {
                 // Run compaction
-                if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
-                    let wait_duration = backoff::exponential_backoff_duration_seconds(
-                        error_run_count + 1,
-                        1.0,
-                        MAX_BACKOFF_SECS,
-                    );
-                    error_run_count += 1;
-                    let wait_duration = Duration::from_secs_f64(wait_duration);
-                    log_compaction_error(
-                        &e,
-                        error_run_count,
-                        &wait_duration,
-                        cancel.is_cancelled(),
-                    );
-                    wait_duration
-                } else {
-                    error_run_count = 0;
-                    period
+                match tenant.compaction_iteration(&cancel, &ctx).await {
+                    Ok(has_pending_task) => {
+                        error_run_count = 0;
+                        // schedule the next compaction immediately in case there is a pending compaction task
+                        if has_pending_task { Duration::ZERO } else { period }
+                    }
+                    Err(e) => {
+                        let wait_duration = backoff::exponential_backoff_duration_seconds(
+                            error_run_count + 1,
+                            1.0,
+                            MAX_BACKOFF_SECS,
+                        );
+                        error_run_count += 1;
+                        let wait_duration = Duration::from_secs_f64(wait_duration);
+                        log_compaction_error(
+                            &e,
+                            error_run_count,
+                            &wait_duration,
+                            cancel.is_cancelled(),
+                        );
+                        wait_duration
+                    }
                 }
             };
 
@@ -264,7 +256,8 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                     count_throttled,
                     sum_throttled_usecs,
                     allowed_rps=%format_args!("{allowed_rps:.0}"),
-                    "shard was throttled in the last n_seconds")
+                    "shard was throttled in the last n_seconds"
+                );
             });
 
             // Sleep
@@ -364,14 +357,13 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             if first {
                 first = false;
 
-                if delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
+                let delays = async {
+                    delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel).await?;
+                    random_init_delay(period, &cancel).await?;
+                    Ok::<_, Cancelled>(())
+                };
 
-                if random_init_delay(period, &cancel).await.is_err() {
+                if delays.await.is_err() {
                     break;
                 }
             }
@@ -406,9 +398,16 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                         error_run_count += 1;
                         let wait_duration = Duration::from_secs_f64(wait_duration);
 
-                        error!(
-                        "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
-                    );
+                        if matches!(e, crate::tenant::GcError::TimelineCancelled) {
+                            // Timeline was cancelled during gc. We might either be in an event
+                            // that affects the entire tenant (tenant deletion, pageserver shutdown),
+                            // or in one that affects the timeline only (timeline deletion).
+                            // Therefore, don't exit the loop.
+                            info!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
+                        } else {
+                            error!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
+                        }
+
                         wait_duration
                     }
                 }
@@ -416,7 +415,6 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
 
-            // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
                 .await
                 .is_ok()

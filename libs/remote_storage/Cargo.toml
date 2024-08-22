@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+async-stream.workspace = true
 once_cell.workspace = true
 aws-smithy-async.workspace = true
 aws-smithy-types.workspace = true
@@ -14,8 +15,9 @@ aws-config.workspace = true
 aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
 bytes.workspace = true
-camino.workspace = true
+camino = { workspace = true, features = ["serde1"] }
 humantime.workspace = true
+humantime-serde.workspace = true
 hyper = { workspace = true, features = ["stream"] }
 futures.workspace = true
 rand.workspace = true
@@ -30,7 +32,7 @@ scopeguard.workspace = true
 metrics.workspace = true
 utils.workspace = true
 pin-project-lite.workspace = true
-workspace_hack.workspace = true
+
 azure_core.workspace = true
 azure_identity.workspace = true
 azure_storage.workspace = true
@@ -44,3 +46,4 @@ sync_wrapper = { workspace = true, features = ["futures"] }
 camino-tempfile.workspace = true
 test-context.workspace = true
 rand.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

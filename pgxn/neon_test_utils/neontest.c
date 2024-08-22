@@ -15,6 +15,7 @@
 #include "access/relation.h"
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/xlog_internal.h"
 #include "catalog/namespace.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -34,6 +35,7 @@ PG_MODULE_MAGIC;
 extern void _PG_init(void);
 
 PG_FUNCTION_INFO_V1(test_consume_xids);
+PG_FUNCTION_INFO_V1(test_consume_oids);
 PG_FUNCTION_INFO_V1(test_consume_cpu);
 PG_FUNCTION_INFO_V1(test_consume_memory);
 PG_FUNCTION_INFO_V1(test_release_memory);
@@ -41,6 +43,8 @@ PG_FUNCTION_INFO_V1(clear_buffer_cache);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn);
 PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
 PG_FUNCTION_INFO_V1(neon_xlogflush);
+PG_FUNCTION_INFO_V1(trigger_panic);
+PG_FUNCTION_INFO_V1(trigger_segfault);
 
 /*
  * Linkage to functions in neon module.
@@ -70,6 +74,21 @@ _PG_init(void)
 }
 
 #define neon_read_at_lsn neon_read_at_lsn_ptr
+
+/*
+ * test_consume_oids(int4), for rapidly consuming OIDs, to test wraparound.
+ * Unlike test_consume_xids which is passed number of xids to be consumed,
+ * this function is given the target Oid.
+ */
+Datum
+test_consume_oids(PG_FUNCTION_ARGS)
+{
+	int32 oid = PG_GETARG_INT32(0);
+
+	while (oid != GetNewObjectId());
+
+	PG_RETURN_VOID();
+}
 
 /*
  * test_consume_xids(int4), for rapidly consuming XIDs, to test wraparound.
@@ -444,12 +463,68 @@ get_raw_page_at_lsn_ex(PG_FUNCTION_ARGS)
 
 /*
  * Directly calls XLogFlush(lsn) to flush WAL buffers.
+ *
+ * If 'lsn' is not specified (is NULL), flush all generated WAL.
  */
 Datum
 neon_xlogflush(PG_FUNCTION_ARGS)
 {
-	XLogRecPtr	lsn = PG_GETARG_LSN(0);
+	XLogRecPtr	lsn;
+
+	if (RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("recovery is in progress"),
+				 errhint("cannot flush WAL during recovery.")));
+
+	if (!PG_ARGISNULL(0))
+		lsn = PG_GETARG_LSN(0);
+	else
+	{
+		lsn = GetXLogInsertRecPtr();
+
+		/*---
+		 * The LSN returned by GetXLogInsertRecPtr() is the position where the
+		 * next inserted record would begin. If the last record ended just at
+		 * the page boundary, the next record will begin after the page header
+		 * on the next page, but the next page's page header has not been
+		 * written yet. If we tried to flush it, XLogFlush() would throw an
+		 * error:
+		 *
+		 * ERROR : xlog flush request %X/%X is not satisfied --- flushed only to %X/%X
+		 *
+		 * To avoid that, if the insert position points to just after the page
+		 * header, back off to page boundary.
+		 */
+		if (lsn % XLOG_BLCKSZ == SizeOfXLogShortPHD &&
+			XLogSegmentOffset(lsn, wal_segment_size) > XLOG_BLCKSZ)
+			lsn -= SizeOfXLogShortPHD;
+		else if (lsn % XLOG_BLCKSZ == SizeOfXLogLongPHD &&
+				 XLogSegmentOffset(lsn, wal_segment_size) < XLOG_BLCKSZ)
+			lsn -= SizeOfXLogLongPHD;
+	}
 
 	XLogFlush(lsn);
 	PG_RETURN_VOID();
+}
+
+/*
+ * Function to trigger panic.
+ */
+Datum
+trigger_panic(PG_FUNCTION_ARGS)
+{
+    elog(PANIC, "neon_test_utils: panic");
+    PG_RETURN_VOID();
+}
+
+/*
+ * Function to trigger a segfault.
+ */
+Datum
+trigger_segfault(PG_FUNCTION_ARGS)
+{
+    int *ptr = NULL;
+    *ptr = 42;
+    PG_RETURN_VOID();
 }

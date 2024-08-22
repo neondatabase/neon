@@ -3,15 +3,20 @@ use crate::metrics::{
     METRICS_REGISTRY,
 };
 use crate::reconciler::ReconcileError;
-use crate::service::{Service, STARTUP_RECONCILE_TIMEOUT};
+use crate::service::{LeadershipStatus, Service, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
 use futures::Future;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use metrics::{BuildInfo, NeonMetrics};
+use pageserver_api::controller_api::{
+    MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
+    MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
+    TenantCreateRequest,
+};
 use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
+    TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
@@ -329,6 +334,22 @@ async fn handle_tenant_timeline_delete(
     .await
 }
 
+async fn handle_tenant_timeline_detach_ancestor(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    let res = service
+        .tenant_timeline_detach_ancestor(tenant_id, timeline_id)
+        .await?;
+
+    json_response(StatusCode::OK, res)
+}
+
 async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
@@ -413,7 +434,7 @@ async fn handle_tenant_describe(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Scrubber)?;
 
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
@@ -455,6 +476,14 @@ async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
 }
 
+async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+    json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
+}
+
 async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -471,7 +500,7 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
         StatusCode::OK,
         state
             .service
-            .node_configure(
+            .external_node_configure(
                 config_req.node_id,
                 config_req.availability.map(NodeAvailability::from),
                 config_req.scheduling,
@@ -491,6 +520,19 @@ async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiErr
     json_response(StatusCode::OK, node_status)
 }
 
+async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let leader = state.service.get_leader().await.map_err(|err| {
+        ApiError::InternalServerError(anyhow::anyhow!(
+            "Failed to read leader from database: {err}"
+        ))
+    })?;
+
+    json_response(StatusCode::OK, leader)
+}
+
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -498,6 +540,17 @@ async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiErro
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
     state.service.start_node_drain(node_id).await?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn handle_cancel_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+
+    state.service.cancel_node_drain(node_id).await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -511,6 +564,62 @@ async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError
     state.service.start_node_fill(node_id).await?;
 
     json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+
+    state.service.cancel_node_fill(node_id).await?;
+
+    json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn handle_metadata_health_update(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Scrubber)?;
+
+    let update_req = json_request::<MetadataHealthUpdateRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    state.service.metadata_health_update(update_req).await?;
+
+    json_response(StatusCode::OK, MetadataHealthUpdateResponse {})
+}
+
+async fn handle_metadata_health_list_unhealthy(
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let unhealthy_tenant_shards = state.service.metadata_health_list_unhealthy().await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListUnhealthyResponse {
+            unhealthy_tenant_shards,
+        },
+    )
+}
+
+async fn handle_metadata_health_list_outdated(
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let list_outdated_req = json_request::<MetadataHealthListOutdatedRequest>(&mut req).await?;
+    let state = get_state(&req);
+    let health_records = state
+        .service
+        .metadata_health_list_outdated(list_outdated_req.not_scrubbed_for)
+        .await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListOutdatedResponse { health_records },
+    )
 }
 
 async fn handle_tenant_shard_split(
@@ -558,6 +667,13 @@ async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<
             .tenant_update_policy(tenant_id, update_req)
             .await?,
     )
+}
+
+async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    json_response(StatusCode::OK, state.service.step_down().await)
 }
 
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -687,6 +803,47 @@ struct RequestMeta {
     at: Instant,
 }
 
+pub fn prologue_leadership_status_check_middleware<
+    B: hyper::body::HttpBody + Send + Sync + 'static,
+>() -> Middleware<B, ApiError> {
+    Middleware::pre(move |req| async move {
+        let state = get_state(&req);
+        let leadership_status = state.service.get_leadership_status();
+
+        enum AllowedRoutes<'a> {
+            All,
+            Some(Vec<&'a str>),
+        }
+
+        let allowed_routes = match leadership_status {
+            LeadershipStatus::Leader => AllowedRoutes::All,
+            LeadershipStatus::SteppedDown => {
+                // TODO: does it make sense to allow /status here?
+                AllowedRoutes::Some(["/control/v1/step_down", "/status", "/metrics"].to_vec())
+            }
+            LeadershipStatus::Candidate => {
+                AllowedRoutes::Some(["/ready", "/status", "/metrics"].to_vec())
+            }
+        };
+
+        let uri = req.uri().to_string();
+        match allowed_routes {
+            AllowedRoutes::All => Ok(req),
+            AllowedRoutes::Some(allowed) if allowed.contains(&uri.as_str()) => Ok(req),
+            _ => {
+                tracing::info!(
+                    "Request {} not allowed due to current leadership state",
+                    req.uri()
+                );
+
+                Err(ApiError::ResourceUnavailable(
+                    format!("Current leadership status is {leadership_status}").into(),
+                ))
+            }
+        }
+    })
+}
+
 fn prologue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
@@ -773,6 +930,7 @@ pub fn make_router(
     build_info: BuildInfo,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router()
+        .middleware(prologue_leadership_status_check_middleware())
         .middleware(prologue_metrics_middleware())
         .middleware(epilogue_metrics_middleware());
     if auth.is_some() {
@@ -855,6 +1013,9 @@ pub fn make_router(
         .post("/control/v1/node", |r| {
             named_request_span(r, handle_node_register, RequestName("control_v1_node"))
         })
+        .delete("/control/v1/node/:node_id", |r| {
+            named_request_span(r, handle_node_delete, RequestName("control_v1_node_delete"))
+        })
         .get("/control/v1/node", |r| {
             named_request_span(r, handle_node_list, RequestName("control_v1_node"))
         })
@@ -868,11 +1029,50 @@ pub fn make_router(
         .get("/control/v1/node/:node_id", |r| {
             named_request_span(r, handle_node_status, RequestName("control_v1_node_status"))
         })
+        .get("/control/v1/leader", |r| {
+            named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))
+        })
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))
         })
+        .delete("/control/v1/node/:node_id/drain", |r| {
+            named_request_span(
+                r,
+                handle_cancel_node_drain,
+                RequestName("control_v1_cancel_node_drain"),
+            )
+        })
         .put("/control/v1/node/:node_id/fill", |r| {
             named_request_span(r, handle_node_fill, RequestName("control_v1_node_fill"))
+        })
+        .delete("/control/v1/node/:node_id/fill", |r| {
+            named_request_span(
+                r,
+                handle_cancel_node_fill,
+                RequestName("control_v1_cancel_node_fill"),
+            )
+        })
+        // Metadata health operations
+        .post("/control/v1/metadata_health/update", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_update,
+                RequestName("control_v1_metadata_health_update"),
+            )
+        })
+        .get("/control/v1/metadata_health/unhealthy", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list_unhealthy,
+                RequestName("control_v1_metadata_health_list_unhealthy"),
+            )
+        })
+        .post("/control/v1/metadata_health/outdated", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list_outdated,
+                RequestName("control_v1_metadata_health_list_outdated"),
+            )
         })
         // TODO(vlad): endpoint for cancelling drain and fill
         // Tenant Shard operations
@@ -906,6 +1106,9 @@ pub fn make_router(
                 handle_tenant_update_policy,
                 RequestName("control_v1_tenant_policy"),
             )
+        })
+        .put("/control/v1/step_down", |r| {
+            named_request_span(r, handle_step_down, RequestName("control_v1_step_down"))
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into
@@ -958,6 +1161,16 @@ pub fn make_router(
                 RequestName("v1_tenant_timeline"),
             )
         })
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/detach_ancestor",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_detach_ancestor,
+                    RequestName("v1_tenant_timeline_detach_ancestor"),
+                )
+            },
+        )
         // Tenant detail GET passthrough to shard zero:
         .get("/v1/tenant/:tenant_id", |r| {
             tenant_service_handler(

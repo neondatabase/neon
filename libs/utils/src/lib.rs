@@ -26,6 +26,8 @@ pub mod auth;
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod id;
 
+pub mod shard;
+
 mod hex;
 pub use hex::Hex;
 
@@ -56,8 +58,6 @@ pub mod sentry_init;
 pub mod signals;
 
 pub mod fs_ext;
-
-pub mod history_buffer;
 
 pub mod measured_stream;
 
@@ -94,6 +94,10 @@ pub mod env;
 
 pub mod poison;
 
+pub mod toml_edit_ext;
+
+pub mod circuit_breaker;
+
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
 /// we have several cases:
@@ -124,7 +128,7 @@ pub mod poison;
 ///
 /// #############################################################################################
 /// TODO this macro is not the way the library is intended to be used, see <https://github.com/neondatabase/neon/issues/1565> for details.
-/// We use `cachepot` to reduce our current CI build times: <https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036>
+/// We used `cachepot` to reduce our current CI build times: <https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036>
 /// Yet, it seems to ignore the GIT_VERSION env variable, passed to Docker build, even with build.rs that contains
 /// `println!("cargo:rerun-if-env-changed=GIT_VERSION");` code for cachepot cache invalidation.
 /// The problem needs further investigation and regular `const` declaration instead of a macro.

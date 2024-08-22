@@ -18,7 +18,7 @@ use hyper1::Response;
 use hyper1::StatusCode;
 use hyper1::{HeaderMap, Request};
 use pq_proto::StartupMessageParamsBuilder;
-use serde_json::json;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::time;
 use tokio_postgres::error::DbError;
@@ -32,7 +32,9 @@ use tokio_postgres::Transaction;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
+use typed_json::json;
 use url::Url;
+use urlencoding;
 use utils::http::error::ApiError;
 
 use crate::auth::backend::ComputeUserInfo;
@@ -143,9 +145,9 @@ impl UserFacingError for ConnInfoError {
 }
 
 fn get_conn_info(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     headers: &HeaderMap,
-    tls: &TlsConfig,
+    tls: Option<&TlsConfig>,
 ) -> Result<ConnInfo, ConnInfoError> {
     // HTTP only uses cleartext (for now and likely always)
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
@@ -167,7 +169,8 @@ fn get_conn_info(
         .path_segments()
         .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname: DbName = url_path.next().ok_or(ConnInfoError::InvalidDbName)?.into();
+    let dbname: DbName =
+        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
     ctx.set_dbname(dbname.clone());
 
     let username = RoleName::from(urlencoding::decode(connection_url.username())?);
@@ -181,12 +184,22 @@ fn get_conn_info(
         .ok_or(ConnInfoError::MissingPassword)?;
     let password = urlencoding::decode_binary(password.as_bytes());
 
-    let hostname = connection_url
-        .host_str()
-        .ok_or(ConnInfoError::MissingHostname)?;
-
-    let endpoint =
-        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?;
+    let endpoint = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => {
+            if let Some(tls) = tls {
+                endpoint_sni(hostname, &tls.common_names)?
+                    .ok_or(ConnInfoError::MalformedEndpoint)?
+            } else {
+                hostname
+                    .split_once(".")
+                    .map_or(hostname, |(prefix, _)| prefix)
+                    .into()
+            }
+        }
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) | None => {
+            return Err(ConnInfoError::MissingHostname)
+        }
+    };
     ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
@@ -222,12 +235,12 @@ fn get_conn_info(
 // TODO: return different http error codes
 pub async fn handle(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
-    let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
+    let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
         Ok(r) => {
@@ -262,13 +275,8 @@ pub async fn handle(
                 | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                 _ => None,
             };
-            fn get<'a, T: serde::Serialize>(
-                db: Option<&'a DbError>,
-                x: impl FnOnce(&'a DbError) -> T,
-            ) -> Value {
-                db.map(x)
-                    .and_then(|t| serde_json::to_value(t).ok())
-                    .unwrap_or_default()
+            fn get<'a, T: Default>(db: Option<&'a DbError>, x: impl FnOnce(&'a DbError) -> T) -> T {
+                db.map(x).unwrap_or_default()
             }
 
             if let Some(db_error) = db_error {
@@ -277,17 +285,11 @@ pub async fn handle(
 
             let position = db_error.and_then(|db| db.position());
             let (position, internal_position, internal_query) = match position {
-                Some(ErrorPosition::Original(position)) => (
-                    Value::String(position.to_string()),
-                    Value::Null,
-                    Value::Null,
-                ),
-                Some(ErrorPosition::Internal { position, query }) => (
-                    Value::Null,
-                    Value::String(position.to_string()),
-                    Value::String(query.clone()),
-                ),
-                None => (Value::Null, Value::Null, Value::Null),
+                Some(ErrorPosition::Original(position)) => (Some(position.to_string()), None, None),
+                Some(ErrorPosition::Internal { position, query }) => {
+                    (None, Some(position.to_string()), Some(query.clone()))
+                }
+                None => (None, None, None),
             };
 
             let code = get(db_error, |db| db.code().code());
@@ -491,13 +493,16 @@ fn map_isolation_level_to_headers(level: IsolationLevel) -> Option<HeaderValue> 
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
-    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
+    let _requeset_gauge = Metrics::get()
+        .proxy
+        .connection_requests
+        .guard(ctx.protocol());
     info!(
-        protocol = %ctx.protocol,
+        protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
 
@@ -507,7 +512,7 @@ async fn handle_inner(
     let headers = request.headers();
 
     // TLS config should be there.
-    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
+    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref())?;
     info!(user = conn_info.user_info.user.as_str(), "credentials");
 
     // Allow connection pooling only if explicitly requested
@@ -553,7 +558,7 @@ async fn handle_inner(
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
-            ctx.latency_timer.success();
+            ctx.success();
             Ok::<_, HttpConnError>(client)
         }
         .map_err(SqlOverHttpError::from),
@@ -577,10 +582,8 @@ async fn handle_inner(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json");
 
-    //
-    // Now execute the query and return the result
-    //
-    let result = match payload {
+    // Now execute the query and return the result.
+    let json_output = match payload {
         Payload::Single(stmt) => stmt.process(cancel, &mut client, parsed_headers).await?,
         Payload::Batch(statements) => {
             if parsed_headers.txn_read_only {
@@ -604,11 +607,9 @@ async fn handle_inner(
 
     let metrics = client.metrics();
 
-    // how could this possibly fail
-    let body = serde_json::to_string(&result).expect("json serialization should not fail");
-    let len = body.len();
+    let len = json_output.len();
     let response = response
-        .body(Full::new(Bytes::from(body)))
+        .body(Full::new(Bytes::from(json_output)))
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
@@ -630,7 +631,7 @@ impl QueryData {
         cancel: CancellationToken,
         client: &mut Client<tokio_postgres::Client>,
         parsed_headers: HttpHeaders,
-    ) -> Result<Value, SqlOverHttpError> {
+    ) -> Result<String, SqlOverHttpError> {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
@@ -643,7 +644,10 @@ impl QueryData {
             // The query successfully completed.
             Either::Left((Ok((status, results)), __not_yet_cancelled)) => {
                 discard.check_idle(status);
-                Ok(results)
+
+                let json_output =
+                    serde_json::to_string(&results).expect("json serialization should not fail");
+                Ok(json_output)
             }
             // The query failed with an error
             Either::Left((Err(e), __not_yet_cancelled)) => {
@@ -661,7 +665,10 @@ impl QueryData {
                     // query successed before it was cancelled.
                     Ok(Ok((status, results))) => {
                         discard.check_idle(status);
-                        Ok(results)
+
+                        let json_output = serde_json::to_string(&results)
+                            .expect("json serialization should not fail");
+                        Ok(json_output)
                     }
                     // query failed or was cancelled.
                     Ok(Err(error)) => {
@@ -695,7 +702,7 @@ impl BatchQueryData {
         cancel: CancellationToken,
         client: &mut Client<tokio_postgres::Client>,
         parsed_headers: HttpHeaders,
-    ) -> Result<Value, SqlOverHttpError> {
+    ) -> Result<String, SqlOverHttpError> {
         info!("starting transaction");
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
@@ -717,9 +724,9 @@ impl BatchQueryData {
             e
         })?;
 
-        let results =
+        let json_output =
             match query_batch(cancel.child_token(), &transaction, self, parsed_headers).await {
-                Ok(results) => {
+                Ok(json_output) => {
                     info!("commit");
                     let status = transaction.commit().await.map_err(|e| {
                         // if we cannot commit - for now don't return connection to pool
@@ -728,7 +735,7 @@ impl BatchQueryData {
                         e
                     })?;
                     discard.check_idle(status);
-                    results
+                    json_output
                 }
                 Err(SqlOverHttpError::Cancelled(_)) => {
                     if let Err(err) = cancel_token.cancel_query(NoTls).await {
@@ -752,7 +759,7 @@ impl BatchQueryData {
                 }
             };
 
-        Ok(json!({ "results": results }))
+        Ok(json_output)
     }
 }
 
@@ -761,7 +768,7 @@ async fn query_batch(
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
-) -> Result<Vec<Value>, SqlOverHttpError> {
+) -> Result<String, SqlOverHttpError> {
     let mut results = Vec::with_capacity(queries.queries.len());
     let mut current_size = 0;
     for stmt in queries.queries {
@@ -786,7 +793,11 @@ async fn query_batch(
             }
         }
     }
-    Ok(results)
+
+    let results = json!({ "results": results });
+    let json_output = serde_json::to_string(&results).expect("json serialization should not fail");
+
+    Ok(json_output)
 }
 
 async fn query_to_json<T: GenericClient>(
@@ -794,7 +805,7 @@ async fn query_to_json<T: GenericClient>(
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
-) -> Result<(ReadyForQueryStatus, Value), SqlOverHttpError> {
+) -> Result<(ReadyForQueryStatus, impl Serialize), SqlOverHttpError> {
     info!("executing query");
     let query_params = data.params;
     let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
@@ -837,13 +848,14 @@ async fn query_to_json<T: GenericClient>(
         "finished reading rows"
     );
 
-    let mut fields = vec![];
-    let mut columns = vec![];
+    let columns_len = row_stream.columns().len();
+    let mut fields = Vec::with_capacity(columns_len);
+    let mut columns = Vec::with_capacity(columns_len);
 
     for c in row_stream.columns() {
         fields.push(json!({
-            "name": Value::String(c.name().to_owned()),
-            "dataTypeID": Value::Number(c.type_().oid().into()),
+            "name": c.name().to_owned(),
+            "dataTypeID": c.type_().oid(),
             "tableID": c.table_oid(),
             "columnID": c.column_id(),
             "dataTypeSize": c.type_size(),
@@ -861,15 +873,14 @@ async fn query_to_json<T: GenericClient>(
         .map(|row| pg_text_row_to_json(row, &columns, parsed_headers.raw_output, array_mode))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // resulting JSON format is based on the format of node-postgres result
-    Ok((
-        ready,
-        json!({
-            "command": command_tag_name,
-            "rowCount": command_tag_count,
-            "rows": rows,
-            "fields": fields,
-            "rowAsArray": array_mode,
-        }),
-    ))
+    // Resulting JSON format is based on the format of node-postgres result.
+    let results = json!({
+        "command": command_tag_name.to_string(),
+        "rowCount": command_tag_count,
+        "rows": rows,
+        "fields": fields,
+        "rowAsArray": array_mode,
+    });
+
+    Ok((ready, results))
 }

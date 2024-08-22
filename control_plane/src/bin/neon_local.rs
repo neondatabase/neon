@@ -15,16 +15,18 @@ use control_plane::local_env::{
 };
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
-use control_plane::storage_controller::StorageController;
+use control_plane::storage_controller::{
+    NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
+};
 use control_plane::{broker, local_env};
 use pageserver_api::config::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
-use pageserver_api::controller_api::PlacementPolicy;
-use pageserver_api::models::{
-    ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
+use pageserver_api::controller_api::{
+    NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
 };
+use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
@@ -36,6 +38,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
+use std::time::Duration;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
 use url::Host;
 use utils::{
@@ -51,7 +54,7 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: &str = "15";
+const DEFAULT_PG_VERSION: &str = "16";
 
 const DEFAULT_PAGESERVER_CONTROL_PLANE_API: &str = "http://127.0.0.1:1234/upcall/v1/";
 
@@ -99,7 +102,7 @@ fn main() -> Result<()> {
         let subcommand_result = match sub_name {
             "tenant" => rt.block_on(handle_tenant(sub_args, &mut env)),
             "timeline" => rt.block_on(handle_timeline(sub_args, &mut env)),
-            "start" => rt.block_on(handle_start_all(&env)),
+            "start" => rt.block_on(handle_start_all(&env, get_start_timeout(sub_args))),
             "stop" => rt.block_on(handle_stop_all(sub_args, &env)),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
             "storage_controller" => rt.block_on(handle_storage_controller(sub_args, &env)),
@@ -599,13 +602,9 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
         Some(("import", import_match)) => {
             let tenant_id = get_tenant_id(import_match, env)?;
             let timeline_id = parse_timeline_id(import_match)?.expect("No timeline id provided");
-            let name = import_match
-                .get_one::<String>("node-name")
-                .ok_or_else(|| anyhow!("No node name provided"))?;
-            let update_catalog = import_match
-                .get_one::<bool>("update-catalog")
-                .cloned()
-                .unwrap_or_default();
+            let branch_name = import_match
+                .get_one::<String>("branch-name")
+                .ok_or_else(|| anyhow!("No branch name provided"))?;
 
             // Parse base inputs
             let base_tarfile = import_match
@@ -632,24 +631,11 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let mut cplane = ComputeControlPlane::load(env.clone())?;
             println!("Importing timeline into pageserver ...");
             pageserver
                 .timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)
                 .await?;
-            env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
-
-            println!("Creating endpoint for imported timeline ...");
-            cplane.new_endpoint(
-                name,
-                tenant_id,
-                timeline_id,
-                None,
-                None,
-                pg_version,
-                ComputeMode::Primary,
-                !update_catalog,
-            )?;
+            env.register_branch_mapping(branch_name.to_string(), tenant_id, timeline_id)?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -864,20 +850,13 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
 
             let allow_multiple = sub_args.get_flag("allow-multiple");
 
-            // If --safekeepers argument is given, use only the listed safekeeper nodes.
-            let safekeepers =
-                if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
-                    let mut safekeepers: Vec<NodeId> = Vec::new();
-                    for sk_id in safekeepers_str.split(',').map(str::trim) {
-                        let sk_id = NodeId(u64::from_str(sk_id).map_err(|_| {
-                            anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list")
-                        })?);
-                        safekeepers.push(sk_id);
-                    }
-                    safekeepers
-                } else {
-                    env.safekeepers.iter().map(|sk| sk.id).collect()
-                };
+            // If --safekeepers argument is given, use only the listed
+            // safekeeper nodes; otherwise all from the env.
+            let safekeepers = if let Some(safekeepers) = parse_safekeepers(sub_args)? {
+                safekeepers
+            } else {
+                env.safekeepers.iter().map(|sk| sk.id).collect()
+            };
 
             let endpoint = cplane
                 .endpoints
@@ -981,7 +960,10 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                         })
                         .collect::<Vec<_>>()
                 };
-            endpoint.reconfigure(pageservers, None).await?;
+            // If --safekeepers argument is given, use only the listed
+            // safekeeper nodes; otherwise all from the env.
+            let safekeepers = parse_safekeepers(sub_args)?;
+            endpoint.reconfigure(pageservers, None, safekeepers).await?;
         }
         "stop" => {
             let endpoint_id = sub_args
@@ -1001,6 +983,23 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
     }
 
     Ok(())
+}
+
+/// Parse --safekeepers as list of safekeeper ids.
+fn parse_safekeepers(sub_args: &ArgMatches) -> Result<Option<Vec<NodeId>>> {
+    if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
+        let mut safekeepers: Vec<NodeId> = Vec::new();
+        for sk_id in safekeepers_str.split(',').map(str::trim) {
+            let sk_id = NodeId(
+                u64::from_str(sk_id)
+                    .map_err(|_| anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list"))?,
+            );
+            safekeepers.push(sk_id);
+        }
+        Ok(Some(safekeepers))
+    } else {
+        Ok(None)
+    }
 }
 
 fn handle_mappings(sub_match: &ArgMatches, env: &mut local_env::LocalEnv) -> Result<()> {
@@ -1048,10 +1047,50 @@ fn get_pageserver(env: &local_env::LocalEnv, args: &ArgMatches) -> Result<PageSe
     ))
 }
 
+fn get_start_timeout(args: &ArgMatches) -> &Duration {
+    let humantime_duration = args
+        .get_one::<humantime::Duration>("start-timeout")
+        .expect("invalid value for start-timeout");
+    humantime_duration.as_ref()
+}
+
+fn storage_controller_start_args(args: &ArgMatches) -> NeonStorageControllerStartArgs {
+    let maybe_instance_id = args.get_one::<u8>("instance-id");
+
+    let base_port = args.get_one::<u16>("base-port");
+
+    if maybe_instance_id.is_some() && base_port.is_none() {
+        panic!("storage-controller start specificied instance-id but did not provide base-port");
+    }
+
+    let start_timeout = args
+        .get_one::<humantime::Duration>("start-timeout")
+        .expect("invalid value for start-timeout");
+
+    NeonStorageControllerStartArgs {
+        instance_id: maybe_instance_id.copied().unwrap_or(1),
+        base_port: base_port.copied(),
+        start_timeout: *start_timeout,
+    }
+}
+
+fn storage_controller_stop_args(args: &ArgMatches) -> NeonStorageControllerStopArgs {
+    let maybe_instance_id = args.get_one::<u8>("instance-id");
+    let immediate = args.get_one::<String>("stop-mode").map(|s| s.as_str()) == Some("immediate");
+
+    NeonStorageControllerStopArgs {
+        instance_id: maybe_instance_id.copied().unwrap_or(1),
+        immediate,
+    }
+}
+
 async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
     match sub_match.subcommand() {
         Some(("start", subcommand_args)) => {
-            if let Err(e) = get_pageserver(env, subcommand_args)?.start().await {
+            if let Err(e) = get_pageserver(env, subcommand_args)?
+                .start(get_start_timeout(subcommand_args))
+                .await
+            {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1077,7 +1116,7 @@ async fn handle_pageserver(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
                 exit(1);
             }
 
-            if let Err(e) = pageserver.start().await {
+            if let Err(e) = pageserver.start(get_start_timeout(sub_match)).await {
                 eprintln!("pageserver start failed: {e}");
                 exit(1);
             }
@@ -1105,20 +1144,15 @@ async fn handle_storage_controller(
 ) -> Result<()> {
     let svc = StorageController::from_env(env);
     match sub_match.subcommand() {
-        Some(("start", _start_match)) => {
-            if let Err(e) = svc.start().await {
+        Some(("start", start_match)) => {
+            if let Err(e) = svc.start(storage_controller_start_args(start_match)).await {
                 eprintln!("start failed: {e}");
                 exit(1);
             }
         }
 
         Some(("stop", stop_match)) => {
-            let immediate = stop_match
-                .get_one::<String>("stop-mode")
-                .map(|s| s.as_str())
-                == Some("immediate");
-
-            if let Err(e) = svc.stop(immediate).await {
+            if let Err(e) = svc.stop(storage_controller_stop_args(stop_match)).await {
                 eprintln!("stop failed: {}", e);
                 exit(1);
             }
@@ -1165,7 +1199,10 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
         "start" => {
             let extra_opts = safekeeper_extra_opts(sub_args);
 
-            if let Err(e) = safekeeper.start(extra_opts).await {
+            if let Err(e) = safekeeper
+                .start(extra_opts, get_start_timeout(sub_args))
+                .await
+            {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1191,7 +1228,10 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
             }
 
             let extra_opts = safekeeper_extra_opts(sub_args);
-            if let Err(e) = safekeeper.start(extra_opts).await {
+            if let Err(e) = safekeeper
+                .start(extra_opts, get_start_timeout(sub_args))
+                .await
+            {
                 eprintln!("safekeeper start failed: {}", e);
                 exit(1);
             }
@@ -1204,15 +1244,23 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
-async fn handle_start_all(env: &local_env::LocalEnv) -> anyhow::Result<()> {
+async fn handle_start_all(
+    env: &local_env::LocalEnv,
+    retry_timeout: &Duration,
+) -> anyhow::Result<()> {
     // Endpoints are not started automatically
 
-    broker::start_broker_process(env).await?;
+    broker::start_broker_process(env, retry_timeout).await?;
 
     // Only start the storage controller if the pageserver is configured to need it
     if env.control_plane_api.is_some() {
         let storage_controller = StorageController::from_env(env);
-        if let Err(e) = storage_controller.start().await {
+        if let Err(e) = storage_controller
+            .start(NeonStorageControllerStartArgs::with_default_instance_id(
+                (*retry_timeout).into(),
+            ))
+            .await
+        {
             eprintln!("storage_controller start failed: {:#}", e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1221,7 +1269,7 @@ async fn handle_start_all(env: &local_env::LocalEnv) -> anyhow::Result<()> {
 
     for ps_conf in &env.pageservers {
         let pageserver = PageServerNode::from_env(env, ps_conf);
-        if let Err(e) = pageserver.start().await {
+        if let Err(e) = pageserver.start(retry_timeout).await {
             eprintln!("pageserver {} start failed: {:#}", ps_conf.id, e);
             try_stop_all(env, true).await;
             exit(1);
@@ -1230,13 +1278,74 @@ async fn handle_start_all(env: &local_env::LocalEnv) -> anyhow::Result<()> {
 
     for node in env.safekeepers.iter() {
         let safekeeper = SafekeeperNode::from_env(env, node);
-        if let Err(e) = safekeeper.start(vec![]).await {
+        if let Err(e) = safekeeper.start(vec![], retry_timeout).await {
             eprintln!("safekeeper {} start failed: {:#}", safekeeper.id, e);
             try_stop_all(env, false).await;
             exit(1);
         }
     }
+
+    neon_start_status_check(env, retry_timeout).await?;
+
     Ok(())
+}
+
+async fn neon_start_status_check(
+    env: &local_env::LocalEnv,
+    retry_timeout: &Duration,
+) -> anyhow::Result<()> {
+    const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+    const NOTICE_AFTER_RETRIES: Duration = Duration::from_secs(5);
+
+    if env.control_plane_api.is_none() {
+        return Ok(());
+    }
+
+    let storcon = StorageController::from_env(env);
+
+    let retries = retry_timeout.as_millis() / RETRY_INTERVAL.as_millis();
+    let notice_after_retries = retry_timeout.as_millis() / NOTICE_AFTER_RETRIES.as_millis();
+
+    println!("\nRunning neon status check");
+
+    for retry in 0..retries {
+        if retry == notice_after_retries {
+            println!("\nNeon status check has not passed yet, continuing to wait")
+        }
+
+        let mut passed = true;
+        let mut nodes = storcon.node_list().await?;
+        let mut pageservers = env.pageservers.clone();
+
+        if nodes.len() != pageservers.len() {
+            continue;
+        }
+
+        nodes.sort_by_key(|ps| ps.id);
+        pageservers.sort_by_key(|ps| ps.id);
+
+        for (idx, pageserver) in pageservers.iter().enumerate() {
+            let node = &nodes[idx];
+            if node.id != pageserver.id {
+                passed = false;
+                break;
+            }
+
+            if !matches!(node.availability, NodeAvailabilityWrapper::Active) {
+                passed = false;
+                break;
+            }
+        }
+
+        if passed {
+            println!("\nNeon started and passed status check");
+            return Ok(());
+        }
+
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+
+    anyhow::bail!("\nNeon passed status check")
 }
 
 async fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
@@ -1281,15 +1390,35 @@ async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
         eprintln!("neon broker stop failed: {e:#}");
     }
 
-    if env.control_plane_api.is_some() {
+    // Stop all storage controller instances. In the most common case there's only one,
+    // but iterate though the base data directory in order to discover the instances.
+    let storcon_instances = env
+        .storage_controller_instances()
+        .await
+        .expect("Must inspect data dir");
+    for (instance_id, _instance_dir_path) in storcon_instances {
         let storage_controller = StorageController::from_env(env);
-        if let Err(e) = storage_controller.stop(immediate).await {
-            eprintln!("storage controller stop failed: {e:#}");
+        let stop_args = NeonStorageControllerStopArgs {
+            instance_id,
+            immediate,
+        };
+
+        if let Err(e) = storage_controller.stop(stop_args).await {
+            eprintln!("Storage controller instance {instance_id} stop failed: {e:#}");
         }
     }
 }
 
 fn cli() -> Command {
+    let timeout_arg = Arg::new("start-timeout")
+        .long("start-timeout")
+        .short('t')
+        .global(true)
+        .help("timeout until we fail the command, e.g. 30s")
+        .value_parser(value_parser!(humantime::Duration))
+        .default_value("10s")
+        .required(false);
+
     let branch_name_arg = Arg::new("branch-name")
         .long("branch-name")
         .help("Name of the branch to be created or used as an alias for other services")
@@ -1415,6 +1544,18 @@ fn cli() -> Command {
         .action(ArgAction::SetTrue)
         .required(false);
 
+    let instance_id = Arg::new("instance-id")
+        .long("instance-id")
+        .help("Identifier used to distinguish storage controller instances (default 1)")
+        .value_parser(value_parser!(u8))
+        .required(false);
+
+    let base_port = Arg::new("base-port")
+        .long("base-port")
+        .help("Base port for the storage controller instance idenfified by instance-id (defaults to pagserver cplane api)")
+        .value_parser(value_parser!(u16))
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1458,8 +1599,7 @@ fn cli() -> Command {
                 .about("Import timeline from basebackup directory")
                 .arg(tenant_id_arg.clone())
                 .arg(timeline_id_arg.clone())
-                .arg(Arg::new("node-name").long("node-name")
-                    .help("Name to assign to the imported timeline"))
+                .arg(branch_name_arg.clone())
                 .arg(Arg::new("base-tarfile")
                     .long("base-tarfile")
                     .value_parser(value_parser!(PathBuf))
@@ -1475,7 +1615,6 @@ fn cli() -> Command {
                 .arg(Arg::new("end-lsn").long("end-lsn")
                     .help("Lsn the basebackup ends at"))
                 .arg(pg_version_arg.clone())
-                .arg(update_catalog.clone())
             )
         ).subcommand(
             Command::new("tenant")
@@ -1509,6 +1648,7 @@ fn cli() -> Command {
                 .subcommand(Command::new("status"))
                 .subcommand(Command::new("start")
                     .about("Start local pageserver")
+                    .arg(timeout_arg.clone())
                 )
                 .subcommand(Command::new("stop")
                     .about("Stop local pageserver")
@@ -1516,15 +1656,20 @@ fn cli() -> Command {
                 )
                 .subcommand(Command::new("restart")
                     .about("Restart local pageserver")
+                    .arg(timeout_arg.clone())
                 )
         )
         .subcommand(
             Command::new("storage_controller")
                 .arg_required_else_help(true)
                 .about("Manage storage_controller")
-                .subcommand(Command::new("start").about("Start storage controller"))
+                .subcommand(Command::new("start").about("Start storage controller")
+                            .arg(timeout_arg.clone())
+                            .arg(instance_id.clone())
+                            .arg(base_port))
                 .subcommand(Command::new("stop").about("Stop storage controller")
-                            .arg(stop_mode_arg.clone()))
+                            .arg(stop_mode_arg.clone())
+                            .arg(instance_id))
         )
         .subcommand(
             Command::new("safekeeper")
@@ -1534,6 +1679,7 @@ fn cli() -> Command {
                             .about("Start local safekeeper")
                             .arg(safekeeper_id_arg.clone())
                             .arg(safekeeper_extra_opt_arg.clone())
+                            .arg(timeout_arg.clone())
                 )
                 .subcommand(Command::new("stop")
                             .about("Stop local safekeeper")
@@ -1545,6 +1691,7 @@ fn cli() -> Command {
                             .arg(safekeeper_id_arg)
                             .arg(stop_mode_arg.clone())
                             .arg(safekeeper_extra_opt_arg)
+                            .arg(timeout_arg.clone())
                 )
         )
         .subcommand(
@@ -1575,14 +1722,16 @@ fn cli() -> Command {
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
                     .arg(endpoint_id_arg.clone())
                     .arg(endpoint_pageserver_id_arg.clone())
-                    .arg(safekeepers_arg)
+                    .arg(safekeepers_arg.clone())
                     .arg(remote_ext_config_args)
                     .arg(create_test_user)
                     .arg(allow_multiple.clone())
+                    .arg(timeout_arg.clone())
                 )
                 .subcommand(Command::new("reconfigure")
                             .about("Reconfigure the endpoint")
                             .arg(endpoint_pageserver_id_arg)
+                            .arg(safekeepers_arg)
                             .arg(endpoint_id_arg.clone())
                             .arg(tenant_id_arg.clone())
                 )
@@ -1630,6 +1779,7 @@ fn cli() -> Command {
         .subcommand(
             Command::new("start")
                 .about("Start page server and safekeepers")
+                .arg(timeout_arg.clone())
         )
         .subcommand(
             Command::new("stop")

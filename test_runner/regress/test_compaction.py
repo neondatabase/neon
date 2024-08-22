@@ -1,12 +1,17 @@
 import enum
 import json
 import os
+import time
 from typing import Optional
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, generate_uploads_and_deletions
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    generate_uploads_and_deletions,
+)
 from fixtures.pageserver.http import PageserverApiException
+from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
@@ -140,6 +145,10 @@ def test_sharding_compaction(
         "image_layer_creation_check_threshold": 0,
     }
 
+    # Disable compression, as we can't estimate the size of layers with compression enabled
+    # TODO: implement eager layer cutting during compaction
+    neon_env_builder.pageserver_config_override = "image_compression='disabled'"
+
     neon_env_builder.num_pageservers = 1 if shard_count is None else shard_count
     env = neon_env_builder.init_start(
         initial_tenant_conf=TENANT_CONF,
@@ -257,3 +266,148 @@ def test_uploads_and_deletions(
         found_allowed_error = any(env.pageserver.log_contains(e) for e in allowed_errors)
         if not found_allowed_error:
             raise Exception("None of the allowed_errors occured in the log")
+
+
+def test_pageserver_compaction_circuit_breaker(neon_env_builder: NeonEnvBuilder):
+    """
+    Check that repeated failures in compaction result in a circuit breaker breaking
+    """
+    TENANT_CONF = {
+        # Very frequent runs to rack up failures quickly
+        "compaction_period": "100ms",
+        # Small checkpoint distance to create many layers
+        "checkpoint_distance": 1024 * 128,
+        # Compact small layers
+        "compaction_target_size": 1024 * 128,
+        "image_creation_threshold": 1,
+    }
+
+    FAILPOINT = "delta-layer-writer-fail-before-finish"
+    BROKEN_LOG = ".*Circuit breaker broken!.*"
+
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+
+    workload = Workload(env, env.initial_tenant, env.initial_timeline)
+    workload.init()
+
+    # Set a failpoint that will prevent compaction succeeding
+    env.pageserver.http_client().configure_failpoints((FAILPOINT, "return"))
+
+    # Write some data to trigger compaction
+    workload.write_rows(1024, upload=False)
+    workload.write_rows(1024, upload=False)
+    workload.write_rows(1024, upload=False)
+
+    def assert_broken():
+        env.pageserver.assert_log_contains(BROKEN_LOG)
+        assert (
+            env.pageserver.http_client().get_metric_value("pageserver_circuit_breaker_broken_total")
+            or 0
+        ) == 1
+        assert (
+            env.pageserver.http_client().get_metric_value(
+                "pageserver_circuit_breaker_unbroken_total"
+            )
+            or 0
+        ) == 0
+
+    # Wait for enough failures to break the circuit breaker
+    # This wait is fairly long because we back off on compaction failures, so 5 retries takes ~30s
+    wait_until(60, 1, assert_broken)
+
+    # Sleep for a while, during which time we expect that compaction will _not_ be retried
+    time.sleep(10)
+
+    assert (
+        env.pageserver.http_client().get_metric_value("pageserver_circuit_breaker_broken_total")
+        or 0
+    ) == 1
+    assert (
+        env.pageserver.http_client().get_metric_value("pageserver_circuit_breaker_unbroken_total")
+        or 0
+    ) == 0
+    assert not env.pageserver.log_contains(".*Circuit breaker failure ended.*")
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool):
+    tenant_conf = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": f"{128 * 1024}",
+        "compaction_threshold": "1",
+        "compaction_target_size": f"{128 * 1024}",
+        # no PITR horizon, we specify the horizon when we request on-demand GC
+        "pitr_interval": "0s",
+        # disable background compaction and GC. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # create image layers as eagerly as possible
+        "image_creation_threshold": "1",
+        "image_layer_creation_check_threshold": "0",
+    }
+
+    # Explicitly enable/disable compression, rather than using default
+    if enabled:
+        neon_env_builder.pageserver_config_override = "image_compression='zstd'"
+    else:
+        neon_env_builder.pageserver_config_override = "image_compression='disabled'"
+
+    env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    pageserver = env.pageserver
+    ps_http = env.pageserver.http_client()
+    with env.endpoints.create_start(
+        "main", tenant_id=tenant_id, pageserver_id=pageserver.id
+    ) as endpoint:
+        endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+        # Generate around 800k worth of easily compressible data to store
+        for v in range(100):
+            endpoint.safe_psql(
+                f"INSERT INTO foo (id, val) VALUES ({v}, repeat('abcde{v:0>3}', 500))"
+            )
+    # run compaction to create image layers
+    ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+
+    layer_map = ps_http.layer_map_info(tenant_id, timeline_id)
+    image_layer_count = 0
+    delta_layer_count = 0
+    for layer in layer_map.historic_layers:
+        if layer.kind == "Image":
+            image_layer_count += 1
+        elif layer.kind == "Delta":
+            delta_layer_count += 1
+    assert image_layer_count > 0
+    assert delta_layer_count > 0
+
+    log.info(f"images: {image_layer_count}, deltas: {delta_layer_count}")
+
+    bytes_in = pageserver.http_client().get_metric_value(
+        "pageserver_compression_image_in_bytes_total"
+    )
+    bytes_out = pageserver.http_client().get_metric_value(
+        "pageserver_compression_image_out_bytes_total"
+    )
+    assert bytes_in is not None
+    assert bytes_out is not None
+    log.info(f"Compression ratio: {bytes_out/bytes_in} ({bytes_out} in, {bytes_out} out)")
+
+    if enabled:
+        # We are writing high compressible repetitive plain text, expect excellent compression
+        EXPECT_RATIO = 0.2
+        assert bytes_out / bytes_in < EXPECT_RATIO
+    else:
+        # Nothing should be compressed if we disabled it.
+        assert bytes_out >= bytes_in
+
+    # Destroy the endpoint and create a new one to resetthe caches
+    with env.endpoints.create_start(
+        "main", tenant_id=tenant_id, pageserver_id=pageserver.id
+    ) as endpoint:
+        for v in range(100):
+            res = endpoint.safe_psql(
+                f"SELECT count(*) FROM foo WHERE id={v} and val=repeat('abcde{v:0>3}', 500)"
+            )
+            assert res[0][0] == 1

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -17,30 +18,74 @@ from performance.pageserver.util import (
     setup_pageserver_with_tenants,
 )
 
+# The following tests use pagebench "getpage at latest LSN" to characterize the throughput of the pageserver.
+# originally there was a single test named `test_pageserver_max_throughput_getpage_at_latest_lsn``
+# so you still see some references to this name in the code.
+# To avoid recreating the snapshots for each test, we continue to use the name `max_throughput_latest_lsn`
+# for some files and metrics.
+
 
 # For reference, the space usage of the snapshots:
-# admin@ip-172-31-13-23:[~/neon-main]: sudo du -hs /instance_store/test_output/shared-snapshots
-# 137G    /instance_store/test_output/shared-snapshots
-# admin@ip-172-31-13-23:[~/neon-main]: sudo du -hs /instance_store/test_output/shared-snapshots/*
-# 1.8G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-1-13
-# 1.1G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-1-6
-# 8.5G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-10-13
-# 5.1G    /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-10-6
-# 76G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-13
-# 46G     /instance_store/test_output/shared-snapshots/max_throughput_latest_lsn-100-6
-@pytest.mark.parametrize("duration", [30])
-@pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(s) for s in [100, 200]])
-@pytest.mark.parametrize("n_tenants", [1, 10])
-@pytest.mark.timeout(
-    10000
-)  # TODO: this value is just "a really high number"; have this per instance type
-def test_pageserver_max_throughput_getpage_at_latest_lsn(
+# sudo du -hs /instance_store/neon/test_output/shared-snapshots/*
+# 416G	/instance_store/neon/test_output/shared-snapshots/max_throughput_latest_lsn-500-13
+@pytest.mark.parametrize("duration", [60 * 60])
+@pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
+@pytest.mark.parametrize("n_tenants", [500])
+@pytest.mark.timeout(10000)
+@pytest.mark.skipif(
+    os.getenv("CI", "false") == "true",
+    reason="This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI",
+)
+def test_pageserver_characterize_throughput_with_n_tenants(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     n_tenants: int,
     pgbench_scale: int,
     duration: int,
+):
+    setup_and_run_pagebench_benchmark(
+        neon_env_builder, zenbenchmark, pg_bin, n_tenants, pgbench_scale, duration, 1
+    )
+
+
+# For reference, the space usage of the snapshots:
+# sudo du -hs /instance_store/neon/test_output/shared-snapshots/*
+# 19G	/instance_store/neon/test_output/shared-snapshots/max_throughput_latest_lsn-1-136
+@pytest.mark.parametrize("duration", [20 * 60])
+@pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(2048)])
+# we use 1 client to characterize latencies, and 64 clients to characterize throughput/scalability
+# we use 64 clients because typically for a high number of connections we recommend the connection pooler
+# which by default uses 64 connections
+@pytest.mark.parametrize("n_clients", [1, 64])
+@pytest.mark.parametrize("n_tenants", [1])
+@pytest.mark.timeout(2400)
+@pytest.mark.skipif(
+    os.getenv("CI", "false") == "true",
+    reason="This test needs lot of resources and should run on dedicated HW, not in github action runners as part of CI",
+)
+def test_pageserver_characterize_latencies_with_1_client_and_throughput_with_many_clients_one_tenant(
+    neon_env_builder: NeonEnvBuilder,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    n_tenants: int,
+    pgbench_scale: int,
+    duration: int,
+    n_clients: int,
+):
+    setup_and_run_pagebench_benchmark(
+        neon_env_builder, zenbenchmark, pg_bin, n_tenants, pgbench_scale, duration, n_clients
+    )
+
+
+def setup_and_run_pagebench_benchmark(
+    neon_env_builder: NeonEnvBuilder,
+    zenbenchmark: NeonBenchmarker,
+    pg_bin: PgBin,
+    n_tenants: int,
+    pgbench_scale: int,
+    duration: int,
+    n_clients: int,
 ):
     def record(metric, **kwargs):
         zenbenchmark.record(
@@ -55,6 +100,7 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
             "n_tenants": (n_tenants, {"unit": ""}),
             "pgbench_scale": (pgbench_scale, {"unit": ""}),
             "duration": (duration, {"unit": "s"}),
+            "n_clients": (n_clients, {"unit": ""}),
         }
     )
 
@@ -85,6 +131,8 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
         f"max_throughput_latest_lsn-{n_tenants}-{pgbench_scale}",
         n_tenants,
         setup_wrapper,
+        # https://github.com/neondatabase/neon/issues/8070
+        timeout_in_seconds=60,
     )
 
     env.pageserver.allowed_errors.append(
@@ -94,7 +142,7 @@ def test_pageserver_max_throughput_getpage_at_latest_lsn(
         r".*query handler for.*pagestream.*failed: unexpected message: CopyFail during COPY.*"
     )
 
-    run_benchmark_max_throughput_latest_lsn(env, pg_bin, record, duration)
+    run_pagebench_benchmark(env, pg_bin, record, duration, n_clients)
 
 
 def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
@@ -116,10 +164,6 @@ def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
     }
     template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
     env.pageserver.tenant_detach(template_tenant)
-    env.pageserver.allowed_errors.append(
-        # tenant detach causes this because the underlying attach-hook removes the tenant from storage controller entirely
-        ".*Dropped remote consistent LSN updates.*",
-    )
     env.pageserver.tenant_attach(template_tenant, config)
     ps_http = env.pageserver.http_client()
     with env.endpoints.create_start("main", tenant_id=template_tenant) as ep:
@@ -155,8 +199,8 @@ def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
     return (template_tenant, template_timeline, config)
 
 
-def run_benchmark_max_throughput_latest_lsn(
-    env: NeonEnv, pg_bin: PgBin, record, duration_secs: int
+def run_pagebench_benchmark(
+    env: NeonEnv, pg_bin: PgBin, record, duration_secs: int, n_clients: int
 ):
     """
     Benchmark `env.pageserver` for max throughput @ latest LSN and record results in `zenbenchmark`.
@@ -170,6 +214,8 @@ def run_benchmark_max_throughput_latest_lsn(
         ps_http.base_url,
         "--page-service-connstring",
         env.pageserver.connstr(password=None),
+        "--num-clients",
+        str(n_clients),
         "--runtime",
         f"{duration_secs}s",
         # don't specify the targets explicitly, let pagebench auto-discover them
@@ -209,11 +255,3 @@ def run_benchmark_max_throughput_latest_lsn(
             unit="ms",
             report=MetricReport.LOWER_IS_BETTER,
         )
-
-    env.storage_controller.allowed_errors.append(
-        # The test setup swaps NeonEnv instances, hence different
-        # pg instances are used for the storage controller db. This means
-        # the storage controller doesn't know about the nodes mentioned
-        # in attachments.json at start-up.
-        ".* Scheduler missing node 1",
-    )

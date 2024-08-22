@@ -83,12 +83,6 @@ pub fn write_postgres_conf(
         ComputeMode::Replica => {
             // hot_standby is 'on' by default, but let's be explicit
             writeln!(file, "hot_standby=on")?;
-
-            // Inform the replica about the primary state
-            // Default is 'false'
-            if let Some(primary_is_running) = spec.primary_is_running {
-                writeln!(file, "neon.primary_is_running={}", primary_is_running)?;
-            }
         }
     }
 

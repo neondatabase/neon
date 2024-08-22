@@ -29,15 +29,16 @@ use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
-use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
-use crate::tenant::storage_layer::{
-    LayerAccessStats, ValueReconstructResult, ValueReconstructState,
+use crate::tenant::disk_btree::{
+    DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, MaxVectoredReadBytes, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+    BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    VectoredReadPlanner,
 };
 use crate::tenant::{PageReconstructError, Timeline};
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{self, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -46,10 +47,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
 use pageserver_api::keyspace::KeySpace;
-use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
@@ -134,7 +135,6 @@ pub struct ImageLayer {
     pub desc: PersistentLayerDesc,
     // This entry contains an image of all pages as of this LSN, should be the same as desc.lsn
     pub lsn: Lsn,
-    access_stats: LayerAccessStats,
     inner: OnceCell<ImageLayerInner>,
 }
 
@@ -224,7 +224,7 @@ impl ImageLayer {
             return Ok(());
         }
 
-        let inner = self.load(LayerAccessKind::Dump, ctx).await?;
+        let inner = self.load(ctx).await?;
 
         inner.dump(ctx).await?;
 
@@ -251,12 +251,7 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    async fn load(
-        &self,
-        access_kind: LayerAccessKind,
-        ctx: &RequestContext,
-    ) -> Result<&ImageLayerInner> {
-        self.access_stats.record_access(access_kind, ctx);
+    async fn load(&self, ctx: &RequestContext) -> Result<&ImageLayerInner> {
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
             .await
@@ -266,9 +261,8 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
-            .await
-            .and_then(|res| res)?;
+        let loaded =
+            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx).await?;
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
@@ -308,7 +302,6 @@ impl ImageLayer {
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
-            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: OnceCell::new(),
         })
     }
@@ -362,33 +355,37 @@ impl ImageLayer {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf, ctx).await;
+        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
         res?;
         Ok(())
     }
 }
 
 impl ImageLayerInner {
-    /// Returns nested result following Result<Result<_, OpErr>, Critical>:
-    /// - inner has the success or transient failure
-    /// - outer has the permanent failure
+    pub(crate) fn key_range(&self) -> &Range<Key> {
+        &self.key_range
+    }
+
+    pub(crate) fn lsn(&self) -> Lsn {
+        self.lsn
+    }
+
     pub(super) async fn load(
         path: &Utf8Path,
         lsn: Lsn,
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
-    ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path, ctx).await {
-            Ok(file) => file,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
-        };
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path, ctx)
+            .await
+            .context("open layer file")?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
-        let summary_blk = match block_reader.read_blk(0, ctx).await {
-            Ok(blk) => blk,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
-        };
+        let summary_blk = block_reader
+            .read_blk(0, ctx)
+            .await
+            .context("read first block")?;
 
         // length is the only way how this could fail, so it's not actually likely at all unless
         // read_blk returns wrong sized block.
@@ -413,7 +410,7 @@ impl ImageLayerInner {
             }
         }
 
-        Ok(Ok(ImageLayerInner {
+        Ok(ImageLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
             lsn,
@@ -421,47 +418,7 @@ impl ImageLayerInner {
             file_id,
             max_vectored_read_bytes,
             key_range: actual_summary.key_range,
-        }))
-    }
-
-    pub(super) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader =
-            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
-
-        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-        key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader
-            .get(
-                &keybuf,
-                &RequestContextBuilder::extend(ctx)
-                    .page_content_kind(PageContentKind::ImageLayerBtreeNode)
-                    .build(),
-            )
-            .await?
-        {
-            let blob = block_reader
-                .block_cursor()
-                .read_blob(
-                    offset,
-                    &RequestContextBuilder::extend(ctx)
-                        .page_content_kind(PageContentKind::ImageLayerValue)
-                        .build(),
-                )
-                .await
-                .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
-
-            reconstruct_state.img = Some((self.lsn, value));
-            Ok(ValueReconstructResult::Complete)
-        } else {
-            Ok(ValueReconstructResult::Missing)
-        }
+        })
     }
 
     // Look up the keys in the provided keyspace and update
@@ -486,7 +443,6 @@ impl ImageLayerInner {
     }
 
     /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
-    #[cfg(test)]
     pub(super) async fn load_key_values(
         &self,
         ctx: &RequestContext,
@@ -495,7 +451,7 @@ impl ImageLayerInner {
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
         let mut result = Vec::new();
-        let mut stream = Box::pin(tree_reader.get_stream_from(&[0; KEY_SIZE], ctx));
+        let mut stream = Box::pin(tree_reader.into_stream(&[0; KEY_SIZE], ctx));
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let cursor = block_reader.block_cursor();
         while let Some(item) = stream.next().await {
@@ -544,7 +500,7 @@ impl ImageLayerInner {
             let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
             range.start.write_to_byte_slice(&mut search_key);
 
-            let index_stream = tree_reader.get_stream_from(&search_key, &ctx);
+            let index_stream = tree_reader.clone().into_stream(&search_key, &ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
@@ -689,6 +645,23 @@ impl ImageLayerInner {
             };
         }
     }
+
+    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
+        let block_reader = FileBlockReader::new(&self.file, self.file_id);
+        let tree_reader =
+            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
+        ImageLayerIterator {
+            image_layer: self,
+            ctx,
+            index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
+            key_values_batch: VecDeque::new(),
+            is_end: false,
+            planner: StreamingVectoredReadPlanner::new(
+                1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
+                1024,        // The default value. Unit tests might use a different value
+            ),
+        }
+    }
 }
 
 /// A builder object for constructing a new image layer.
@@ -710,11 +683,32 @@ struct ImageLayerWriterInner {
     key_range: Range<Key>,
     lsn: Lsn,
 
+    // Total uncompressed bytes passed into put_image
+    uncompressed_bytes: u64,
+
+    // Like `uncompressed_bytes`,
+    // but only of images we might consider for compression
+    uncompressed_bytes_eligible: u64,
+
+    // Like `uncompressed_bytes`, but only of images
+    // where we have chosen their compressed form
+    uncompressed_bytes_chosen: u64,
+
+    // Number of keys in the layer.
+    num_keys: usize,
+
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
+
+    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
+    last_written_key: Key,
 }
 
 impl ImageLayerWriterInner {
+    fn size(&self) -> u64 {
+        self.tree.borrow_writer().size() + self.blob_writer.size()
+    }
+
     ///
     /// Start building a new image layer.
     ///
@@ -765,6 +759,11 @@ impl ImageLayerWriterInner {
             lsn,
             tree: tree_builder,
             blob_writer,
+            uncompressed_bytes: 0,
+            uncompressed_bytes_eligible: 0,
+            uncompressed_bytes_chosen: 0,
+            num_keys: 0,
+            last_written_key: Key::MIN,
         };
 
         Ok(writer)
@@ -782,13 +781,33 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
-        let (_img, res) = self.blob_writer.write_blob(img, ctx).await;
+        let compression = self.conf.image_compression;
+        let uncompressed_len = img.len() as u64;
+        self.uncompressed_bytes += uncompressed_len;
+        self.num_keys += 1;
+        let (_img, res) = self
+            .blob_writer
+            .write_blob_maybe_compressed(img.slice_len(), ctx, compression)
+            .await;
         // TODO: re-use the buffer for `img` further upstack
-        let off = res?;
+        let (off, compression_info) = res?;
+        if compression_info.compressed_size.is_some() {
+            // The image has been considered for compression at least
+            self.uncompressed_bytes_eligible += uncompressed_len;
+        }
+        if compression_info.written_compressed {
+            // The image has been compressed
+            self.uncompressed_bytes_chosen += uncompressed_len;
+        }
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;
+
+        #[cfg(feature = "testing")]
+        {
+            self.last_written_key = key;
+        }
 
         Ok(())
     }
@@ -800,9 +819,18 @@ impl ImageLayerWriterInner {
         self,
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
+        end_key: Option<Key>,
     ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+
+        // Calculate compression ratio
+        let compressed_size = self.blob_writer.size() - PAGE_SZ as u64; // Subtract PAGE_SZ for header
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES.inc_by(self.uncompressed_bytes);
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED
+            .inc_by(self.uncompressed_bytes_eligible);
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
+        crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
         let mut file = self.blob_writer.into_inner();
 
@@ -811,7 +839,7 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf, ctx).await;
+            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
             res?;
         }
 
@@ -831,7 +859,7 @@ impl ImageLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf, ctx).await;
+        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
         res?;
 
         let metadata = file
@@ -842,10 +870,22 @@ impl ImageLayerWriterInner {
         let desc = PersistentLayerDesc::new_img(
             self.tenant_shard_id,
             self.timeline_id,
-            self.key_range.clone(),
+            if let Some(end_key) = end_key {
+                self.key_range.start..end_key
+            } else {
+                self.key_range.clone()
+            },
             self.lsn,
             metadata.len(),
         );
+
+        #[cfg(feature = "testing")]
+        if let Some(end_key) = end_key {
+            assert!(
+                self.last_written_key < end_key,
+                "written key violates end_key range"
+            );
+        }
 
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
@@ -923,6 +963,18 @@ impl ImageLayerWriter {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
+    #[cfg(test)]
+    /// Estimated size of the image layer.
+    pub(crate) fn estimated_size(&self) -> u64 {
+        let inner = self.inner.as_ref().unwrap();
+        inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
+    }
+
+    #[cfg(test)]
+    pub(crate) fn num_keys(&self) -> usize {
+        self.inner.as_ref().unwrap().num_keys
+    }
+
     ///
     /// Finish writing the image layer.
     ///
@@ -931,7 +983,26 @@ impl ImageLayerWriter {
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<super::ResidentLayer> {
-        self.inner.take().unwrap().finish(timeline, ctx).await
+        self.inner.take().unwrap().finish(timeline, ctx, None).await
+    }
+
+    #[cfg(test)]
+    /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
+    pub(super) async fn finish_with_end_key(
+        mut self,
+        timeline: &Arc<Timeline>,
+        end_key: Key,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<super::ResidentLayer> {
+        self.inner
+            .take()
+            .unwrap()
+            .finish(timeline, ctx, Some(end_key))
+            .await
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.inner.as_ref().unwrap().size()
     }
 }
 
@@ -943,11 +1014,78 @@ impl Drop for ImageLayerWriter {
     }
 }
 
+pub struct ImageLayerIterator<'a> {
+    image_layer: &'a ImageLayerInner,
+    ctx: &'a RequestContext,
+    planner: StreamingVectoredReadPlanner,
+    index_iter: DiskBtreeIterator<'a>,
+    key_values_batch: VecDeque<(Key, Lsn, Value)>,
+    is_end: bool,
+}
+
+impl<'a> ImageLayerIterator<'a> {
+    /// Retrieve a batch of key-value pairs into the iterator buffer.
+    async fn next_batch(&mut self) -> anyhow::Result<()> {
+        assert!(self.key_values_batch.is_empty());
+        assert!(!self.is_end);
+
+        let plan = loop {
+            if let Some(res) = self.index_iter.next().await {
+                let (raw_key, offset) = res?;
+                if let Some(batch_plan) = self.planner.handle(
+                    Key::from_slice(&raw_key[..KEY_SIZE]),
+                    self.image_layer.lsn,
+                    offset,
+                ) {
+                    break batch_plan;
+                }
+            } else {
+                self.is_end = true;
+                let payload_end = self.image_layer.index_start_blk as u64 * PAGE_SZ as u64;
+                if let Some(item) = self.planner.handle_range_end(payload_end) {
+                    break item;
+                } else {
+                    return Ok(()); // TODO: a test case on empty iterator
+                }
+            }
+        };
+        let vectored_blob_reader = VectoredBlobReader::new(&self.image_layer.file);
+        let mut next_batch = std::collections::VecDeque::new();
+        let buf_size = plan.size();
+        let buf = BytesMut::with_capacity(buf_size);
+        let blobs_buf = vectored_blob_reader
+            .read_blobs(&plan, buf, self.ctx)
+            .await?;
+        let frozen_buf: Bytes = blobs_buf.buf.freeze();
+        for meta in blobs_buf.blobs.iter() {
+            let img_buf = frozen_buf.slice(meta.start..meta.end);
+            next_batch.push_back((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
+        }
+        self.key_values_batch = next_batch;
+        Ok(())
+    }
+
+    pub async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
+        if self.key_values_batch.is_empty() {
+            if self.is_end {
+                return Ok(None);
+            }
+            self.next_batch().await?;
+        }
+        Ok(Some(
+            self.key_values_batch
+                .pop_front()
+                .expect("should not be empty"),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use bytes::Bytes;
+    use itertools::Itertools;
     use pageserver_api::{
         key::Key,
         shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
@@ -959,11 +1097,19 @@ mod test {
     };
 
     use crate::{
-        tenant::{config::TenantConf, harness::TenantHarness},
+        context::RequestContext,
+        repository::Value,
+        tenant::{
+            config::TenantConf,
+            harness::{TenantHarness, TIMELINE_ID},
+            storage_layer::ResidentLayer,
+            vectored_blob_io::StreamingVectoredReadPlanner,
+            Tenant, Timeline,
+        },
         DEFAULT_PG_VERSION,
     };
 
-    use super::ImageLayerWriter;
+    use super::{ImageLayerIterator, ImageLayerWriter};
 
     #[tokio::test]
     async fn image_layer_rewrite() {
@@ -994,6 +1140,7 @@ mod test {
             ShardIdentity::unsharded(),
             get_next_gen(),
         )
+        .await
         .unwrap();
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
@@ -1060,6 +1207,7 @@ mod test {
                 // But here, all we care about is that the gen number is unique.
                 get_next_gen(),
             )
+            .await
             .unwrap();
             let (tenant, ctx) = harness.load().await;
             let timeline = tenant
@@ -1131,6 +1279,113 @@ mod test {
                     assert_eq!(replacement.metadata().file_size, 811008);
                 }
                 _ => unreachable!(),
+            }
+        }
+    }
+
+    async fn produce_image_layer(
+        tenant: &Tenant,
+        tline: &Arc<Timeline>,
+        mut images: Vec<(Key, Bytes)>,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
+        images.sort();
+        let (key_start, _) = images.first().unwrap();
+        let (key_last, _) = images.last().unwrap();
+        let key_end = key_last.next();
+        let key_range = *key_start..key_end;
+        let mut writer = ImageLayerWriter::new(
+            tenant.conf,
+            tline.timeline_id,
+            tenant.tenant_shard_id,
+            &key_range,
+            lsn,
+            ctx,
+        )
+        .await?;
+
+        for (key, img) in images {
+            writer.put_image(key, img, ctx).await?;
+        }
+        let img_layer = writer.finish(tline, ctx).await?;
+
+        Ok::<_, anyhow::Error>(img_layer)
+    }
+
+    async fn assert_img_iter_equal(
+        img_iter: &mut ImageLayerIterator<'_>,
+        expect: &[(Key, Bytes)],
+        expect_lsn: Lsn,
+    ) {
+        let mut expect_iter = expect.iter();
+        loop {
+            let o1 = img_iter.next().await.unwrap();
+            let o2 = expect_iter.next();
+            match (o1, o2) {
+                (None, None) => break,
+                (Some((k1, l1, v1)), Some((k2, i2))) => {
+                    let Value::Image(i1) = v1 else {
+                        panic!("expect Value::Image")
+                    };
+                    assert_eq!(&k1, k2);
+                    assert_eq!(l1, expect_lsn);
+                    assert_eq!(&i1, i2);
+                }
+                (o1, o2) => panic!("iterators length mismatch: {:?}, {:?}", o1, o2),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn image_layer_iterator() {
+        let harness = TenantHarness::create("image_layer_iterator").await.unwrap();
+        let (tenant, ctx) = harness.load().await;
+
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        fn get_key(id: u32) -> Key {
+            let mut key = Key::from_hex("000000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+        const N: usize = 1000;
+        let test_imgs = (0..N)
+            .map(|idx| (get_key(idx as u32), Bytes::from(format!("img{idx:05}"))))
+            .collect_vec();
+        let resident_layer =
+            produce_image_layer(&tenant, &tline, test_imgs.clone(), Lsn(0x10), &ctx)
+                .await
+                .unwrap();
+        let img_layer = resident_layer.get_as_image(&ctx).await.unwrap();
+        for max_read_size in [1, 1024] {
+            for batch_size in [1, 2, 4, 8, 3, 7, 13] {
+                println!("running with batch_size={batch_size} max_read_size={max_read_size}");
+                // Test if the batch size is correctly determined
+                let mut iter = img_layer.iter(&ctx);
+                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                let mut num_items = 0;
+                for _ in 0..3 {
+                    iter.next_batch().await.unwrap();
+                    num_items += iter.key_values_batch.len();
+                    if max_read_size == 1 {
+                        // every key should be a batch b/c the value is larger than max_read_size
+                        assert_eq!(iter.key_values_batch.len(), 1);
+                    } else {
+                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                    }
+                    if num_items >= N {
+                        break;
+                    }
+                    iter.key_values_batch.clear();
+                }
+                // Test if the result is correct
+                let mut iter = img_layer.iter(&ctx);
+                iter.planner = StreamingVectoredReadPlanner::new(max_read_size, batch_size);
+                assert_img_iter_equal(&mut iter, &test_imgs, Lsn(0x10)).await;
             }
         }
     }

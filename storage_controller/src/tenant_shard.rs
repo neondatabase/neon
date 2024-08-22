@@ -7,8 +7,9 @@ use std::{
 use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
-    reconciler::ReconcileUnits,
+    reconciler::{ReconcileUnits, ReconcilerConfig},
     scheduler::{AffinityScore, MaySchedule, RefCountUpdate, ScheduleContext},
+    service::ReconcileResultRequest,
 };
 use pageserver_api::controller_api::{
     NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
@@ -17,7 +18,7 @@ use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
     shard::{ShardIdentity, TenantShardId},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{instrument, Instrument};
@@ -124,6 +125,7 @@ pub(crate) struct TenantShard {
     ///  - ReconcileWaiters need to Arc-clone the overall object to read it later
     ///  - ReconcileWaitError needs to use an `Arc<ReconcileError>` because we can construct
     ///    many waiters for one shard, and the underlying error types are not Clone.
+    ///
     /// TODO: generalize to an array of recent events
     /// TOOD: use a ArcSwap instead of mutex for faster reads?
     #[serde(serialize_with = "read_last_error")]
@@ -282,7 +284,7 @@ impl Drop for IntentState {
     }
 }
 
-#[derive(Default, Clone, Serialize)]
+#[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub(crate) struct ObservedState {
     pub(crate) locations: HashMap<NodeId, ObservedStateLocation>,
 }
@@ -296,7 +298,7 @@ pub(crate) struct ObservedState {
 ///       what it is (e.g. we failed partway through configuring it)
 ///     * Instance exists with conf==Some: this tells us what we last successfully configured on this node,
 ///       and that configuration will still be present unless something external interfered.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub(crate) struct ObservedStateLocation {
     /// If None, it means we do not know the status of this shard's location on this node, but
     /// we know that we might have some state on this node.
@@ -383,9 +385,9 @@ impl ReconcilerWaiter {
     }
 
     pub(crate) fn get_status(&self) -> ReconcilerStatus {
-        if self.seq_wait.would_wait_for(self.seq).is_err() {
+        if self.seq_wait.would_wait_for(self.seq).is_ok() {
             ReconcilerStatus::Done
-        } else if self.error_seq_wait.would_wait_for(self.seq).is_err() {
+        } else if self.error_seq_wait.would_wait_for(self.seq).is_ok() {
             ReconcilerStatus::Failed
         } else {
             ReconcilerStatus::InProgress
@@ -646,6 +648,48 @@ impl TenantShard {
         Ok(())
     }
 
+    /// Reschedule this tenant shard to one of its secondary locations. Returns a scheduling error
+    /// if the swap is not possible and leaves the intent state in its original state.
+    ///
+    /// Arguments:
+    /// `attached_to`: the currently attached location matching the intent state (may be None if the
+    /// shard is not attached)
+    /// `promote_to`: an optional secondary location of this tenant shard. If set to None, we ask
+    /// the scheduler to recommend a node
+    pub(crate) fn reschedule_to_secondary(
+        &mut self,
+        promote_to: Option<NodeId>,
+        scheduler: &mut Scheduler,
+    ) -> Result<(), ScheduleError> {
+        let promote_to = match promote_to {
+            Some(node) => node,
+            None => match scheduler.node_preferred(self.intent.get_secondary()) {
+                Some(node) => node,
+                None => {
+                    return Err(ScheduleError::ImpossibleConstraint);
+                }
+            },
+        };
+
+        assert!(self.intent.get_secondary().contains(&promote_to));
+
+        if let Some(node) = self.intent.get_attached() {
+            let demoted = self.intent.demote_attached(scheduler, *node);
+            if !demoted {
+                return Err(ScheduleError::ImpossibleConstraint);
+            }
+        }
+
+        self.intent.promote_attached(scheduler, promote_to);
+
+        // Increment the sequence number for the edge case where a
+        // reconciler is already running to avoid waiting on the
+        // current reconcile instead of spawning a new one.
+        self.sequence = self.sequence.next();
+
+        Ok(())
+    }
+
     /// Optimize attachments: if a shard has a secondary location that is preferable to
     /// its primary location based on soft constraints, switch that secondary location
     /// to be attached.
@@ -866,12 +910,8 @@ impl TenantShard {
                 .generation
                 .expect("Attempted to enter attached state without a generation");
 
-            let wanted_conf = attached_location_conf(
-                generation,
-                &self.shard,
-                &self.config,
-                !self.intent.secondary.is_empty(),
-            );
+            let wanted_conf =
+                attached_location_conf(generation, &self.shard, &self.config, &self.policy);
             match self.observed.locations.get(&node_id) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {}
                 Some(_) | None => {
@@ -1020,9 +1060,10 @@ impl TenantShard {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn spawn_reconciler(
         &mut self,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResult>,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
         pageservers: &Arc<HashMap<NodeId, Node>>,
         compute_hook: &Arc<ComputeHook>,
+        reconciler_config: ReconcilerConfig,
         service_config: &service::Config,
         persistence: &Arc<Persistence>,
         units: ReconcileUnits,
@@ -1057,9 +1098,11 @@ impl TenantShard {
         let mut reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
+            placement_policy: self.policy.clone(),
             generation: self.generation,
             intent: reconciler_intent,
             detach,
+            reconciler_config,
             config: self.config.clone(),
             observed: self.observed.clone(),
             compute_hook: compute_hook.clone(),
@@ -1143,7 +1186,9 @@ impl TenantShard {
                     pending_compute_notification: reconciler.compute_notify_failure,
                 };
 
-                result_tx.send(result).ok();
+                result_tx
+                    .send(ReconcileResultRequest::ReconcileResult(result))
+                    .ok();
             }
             .instrument(reconciler_span),
         );
@@ -1190,18 +1235,27 @@ impl TenantShard {
         }
     }
 
-    // If we had any state at all referring to this node ID, drop it.  Does not
-    // attempt to reschedule.
-    pub(crate) fn deref_node(&mut self, node_id: NodeId) {
+    /// If we had any state at all referring to this node ID, drop it.  Does not
+    /// attempt to reschedule.
+    ///
+    /// Returns true if we modified the node's intent state.
+    pub(crate) fn deref_node(&mut self, node_id: NodeId) -> bool {
+        let mut intent_modified = false;
+
+        // Drop if this node was our attached intent
         if self.intent.attached == Some(node_id) {
             self.intent.attached = None;
+            intent_modified = true;
         }
 
+        // Drop from the list of secondaries, and check if we modified it
+        let had_secondaries = self.intent.secondary.len();
         self.intent.secondary.retain(|n| n != &node_id);
-
-        self.observed.locations.remove(&node_id);
+        intent_modified |= self.intent.secondary.len() != had_secondaries;
 
         debug_assert!(!self.intent.all_pageservers().contains(&node_id));
+
+        intent_modified
     }
 
     pub(crate) fn set_scheduling_policy(&mut self, p: ShardSchedulingPolicy) {
@@ -1632,14 +1686,10 @@ pub(crate) mod tests {
 
         // We should see equal number of locations on the two nodes.
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 4);
-        // Scheduling does not consider the number of attachments picking the initial
-        // pageserver to attach to (hence the assertion that all primaries are on the
-        // same node)
-        // TODO: Tweak the scheduling to evenly distribute attachments for new shards.
-        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 4);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(1)), 2);
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 4);
-        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 0);
+        assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 2);
 
         // Add another two nodes: we should see the shards spread out when their optimize
         // methods are called

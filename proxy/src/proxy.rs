@@ -8,6 +8,7 @@ pub mod passthrough;
 pub mod retry;
 pub mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
+pub use copy_bidirectional::ErrorSource;
 
 use crate::{
     auth,
@@ -112,18 +113,18 @@ pub async fn task_main(
                 }
             };
 
-            let mut ctx = RequestMonitoring::new(
+            let ctx = RequestMonitoring::new(
                 session_id,
                 peer_addr,
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );
-            let span = ctx.span.clone();
+            let span = ctx.span();
 
             let startup = Box::pin(
                 handle_client(
                     config,
-                    &mut ctx,
+                    &ctx,
                     cancellation_handler,
                     socket,
                     ClientMode::Tcp,
@@ -148,8 +149,11 @@ pub async fn task_main(
                     ctx.log_connect();
                     match p.proxy_pass().instrument(span.clone()).await {
                         Ok(()) => {}
-                        Err(e) => {
-                            error!(parent: &span, "per-client task finished with an error: {e:#}");
+                        Err(ErrorSource::Client(e)) => {
+                            error!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
+                        }
+                        Err(ErrorSource::Compute(e)) => {
+                            error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");
                         }
                     }
                 }
@@ -236,7 +240,7 @@ impl ReportableError for ClientRequestError {
 
 pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     mode: ClientMode,
@@ -244,25 +248,25 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     conn_gauge: NumClientConnectionsGuard<'static>,
 ) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
     info!(
-        protocol = %ctx.protocol,
+        protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
 
     let metrics = &Metrics::get().proxy;
-    let proto = ctx.protocol;
+    let proto = ctx.protocol();
     let _request_gauge = metrics.connection_requests.guard(proto);
 
     let tls = config.tls_config.as_ref();
 
     let record_handshake_error = !ctx.has_private_peer_addr();
-    let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
-    let do_handshake = handshake(stream, mode.handshake_tls(tls), record_handshake_error);
+    let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
+    let do_handshake = handshake(ctx, stream, mode.handshake_tls(tls), record_handshake_error);
     let (mut stream, params) =
         match tokio::time::timeout(config.handshake_timeout, do_handshake).await?? {
             HandshakeData::Startup(stream, params) => (stream, params),
             HandshakeData::Cancel(cancel_key_data) => {
                 return Ok(cancellation_handler
-                    .cancel_session(cancel_key_data, ctx.session_id)
+                    .cancel_session(cancel_key_data, ctx.session_id())
                     .await
                     .map(|()| None)?)
             }

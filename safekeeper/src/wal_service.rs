@@ -4,9 +4,10 @@
 //!
 use anyhow::{Context, Result};
 use postgres_backend::QueryError;
-use std::{future, time::Duration};
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_io_timeout::TimeoutReader;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{auth::Scope, measured_stream::MeasuredStream};
 
@@ -42,7 +43,7 @@ pub async fn task_main(
                     error!("connection handler exited: {}", err);
                 }
             }
-            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty)),
+            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty, application_name = field::Empty)),
         );
     }
 }
@@ -100,7 +101,7 @@ async fn handle_socket(
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.
     pgbackend
-        .run(&mut conn_handler, future::pending::<()>)
+        .run(&mut conn_handler, &CancellationToken::new())
         .await
 }
 

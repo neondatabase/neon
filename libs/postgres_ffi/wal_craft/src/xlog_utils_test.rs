@@ -178,7 +178,7 @@ pub fn test_find_end_of_wal_last_crossing_segment() {
 /// currently 1024.
 #[test]
 pub fn test_update_next_xid() {
-    let checkpoint_buf = [0u8; std::mem::size_of::<CheckPoint>()];
+    let checkpoint_buf = [0u8; size_of::<CheckPoint>()];
     let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
 
     checkpoint.nextXid = FullTransactionId { value: 10 };
@@ -200,6 +200,53 @@ pub fn test_update_next_xid() {
     // XID_CHECKPOINT_INTERVAL boundary.
     checkpoint.update_next_xid(1024);
     assert_eq!(checkpoint.nextXid.value, 2048);
+}
+
+#[test]
+pub fn test_update_next_multixid() {
+    let checkpoint_buf = [0u8; size_of::<CheckPoint>()];
+    let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
+
+    // simple case
+    checkpoint.nextMulti = 20;
+    checkpoint.nextMultiOffset = 20;
+    checkpoint.update_next_multixid(1000, 2000);
+    assert_eq!(checkpoint.nextMulti, 1000);
+    assert_eq!(checkpoint.nextMultiOffset, 2000);
+
+    // No change
+    checkpoint.update_next_multixid(500, 900);
+    assert_eq!(checkpoint.nextMulti, 1000);
+    assert_eq!(checkpoint.nextMultiOffset, 2000);
+
+    // Close to wraparound, but not wrapped around yet
+    checkpoint.nextMulti = 0xffff0000;
+    checkpoint.nextMultiOffset = 0xfffe0000;
+    checkpoint.update_next_multixid(0xffff00ff, 0xfffe00ff);
+    assert_eq!(checkpoint.nextMulti, 0xffff00ff);
+    assert_eq!(checkpoint.nextMultiOffset, 0xfffe00ff);
+
+    // Wraparound
+    checkpoint.update_next_multixid(1, 900);
+    assert_eq!(checkpoint.nextMulti, 1);
+    assert_eq!(checkpoint.nextMultiOffset, 900);
+
+    // Wraparound nextMulti to 0.
+    //
+    // It's a bit surprising that nextMulti can be 0, because that's a special value
+    // (InvalidMultiXactId). However, that's how Postgres does it at multi-xid wraparound:
+    // nextMulti wraps around to 0, but then when the next multi-xid is assigned, it skips
+    // the 0 and the next multi-xid actually assigned is 1.
+    checkpoint.nextMulti = 0xffff0000;
+    checkpoint.nextMultiOffset = 0xfffe0000;
+    checkpoint.update_next_multixid(0, 0xfffe00ff);
+    assert_eq!(checkpoint.nextMulti, 0);
+    assert_eq!(checkpoint.nextMultiOffset, 0xfffe00ff);
+
+    // Wraparound nextMultiOffset to 0
+    checkpoint.update_next_multixid(0, 0);
+    assert_eq!(checkpoint.nextMulti, 0);
+    assert_eq!(checkpoint.nextMultiOffset, 0);
 }
 
 #[test]

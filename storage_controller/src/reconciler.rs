@@ -1,6 +1,7 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::service;
+use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
@@ -29,12 +31,16 @@ pub(super) struct Reconciler {
     /// of a tenant's state from when we spawned a reconcile task.
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
+    pub(crate) placement_policy: PlacementPolicy,
     pub(crate) generation: Option<Generation>,
     pub(crate) intent: TargetState,
 
     /// Nodes not referenced by [`Self::intent`], from which we should try
     /// to detach this tenant shard.
     pub(crate) detach: Vec<Node>,
+
+    /// Configuration specific to this reconciler
+    pub(crate) reconciler_config: ReconcilerConfig,
 
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
@@ -68,6 +74,65 @@ pub(super) struct Reconciler {
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+}
+
+pub(crate) struct ReconcilerConfigBuilder {
+    config: ReconcilerConfig,
+}
+
+impl ReconcilerConfigBuilder {
+    pub(crate) fn new() -> Self {
+        Self {
+            config: ReconcilerConfig::default(),
+        }
+    }
+
+    pub(crate) fn secondary_warmup_timeout(self, value: Duration) -> Self {
+        Self {
+            config: ReconcilerConfig {
+                secondary_warmup_timeout: Some(value),
+                ..self.config
+            },
+        }
+    }
+
+    pub(crate) fn secondary_download_request_timeout(self, value: Duration) -> Self {
+        Self {
+            config: ReconcilerConfig {
+                secondary_download_request_timeout: Some(value),
+                ..self.config
+            },
+        }
+    }
+
+    pub(crate) fn build(self) -> ReconcilerConfig {
+        self.config
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone)]
+pub(crate) struct ReconcilerConfig {
+    // During live migration give up on warming-up the secondary
+    // after this timeout.
+    secondary_warmup_timeout: Option<Duration>,
+
+    // During live migrations this is the amount of time that
+    // the pagserver will hold our poll.
+    secondary_download_request_timeout: Option<Duration>,
+}
+
+impl ReconcilerConfig {
+    pub(crate) fn get_secondary_warmup_timeout(&self) -> Duration {
+        const SECONDARY_WARMUP_TIMEOUT_DEFAULT: Duration = Duration::from_secs(300);
+        self.secondary_warmup_timeout
+            .unwrap_or(SECONDARY_WARMUP_TIMEOUT_DEFAULT)
+    }
+
+    pub(crate) fn get_secondary_download_request_timeout(&self) -> Duration {
+        const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(20);
+        self.secondary_download_request_timeout
+            .unwrap_or(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT)
+    }
 }
 
 /// RAII resource units granted to a Reconciler, which it should keep alive until it finishes doing I/O
@@ -297,11 +362,13 @@ impl Reconciler {
     ) -> Result<(), ReconcileError> {
         // This is not the timeout for a request, but the total amount of time we're willing to wait
         // for a secondary location to get up to date before
-        const TOTAL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+        let total_download_timeout = self.reconciler_config.get_secondary_warmup_timeout();
 
         // This the long-polling interval for the secondary download requests we send to destination pageserver
         // during a migration.
-        const REQUEST_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+        let request_download_timeout = self
+            .reconciler_config
+            .get_secondary_download_request_timeout();
 
         let started_at = Instant::now();
 
@@ -312,14 +379,14 @@ impl Reconciler {
                         client
                             .tenant_secondary_download(
                                 tenant_shard_id,
-                                Some(REQUEST_DOWNLOAD_TIMEOUT),
+                                Some(request_download_timeout),
                             )
                             .await
                     },
                     &self.service_config.jwt_token,
                     1,
                     3,
-                    REQUEST_DOWNLOAD_TIMEOUT * 2,
+                    request_download_timeout * 2,
                     &self.cancel,
                 )
                 .await
@@ -347,7 +414,7 @@ impl Reconciler {
                 return Ok(());
             } else if status == StatusCode::ACCEPTED {
                 let total_runtime = started_at.elapsed();
-                if total_runtime > TOTAL_DOWNLOAD_TIMEOUT {
+                if total_runtime > total_download_timeout {
                     tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
                         total_runtime.as_millis(),
                         progress.layers_downloaded,
@@ -641,7 +708,7 @@ impl Reconciler {
                 generation,
                 &self.shard,
                 &self.config,
-                !self.intent.secondary.is_empty(),
+                &self.placement_policy,
             );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
@@ -653,11 +720,8 @@ impl Reconciler {
                     // reconcile this location.  This includes locations with different configurations, as well
                     // as locations with unknown (None) observed state.
 
-                    // The general case is to increment the generation.  However, there are cases
-                    // where this is not necessary:
-                    // - if we are only updating the TenantConf part of the location
-                    // - if we are only changing the attachment mode (e.g. going to attachedmulti or attachedstale)
-                    //   and the location was already in the correct generation
+                    // Incrementing generation is the safe general case, but is inefficient for changes that only
+                    // modify some details (e.g. the tenant's config).
                     let increment_generation = match observed {
                         None => true,
                         Some(ObservedStateLocation { conf: None }) => true,
@@ -666,18 +730,11 @@ impl Reconciler {
                         }) => {
                             let generations_match = observed.generation == wanted_conf.generation;
 
-                            use LocationConfigMode::*;
-                            let mode_transition_requires_gen_inc =
-                                match (observed.mode, wanted_conf.mode) {
-                                    // Usually the short-lived attachment modes (multi and stale) are only used
-                                    // in the case of [`Self::live_migrate`], but it is simple to handle them correctly
-                                    // here too.  Locations are allowed to go Single->Stale and Multi->Single within the same generation.
-                                    (AttachedSingle, AttachedStale) => false,
-                                    (AttachedMulti, AttachedSingle) => false,
-                                    (lhs, rhs) => lhs != rhs,
-                                };
-
-                            !generations_match || mode_transition_requires_gen_inc
+                            // We may skip incrementing the generation if the location is already in the expected mode and
+                            // generation.  In principle it would also be safe to skip from certain other modes (e.g. AttachedStale),
+                            // but such states are handled inside `live_migrate`, and if we see that state here we're cleaning up
+                            // after a restart/crash, so fall back to the universally safe path of incrementing generation.
+                            !generations_match || (observed.mode != wanted_conf.mode)
                         }
                     };
 
@@ -747,6 +804,8 @@ impl Reconciler {
             self.location_config(&node, conf, None, false).await?;
         }
 
+        failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
+
         Ok(())
     }
 
@@ -801,8 +860,15 @@ pub(crate) fn attached_location_conf(
     generation: Generation,
     shard: &ShardIdentity,
     config: &TenantConfig,
-    has_secondaries: bool,
+    policy: &PlacementPolicy,
 ) -> LocationConfig {
+    let has_secondaries = match policy {
+        PlacementPolicy::Attached(0) | PlacementPolicy::Detached | PlacementPolicy::Secondary => {
+            false
+        }
+        PlacementPolicy::Attached(_) => true,
+    };
+
     LocationConfig {
         mode: LocationConfigMode::AttachedSingle,
         generation: generation.into(),

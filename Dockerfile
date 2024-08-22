@@ -17,7 +17,7 @@ COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
 
-ENV BUILD_TYPE release
+ENV BUILD_TYPE=release
 RUN set -e \
     && mold -run make -j $(nproc) -s neon-pg-ext \
     && rm -rf pg_install/build \
@@ -29,25 +29,15 @@ WORKDIR /home/nonroot
 ARG GIT_VERSION=local
 ARG BUILD_TAG
 
-# Enable https://github.com/paritytech/cachepot to cache Rust crates' compilation results in Docker builds.
-# Set up cachepot to use an AWS S3 bucket for cache results, to reuse it between `docker build` invocations.
-# cachepot falls back to local filesystem if S3 is misconfigured, not failing the build
-ARG RUSTC_WRAPPER=cachepot
-ENV AWS_REGION=eu-central-1
-ENV CACHEPOT_S3_KEY_PREFIX=cachepot
-ARG CACHEPOT_BUCKET=neon-github-dev
-#ARG AWS_ACCESS_KEY_ID
-#ARG AWS_SECRET_ACCESS_KEY
-
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/v16/lib                       pg_install/v16/lib
 COPY --chown=nonroot . .
 
-# Show build caching stats to check if it was used in the end.
-# Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
+ARG ADDITIONAL_RUSTFLAGS
 RUN set -e \
-    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build  \
+    && PQ_LIB_DIR=$(pwd)/pg_install/v16/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
@@ -56,8 +46,8 @@ RUN set -e \
       --bin storage_controller  \
       --bin proxy  \
       --bin neon_local \
-      --locked --release \
-    && cachepot -s
+      --bin storage_scrubber \
+      --locked --release
 
 # Build final image
 #
@@ -82,6 +72,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker 
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_scrubber    /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
@@ -90,20 +81,24 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
-RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
-    && /usr/local/bin/pageserver -D /data/.neon/ --init \
-       -c "id=1234" \
-       -c "broker_endpoint='http://storage_broker:50051'" \
-       -c "pg_distrib_dir='/usr/local/'" \
-       -c "listen_pg_addr='0.0.0.0:6400'" \
-       -c "listen_http_addr='0.0.0.0:9898'"
+RUN mkdir -p /data/.neon/ && \
+  echo "id=1234" > "/data/.neon/identity.toml" && \
+  echo "broker_endpoint='http://storage_broker:50051'\n" \
+       "pg_distrib_dir='/usr/local/'\n" \
+       "listen_pg_addr='0.0.0.0:6400'\n" \
+       "listen_http_addr='0.0.0.0:9898'\n" \
+  > /data/.neon/pageserver.toml && \
+  chown -R neon:neon /data/.neon
 
 # When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
 # that want a particular postgres version will select it explicitly: this is just a default.
-ENV LD_LIBRARY_PATH /usr/local/v16/lib
+ENV LD_LIBRARY_PATH=/usr/local/v16/lib
 
 
 VOLUME ["/data"]
 USER neon
 EXPOSE 6400
 EXPOSE 9898
+
+CMD ["/usr/local/bin/pageserver", "-D", "/data/.neon"]
+

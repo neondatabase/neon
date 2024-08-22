@@ -5,6 +5,7 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
+use aws_config::Region;
 use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::AuthRateLimiter;
@@ -22,7 +23,9 @@ use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
 use proxy::rate_limiter::EndpointRateLimiter;
+use proxy::rate_limiter::LeakyBucketConfig;
 use proxy::rate_limiter::RateBucketInfo;
+use proxy::rate_limiter::WakeComputeRateLimiter;
 use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
@@ -35,6 +38,7 @@ use proxy::usage_metrics;
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
 use proxy::serverless;
+use remote_storage::RemoteStorageConfig;
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
@@ -169,12 +173,12 @@ struct ProxyCliArgs {
     /// cache for `role_secret` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     role_secret_cache: String,
-    /// disable ip check for http requests. If it is too time consuming, it could be turned off.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    disable_ip_check_for_http: bool,
     /// redis url for notifications (if empty, redis_host:port will be used for both notifications and streaming connections)
     #[clap(long)]
     redis_notifications: Option<String>,
+    /// what from the available authentications type to use for the regional redis we have. Supported are "irsa" and "plain".
+    #[clap(long, default_value = "irsa")]
+    redis_auth_type: String,
     /// redis host for streaming connections (might be different from the notifications host)
     #[clap(long)]
     redis_host: Option<String>,
@@ -205,8 +209,8 @@ struct ProxyCliArgs {
     /// remote storage configuration for backup metric collection
     /// Encoded as toml (same format as pageservers), eg
     /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
-    #[clap(long, default_value = "{}")]
-    metric_backup_collection_remote_storage: String,
+    #[clap(long, value_parser = remote_storage_from_toml)]
+    metric_backup_collection_remote_storage: Option<RemoteStorageConfig>,
     /// chunk size for backup metric collection
     /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
     #[clap(long, default_value = "4194304")]
@@ -284,9 +288,10 @@ async fn main() -> anyhow::Result<()> {
     let config = build_config(&args)?;
 
     info!("Authentication backend: {}", config.auth_backend);
-    info!("Using region: {}", config.aws_region);
+    info!("Using region: {}", args.aws_region);
 
-    let region_provider = RegionProviderChain::default_provider().or_else(&*config.aws_region); // Replace with your Redis region if needed
+    let region_provider =
+        RegionProviderChain::default_provider().or_else(Region::new(args.aws_region.clone()));
     let provider_conf =
         ProviderConfig::without_region().with_region(region_provider.region().await);
     let aws_credentials_provider = {
@@ -312,30 +317,44 @@ async fn main() -> anyhow::Result<()> {
     };
     let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
         elasticache::AWSIRSAConfig::new(
-            config.aws_region.clone(),
+            args.aws_region.clone(),
             args.redis_cluster_name,
             args.redis_user_id,
         ),
         aws_credentials_provider,
     ));
-    let regional_redis_client = match (args.redis_host, args.redis_port) {
-        (Some(host), Some(port)) => Some(
-            ConnectionWithCredentialsProvider::new_with_credentials_provider(
-                host,
-                port,
-                elasticache_credentials_provider.clone(),
+    let regional_redis_client = match (args.redis_auth_type.as_str(), &args.redis_notifications) {
+        ("plain", redis_url) => match redis_url {
+            None => {
+                bail!("plain auth requires redis_notifications to be set");
+            }
+            Some(url) => Some(
+                ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string()),
             ),
-        ),
-        (None, None) => {
-            warn!("Redis events from console are disabled");
-            None
-        }
+        },
+        ("irsa", _) => match (&args.redis_host, args.redis_port) {
+            (Some(host), Some(port)) => Some(
+                ConnectionWithCredentialsProvider::new_with_credentials_provider(
+                    host.to_string(),
+                    port,
+                    elasticache_credentials_provider.clone(),
+                ),
+            ),
+            (None, None) => {
+                warn!("irsa auth requires redis-host and redis-port to be set, continuing without regional_redis_client");
+                None
+            }
+            _ => {
+                bail!("redis-host and redis-port must be specified together");
+            }
+        },
         _ => {
-            bail!("redis-host and redis-port must be specified together");
+            bail!("unknown auth type given");
         }
     };
+
     let redis_notifications_client = if let Some(url) = args.redis_notifications {
-        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url))
+        Some(ConnectionWithCredentialsProvider::new_with_static_credentials(url.to_string()))
     } else {
         regional_redis_client.clone()
     };
@@ -356,11 +375,14 @@ async fn main() -> anyhow::Result<()> {
 
     let cancel_map = CancelMap::default();
 
+    let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
+    RateBucketInfo::validate(redis_rps_limit)?;
+
     let redis_publisher = match &regional_redis_client {
         Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
             redis_publisher.clone(),
             args.region.clone(),
-            &config.redis_rps_limit,
+            redis_rps_limit,
         )?))),
         None => None,
     };
@@ -372,9 +394,24 @@ async fn main() -> anyhow::Result<()> {
         proxy::metrics::CancellationSource::FromClient,
     ));
 
-    let mut endpoint_rps_limit = args.endpoint_rps_limit.clone();
-    RateBucketInfo::validate(&mut endpoint_rps_limit)?;
-    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new(endpoint_rps_limit));
+    // bit of a hack - find the min rps and max rps supported and turn it into
+    // leaky bucket config instead
+    let max = args
+        .endpoint_rps_limit
+        .iter()
+        .map(|x| x.rps())
+        .max_by(f64::total_cmp)
+        .unwrap_or(EndpointRateLimiter::DEFAULT.max);
+    let rps = args
+        .endpoint_rps_limit
+        .iter()
+        .map(|x| x.rps())
+        .min_by(f64::total_cmp)
+        .unwrap_or(EndpointRateLimiter::DEFAULT.rps);
+    let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+        LeakyBucketConfig { rps, max },
+        64,
+    ));
 
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
@@ -511,9 +548,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     }
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         interval: args.metric_backup_collection_interval,
-        remote_storage_config: remote_storage_from_toml(
-            &args.metric_backup_collection_remote_storage,
-        )?,
+        remote_storage_config: args.metric_backup_collection_remote_storage.clone(),
         chunk_size: args.metric_backup_collection_chunk_size,
     };
 
@@ -578,7 +613,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
-                Arc::new(EndpointRateLimiter::new(wake_compute_rps_limit));
+                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
             let api = console::provider::neon::Api::new(
                 endpoint,
                 caches,
@@ -623,7 +658,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     )?;
 
     let http_config = HttpConfig {
-        request_timeout: args.sql_over_http.sql_over_http_timeout,
+        accept_websockets: true,
         pool_options: GlobalConnPoolOptions {
             max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
             gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
@@ -643,9 +678,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
-    let mut redis_rps_limit = args.redis_rps_limit.clone();
-    RateBucketInfo::validate(&mut redis_rps_limit)?;
-
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
@@ -654,11 +686,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         http_config,
         authentication_config,
         require_client_ip: args.require_client_ip,
-        disable_ip_check_for_http: args.disable_ip_check_for_http,
-        redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
-        aws_region: args.aws_region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute_retry_config: config::RetryConfig::parse(

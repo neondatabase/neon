@@ -10,10 +10,11 @@ from fixtures.neon_fixtures import (
     AuxFileStore,
     NeonEnv,
     NeonEnvBuilder,
+    PgProtocol,
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
-from fixtures.utils import query_scalar, wait_until
+from fixtures.utils import wait_until
 
 
 def random_string(n: int):
@@ -248,6 +249,27 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
         cur.execute(
             "SELECT * FROM pg_logical_slot_peek_binary_changes('slotty_mcslotface', NULL, NULL, 'include-xids', '0')"
         )
+        # do the peek second time: we've had a bug using wrong memory context
+        # for NeonWALReader leading to the crash in this case.
+        log.info("peek_changes again")
+        cur.execute(
+            "SELECT * FROM pg_logical_slot_peek_binary_changes('slotty_mcslotface', NULL, NULL, 'include-xids', '0')"
+        )
+        cur.execute(
+            """
+INSERT INTO wal_generator (data)
+SELECT repeat('A', 1024) -- Generates a kilobyte of data per row
+FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of data
+"""
+        )
+
+    endpoint.stop_and_destroy()
+    endpoint = env.endpoints.create_start("init")
+    with endpoint.connect().cursor() as cur:
+        log.info("advance slot")
+        cur.execute(
+            "SELECT * from pg_replication_slot_advance('slotty_mcslotface', pg_current_wal_lsn())"
+        )
 
 
 # Tests that walsender correctly blocks until WAL is downloaded from safekeepers
@@ -326,12 +348,17 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
         assert "could not receive data from WAL stream" not in logs
 
 
-# Test compute start at LSN page of which starts with contrecord
-# https://github.com/neondatabase/neon/issues/5749
+# Test replication of WAL record spanning page boundary (with contrecord) after
+# compute restart and WAL write of the page.
+#
+# See https://github.com/neondatabase/neon/issues/5749
+#
+# Most pages start with a contrecord, so we don't do anything special
+# to ensure that.
 @pytest.mark.parametrize(
     "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
 )
-def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
+def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
     env.neon_cli.create_branch("init")
@@ -355,52 +382,6 @@ def test_wal_page_boundary_start(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub1")
     logical_replication_sync(vanilla_pg, endpoint)
     vanilla_pg.stop()
-
-    with endpoint.cursor() as cur:
-        # measure how much space logical message takes. Sometimes first attempt
-        # creates huge message and then it stabilizes, have no idea why.
-        for _ in range(3):
-            lsn_before = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-            log.info(f"current_lsn={lsn_before}")
-            # Non-transactional logical message doesn't write WAL, only XLogInsert's
-            # it, so use transactional. Which is a bit problematic as transactional
-            # necessitates commit record. Alternatively we can do smth like
-            #   select neon_xlogflush(pg_current_wal_insert_lsn());
-            # but isn't much better + that particular call complains on 'xlog flush
-            # request 0/282C018 is not satisfied' as pg_current_wal_insert_lsn skips
-            # page headers.
-            payload = "blahblah"
-            cur.execute(f"select pg_logical_emit_message(true, 'pref', '{payload}')")
-            lsn_after_by_curr_wal_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-            lsn_diff = lsn_after_by_curr_wal_lsn - lsn_before
-            logical_message_base = lsn_after_by_curr_wal_lsn - lsn_before - len(payload)
-            log.info(
-                f"before {lsn_before}, after {lsn_after_by_curr_wal_lsn}, lsn diff is {lsn_diff}, base {logical_message_base}"
-            )
-
-        # and write logical message spanning exactly as we want
-        lsn_before = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        log.info(f"current_lsn={lsn_before}")
-        curr_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        offs = int(curr_lsn) % 8192
-        till_page = 8192 - offs
-        payload_len = (
-            till_page - logical_message_base - 8
-        )  # not sure why 8 is here, it is deduced from experiments
-        log.info(f"current_lsn={curr_lsn}, offs {offs}, till_page {till_page}")
-
-        # payload_len above would go exactly till the page boundary; but we want contrecord, so make it slightly longer
-        payload_len += 8
-
-        cur.execute(f"select pg_logical_emit_message(true, 'pref', 'f{'a' * payload_len}')")
-        supposedly_contrecord_end = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        log.info(f"supposedly_page_boundary={supposedly_contrecord_end}")
-        # The calculations to hit the page boundary are very fuzzy, so just
-        # ignore test if we fail to reach it.
-        if not (int(supposedly_contrecord_end) % 8192 == 32):
-            pytest.skip("missed page boundary, bad luck")
-
-        cur.execute("insert into replication_example values (2, 3)")
 
     wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
     endpoint.stop().start()
@@ -560,3 +541,90 @@ def test_replication_shutdown(neon_simple_env: NeonEnv):
             assert [r[0] for r in res] == [10, 20, 30, 40]
 
         wait_until(10, 0.5, check_that_changes_propagated)
+
+
+def logical_replication_wait_flush_lsn_sync(publisher: PgProtocol) -> Lsn:
+    """
+    Wait for logical replication subscriber reported flush_lsn to reach
+    pg_current_wal_flush_lsn on publisher. Note that this is somewhat unreliable
+    because for some WAL records like vacuum subscriber won't get any data at
+    all.
+    """
+    publisher_flush_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+
+    def check_caughtup():
+        res = publisher.safe_psql(
+            """
+select sent_lsn, flush_lsn, pg_current_wal_flush_lsn() from pg_stat_replication sr, pg_replication_slots s
+   where s.active_pid = sr.pid and s.slot_type = 'logical';
+                                  """
+        )[0]
+        sent_lsn, flush_lsn, curr_publisher_flush_lsn = Lsn(res[0]), Lsn(res[1]), Lsn(res[2])
+        log.info(
+            f"sent_lsn={sent_lsn}, flush_lsn={flush_lsn}, publisher_flush_lsn={curr_publisher_flush_lsn}, waiting flush_lsn to reach {publisher_flush_lsn}"
+        )
+        assert flush_lsn >= publisher_flush_lsn
+
+    wait_until(30, 0.5, check_caughtup)
+    return publisher_flush_lsn
+
+
+# Test that subscriber takes into account quorum committed flush_lsn in
+# flush_lsn reporting to publisher. Without this, it may ack too far, losing
+# data on restart because publisher advances START_REPLICATION position to the
+# confirmed_flush_lsn of the slot.
+def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
+    env = neon_simple_env
+    # use vanilla as publisher to allow writes on it when safekeeper is down
+    vanilla_pg.configure(
+        [
+            "wal_level = 'logical'",
+            # neon fork uses custom WAL records which won't work without extension installed with obscure
+            # ERROR:  resource manager with ID 134 not registered
+            # error.
+            "shared_preload_libraries = 'neon'",
+        ]
+    )
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create extension neon;")
+
+    env.neon_cli.create_branch("subscriber")
+    sub = env.endpoints.create("subscriber")
+    sub.start()
+
+    with vanilla_pg.cursor() as pcur:
+        with sub.cursor() as scur:
+            pcur.execute("CREATE TABLE t (pk integer primary key, sk integer)")
+            pcur.execute("CREATE PUBLICATION pub FOR TABLE t")
+            scur.execute("CREATE TABLE t (pk integer primary key, sk integer)")
+
+            pub_connstr = vanilla_pg.connstr().replace("'", "''")
+            log.info(f"pub connstr is {pub_connstr}, subscriber connstr {sub.connstr()}")
+            query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_connstr}' PUBLICATION pub with (synchronous_commit=off)"
+            scur.execute(query)
+            time.sleep(2)  # let initial table sync complete
+
+    # stop safekeeper so it won't get any data
+    for sk in env.safekeepers:
+        sk.stop()
+    # and insert to publisher
+    with vanilla_pg.cursor() as pcur:
+        for i in range(0, 1000):
+            pcur.execute("INSERT into t values (%s, random()*100000)", (i,))
+    # wait until sub receives all data
+    logical_replication_sync(sub, vanilla_pg)
+    # Update confirmed_flush_lsn of the slot. If subscriber ack'ed recevied data
+    # as flushed we'll now lose it if subscriber restars. That's why
+    # logical_replication_wait_flush_lsn_sync is expected to hang while
+    # safekeeper is down.
+    vanilla_pg.safe_psql("checkpoint;")
+    assert sub.safe_psql_scalar("SELECT count(*) FROM t") == 1000
+
+    # restart subscriber and ensure it can catch up lost tail again
+    sub.stop(mode="immediate")
+    for sk in env.safekeepers:
+        sk.start()
+    sub.start()
+    log.info("waiting for sync after restart")
+    logical_replication_wait_flush_lsn_sync(vanilla_pg)
+    assert sub.safe_psql_scalar("SELECT count(*) FROM t") == 1000

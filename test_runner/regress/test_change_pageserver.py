@@ -3,9 +3,16 @@ import asyncio
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.remote_storage import RemoteStorageKind
+from werkzeug.wrappers.request import Request
+from werkzeug.wrappers.response import Response
 
 
-def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
+def test_change_pageserver(neon_env_builder: NeonEnvBuilder, make_httpserver):
+    """
+    A relatively low level test of reconfiguring a compute's pageserver at runtime.  Usually this
+    is all done via the storage controller, but this test will disable the storage controller's compute
+    notifications, and instead update endpoints directly.
+    """
     num_connections = 3
 
     neon_env_builder.num_pageservers = 2
@@ -14,14 +21,24 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     )
     env = neon_env_builder.init_start()
 
-    for pageserver in env.pageservers:
-        # This test dual-attaches a tenant, one of the pageservers will therefore
-        # be running with a stale generation.
-        pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
+    neon_env_builder.control_plane_compute_hook_api = (
+        f"http://{make_httpserver.host}:{make_httpserver.port}/notify-attach"
+    )
+
+    def ignore_notify(request: Request):
+        # This test does direct updates to compute configuration: disable the storage controller's notification
+        log.info(f"Ignoring storage controller compute notification: {request.json}")
+        return Response(status=200)
+
+    make_httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(
+        ignore_notify
+    )
 
     env.neon_cli.create_branch("test_change_pageserver")
     endpoint = env.endpoints.create_start("test_change_pageserver")
 
+    # Put this tenant into a dual-attached state
+    assert env.get_tenant_pageserver(env.initial_tenant) == env.pageservers[0]
     alt_pageserver_id = env.pageservers[1].id
     env.pageservers[1].tenant_attach(env.initial_tenant)
 
@@ -77,6 +94,7 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     env.pageservers[
         0
     ].stop()  # Stop the old pageserver just to make sure we're reading from the new one
+    env.storage_controller.node_configure(env.pageservers[0].id, {"availability": "Offline"})
 
     execute("SELECT count(*) FROM foo")
     assert fetchone() == (100000,)
@@ -87,9 +105,10 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     #
     # Since we're dual-attached, need to tip-off storage controller to treat the one we're
     # about to start as the attached pageserver
-    env.storage_controller.attach_hook_issue(env.initial_tenant, env.pageservers[0].id)
     env.pageservers[0].start()
     env.pageservers[1].stop()
+    env.storage_controller.node_configure(env.pageservers[1].id, {"availability": "Offline"})
+    env.storage_controller.reconcile_until_idle()
 
     endpoint.reconfigure(pageserver_id=env.pageservers[0].id)
 
@@ -97,10 +116,9 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder):
     assert fetchone() == (100000,)
 
     env.pageservers[0].stop()
-    # Since we're dual-attached, need to tip-off storage controller to treat the one we're
-    # about to start as the attached pageserver
-    env.storage_controller.attach_hook_issue(env.initial_tenant, env.pageservers[1].id)
     env.pageservers[1].start()
+    env.storage_controller.node_configure(env.pageservers[0].id, {"availability": "Offline"})
+    env.storage_controller.reconcile_until_idle()
 
     # Test a (former) bug where a child process spins without updating its connection string
     # by executing a query separately. This query will hang until we issue the reconfigure.

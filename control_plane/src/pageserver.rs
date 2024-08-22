@@ -1,8 +1,10 @@
 //! Code to manage pageservers
 //!
-//! In the local test environment, the pageserver stores its data directly in
+//! In the local test environment, the data for each pageserver is stored in
 //!
-//!   .neon/
+//! ```text
+//!   .neon/pageserver_<pageserver_id>
+//! ```
 //!
 use std::collections::HashMap;
 
@@ -15,16 +17,15 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use futures::SinkExt;
 use pageserver_api::models::{
-    self, AuxFilePolicy, LocationConfig, ShardParameters, TenantHistorySize, TenantInfo,
-    TimelineInfo,
+    self, AuxFilePolicy, LocationConfig, TenantHistorySize, TenantInfo, TimelineInfo,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use utils::auth::{Claims, Scope};
+use utils::id::NodeId;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -72,6 +73,10 @@ impl PageServerNode {
                 .as_deref(),
             ),
         }
+    }
+
+    fn pageserver_make_identity_toml(&self, node_id: NodeId) -> toml_edit::Document {
+        toml_edit::Document::from_str(&format!("id={node_id}")).unwrap()
     }
 
     fn pageserver_init_make_toml(
@@ -122,10 +127,13 @@ impl PageServerNode {
         }
 
         // Apply the user-provided overrides
-        overrides.push(
-            toml_edit::ser::to_string_pretty(&conf)
-                .expect("we deserialized this from toml earlier"),
-        );
+        overrides.push({
+            let mut doc =
+                toml_edit::ser::to_document(&conf).expect("we deserialized this from toml earlier");
+            // `id` is written out to `identity.toml` instead of `pageserver.toml`
+            doc.remove("id").expect("it's part of the struct");
+            doc.to_string()
+        });
 
         // Turn `overrides` into a toml document.
         // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
@@ -158,8 +166,8 @@ impl PageServerNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
-        self.start_node().await
+    pub async fn start(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
+        self.start_node(retry_timeout).await
     }
 
     fn pageserver_init(&self, conf: NeonLocalInitPageserverConf) -> anyhow::Result<()> {
@@ -186,6 +194,19 @@ impl PageServerNode {
             .write_all(config.to_string().as_bytes())
             .context("write pageserver toml")?;
         drop(config_file);
+
+        let identity_file_path = datadir.join("identity.toml");
+        let mut identity_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(identity_file_path)
+            .with_context(|| format!("open identity toml for write: {config_file_path:?}"))?;
+        let identity_toml = self.pageserver_make_identity_toml(node_id);
+        identity_file
+            .write_all(identity_toml.to_string().as_bytes())
+            .context("write identity toml")?;
+        drop(identity_toml);
+
         // TODO: invoke a TBD config-check command to validate that pageserver will start with the written config
 
         // Write metadata file, used by pageserver on startup to register itself with
@@ -214,14 +235,15 @@ impl PageServerNode {
         Ok(())
     }
 
-    async fn start_node(&self) -> anyhow::Result<()> {
+    async fn start_node(&self, retry_timeout: &Duration) -> anyhow::Result<()> {
         // TODO: using a thread here because start_process() is not async but we need to call check_status()
         let datadir = self.repo_path();
         print!(
-            "Starting pageserver node {} at '{}' in {:?}",
+            "Starting pageserver node {} at '{}' in {:?}, retrying for {:?}",
             self.conf.id,
             self.pg_connection_config.raw_address(),
-            datadir
+            datadir,
+            retry_timeout
         );
         io::stdout().flush().context("flush stdout")?;
 
@@ -239,6 +261,7 @@ impl PageServerNode {
             args,
             self.pageserver_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
+            retry_timeout,
             || async {
                 let st = self.check_status().await;
                 match st {
@@ -349,11 +372,6 @@ impl PageServerNode {
                 .map(|x| x.parse::<NonZeroU64>())
                 .transpose()
                 .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-            trace_read_requests: settings
-                .remove("trace_read_requests")
-                .map(|x| x.parse::<bool>())
-                .transpose()
-                .context("Failed to parse 'trace_read_requests' as bool")?,
             eviction_policy: settings
                 .remove("eviction_policy")
                 .map(serde_json::from_str)
@@ -393,28 +411,6 @@ impl PageServerNode {
         } else {
             Ok(result)
         }
-    }
-
-    pub async fn tenant_create(
-        &self,
-        new_tenant_id: TenantId,
-        generation: Option<u32>,
-        settings: HashMap<&str, &str>,
-    ) -> anyhow::Result<TenantId> {
-        let config = Self::parse_config(settings.clone())?;
-
-        let request = models::TenantCreateRequest {
-            new_tenant_id: TenantShardId::unsharded(new_tenant_id),
-            generation,
-            config,
-            shard_parameters: ShardParameters::default(),
-            // Placement policy is not meaningful for creations not done via storage controller
-            placement_policy: None,
-        };
-        if !settings.is_empty() {
-            bail!("Unrecognized tenant settings: {settings:?}")
-        }
-        Ok(self.http_client.tenant_create(&request).await?)
     }
 
     pub async fn tenant_config(
@@ -476,11 +472,6 @@ impl PageServerNode {
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-                trace_read_requests: settings
-                    .remove("trace_read_requests")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'trace_read_requests' as bool")?,
                 eviction_policy: settings
                     .remove("eviction_policy")
                     .map(serde_json::from_str)
@@ -587,60 +578,39 @@ impl PageServerNode {
         pg_wal: Option<(Lsn, PathBuf)>,
         pg_version: u32,
     ) -> anyhow::Result<()> {
-        let (client, conn) = self.page_server_psql_client().await?;
-        // The connection object performs the actual communication with the database,
-        // so spawn it off to run on its own.
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
-        let client = std::pin::pin!(client);
-
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
         let base_tarfile = tokio::fs::File::open(base_tarfile_path).await?;
-        let base_tarfile = tokio_util::io::ReaderStream::new(base_tarfile);
+        let base_tarfile =
+            mgmt_api::ReqwestBody::wrap_stream(tokio_util::io::ReaderStream::new(base_tarfile));
 
         // Init wal reader if necessary
         let (end_lsn, wal_reader) = if let Some((end_lsn, wal_tarfile_path)) = pg_wal {
             let wal_tarfile = tokio::fs::File::open(wal_tarfile_path).await?;
-            let wal_reader = tokio_util::io::ReaderStream::new(wal_tarfile);
+            let wal_reader =
+                mgmt_api::ReqwestBody::wrap_stream(tokio_util::io::ReaderStream::new(wal_tarfile));
             (end_lsn, Some(wal_reader))
         } else {
             (start_lsn, None)
         };
 
-        let copy_in = |reader, cmd| {
-            let client = &client;
-            async move {
-                let writer = client.copy_in(&cmd).await?;
-                let writer = std::pin::pin!(writer);
-                let mut writer = writer.sink_map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::Other, format!("{e}"))
-                });
-                let mut reader = std::pin::pin!(reader);
-                writer.send_all(&mut reader).await?;
-                writer.into_inner().finish().await?;
-                anyhow::Ok(())
-            }
-        };
-
         // Import base
-        copy_in(
-            base_tarfile,
-            format!(
-                "import basebackup {tenant_id} {timeline_id} {start_lsn} {end_lsn} {pg_version}"
-            ),
-        )
-        .await?;
-        // Import wal if necessary
-        if let Some(wal_reader) = wal_reader {
-            copy_in(
-                wal_reader,
-                format!("import wal {tenant_id} {timeline_id} {start_lsn} {end_lsn}"),
+        self.http_client
+            .import_basebackup(
+                tenant_id,
+                timeline_id,
+                start_lsn,
+                end_lsn,
+                pg_version,
+                base_tarfile,
             )
             .await?;
+
+        // Import wal if necessary
+        if let Some(wal_reader) = wal_reader {
+            self.http_client
+                .import_wal(tenant_id, timeline_id, start_lsn, end_lsn, wal_reader)
+                .await?;
         }
 
         Ok(())

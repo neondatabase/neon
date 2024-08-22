@@ -56,6 +56,7 @@ pub struct ComputeNode {
     /// - we push new spec and it does reconfiguration
     /// - but then something happens and compute pod / VM is destroyed,
     ///   so k8s controller starts it again with the **old** spec
+    ///
     /// and the same for empty computes:
     /// - we started compute without any spec
     /// - we push spec and it does configuration
@@ -399,7 +400,15 @@ impl ComputeNode {
     pub fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let mut retry_period_ms = 500.0;
         let mut attempts = 0;
-        let max_attempts = 10;
+        const DEFAULT_ATTEMPTS: u16 = 10;
+        #[cfg(feature = "testing")]
+        let max_attempts = if let Ok(v) = env::var("NEON_COMPUTE_TESTING_BASEBACKUP_RETRIES") {
+            u16::from_str(&v).unwrap()
+        } else {
+            DEFAULT_ATTEMPTS
+        };
+        #[cfg(not(feature = "testing"))]
+        let max_attempts = DEFAULT_ATTEMPTS;
         loop {
             let result = self.try_get_basebackup(compute_state, lsn);
             match result {
@@ -798,7 +807,11 @@ impl ComputeNode {
         // In this case we need to connect with old `zenith_admin` name
         // and create new user. We cannot simply rename connected user,
         // but we can create a new one and grant it all privileges.
-        let connstr = self.connstr.clone();
+        let mut connstr = self.connstr.clone();
+        connstr
+            .query_pairs_mut()
+            .append_pair("application_name", "apply_config");
+
         let mut client = match Client::connect(connstr.as_str(), NoTls) {
             Err(e) => match e.code() {
                 Some(&SqlState::INVALID_PASSWORD)
@@ -867,15 +880,19 @@ impl ComputeNode {
 
         // Run migrations separately to not hold up cold starts
         thread::spawn(move || {
+            let mut connstr = connstr.clone();
+            connstr
+                .query_pairs_mut()
+                .append_pair("application_name", "migrations");
+
             let mut client = Client::connect(connstr.as_str(), NoTls)?;
             handle_migrations(&mut client).context("apply_config handle_migrations")
         });
         Ok(())
     }
 
-    // We could've wrapped this around `pg_ctl reload`, but right now we don't use
-    // `pg_ctl` for start / stop, so this just seems much easier to do as we already
-    // have opened connection to Postgres and superuser access.
+    // Wrapped this around `pg_ctl reload`, but right now we don't use
+    // `pg_ctl` for start / stop.
     #[instrument(skip_all)]
     fn pg_reload_conf(&self) -> Result<()> {
         let pgctl_bin = Path::new(&self.pgbin).parent().unwrap().join("pg_ctl");
@@ -1108,7 +1125,7 @@ impl ComputeNode {
     // EKS worker nodes have following core dump settings:
     //   /proc/sys/kernel/core_pattern -> core
     //   /proc/sys/kernel/core_uses_pid -> 1
-    //   ulimint -c -> unlimited
+    //   ulimit -c -> unlimited
     // which results in core dumps being written to postgres data directory as core.<pid>.
     //
     // Use that as a default location and pattern, except macos where core dumps are written
@@ -1387,7 +1404,9 @@ pub fn forward_termination_signal() {
     let pg_pid = PG_PID.load(Ordering::SeqCst);
     if pg_pid != 0 {
         let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
-        // use 'immediate' shutdown (SIGQUIT): https://www.postgresql.org/docs/current/server-shutdown.html
-        kill(pg_pid, Signal::SIGQUIT).ok();
+        // Use 'fast' shutdown (SIGINT) because it also creates a shutdown checkpoint, which is important for
+        // ROs to get a list of running xacts faster instead of going through the CLOG.
+        // See https://www.postgresql.org/docs/current/server-shutdown.html for the list of modes and signals.
+        kill(pg_pid, Signal::SIGINT).ok();
     }
 }

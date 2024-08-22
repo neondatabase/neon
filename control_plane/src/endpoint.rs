@@ -499,6 +499,23 @@ impl Endpoint {
             .join(",")
     }
 
+    /// Map safekeepers ids to the actual connection strings.
+    fn build_safekeepers_connstrs(&self, sk_ids: Vec<NodeId>) -> Result<Vec<String>> {
+        let mut safekeeper_connstrings = Vec::new();
+        if self.mode == ComputeMode::Primary {
+            for sk_id in sk_ids {
+                let sk = self
+                    .env
+                    .safekeepers
+                    .iter()
+                    .find(|node| node.id == sk_id)
+                    .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
+                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
+            }
+        }
+        Ok(safekeeper_connstrings)
+    }
+
     pub async fn start(
         &self,
         auth_token: &Option<String>,
@@ -523,18 +540,7 @@ impl Endpoint {
         let pageserver_connstring = Self::build_pageserver_connstr(&pageservers);
         assert!(!pageserver_connstring.is_empty());
 
-        let mut safekeeper_connstrings = Vec::new();
-        if self.mode == ComputeMode::Primary {
-            for sk_id in safekeepers {
-                let sk = self
-                    .env
-                    .safekeepers
-                    .iter()
-                    .find(|node| node.id == sk_id)
-                    .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
-                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
-            }
-        }
+        let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
 
         // check for file remote_extensions_spec.json
         // if it is present, read it and pass to compute_ctl
@@ -592,7 +598,6 @@ impl Endpoint {
             remote_extensions,
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
-            primary_is_running: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -741,6 +746,7 @@ impl Endpoint {
         &self,
         mut pageservers: Vec<(Host, u16)>,
         stripe_size: Option<ShardStripeSize>,
+        safekeepers: Option<Vec<NodeId>>,
     ) -> Result<()> {
         let mut spec: ComputeSpec = {
             let spec_path = self.endpoint_path().join("spec.json");
@@ -773,6 +779,12 @@ impl Endpoint {
         spec.pageserver_connstring = Some(pageserver_connstr);
         if stripe_size.is_some() {
             spec.shard_stripe_size = stripe_size.map(|s| s.0 as usize);
+        }
+
+        // If safekeepers are not specified, don't change them.
+        if let Some(safekeepers) = safekeepers {
+            let safekeeper_connstrings = self.build_safekeepers_connstrs(safekeepers)?;
+            spec.safekeeper_connstrings = safekeeper_connstrings;
         }
 
         let client = reqwest::Client::builder()
@@ -812,11 +824,12 @@ impl Endpoint {
         // cleanup work to do after postgres stops, like syncing safekeepers,
         // etc.
         //
-        // If destroying, send it SIGTERM before waiting. Sometimes we do *not*
-        // want this cleanup: tests intentionally do stop when majority of
-        // safekeepers is down, so sync-safekeepers would hang otherwise. This
-        // could be a separate flag though.
-        self.wait_for_compute_ctl_to_exit(destroy)?;
+        // If destroying or stop mode is immediate, send it SIGTERM before
+        // waiting. Sometimes we do *not* want this cleanup: tests intentionally
+        // do stop when majority of safekeepers is down, so sync-safekeepers
+        // would hang otherwise. This could be a separate flag though.
+        let send_sigterm = destroy || mode == "immediate";
+        self.wait_for_compute_ctl_to_exit(send_sigterm)?;
         if destroy {
             println!(
                 "Destroying postgres data directory '{}'",

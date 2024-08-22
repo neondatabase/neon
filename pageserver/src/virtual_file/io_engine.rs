@@ -12,7 +12,7 @@
 #[cfg(target_os = "linux")]
 pub(super) mod tokio_epoll_uring_ext;
 
-use tokio_epoll_uring::{IoBuf, Slice};
+use tokio_epoll_uring::IoBuf;
 use tracing::Instrument;
 
 pub(crate) use super::api::IoEngineKind;
@@ -107,7 +107,10 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use super::{FileGuard, Metadata};
+use super::{
+    owned_buffers_io::{io_buf_ext::FullSlice, slice::SliceMutExt},
+    FileGuard, Metadata,
+};
 
 #[cfg(target_os = "linux")]
 fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
@@ -120,38 +123,29 @@ fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std:
 }
 
 impl IoEngine {
-    pub(super) async fn read_at<B>(
+    pub(super) async fn read_at<Buf>(
         &self,
         file_guard: FileGuard,
         offset: u64,
-        mut buf: B,
-    ) -> ((FileGuard, B), std::io::Result<usize>)
+        mut slice: tokio_epoll_uring::Slice<Buf>,
+    ) -> (
+        (FileGuard, tokio_epoll_uring::Slice<Buf>),
+        std::io::Result<usize>,
+    )
     where
-        B: tokio_epoll_uring::BoundedBufMut + Send,
+        Buf: tokio_epoll_uring::IoBufMut + Send,
     {
         match self {
             IoEngine::NotSet => panic!("not initialized"),
             IoEngine::StdFs => {
-                // SAFETY: `dst` only lives at most as long as this match arm, during which buf remains valid memory.
-                let dst = unsafe {
-                    std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf.bytes_total())
-                };
-                let res = file_guard.with_std_file(|std_file| std_file.read_at(dst, offset));
-                if let Ok(nbytes) = &res {
-                    assert!(*nbytes <= buf.bytes_total());
-                    // SAFETY: see above assertion
-                    unsafe {
-                        buf.set_init(*nbytes);
-                    }
-                }
-                #[allow(dropping_references)]
-                drop(dst);
-                ((file_guard, buf), res)
+                let rust_slice = slice.as_mut_rust_slice_full_zeroed();
+                let res = file_guard.with_std_file(|std_file| std_file.read_at(rust_slice, offset));
+                ((file_guard, slice), res)
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.read(file_guard, offset, buf).await;
+                let (resources, res) = system.read(file_guard, offset, slice).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
         }
@@ -215,8 +209,8 @@ impl IoEngine {
         &self,
         file_guard: FileGuard,
         offset: u64,
-        buf: Slice<B>,
-    ) -> ((FileGuard, Slice<B>), std::io::Result<usize>) {
+        buf: FullSlice<B>,
+    ) -> ((FileGuard, FullSlice<B>), std::io::Result<usize>) {
         match self {
             IoEngine::NotSet => panic!("not initialized"),
             IoEngine::StdFs => {
@@ -226,8 +220,12 @@ impl IoEngine {
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.write(file_guard, offset, buf).await;
-                (resources, res.map_err(epoll_uring_error_to_std))
+                let ((file_guard, slice), res) =
+                    system.write(file_guard, offset, buf.into_raw_slice()).await;
+                (
+                    (file_guard, FullSlice::must_new(slice)),
+                    res.map_err(epoll_uring_error_to_std),
+                )
             }
         }
     }
@@ -336,4 +334,30 @@ pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
     })
     .join()
     .unwrap()
+}
+
+/// For use in benchmark binaries only.
+///
+/// Benchmarks which initialize `virtual_file` need to know what engine to use, but we also
+/// don't want to silently fall back to slower I/O engines in a benchmark: this could waste
+/// developer time trying to figure out why it's slow.
+///
+/// In practice, this method will either return IoEngineKind::TokioEpollUring, or panic.
+pub fn io_engine_for_bench() -> IoEngineKind {
+    #[cfg(not(target_os = "linux"))]
+    {
+        panic!("This benchmark does I/O and can only give a representative result on Linux");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match feature_test().unwrap() {
+            FeatureTestResult::PlatformPreferred(engine) => engine,
+            FeatureTestResult::Worse {
+                engine: _engine,
+                remark,
+            } => {
+                panic!("This benchmark does I/O can requires the preferred I/O engine: {remark}");
+            }
+        }
+    }
 }

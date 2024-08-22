@@ -212,6 +212,7 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
 ///
 /// Public reader object, to search the tree.
 ///
+#[derive(Clone)]
 pub struct DiskBtreeReader<R, const L: usize>
 where
     R: BlockReader,
@@ -259,38 +260,55 @@ where
         Ok(result)
     }
 
-    pub fn iter<'a>(
-        &'a self,
-        start_key: &'a [u8; L],
-        ctx: &'a RequestContext,
-    ) -> DiskBtreeIterator<'a> {
+    pub fn iter<'a>(self, start_key: &'a [u8; L], ctx: &'a RequestContext) -> DiskBtreeIterator<'a>
+    where
+        R: 'a + Send,
+    {
         DiskBtreeIterator {
-            stream: Box::pin(self.get_stream_from(start_key, ctx)),
+            stream: Box::pin(self.into_stream(start_key, ctx)),
         }
     }
 
     /// Return a stream which yields all key, value pairs from the index
     /// starting from the first key greater or equal to `start_key`.
     ///
-    /// Note that this is a copy of [`Self::visit`].
+    /// Note 1: that this is a copy of [`Self::visit`].
     /// TODO: Once the sequential read path is removed this will become
     /// the only index traversal method.
-    pub fn get_stream_from<'a>(
-        &'a self,
+    ///
+    /// Note 2: this function used to take `&self` but it now consumes `self`. This is due to
+    /// the lifetime constraints of the reader and the stream / iterator it creates. Using `&self`
+    /// requires the reader to be present when the stream is used, and this creates a lifetime
+    /// dependency between the reader and the stream. Now if we want to create an iterator that
+    /// holds the stream, someone will need to keep a reference to the reader, which is inconvenient
+    /// to use from the image/delta layer APIs.
+    ///
+    /// Feel free to add the `&self` variant back if it's necessary.
+    pub fn into_stream<'a>(
+        self,
         start_key: &'a [u8; L],
         ctx: &'a RequestContext,
-    ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a {
+    ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a
+    where
+        R: 'a,
+    {
         try_stream! {
             let mut stack = Vec::new();
             stack.push((self.root_blk, None));
             let block_cursor = self.reader.block_cursor();
+            let mut node_buf = [0_u8; PAGE_SZ];
             while let Some((node_blknum, opt_iter)) = stack.pop() {
-                // Locate the node.
-                let node_buf = block_cursor
+                // Read the node, through the PS PageCache, into local variable `node_buf`.
+                // We could keep the page cache read guard alive, but, at the time of writing,
+                // we run quite small PS PageCache s => can't risk running out of
+                // PageCache space because this stream isn't consumed fast enough.
+                let page_read_guard = block_cursor
                     .read_blk(self.start_blk + node_blknum, ctx)
                     .await?;
+                node_buf.copy_from_slice(page_read_guard.as_ref());
+                drop(page_read_guard); // drop page cache read guard early
 
-                let node = OnDiskNode::deparse(node_buf.as_ref())?;
+                let node = OnDiskNode::deparse(&node_buf)?;
                 let prefix_len = node.prefix_len as usize;
                 let suffix_len = node.suffix_len as usize;
 
@@ -332,6 +350,7 @@ where
                     };
                     Either::Left(idx..node.num_children.into())
                 };
+
 
                 // idx points to the first match now. Keep going from there
                 while let Some(idx) = iter.next() {
@@ -509,7 +528,7 @@ where
 pub struct DiskBtreeIterator<'a> {
     #[allow(clippy::type_complexity)]
     stream: std::pin::Pin<
-        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a>,
+        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a + Send>,
     >,
 }
 
@@ -538,10 +557,10 @@ where
     /// We maintain the length of the stack to be always greater than zero.
     /// Two exceptions are:
     /// 1. `Self::flush_node`. The method will push the new node if it extracted the last one.
-    ///   So because other methods cannot see the intermediate state invariant still holds.
+    ///    So because other methods cannot see the intermediate state invariant still holds.
     /// 2. `Self::finish`. It consumes self and does not return it back,
-    ///  which means that this is where the structure is destroyed.
-    ///  Thus stack of zero length cannot be observed by other methods.
+    ///    which means that this is where the structure is destroyed.
+    ///    Thus stack of zero length cannot be observed by other methods.
     stack: Vec<BuildNode<L>>,
 
     /// Last key that was appended to the tree. Used to sanity check that append

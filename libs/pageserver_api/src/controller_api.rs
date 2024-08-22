@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
@@ -10,6 +12,27 @@ use crate::{
     models::{ShardParameters, TenantConfig},
     shard::{ShardStripeSize, TenantShardId},
 };
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TenantCreateRequest {
+    pub new_tenant_id: TenantShardId,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+
+    // If omitted, create a single shard with TenantShardId::unsharded()
+    #[serde(default)]
+    #[serde(skip_serializing_if = "ShardParameters::is_unsharded")]
+    pub shard_parameters: ShardParameters,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement_policy: Option<PlacementPolicy>,
+
+    #[serde(flatten)]
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct TenantCreateResponseShard {
@@ -66,7 +89,7 @@ pub struct TenantLocateResponse {
     pub shard_params: ShardParameters,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TenantDescribeResponse {
     pub tenant_id: TenantId,
     pub shards: Vec<TenantDescribeResponseShard>,
@@ -89,7 +112,7 @@ pub struct NodeDescribeResponse {
     pub listen_pg_port: u16,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TenantDescribeResponseShard {
     pub tenant_shard_id: TenantShardId,
 
@@ -129,11 +152,16 @@ impl UtilizationScore {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Clone, Copy, Debug)]
 #[serde(into = "NodeAvailabilityWrapper")]
 pub enum NodeAvailability {
     // Normal, happy state
     Active(UtilizationScore),
+    // Node is warming up, but we expect it to become available soon. Covers
+    // the time span between the re-attach response being composed on the storage controller
+    // and the first successful heartbeat after the processing of the re-attach response
+    // finishes on the pageserver.
+    WarmingUp(Instant),
     // Offline: Tenants shouldn't try to attach here, but they may assume that their
     // secondary locations on this node still exist.  Newly added nodes are in this
     // state until we successfully contact them.
@@ -143,7 +171,10 @@ pub enum NodeAvailability {
 impl PartialEq for NodeAvailability {
     fn eq(&self, other: &Self) -> bool {
         use NodeAvailability::*;
-        matches!((self, other), (Active(_), Active(_)) | (Offline, Offline))
+        matches!(
+            (self, other),
+            (Active(_), Active(_)) | (Offline, Offline) | (WarmingUp(_), WarmingUp(_))
+        )
     }
 }
 
@@ -155,6 +186,7 @@ impl Eq for NodeAvailability {}
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum NodeAvailabilityWrapper {
     Active,
+    WarmingUp,
     Offline,
 }
 
@@ -164,6 +196,7 @@ impl From<NodeAvailabilityWrapper> for NodeAvailability {
             // Assume the worst utilisation score to begin with. It will later be updated by
             // the heartbeats.
             NodeAvailabilityWrapper::Active => NodeAvailability::Active(UtilizationScore::worst()),
+            NodeAvailabilityWrapper::WarmingUp => NodeAvailability::WarmingUp(Instant::now()),
             NodeAvailabilityWrapper::Offline => NodeAvailability::Offline,
         }
     }
@@ -173,6 +206,7 @@ impl From<NodeAvailability> for NodeAvailabilityWrapper {
     fn from(val: NodeAvailability) -> Self {
         match val {
             NodeAvailability::Active(_) => NodeAvailabilityWrapper::Active,
+            NodeAvailability::WarmingUp(_) => NodeAvailabilityWrapper::WarmingUp,
             NodeAvailability::Offline => NodeAvailabilityWrapper::Offline,
         }
     }
@@ -261,6 +295,39 @@ pub enum PlacementPolicy {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateResponse {}
 
+/// Metadata health record posted from scrubber.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthRecord {
+    pub tenant_shard_id: TenantShardId,
+    pub healthy: bool,
+    pub last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthUpdateRequest {
+    pub healthy_tenant_shards: HashSet<TenantShardId>,
+    pub unhealthy_tenant_shards: HashSet<TenantShardId>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthUpdateResponse {}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthListUnhealthyResponse {
+    pub unhealthy_tenant_shards: Vec<TenantShardId>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthListOutdatedRequest {
+    #[serde(with = "humantime_serde")]
+    pub not_scrubbed_for: Duration,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthListOutdatedResponse {
+    pub health_records: Vec<MetadataHealthRecord>,
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -279,5 +346,20 @@ mod test {
         assert_eq!(encoded, "\"Detached\"");
         assert_eq!(serde_json::from_str::<PlacementPolicy>(&encoded)?, v);
         Ok(())
+    }
+
+    #[test]
+    fn test_reject_unknown_field() {
+        let id = TenantId::generate();
+        let create_request = serde_json::json!({
+            "new_tenant_id": id.to_string(),
+            "unknown_field": "unknown_value".to_string(),
+        });
+        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
     }
 }

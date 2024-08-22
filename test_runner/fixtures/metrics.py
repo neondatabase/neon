@@ -118,8 +118,6 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     "libmetrics_launch_timestamp",
     "libmetrics_build_info",
     "libmetrics_tracing_event_count_total",
-    "pageserver_materialized_cache_hits_total",
-    "pageserver_materialized_cache_hits_direct_total",
     "pageserver_page_cache_read_hits_total",
     "pageserver_page_cache_read_accesses_total",
     "pageserver_page_cache_size_current_bytes",
@@ -135,6 +133,8 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *histogram("pageserver_remote_operation_seconds"),
     *histogram("pageserver_io_operations_seconds"),
     "pageserver_tenant_states_count",
+    "pageserver_circuit_breaker_broken_total",
+    "pageserver_circuit_breaker_unbroken_total",
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
@@ -146,11 +146,17 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",
     "pageserver_smgr_query_seconds_sum",
+    "pageserver_archive_size",
+    "pageserver_pitr_history_size",
+    "pageserver_layer_bytes",
+    "pageserver_layer_count",
+    "pageserver_visible_physical_size",
     "pageserver_storage_operations_seconds_count_total",
     "pageserver_storage_operations_seconds_sum_total",
     "pageserver_evictions_total",
     "pageserver_evictions_with_low_residence_duration_total",
     "pageserver_aux_file_estimated_size",
+    "pageserver_valid_lsn_lease_count",
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     # "pageserver_directory_entries_count", -- only used if above a certain threshold
     # "pageserver_broken_tenants_count" -- used only for broken

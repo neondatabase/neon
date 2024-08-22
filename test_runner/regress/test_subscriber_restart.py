@@ -54,4 +54,4 @@ def test_subscriber_restart(neon_simple_env: NeonEnv):
         pcur.execute(f"INSERT into t values ({n_records}, 0)")
         n_records += 1
         with sub.cursor() as scur:
-            wait_until(10, 0.5, check_that_changes_propagated)
+            wait_until(60, 0.5, check_that_changes_propagated)

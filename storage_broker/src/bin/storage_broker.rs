@@ -642,8 +642,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
-    info!("version: {GIT_VERSION}");
-    info!("build_tag: {BUILD_TAG}");
+    info!("version: {GIT_VERSION} build_tag: {BUILD_TAG}");
     metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // On any shutdown signal, log receival and exit.

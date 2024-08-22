@@ -5,15 +5,15 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_WRITE_SECONDS_BUCKETS};
+use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_FSYNC_SECONDS_BUCKETS};
 use anyhow::Result;
 use futures::Future;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    register_int_counter, register_int_counter_pair, register_int_counter_pair_vec,
-    register_int_counter_vec, Gauge, IntCounter, IntCounterPair, IntCounterPairVec, IntCounterVec,
-    IntGaugeVec,
+    register_histogram_vec, register_int_counter, register_int_counter_pair,
+    register_int_counter_pair_vec, register_int_counter_vec, Gauge, HistogramVec, IntCounter,
+    IntCounterPair, IntCounterPairVec, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
@@ -48,7 +48,7 @@ pub static WRITE_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_write_wal_seconds",
         "Seconds spent writing and syncing WAL to a disk in a single request",
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_write_wal_seconds histogram")
 });
@@ -56,7 +56,7 @@ pub static FLUSH_WAL_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_flush_wal_seconds",
         "Seconds spent syncing WAL to a disk",
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_flush_wal_seconds histogram")
 });
@@ -64,9 +64,27 @@ pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_persist_control_file_seconds",
         "Seconds to persist and sync control file",
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec")
+});
+pub static WAL_STORAGE_OPERATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "safekeeper_wal_storage_operation_seconds",
+        "Seconds spent on WAL storage operations",
+        &["operation"],
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_wal_storage_operation_seconds histogram vec")
+});
+pub static MISC_OPERATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "safekeeper_misc_operation_seconds",
+        "Seconds spent on miscellaneous operations",
+        &["operation"],
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_misc_operation_seconds histogram vec")
 });
 pub static PG_IO_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -126,7 +144,7 @@ pub static BROKER_PUSH_ALL_UPDATES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_broker_push_update_seconds",
         "Seconds to push all timeline updates to the broker",
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_broker_push_update_seconds histogram vec")
 });
@@ -185,6 +203,32 @@ pub static WAL_BACKUP_TASKS: Lazy<IntCounterPair> = Lazy::new(|| {
         "Number of finished WAL backup tasks",
     )
     .expect("Failed to register safekeeper_wal_backup_tasks_finished_total counter")
+});
+
+// Metrics collected on operations on the storage repository.
+#[derive(strum_macros::EnumString, strum_macros::Display, strum_macros::IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+pub(crate) enum EvictionEvent {
+    Evict,
+    Restore,
+}
+
+pub(crate) static EVICTION_EVENTS_STARTED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_eviction_events_started_total",
+        "Number of eviction state changes, incremented when they start",
+        &["kind"]
+    )
+    .expect("Failed to register metric")
+});
+
+pub(crate) static EVICTION_EVENTS_COMPLETED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_eviction_events_completed_total",
+        "Number of eviction state changes, incremented when they complete",
+        &["kind"]
+    )
+    .expect("Failed to register metric")
 });
 
 pub const LABEL_UNKNOWN: &str = "unknown";

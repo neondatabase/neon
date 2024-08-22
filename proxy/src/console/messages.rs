@@ -5,11 +5,11 @@ use std::fmt::{self, Display};
 use crate::auth::IpPattern;
 
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
-use crate::proxy::retry::ShouldRetry;
+use crate::proxy::retry::CouldRetry;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ConsoleError {
     pub error: Box<str>,
     #[serde(skip)]
@@ -22,16 +22,15 @@ impl ConsoleError {
         self.status
             .as_ref()
             .and_then(|s| s.details.error_info.as_ref())
-            .map(|e| e.reason)
-            .unwrap_or(Reason::Unknown)
+            .map_or(Reason::Unknown, |e| e.reason)
     }
+
     pub fn get_user_facing_message(&self) -> String {
         use super::provider::errors::REQUEST_FAILED;
         self.status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
-            .map(|m| m.message.clone().into())
-            .unwrap_or_else(|| {
+            .map_or_else(|| {
                 // Ask @neondatabase/control-plane for review before adding more.
                 match self.http_status_code {
                     http::StatusCode::NOT_FOUND => {
@@ -48,80 +47,59 @@ impl ConsoleError {
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 }
-            })
+            }, |m| m.message.clone().into())
     }
 }
 
 impl Display for ConsoleError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let msg = self
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg: &str = self
             .status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
-            .map(|m| m.message.as_ref())
-            .unwrap_or_else(|| &self.error);
-        write!(f, "{}", msg)
+            .map_or_else(|| self.error.as_ref(), |m| m.message.as_ref());
+        write!(f, "{msg}")
     }
 }
 
-impl ShouldRetry for ConsoleError {
+impl CouldRetry for ConsoleError {
     fn could_retry(&self) -> bool {
-        if self.status.is_none() || self.status.as_ref().unwrap().details.retry_info.is_none() {
-            // retry some temporary failures because the compute was in a bad state
-            // (bad request can be returned when the endpoint was in transition)
-            return match &self {
-                ConsoleError {
-                    http_status_code: http::StatusCode::BAD_REQUEST,
-                    ..
-                } => true,
-                // don't retry when quotas are exceeded
-                ConsoleError {
-                    http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
-                    ref error,
-                    ..
-                } => !error.contains("compute time quota of non-primary branches is exceeded"),
-                // locked can be returned when the endpoint was in transition
-                // or when quotas are exceeded. don't retry when quotas are exceeded
-                ConsoleError {
-                    http_status_code: http::StatusCode::LOCKED,
-                    ref error,
-                    ..
-                } => {
-                    !error.contains("quota exceeded")
-                        && !error.contains("the limit for current plan reached")
-                }
-                _ => false,
-            };
+        // If the error message does not have a status,
+        // the error is unknown and probably should not retry automatically
+        let Some(status) = &self.status else {
+            return false;
+        };
+
+        // retry if the retry info is set.
+        if status.details.retry_info.is_some() {
+            return true;
         }
 
-        // retry if the response has a retry delay
-        if let Some(retry_info) = self
-            .status
-            .as_ref()
-            .and_then(|s| s.details.retry_info.as_ref())
-        {
-            retry_info.retry_delay_ms > 0
-        } else {
-            false
-        }
+        // if no retry info set, attempt to use the error code to guess the retry state.
+        let reason = status
+            .details
+            .error_info
+            .map_or(Reason::Unknown, |e| e.reason);
+
+        reason.can_retry()
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Status {
     pub code: Box<str>,
     pub message: Box<str>,
     pub details: Details,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Details {
     pub error_info: Option<ErrorInfo>,
     pub retry_info: Option<RetryInfo>,
     pub user_facing_message: Option<UserFacingMessage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Copy, Clone, Debug, Deserialize)]
 pub struct ErrorInfo {
     pub reason: Reason,
     // Schema could also have `metadata` field, but it's not structured. Skip it for now.
@@ -129,30 +107,59 @@ pub struct ErrorInfo {
 
 #[derive(Clone, Copy, Debug, Deserialize, Default)]
 pub enum Reason {
+    /// RoleProtected indicates that the role is protected and the attempted operation is not permitted on protected roles.
     #[serde(rename = "ROLE_PROTECTED")]
     RoleProtected,
+    /// ResourceNotFound indicates that a resource (project, endpoint, branch, etc.) wasn't found,
+    /// usually due to the provided ID not being correct or because the subject doesn't have enough permissions to
+    /// access the requested resource.
+    /// Prefer a more specific reason if possible, e.g., ProjectNotFound, EndpointNotFound, etc.
     #[serde(rename = "RESOURCE_NOT_FOUND")]
     ResourceNotFound,
+    /// ProjectNotFound indicates that the project wasn't found, usually due to the provided ID not being correct,
+    /// or that the subject doesn't have enough permissions to access the requested project.
     #[serde(rename = "PROJECT_NOT_FOUND")]
     ProjectNotFound,
+    /// EndpointNotFound indicates that the endpoint wasn't found, usually due to the provided ID not being correct,
+    /// or that the subject doesn't have enough permissions to access the requested endpoint.
     #[serde(rename = "ENDPOINT_NOT_FOUND")]
     EndpointNotFound,
+    /// BranchNotFound indicates that the branch wasn't found, usually due to the provided ID not being correct,
+    /// or that the subject doesn't have enough permissions to access the requested branch.
     #[serde(rename = "BRANCH_NOT_FOUND")]
     BranchNotFound,
+    /// RateLimitExceeded indicates that the rate limit for the operation has been exceeded.
     #[serde(rename = "RATE_LIMIT_EXCEEDED")]
     RateLimitExceeded,
+    /// NonDefaultBranchComputeTimeExceeded indicates that the compute time quota of non-default branches has been
+    /// exceeded.
     #[serde(rename = "NON_PRIMARY_BRANCH_COMPUTE_TIME_EXCEEDED")]
-    NonPrimaryBranchComputeTimeExceeded,
+    NonDefaultBranchComputeTimeExceeded,
+    /// ActiveTimeQuotaExceeded indicates that the active time quota was exceeded.
     #[serde(rename = "ACTIVE_TIME_QUOTA_EXCEEDED")]
     ActiveTimeQuotaExceeded,
+    /// ComputeTimeQuotaExceeded indicates that the compute time quota was exceeded.
     #[serde(rename = "COMPUTE_TIME_QUOTA_EXCEEDED")]
     ComputeTimeQuotaExceeded,
+    /// WrittenDataQuotaExceeded indicates that the written data quota was exceeded.
     #[serde(rename = "WRITTEN_DATA_QUOTA_EXCEEDED")]
     WrittenDataQuotaExceeded,
+    /// DataTransferQuotaExceeded indicates that the data transfer quota was exceeded.
     #[serde(rename = "DATA_TRANSFER_QUOTA_EXCEEDED")]
     DataTransferQuotaExceeded,
+    /// LogicalSizeQuotaExceeded indicates that the logical size quota was exceeded.
     #[serde(rename = "LOGICAL_SIZE_QUOTA_EXCEEDED")]
     LogicalSizeQuotaExceeded,
+    /// RunningOperations indicates that the project already has some running operations
+    /// and scheduling of new ones is prohibited.
+    #[serde(rename = "RUNNING_OPERATIONS")]
+    RunningOperations,
+    /// ConcurrencyLimitReached indicates that the concurrency limit for an action was reached.
+    #[serde(rename = "CONCURRENCY_LIMIT_REACHED")]
+    ConcurrencyLimitReached,
+    /// LockAlreadyTaken indicates that the we attempted to take a lock that was already taken.
+    #[serde(rename = "LOCK_ALREADY_TAKEN")]
+    LockAlreadyTaken,
     #[default]
     #[serde(other)]
     Unknown,
@@ -168,14 +175,42 @@ impl Reason {
                 | Reason::BranchNotFound
         )
     }
+
+    pub fn can_retry(&self) -> bool {
+        match self {
+            // do not retry role protected errors
+            // not a transitive error
+            Reason::RoleProtected => false,
+            // on retry, it will still not be found
+            Reason::ResourceNotFound
+            | Reason::ProjectNotFound
+            | Reason::EndpointNotFound
+            | Reason::BranchNotFound => false,
+            // we were asked to go away
+            Reason::RateLimitExceeded
+            | Reason::NonDefaultBranchComputeTimeExceeded
+            | Reason::ActiveTimeQuotaExceeded
+            | Reason::ComputeTimeQuotaExceeded
+            | Reason::WrittenDataQuotaExceeded
+            | Reason::DataTransferQuotaExceeded
+            | Reason::LogicalSizeQuotaExceeded => false,
+            // transitive error. control plane is currently busy
+            // but might be ready soon
+            Reason::RunningOperations
+            | Reason::ConcurrencyLimitReached
+            | Reason::LockAlreadyTaken => true,
+            // unknown error. better not retry it.
+            Reason::Unknown => false,
+        }
+    }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Copy, Clone, Debug, Deserialize)]
 pub struct RetryInfo {
     pub retry_delay_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct UserFacingMessage {
     pub message: Box<str>,
 }
@@ -249,7 +284,7 @@ pub struct DatabaseInfo {
 
 // Manually implement debug to omit sensitive info.
 impl fmt::Debug for DatabaseInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatabaseInfo")
             .field("host", &self.host)
             .field("port", &self.port)
@@ -336,7 +371,7 @@ mod tests {
                 }
             }
         });
-        let _: KickSession = serde_json::from_str(&json.to_string())?;
+        let _: KickSession<'_> = serde_json::from_str(&json.to_string())?;
 
         Ok(())
     }

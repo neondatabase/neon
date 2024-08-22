@@ -1,5 +1,6 @@
 mod classic;
 mod hacks;
+pub mod jwt;
 mod link;
 
 use std::net::IpAddr;
@@ -79,9 +80,8 @@ pub trait TestBackend: Send + Sync + 'static {
 
 impl std::fmt::Display for BackendType<'_, (), ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use BackendType::*;
         match self {
-            Console(api, _) => match &**api {
+            Self::Console(api, _) => match &**api {
                 ConsoleBackend::Console(endpoint) => {
                     fmt.debug_tuple("Console").field(&endpoint.url()).finish()
                 }
@@ -92,7 +92,7 @@ impl std::fmt::Display for BackendType<'_, (), ()> {
                 #[cfg(test)]
                 ConsoleBackend::Test(_) => fmt.debug_tuple("Test").finish(),
             },
-            Link(url, _) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+            Self::Link(url, _) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
         }
     }
 }
@@ -101,10 +101,9 @@ impl<T, D> BackendType<'_, T, D> {
     /// Very similar to [`std::option::Option::as_ref`].
     /// This helps us pass structured config to async tasks.
     pub fn as_ref(&self) -> BackendType<'_, &T, &D> {
-        use BackendType::*;
         match self {
-            Console(c, x) => Console(MaybeOwned::Borrowed(c), x),
-            Link(c, x) => Link(MaybeOwned::Borrowed(c), x),
+            Self::Console(c, x) => BackendType::Console(MaybeOwned::Borrowed(c), x),
+            Self::Link(c, x) => BackendType::Link(MaybeOwned::Borrowed(c), x),
         }
     }
 }
@@ -114,10 +113,9 @@ impl<'a, T, D> BackendType<'a, T, D> {
     /// Maps [`BackendType<T>`] to [`BackendType<R>`] by applying
     /// a function to a contained value.
     pub fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<'a, R, D> {
-        use BackendType::*;
         match self {
-            Console(c, x) => Console(c, f(x)),
-            Link(c, x) => Link(c, x),
+            Self::Console(c, x) => BackendType::Console(c, f(x)),
+            Self::Link(c, x) => BackendType::Link(c, x),
         }
     }
 }
@@ -125,10 +123,9 @@ impl<'a, T, D, E> BackendType<'a, Result<T, E>, D> {
     /// Very similar to [`std::option::Option::transpose`].
     /// This is most useful for error handling.
     pub fn transpose(self) -> Result<BackendType<'a, T, D>, E> {
-        use BackendType::*;
         match self {
-            Console(c, x) => x.map(|x| Console(c, x)),
-            Link(c, x) => Ok(Link(c, x)),
+            Self::Console(c, x) => x.map(|x| BackendType::Console(c, x)),
+            Self::Link(c, x) => Ok(BackendType::Link(c, x)),
         }
     }
 }
@@ -218,7 +215,7 @@ impl RateBucketInfo {
 impl AuthenticationConfig {
     pub fn check_rate_limit(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         config: &AuthenticationConfig,
         secret: AuthSecret,
         endpoint: &EndpointId,
@@ -243,7 +240,7 @@ impl AuthenticationConfig {
         let limit_not_exceeded = self.rate_limiter.check(
             (
                 endpoint_int,
-                MaskedIp::new(ctx.peer_addr, config.rate_limit_ip_subnet),
+                MaskedIp::new(ctx.peer_addr(), config.rate_limit_ip_subnet),
             ),
             password_weight,
         );
@@ -274,7 +271,7 @@ impl AuthenticationConfig {
 ///
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     api: &impl console::Api,
     user_info: ComputeUserInfoMaybeEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -292,7 +289,9 @@ async fn auth_quirks(
             ctx.set_endpoint_id(res.info.endpoint.clone());
             let password = match res.keys {
                 ComputeCredentialKeys::Password(p) => p,
-                _ => unreachable!("password hack should return a password"),
+                ComputeCredentialKeys::AuthKeys(_) => {
+                    unreachable!("password hack should return a password")
+                }
             };
             (res.info, Some(password))
         }
@@ -303,8 +302,8 @@ async fn auth_quirks(
     let (allowed_ips, maybe_secret) = api.get_allowed_ips_and_secret(ctx, &info).await?;
 
     // check allowed list
-    if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
-        return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr));
+    if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
+        return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
     }
 
     if !endpoint_rate_limiter.check(info.endpoint.clone().into(), 1) {
@@ -356,7 +355,7 @@ async fn auth_quirks(
 }
 
 async fn authenticate_with_secret(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     secret: AuthSecret,
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -399,21 +398,17 @@ async fn authenticate_with_secret(
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
     /// Get compute endpoint name from the credentials.
     pub fn get_endpoint(&self) -> Option<EndpointId> {
-        use BackendType::*;
-
         match self {
-            Console(_, user_info) => user_info.endpoint_id.clone(),
-            Link(_, _) => Some("link".into()),
+            Self::Console(_, user_info) => user_info.endpoint_id.clone(),
+            Self::Link(_, _) => Some("link".into()),
         }
     }
 
     /// Get username from the credentials.
     pub fn get_user(&self) -> &str {
-        use BackendType::*;
-
         match self {
-            Console(_, user_info) => &user_info.user,
-            Link(_, _) => "link",
+            Self::Console(_, user_info) => &user_info.user,
+            Self::Link(_, _) => "link",
         }
     }
 
@@ -421,16 +416,14 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub async fn authenticate(
         self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> auth::Result<BackendType<'a, ComputeCredentials, NodeInfo>> {
-        use BackendType::*;
-
         let res = match self {
-            Console(api, user_info) => {
+            Self::Console(api, user_info) => {
                 info!(
                     user = &*user_info.user,
                     project = user_info.endpoint(),
@@ -450,7 +443,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
                 BackendType::Console(api, credentials)
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Link(url, _) => {
+            Self::Link(url, _) => {
                 info!("performing link authentication");
 
                 let info = link::authenticate(ctx, &url, client).await?;
@@ -467,23 +460,21 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
 impl BackendType<'_, ComputeUserInfo, &()> {
     pub async fn get_role_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        use BackendType::*;
         match self {
-            Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
-            Link(_, _) => Ok(Cached::new_uncached(None)),
+            Self::Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
+            Self::Link(_, _) => Ok(Cached::new_uncached(None)),
         }
     }
 
     pub async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
-        use BackendType::*;
         match self {
-            Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
-            Link(_, _) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
+            Self::Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Link(_, _) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
     }
 }
@@ -492,20 +483,18 @@ impl BackendType<'_, ComputeUserInfo, &()> {
 impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
-        use BackendType::*;
-
         match self {
-            Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Link(_, info) => Ok(Cached::new_uncached(info.clone())),
+            Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::Link(_, info) => Ok(Cached::new_uncached(info.clone())),
         }
     }
 
     fn get_keys(&self) -> Option<&ComputeCredentialKeys> {
         match self {
-            BackendType::Console(_, creds) => Some(&creds.keys),
-            BackendType::Link(_, _) => None,
+            Self::Console(_, creds) => Some(&creds.keys),
+            Self::Link(_, _) => None,
         }
     }
 }
@@ -514,20 +503,18 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
 impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
-        use BackendType::*;
-
         match self {
-            Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Link(_, _) => unreachable!("link auth flow doesn't support waking the compute"),
+            Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::Link(_, _) => unreachable!("link auth flow doesn't support waking the compute"),
         }
     }
 
     fn get_keys(&self) -> Option<&ComputeCredentialKeys> {
         match self {
-            BackendType::Console(_, creds) => Some(&creds.keys),
-            BackendType::Link(_, _) => None,
+            Self::Console(_, creds) => Some(&creds.keys),
+            Self::Link(_, _) => None,
         }
     }
 }
@@ -571,7 +558,7 @@ mod tests {
     impl console::Api for Auth {
         async fn get_role_secret(
             &self,
-            _ctx: &mut RequestMonitoring,
+            _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError> {
             Ok(CachedRoleSecret::new_uncached(Some(self.secret.clone())))
@@ -579,7 +566,7 @@ mod tests {
 
         async fn get_allowed_ips_and_secret(
             &self,
-            _ctx: &mut RequestMonitoring,
+            _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>
         {
@@ -591,7 +578,7 @@ mod tests {
 
         async fn wake_compute(
             &self,
-            _ctx: &mut RequestMonitoring,
+            _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
         ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
             unimplemented!()
@@ -665,7 +652,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
@@ -717,11 +704,13 @@ mod tests {
                 _ => panic!("wrong message"),
             }
         });
-        let endpoint_rate_limiter =
-            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
+        let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+            EndpointRateLimiter::DEFAULT,
+            64,
+        ));
 
         let _creds = auth_quirks(
-            &mut ctx,
+            &ctx,
             &api,
             user_info,
             &mut stream,
@@ -740,7 +729,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
@@ -767,11 +756,13 @@ mod tests {
             frontend::password_message(b"my-secret-password", &mut write).unwrap();
             client.write_all(&write).await.unwrap();
         });
-        let endpoint_rate_limiter =
-            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
+        let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+            EndpointRateLimiter::DEFAULT,
+            64,
+        ));
 
         let _creds = auth_quirks(
-            &mut ctx,
+            &ctx,
             &api,
             user_info,
             &mut stream,
@@ -790,7 +781,7 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(1024);
         let mut stream = PqStream::new(Stream::from_raw(server));
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let api = Auth {
             ips: vec![],
             secret: AuthSecret::Scram(ServerSecret::build("my-secret-password").await.unwrap()),
@@ -818,11 +809,13 @@ mod tests {
             client.write_all(&write).await.unwrap();
         });
 
-        let endpoint_rate_limiter =
-            Arc::new(EndpointRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET));
+        let endpoint_rate_limiter = Arc::new(EndpointRateLimiter::new_with_shards(
+            EndpointRateLimiter::DEFAULT,
+            64,
+        ));
 
         let creds = auth_quirks(
-            &mut ctx,
+            &ctx,
             &api,
             user_info,
             &mut stream,

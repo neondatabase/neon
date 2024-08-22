@@ -348,35 +348,36 @@ where
                     self.add_rel(rel, rel).await?;
                 }
             }
-
-            for (path, content) in self
-                .timeline
-                .list_aux_files(self.lsn, self.ctx)
-                .await
-                .map_err(|e| BasebackupError::Server(e.into()))?
-            {
-                if path.starts_with("pg_replslot") {
-                    let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
-                    let restart_lsn = Lsn(u64::from_le_bytes(
-                        content[offs..offs + 8].try_into().unwrap(),
-                    ));
-                    info!("Replication slot {} restart LSN={}", path, restart_lsn);
-                    min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
-                } else if path == "pg_logical/replorigin_checkpoint" {
-                    // replorigin_checkoint is written only on compute shutdown, so it contains
-                    // deteriorated values. So we generate our own version of this file for the particular LSN
-                    // based on information about replorigins extracted from transaction commit records.
-                    // In future we will not generate AUX record for "pg_logical/replorigin_checkpoint" at all,
-                    // but now we should handle (skip) it for backward compatibility.
-                    continue;
-                }
-                let header = new_tar_header(&path, content.len() as u64)?;
-                self.ar
-                    .append(&header, &*content)
-                    .await
-                    .context("could not add aux file to basebackup tarball")?;
-            }
         }
+
+        for (path, content) in self
+            .timeline
+            .list_aux_files(self.lsn, self.ctx)
+            .await
+            .map_err(|e| BasebackupError::Server(e.into()))?
+        {
+            if path.starts_with("pg_replslot") {
+                let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
+                let restart_lsn = Lsn(u64::from_le_bytes(
+                    content[offs..offs + 8].try_into().unwrap(),
+                ));
+                info!("Replication slot {} restart LSN={}", path, restart_lsn);
+                min_restart_lsn = Lsn::min(min_restart_lsn, restart_lsn);
+            } else if path == "pg_logical/replorigin_checkpoint" {
+                // replorigin_checkoint is written only on compute shutdown, so it contains
+                // deteriorated values. So we generate our own version of this file for the particular LSN
+                // based on information about replorigins extracted from transaction commit records.
+                // In future we will not generate AUX record for "pg_logical/replorigin_checkpoint" at all,
+                // but now we should handle (skip) it for backward compatibility.
+                continue;
+            }
+            let header = new_tar_header(&path, content.len() as u64)?;
+            self.ar
+                .append(&header, &*content)
+                .await
+                .context("could not add aux file to basebackup tarball")?;
+        }
+
         if min_restart_lsn != Lsn::MAX {
             info!(
                 "Min restart LSN for logical replication is {}",

@@ -10,7 +10,7 @@ use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
 use proxy::metrics::{Metrics, ThreadPoolMetrics};
-use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled};
+use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
 
@@ -205,7 +205,7 @@ async fn task_main(
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
@@ -216,10 +216,11 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     use pq_proto::FeStartupPacket::*;
 
     match msg {
-        SslRequest => {
+        SslRequest { direct: false } => {
             stream
                 .write_message(&pq_proto::BeMessage::EncryptionResponse(true))
                 .await?;
+
             // Upgrade raw stream into a secure TLS-backed stream.
             // NOTE: We've consumed `tls`; this fact will be used later.
 
@@ -255,13 +256,13 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 async fn handle_client(
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let mut tls_stream = ssl_handshake(&mut ctx, stream, tls_config, tls_server_end_point).await?;
+    let mut tls_stream = ssl_handshake(&ctx, stream, tls_config, tls_server_end_point).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of
@@ -286,7 +287,10 @@ async fn handle_client(
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
-    let _ = copy_bidirectional_client_compute(&mut tls_stream, &mut client).await?;
 
-    Ok(())
+    match copy_bidirectional_client_compute(&mut tls_stream, &mut client).await {
+        Ok(_) => Ok(()),
+        Err(ErrorSource::Client(err)) => Err(err).context("client"),
+        Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
+    }
 }

@@ -1,3 +1,4 @@
+use crate::proxy::ErrorSource;
 use crate::{
     cancellation::CancellationHandlerMain,
     config::ProxyConfig,
@@ -7,6 +8,7 @@ use crate::{
     proxy::{handle_client, ClientMode},
     rate_limiter::EndpointRateLimiter,
 };
+use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
@@ -127,7 +129,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
 pub async fn serve_websocket(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -143,7 +145,7 @@ pub async fn serve_websocket(
 
     let res = Box::pin(handle_client(
         config,
-        &mut ctx,
+        &ctx,
         cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },
@@ -165,7 +167,11 @@ pub async fn serve_websocket(
         Ok(Some(p)) => {
             ctx.set_success();
             ctx.log_connect();
-            p.proxy_pass().await
+            match p.proxy_pass().await {
+                Ok(()) => Ok(()),
+                Err(ErrorSource::Client(err)) => Err(err).context("client"),
+                Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
+            }
         }
     }
 }

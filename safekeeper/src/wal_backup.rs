@@ -12,7 +12,6 @@ use std::cmp::min;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
@@ -23,18 +22,16 @@ use tokio::fs::File;
 
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::watch;
+use tokio::sync::{watch, OnceCell};
 use tokio::time::sleep;
 use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
-use crate::timeline::{FullAccessTimeline, PeerInfo, Timeline};
-use crate::timeline_manager::StateSnapshot;
+use crate::timeline::{PeerInfo, WalResidentTimeline};
+use crate::timeline_manager::{Manager, StateSnapshot};
 use crate::{SafeKeeperConf, WAL_BACKUP_RUNTIME};
-
-use once_cell::sync::OnceCell;
 
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
@@ -48,7 +45,7 @@ pub struct WalBackupTaskHandle {
 }
 
 /// Do we have anything to upload to S3, i.e. should safekeepers run backup activity?
-pub fn is_wal_backup_required(
+pub(crate) fn is_wal_backup_required(
     wal_seg_size: usize,
     num_computes: usize,
     state: &StateSnapshot,
@@ -61,35 +58,33 @@ pub fn is_wal_backup_required(
 /// Based on peer information determine which safekeeper should offload; if it
 /// is me, run (per timeline) task, if not yet. OTOH, if it is not me and task
 /// is running, kill it.
-pub async fn update_task(
-    conf: &SafeKeeperConf,
-    tli: &Arc<Timeline>,
-    need_backup: bool,
-    state: &StateSnapshot,
-    entry: &mut Option<WalBackupTaskHandle>,
-) {
+pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &StateSnapshot) {
     let (offloader, election_dbg_str) =
-        determine_offloader(&state.peers, state.backup_lsn, tli.ttid, conf);
-    let elected_me = Some(conf.my_id) == offloader;
+        determine_offloader(&state.peers, state.backup_lsn, mgr.tli.ttid, &mgr.conf);
+    let elected_me = Some(mgr.conf.my_id) == offloader;
 
     let should_task_run = need_backup && elected_me;
 
     // start or stop the task
-    if should_task_run != (entry.is_some()) {
+    if should_task_run != (mgr.backup_task.is_some()) {
         if should_task_run {
             info!("elected for backup: {}", election_dbg_str);
 
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-            let async_task = backup_task_main(tli.clone(), conf.backup_parallel_jobs, shutdown_rx);
+            let async_task = backup_task_main(
+                mgr.wal_resident_timeline(),
+                mgr.conf.backup_parallel_jobs,
+                shutdown_rx,
+            );
 
-            let handle = if conf.current_thread_runtime {
+            let handle = if mgr.conf.current_thread_runtime {
                 tokio::spawn(async_task)
             } else {
                 WAL_BACKUP_RUNTIME.spawn(async_task)
             };
 
-            *entry = Some(WalBackupTaskHandle {
+            mgr.backup_task = Some(WalBackupTaskHandle {
                 shutdown_tx,
                 handle,
             });
@@ -101,7 +96,7 @@ pub async fn update_task(
                 // someone else has been elected
                 info!("stepping down from backup: {}", election_dbg_str);
             }
-            shut_down_task(entry).await;
+            shut_down_task(&mut mgr.backup_task).await;
         }
     }
 }
@@ -122,6 +117,7 @@ async fn shut_down_task(entry: &mut Option<WalBackupTaskHandle>) {
 /// time we have several ones as they PUT the same files. Also,
 /// - frequently changing the offloader would be bad;
 /// - electing seriously lagging safekeeper is undesirable;
+///
 /// So we deterministically choose among the reasonably caught up candidates.
 /// TODO: take into account failed attempts to deal with hypothetical situation
 /// where s3 is unreachable only for some sks.
@@ -169,7 +165,7 @@ fn determine_offloader(
     }
 }
 
-static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
+static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::const_new();
 
 // Storage must be configured and initialized when this is called.
 fn get_configured_remote_storage() -> &'static GenericRemoteStorage {
@@ -180,18 +176,26 @@ fn get_configured_remote_storage() -> &'static GenericRemoteStorage {
         .unwrap()
 }
 
-pub fn init_remote_storage(conf: &SafeKeeperConf) {
+pub async fn init_remote_storage(conf: &SafeKeeperConf) {
     // TODO: refactor REMOTE_STORAGE to avoid using global variables, and provide
     // dependencies to all tasks instead.
-    REMOTE_STORAGE.get_or_init(|| {
-        conf.remote_storage
-            .as_ref()
-            .map(|c| GenericRemoteStorage::from_config(c).expect("failed to create remote storage"))
-    });
+    REMOTE_STORAGE
+        .get_or_init(|| async {
+            if let Some(conf) = conf.remote_storage.as_ref() {
+                Some(
+                    GenericRemoteStorage::from_config(conf)
+                        .await
+                        .expect("failed to create remote storage"),
+                )
+            } else {
+                None
+            }
+        })
+        .await;
 }
 
 struct WalBackupTask {
-    timeline: FullAccessTimeline,
+    timeline: WalResidentTimeline,
     timeline_dir: Utf8PathBuf,
     wal_seg_size: usize,
     parallel_jobs: usize,
@@ -200,16 +204,12 @@ struct WalBackupTask {
 
 /// Offload single timeline.
 #[instrument(name = "WAL backup", skip_all, fields(ttid = %tli.ttid))]
-async fn backup_task_main(tli: Arc<Timeline>, parallel_jobs: usize, mut shutdown_rx: Receiver<()>) {
+async fn backup_task_main(
+    tli: WalResidentTimeline,
+    parallel_jobs: usize,
+    mut shutdown_rx: Receiver<()>,
+) {
     let _guard = WAL_BACKUP_TASKS.guard();
-
-    let tli = match tli.full_access_guard().await {
-        Ok(tli) => tli,
-        Err(e) => {
-            error!("backup error: {}", e);
-            return;
-        }
-    };
     info!("started");
 
     let mut wb = WalBackupTask {
@@ -304,7 +304,7 @@ impl WalBackupTask {
 }
 
 async fn backup_lsn_range(
-    timeline: &FullAccessTimeline,
+    timeline: &WalResidentTimeline,
     backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
@@ -483,6 +483,16 @@ pub(crate) async fn backup_partial_segment(
         .await
 }
 
+pub(crate) async fn copy_partial_segment(
+    source: &RemotePath,
+    destination: &RemotePath,
+) -> Result<()> {
+    let storage = get_configured_remote_storage();
+    let cancel = CancellationToken::new();
+
+    storage.copy_object(source, destination, &cancel).await
+}
+
 pub async fn read_object(
     file_path: &RemotePath,
     offset: u64,
@@ -545,7 +555,10 @@ pub async fn delete_timeline(ttid: &TenantTimelineId) -> Result<()> {
                         &cancel,
                     )
                     .await?
-                    .keys;
+                    .keys
+                    .into_iter()
+                    .map(|o| o.key)
+                    .collect::<Vec<_>>();
                 if files.is_empty() {
                     return Ok(()); // done
                 }
@@ -613,7 +626,7 @@ pub async fn copy_s3_segments(
 
     let uploaded_segments = &files
         .iter()
-        .filter_map(|file| file.object_name().map(ToOwned::to_owned))
+        .filter_map(|o| o.key.object_name().map(ToOwned::to_owned))
         .collect::<HashSet<_>>();
 
     debug!(

@@ -281,22 +281,6 @@ impl LocationConf {
     }
 }
 
-impl Default for LocationConf {
-    // TODO: this should be removed once tenant loading can guarantee that we are never
-    // loading from a directory without a configuration.
-    // => tech debt since https://github.com/neondatabase/neon/issues/1555
-    fn default() -> Self {
-        Self {
-            mode: LocationMode::Attached(AttachedLocationConfig {
-                generation: Generation::none(),
-                attach_mode: AttachmentMode::Single,
-            }),
-            tenant_conf: TenantConfOpt::default(),
-            shard: ShardIdentity::unsharded(),
-        }
-    }
-}
-
 /// A tenant's calcuated configuration, which is the result of merging a
 /// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
 ///
@@ -351,7 +335,6 @@ pub struct TenantConf {
     /// A lagging safekeeper will be changed after `lagging_wal_timeout` time elapses since the last WAL update,
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
-    pub trace_read_requests: bool,
     pub eviction_policy: EvictionPolicy,
     pub min_resident_size_override: Option<u64>,
     // See the corresponding metric's help string.
@@ -454,10 +437,6 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub trace_read_requests: Option<bool>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
     pub eviction_policy: Option<EvictionPolicy>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -535,9 +514,6 @@ impl TenantConfOpt {
                 .lagging_wal_timeout
                 .unwrap_or(global_conf.lagging_wal_timeout),
             max_lsn_wal_lag: self.max_lsn_wal_lag.unwrap_or(global_conf.max_lsn_wal_lag),
-            trace_read_requests: self
-                .trace_read_requests
-                .unwrap_or(global_conf.trace_read_requests),
             eviction_policy: self.eviction_policy.unwrap_or(global_conf.eviction_policy),
             min_resident_size_override: self
                 .min_resident_size_override
@@ -597,7 +573,6 @@ impl Default for TenantConf {
                 .expect("cannot parse default walreceiver lagging wal timeout"),
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
-            trace_read_requests: false,
             eviction_policy: EvictionPolicy::NoEviction,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
@@ -675,7 +650,6 @@ impl From<TenantConfOpt> for models::TenantConfig {
             walreceiver_connect_timeout: value.walreceiver_connect_timeout.map(humantime),
             lagging_wal_timeout: value.lagging_wal_timeout.map(humantime),
             max_lsn_wal_lag: value.max_lsn_wal_lag,
-            trace_read_requests: value.trace_read_requests,
             eviction_policy: value.eviction_policy,
             min_resident_size_override: value.min_resident_size_override,
             evictions_low_residence_duration_metric_threshold: value

@@ -14,7 +14,7 @@ from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 
 """
 Usage:
-DEFAULT_PG_VERSION=15 BUILD_TYPE=debug NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 INTERACTIVE=true \
+DEFAULT_PG_VERSION=16 BUILD_TYPE=debug NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 INTERACTIVE=true \
     ./scripts/pytest --timeout 0 test_runner/performance/pageserver/interactive/test_many_small_tenants.py
 """
 
@@ -55,10 +55,6 @@ def setup_env(
         }
         template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
         env.pageserver.tenant_detach(template_tenant)
-        env.pageserver.allowed_errors.append(
-            # tenant detach causes this because the underlying attach-hook removes the tenant from storage controller entirely
-            ".*Dropped remote consistent LSN updates.*",
-        )
         env.pageserver.tenant_attach(template_tenant, config)
         ep = env.endpoints.create_start("main", tenant_id=template_tenant)
         ep.safe_psql("create table foo(b text)")

@@ -22,7 +22,6 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    StorageScrubber,
     generate_uploads_and_deletions,
 )
 from fixtures.pageserver.common_types import parse_layer_file_name
@@ -215,12 +214,11 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     # Having written a mixture of generation-aware and legacy index_part.json,
     # ensure the scrubber handles the situation as expected.
-    metadata_summary = StorageScrubber(neon_env_builder).scan_metadata()
+    healthy, metadata_summary = env.storage_scrubber.scan_metadata()
     assert metadata_summary["tenant_count"] == 1  # Scrubber should have seen our timeline
     assert metadata_summary["timeline_count"] == 1
     assert metadata_summary["timeline_shard_count"] == 1
-    assert not metadata_summary["with_errors"]
-    assert not metadata_summary["with_warnings"]
+    assert healthy
 
 
 def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
@@ -248,10 +246,6 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     timeline = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
     assert timeline["remote_consistent_lsn"] == timeline["remote_consistent_lsn_visible"]
     assert get_deletion_queue_dropped_lsn_updates(ps_http) == 0
-
-    main_pageserver.allowed_errors.extend(
-        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
-    )
 
     # Now advance the generation in the control plane: subsequent validations
     # from the running pageserver will fail.  No more deletions should happen.
@@ -397,8 +391,6 @@ def test_deletion_queue_recovery(
         #   validated before restart.
         assert get_deletion_queue_executed(ps_http) == before_restart_depth
     else:
-        main_pageserver.allowed_errors.extend([".*Dropping stale deletions.*"])
-
         # If we lost the attachment, we should have dropped our pre-restart deletions.
         assert get_deletion_queue_dropped(ps_http) == before_restart_depth
 
@@ -553,13 +545,6 @@ def test_multi_attach(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    # We will intentionally create situations where stale deletions happen from non-latest-generation
-    # nodes when the tenant is multiply-attached
-    for ps in env.pageservers:
-        ps.allowed_errors.extend(
-            [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
-        )
-
     # Initially, the tenant will be attached to the first pageserver (first is default in our test harness)
     wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
     _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
@@ -610,19 +595,26 @@ def test_multi_attach(
     for ps in pageservers:
         ps.stop()
 
-    # Returning to a normal healthy state: all pageservers will start, but only the one most
-    # recently attached via the control plane will re-attach on startup
+    # Returning to a normal healthy state: all pageservers will start
     for ps in pageservers:
         ps.start()
 
-    with pytest.raises(PageserverApiException):
-        _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
-    with pytest.raises(PageserverApiException):
-        _detail = http_clients[1].timeline_detail(tenant_id, timeline_id)
-    _detail = http_clients[2].timeline_detail(tenant_id, timeline_id)
+    # Pageservers are marked offline by the storage controller during the rolling restart
+    # above. This may trigger a reschedulling, so there's no guarantee that the tenant
+    # shard ends up attached to the most recent ps.
+    raised = 0
+    serving_ps_idx = None
+    for idx, http_client in enumerate(http_clients):
+        try:
+            _detail = http_client.timeline_detail(tenant_id, timeline_id)
+            serving_ps_idx = idx
+        except PageserverApiException:
+            raised += 1
+
+    assert raised == 2 and serving_ps_idx is not None
 
     # All data we wrote while multi-attached remains readable
-    workload.validate(pageservers[2].id)
+    workload.validate(pageservers[serving_ps_idx].id)
 
 
 def test_upgrade_generationless_local_file_paths(

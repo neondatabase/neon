@@ -1,26 +1,30 @@
 import os
-import time
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    NeonEnv,
+    NeonEnvBuilder,
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
 from fixtures.pg_version import PgVersion
 
 
-def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
-    env = neon_simple_env
-
-    if env.pg_version != PgVersion.V16:
+def test_layer_bloating(neon_env_builder: NeonEnvBuilder, vanilla_pg):
+    if neon_env_builder.pg_version != PgVersion.V16:
         pytest.skip("pg_log_standby_snapshot() function is available only in PG16")
 
-    timeline = env.neon_cli.create_branch("test_logical_replication", "empty")
-    endpoint = env.endpoints.create_start(
-        "test_logical_replication", config_lines=["log_statement=all"]
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "compaction_threshold": 99999,
+            "image_creation_threshold": 99999,
+        }
     )
+
+    timeline = env.initial_timeline
+    endpoint = env.endpoints.create_start("main", config_lines=["log_statement=all"])
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -54,7 +58,7 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
     # Wait logical replication to sync
     logical_replication_sync(vanilla_pg, endpoint)
     wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, timeline)
-    time.sleep(10)
+    env.pageserver.http_client().timeline_checkpoint(env.initial_tenant, timeline, compact=False)
 
     # Check layer file sizes
     timeline_path = f"{env.pageserver.workdir}/tenants/{env.initial_tenant}/timelines/{timeline}/"
@@ -63,3 +67,5 @@ def test_layer_bloating(neon_simple_env: NeonEnv, vanilla_pg):
         if filename.startswith("00000"):
             log.info(f"layer {filename} size is {os.path.getsize(timeline_path + filename)}")
             assert os.path.getsize(timeline_path + filename) < 512_000_000
+
+    env.stop(immediate=True)

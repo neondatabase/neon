@@ -31,11 +31,8 @@ pub struct ProxyConfig {
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
-    pub disable_ip_check_for_http: bool,
-    pub redis_rps_limit: Vec<RateBucketInfo>,
     pub region: String,
     pub handshake_timeout: Duration,
-    pub aws_region: String,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute_retry_config: RetryConfig,
@@ -55,7 +52,7 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub request_timeout: tokio::time::Duration,
+    pub accept_websockets: bool,
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,
@@ -74,6 +71,9 @@ impl TlsConfig {
         self.config.clone()
     }
 }
+
+/// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L159>
+pub const PG_ALPN_PROTOCOL: &[u8] = b"postgresql";
 
 /// Configure TLS for the main endpoint.
 pub fn configure_tls(
@@ -111,16 +111,17 @@ pub fn configure_tls(
     let cert_resolver = Arc::new(cert_resolver);
 
     // allow TLS 1.2 to be compatible with older client libraries
-    let config = rustls::ServerConfig::builder_with_protocol_versions(&[
+    let mut config = rustls::ServerConfig::builder_with_protocol_versions(&[
         &rustls::version::TLS13,
         &rustls::version::TLS12,
     ])
     .with_no_client_auth()
-    .with_cert_resolver(cert_resolver.clone())
-    .into();
+    .with_cert_resolver(cert_resolver.clone());
+
+    config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];
 
     Ok(TlsConfig {
-        config,
+        config: Arc::new(config),
         common_names,
         cert_resolver,
     })
@@ -155,7 +156,7 @@ pub enum TlsServerEndPoint {
 }
 
 impl TlsServerEndPoint {
-    pub fn new(cert: &CertificateDer) -> anyhow::Result<Self> {
+    pub fn new(cert: &CertificateDer<'_>) -> anyhow::Result<Self> {
         let sha256_oids = [
             // I'm explicitly not adding MD5 or SHA1 here... They're bad.
             oid_registry::OID_SIG_ECDSA_WITH_SHA256,
@@ -278,7 +279,7 @@ impl CertResolver {
 impl rustls::server::ResolvesServerCert for CertResolver {
     fn resolve(
         &self,
-        client_hello: rustls::server::ClientHello,
+        client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         self.resolve(client_hello.server_name()).map(|x| x.0)
     }
@@ -399,15 +400,11 @@ impl FromStr for EndpointCacheConfig {
 #[derive(Debug)]
 pub struct MetricBackupCollectionConfig {
     pub interval: Duration,
-    pub remote_storage_config: OptRemoteStorageConfig,
+    pub remote_storage_config: Option<RemoteStorageConfig>,
     pub chunk_size: usize,
 }
 
-/// Hack to avoid clap being smarter. If you don't use this type alias, clap assumes more about the optional state and you get
-/// runtime type errors from the value parser we use.
-pub type OptRemoteStorageConfig = Option<RemoteStorageConfig>;
-
-pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<OptRemoteStorageConfig> {
+pub fn remote_storage_from_toml(s: &str) -> anyhow::Result<RemoteStorageConfig> {
     RemoteStorageConfig::from_toml(&s.parse()?)
 }
 
@@ -563,7 +560,7 @@ impl RetryConfig {
             match key {
                 "num_retries" => num_retries = Some(value.parse()?),
                 "base_retry_wait_duration" => {
-                    base_retry_wait_duration = Some(humantime::parse_duration(value)?)
+                    base_retry_wait_duration = Some(humantime::parse_duration(value)?);
                 }
                 "retry_wait_exponent_base" => retry_wait_exponent_base = Some(value.parse()?),
                 unknown => bail!("unknown key: {unknown}"),

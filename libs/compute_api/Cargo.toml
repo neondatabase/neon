@@ -14,5 +14,3 @@ regex.workspace = true
 
 utils = { path = "../utils" }
 remote_storage = { version = "0.1", path = "../remote_storage/" }
-
-workspace_hack.workspace = true

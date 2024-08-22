@@ -28,7 +28,8 @@ use crate::send_wal::WalSenderState;
 use crate::state::TimelineMemState;
 use crate::state::TimelinePersistentState;
 use crate::timeline::get_timeline_dir;
-use crate::timeline::FullAccessTimeline;
+use crate::timeline::WalResidentTimeline;
+use crate::timeline_manager;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 
@@ -168,6 +169,7 @@ pub struct Memory {
     pub last_removed_segno: XLogSegNo,
     pub epoch_start_lsn: Lsn,
     pub mem_state: TimelineMemState,
+    pub mgr_status: timeline_manager::Status,
 
     // PhysicalStorage state.
     pub write_lsn: Lsn,
@@ -326,7 +328,7 @@ pub struct TimelineDigest {
 }
 
 pub async fn calculate_digest(
-    tli: &FullAccessTimeline,
+    tli: &WalResidentTimeline,
     request: TimelineDigestRequest,
 ) -> Result<TimelineDigest> {
     if request.from_lsn > request.until_lsn {

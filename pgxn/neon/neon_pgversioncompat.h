@@ -54,6 +54,10 @@
 
 #define BufTagGetNRelFileInfo(tag) tag.rnode
 
+#define BufTagGetRelNumber(tagp) ((tagp)->rnode.relNode)
+
+#define InvalidRelFileNumber InvalidOid
+
 #define SMgrRelGetRelInfo(reln) \
 	(reln->smgr_rnode.node)
 

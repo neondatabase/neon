@@ -377,7 +377,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
     pub fn get(
         self: &Arc<Self>,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
     ) -> Result<Option<Client<C>>, HttpConnError> {
         let mut client: Option<ClientInner<C>> = None;
@@ -390,7 +390,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             .write()
             .get_conn_entry(conn_info.db_and_user())
         {
-            client = Some(entry.conn)
+            client = Some(entry.conn);
         }
         let endpoint_pool = Arc::downgrade(&endpoint_pool);
 
@@ -403,15 +403,15 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                 tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
                 tracing::Span::current().record(
                     "pid",
-                    &tracing::field::display(client.inner.get_process_id()),
+                    tracing::field::display(client.inner.get_process_id()),
                 );
                 info!(
                     cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
                     "pool: reusing connection '{conn_info}'"
                 );
-                client.session.send(ctx.session_id)?;
+                client.session.send(ctx.session_id())?;
                 ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
-                ctx.latency_timer.success();
+                ctx.success();
                 return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
             }
         }
@@ -465,19 +465,19 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
 pub fn poll_client<C: ClientInnerExt>(
     global_pool: Arc<GlobalConnPool<C>>,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     conn_info: ConnInfo,
     client: C,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client<C> {
-    let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol);
-    let mut session_id = ctx.session_id;
+    let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
+    let mut session_id = ctx.session_id();
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
     let span = info_span!(parent: None, "connection", %conn_id);
-    let cold_start_info = ctx.cold_start_info;
+    let cold_start_info = ctx.cold_start_info();
     span.in_scope(|| {
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
     });
@@ -662,13 +662,13 @@ impl<C: ClientInnerExt> Discard<'_, C> {
     pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
         let conn_info = &self.conn_info;
         if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is not idle")
+            info!("pool: throwing away connection '{conn_info}' because connection is not idle");
         }
     }
     pub fn discard(&mut self) {
         let conn_info = &self.conn_info;
         if std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
+            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
         }
     }
 }
@@ -758,6 +758,7 @@ mod tests {
     async fn test_pool() {
         let _ = env_logger::try_init();
         let config = Box::leak(Box::new(crate::config::HttpConfig {
+            accept_websockets: false,
             pool_options: GlobalConnPoolOptions {
                 max_conns_per_endpoint: 2,
                 gc_epoch: Duration::from_secs(1),
@@ -766,7 +767,6 @@ mod tests {
                 opt_in: false,
                 max_total_conns: 3,
             },
-            request_timeout: Duration::from_secs(1),
             cancel_set: CancelSet::new(0),
             client_conn_threshold: u64::MAX,
         }));

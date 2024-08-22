@@ -78,29 +78,14 @@ paths:
 
     delete:
       description: |
-        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried until 404 is retrieved.
-        404 means that deletion successfully finished"
+        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried.  Deleting
+        a non-existent tenant is considered successful (returns 200).
       responses:
         "200":
           description: Tenant was successfully deleted, or was already not found.
-        "404":
-          description: Tenant not found. This is a success result, equivalent to 200.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "409":
-          description: Deletion is already in progress, continue polling
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ConflictError"
-        "412":
-          description: Deletion may not proceed, tenant is not in Active state
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PreconditionFailedError"
+        "503":
+          description: Service is unavailable, or tenant is already being modified (perhaps concurrently deleted)
+
 
   /v1/tenant/{tenant_id}/time_travel_remote_storage:
     parameters:
@@ -251,6 +236,13 @@ paths:
             type: string
             format: date-time
           description: A timestamp to get the LSN
+        - name: with_lease
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Whether to grant a lease to the corresponding LSN. Default to false.
+
       responses:
         "200":
           description: OK
@@ -273,15 +265,19 @@ paths:
           type: string
           format: hex
     post:
-      description: Obtain lease for the given LSN
-      parameters:
-        - name: lsn
-          in: query
-          required: true
-          schema:
-            type: string
-            format: hex
-          description: A LSN to obtain the lease for
+      description: Obtains a lease for the given LSN.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+               - lsn
+              properties:
+                lsn:
+                  description: A LSN to obtain the lease for.
+                  type: string
+                  format: hex
       responses:
         "200":
           description: OK
@@ -312,6 +308,45 @@ paths:
             application/json:
               schema:
                 type: string
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/block_gc:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Persistently add a gc blocking at the tenant level because of this timeline
+      responses:
+        "200":
+          description: OK
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/unblock_gc:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Persistently remove a tenant level gc blocking for this timeline
+      responses:
+        "200":
+          description: OK
+
   /v1/tenant/{tenant_shard_id}/location_config:
     parameters:
       - name: tenant_shard_id
@@ -375,64 +410,13 @@ paths:
                 $ref: "#/components/schemas/TenantLocationConfigResponse"
         "409":
           description: |
-            The tenant is already known to Pageserver in some way,
-            and hence this `/attach` call has been rejected.
-
-            Some examples of how this can happen:
-            - tenant was created on this pageserver
-            - tenant attachment was started by an earlier call to `/attach`.
-
-            Callers should poll the tenant status's `attachment_status` field,
-            like for status 202. See the longer description for `POST /attach`
-            for details.
+            The tenant is already being modified, perhaps by a concurrent call to this API
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-  /v1/tenant/{tenant_id}/ignore:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      description: |
-        Remove tenant data (including all corresponding timelines) from pageserver's memory.
-        Files on local disk and remote storage are not affected.
 
-        Future pageserver restarts won't load the data back until `load` is called on such tenant.
-      responses:
-        "200":
-          description: Tenant ignored
-
-
-  /v1/tenant/{tenant_id}/load:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      description: |
-        Schedules an operation that attempts to load a tenant from the local disk and
-        synchronise it with the remote storage (if enabled), repeating pageserver's restart logic for tenant load.
-        If the tenant was ignored before, removes the ignore mark and continues with load scheduling.
-
-        Errors if the tenant is absent on disk, already present in memory or fails to schedule its load.
-        Scheduling a load does not mean that the tenant would load successfully, check tenant status to ensure load correctness.
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TenantLoadRequest"
-      responses:
-        "202":
-          description: Tenant scheduled to load successfully
-
-  /v1/tenant/{tenant_id}/{timeline_id}/preserve_initdb_archive:
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/preserve_initdb_archive:
     parameters:
       - name: tenant_id
         in: path
@@ -451,6 +435,51 @@ paths:
       responses:
         "202":
           description: Tenant scheduled to load successfully
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/archival_config:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      description: |
+        Either archives or unarchives the given timeline.
+        An archived timeline may not have any non-archived children.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArchivalConfigRequest"
+      responses:
+        "200":
+          description: Timeline (un)archived successfully
+        "409":
+          description: |
+            The tenant/timeline is already being modified, perhaps by a concurrent call to this API
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Temporarily unavailable, please retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceUnavailableError"
 
   /v1/tenant/{tenant_id}/synthetic_size:
     parameters:
@@ -484,7 +513,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/SyntheticSizeResponse"
             text/html:
-              description: SVG representation of the tenant and it's timelines.
+              schema:
+                type: string
+                description: SVG representation of the tenant and its timelines.
         "401":
           description: Unauthorized Error
           content:
@@ -623,7 +654,7 @@ paths:
           type: string
       - name: timeline_id
         in: path
-        ŕequired: true
+        required: true
         schema:
           type: string
 
@@ -812,8 +843,6 @@ components:
               For example this can be caused by s3 being unreachable. The retry may be implemented
               with call to detach, though it would be better to not automate it and inspec failed state
               manually before proceeding with a retry.
-
-            See the tenant `/attach` endpoint for more information.
           type: object
           required:
             - slug
@@ -831,15 +860,13 @@ components:
     TenantCreateRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
+        - $ref: '#/components/schemas/TenantLoadRequest'
         - type: object
           required:
             - new_tenant_id
           properties:
             new_tenant_id:
               type: string
-            generation:
-              type: integer
-              description: Attachment generation number.
     TenantLoadRequest:
       type: object
       properties:
@@ -903,6 +930,15 @@ components:
         warm:
           type: boolean
           description: Whether to poll remote storage for layers to download.  If false, secondary locations don't download anything.
+    ArchivalConfigRequest:
+      type: object
+      required:
+        - state
+      properties:
+        state:
+          description: The archival state of a timeline
+          type: string
+          enum: ["Archived", "Unarchived"]
     TenantConfig:
       type: object
       properties:
@@ -930,8 +966,6 @@ components:
           type: string
         max_lsn_wal_lag:
           type: integer
-        trace_read_requests:
-          type: boolean
         heatmap_period:
           type: string
     TenantConfigResponse:
@@ -1086,6 +1120,10 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
+        valid_until:
+          type: string
+          format: date-time
+          description: The expiration time of the granted lease.
 
     LsnLease:
       type: object
@@ -1161,7 +1199,7 @@ components:
         reparented_timelines:
           type: array
           description: Set of reparented timeline ids
-          properties:
+          items:
             type: string
             format: hex
             description: TimelineId

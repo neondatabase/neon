@@ -10,7 +10,7 @@ from fixtures.neon_fixtures import (
     tenant_get_shards,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import wait_for_last_record_lsn
 
 # neon_local doesn't handle creating/modifying endpoints concurrently, so we use a mutex
 # to ensure we don't do that: this enables running lots of Workloads in parallel safely.
@@ -174,22 +174,17 @@ class Workload:
 
                 if upload:
                     # Wait for written data to be uploaded to S3 (force a checkpoint to trigger upload)
-                    ps_http.timeline_checkpoint(tenant_shard_id, self.timeline_id)
-                    wait_for_upload(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
+                    ps_http.timeline_checkpoint(
+                        tenant_shard_id, self.timeline_id, wait_until_uploaded=True
+                    )
                     log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
                 else:
                     log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
 
     def validate(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
-        result = endpoint.safe_psql_many(
-            [
-                "select clear_buffer_cache()",
-                f"""
-            SELECT COUNT(*) FROM {self.table}
-            """,
-            ]
-        )
+        endpoint.clear_shared_buffers()
+        result = endpoint.safe_psql(f"SELECT COUNT(*) FROM {self.table}")
 
         log.info(f"validate({self.expect_rows}): {result}")
-        assert result == [[("",)], [(self.expect_rows,)]]
+        assert result == [(self.expect_rows,)]

@@ -16,12 +16,12 @@ use desim::{
 use hyper::Uri;
 use safekeeper::{
     safekeeper::{ProposerAcceptorMessage, SafeKeeper, ServerInfo, UNKNOWN_SERVER_VERSION},
-    state::TimelinePersistentState,
+    state::{TimelinePersistentState, TimelineState},
     timeline::TimelineError,
     wal_storage::Storage,
     SafeKeeperConf,
 };
-use tracing::{debug, info_span};
+use tracing::{debug, info_span, warn};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -68,7 +68,7 @@ impl GlobalMap {
             let control_store = DiskStateStorage::new(disk.clone());
             let wal_store = DiskWALStorage::new(disk.clone(), &control_store)?;
 
-            let sk = SafeKeeper::new(control_store, wal_store, conf.my_id)?;
+            let sk = SafeKeeper::new(TimelineState::new(control_store), wal_store, conf.my_id)?;
             timelines.insert(
                 ttid,
                 SharedState {
@@ -118,7 +118,11 @@ impl GlobalMap {
         let control_store = DiskStateStorage::new(disk_timeline.clone());
         let wal_store = DiskWALStorage::new(disk_timeline.clone(), &control_store)?;
 
-        let sk = SafeKeeper::new(control_store, wal_store, self.conf.my_id)?;
+        let sk = SafeKeeper::new(
+            TimelineState::new(control_store),
+            wal_store,
+            self.conf.my_id,
+        )?;
 
         self.timelines.insert(
             ttid,
@@ -177,9 +181,13 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         sk_auth_token: None,
         current_thread_runtime: false,
         walsenders_keep_horizon: false,
-        partial_backup_enabled: false,
         partial_backup_timeout: Duration::from_secs(0),
         disable_periodic_broker_push: false,
+        enable_offload: false,
+        delete_offloaded_wal: false,
+        control_file_save_interval: Duration::from_secs(1),
+        partial_backup_concurrency: 1,
+        eviction_min_resident: Duration::ZERO,
     };
 
     let mut global = GlobalMap::new(disk, conf.clone())?;
@@ -247,7 +255,12 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
                 NetEvent::Message(msg) => {
                     let res = conn.process_any(msg, &mut global);
                     if res.is_err() {
-                        debug!("conn {:?} error: {:#}", connection_id, res.unwrap_err());
+                        let e = res.unwrap_err();
+                        let estr = e.to_string();
+                        if !estr.contains("finished processing START_REPLICATION") {
+                            warn!("conn {:?} error: {:?}", connection_id, e);
+                            panic!("unexpected error at safekeeper: {:#}", e);
+                        }
                         conns.remove(&connection_id);
                         break;
                     }

@@ -146,6 +146,9 @@ pub(crate) enum NotifyError {
     // A response indicates we will never succeed, such as 400 or 404
     #[error("Non-retryable error {0}")]
     Fatal(StatusCode),
+
+    #[error("neon_local error: {0}")]
+    NeonLocal(anyhow::Error),
 }
 
 enum MaybeSendResult {
@@ -278,7 +281,7 @@ impl ComputeHook {
     async fn do_notify_local(
         &self,
         reconfigure_request: &ComputeHookNotifyRequest,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), NotifyError> {
         // neon_local updates are not safe to call concurrently, use a lock to serialize
         // all calls to this function
         let _locked = self.neon_local_lock.lock().await;
@@ -320,8 +323,9 @@ impl ComputeHook {
             if endpoint.tenant_id == *tenant_id && endpoint.status() == EndpointStatus::Running {
                 tracing::info!("Reconfiguring endpoint {}", endpoint_name,);
                 endpoint
-                    .reconfigure(compute_pageservers.clone(), *stripe_size)
-                    .await?;
+                    .reconfigure(compute_pageservers.clone(), *stripe_size, None)
+                    .await
+                    .map_err(NotifyError::NeonLocal)?;
             }
         }
 
@@ -510,7 +514,7 @@ impl ComputeHook {
         } else {
             self.do_notify_local(&request).await.map_err(|e| {
                 // This path is for testing only, so munge the error into our prod-style error type.
-                tracing::error!("Local notification hook failed: {e}");
+                tracing::error!("neon_local notification hook failed: {e}");
                 NotifyError::Fatal(StatusCode::INTERNAL_SERVER_ERROR)
             })
         };

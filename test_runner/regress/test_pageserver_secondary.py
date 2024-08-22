@@ -2,22 +2,23 @@ import json
 import os
 import random
 import time
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
 
 import pytest
-from fixtures.common_types import TenantId, TimelineId
+from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, StorageScrubber
+from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
-    poll_for_remote_storage_iterations,
-    tenant_delete_wait_completed,
     wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
+from werkzeug.wrappers.request import Request
+from werkzeug.wrappers.response import Response
 
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
@@ -61,7 +62,7 @@ def evict_random_layers(
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
-def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
+def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, seed: int):
     """
     Issue many location configuration changes, ensure that tenants
     remain readable & we don't get any unexpected errors.  We should
@@ -75,6 +76,20 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     neon_env_builder.enable_pageserver_remote_storage(
         remote_storage_kind=s3_storage(),
     )
+    neon_env_builder.control_plane_compute_hook_api = (
+        f"http://{make_httpserver.host}:{make_httpserver.port}/notify-attach"
+    )
+
+    def ignore_notify(request: Request):
+        # This test does all its own compute configuration (by passing explicit pageserver ID to Workload functions),
+        # so we send controller notifications to /dev/null to prevent it fighting the test for control of the compute.
+        log.info(f"Ignoring storage controller compute notification: {request.json}")
+        return Response(status=200)
+
+    make_httpserver.expect_request("/notify-attach", method="PUT").respond_with_handler(
+        ignore_notify
+    )
+
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
 
     pageservers = env.pageservers
@@ -85,9 +100,6 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     for ps in env.pageservers:
         ps.allowed_errors.extend(
             [
-                # We will make no effort to avoid stale attachments
-                ".*Dropped remote consistent LSN updates.*",
-                ".*Dropping stale deletions.*",
                 # page_service_conn_main{peer_addr=[::1]:41176}: query handler for 'pagestream 3b19aec5038c796f64b430b30a555121 d07776761d44050b8aab511df1657d83' failed: Tenant 3b19aec5038c796f64b430b30a555121 not found
                 ".*query handler.*Tenant.*not found.*",
                 # page_service_conn_main{peer_addr=[::1]:45552}: query handler for 'pagestream 414ede7ad50f775a8e7d9ba0e43b9efc a43884be16f44b3626482b6981b2c745' failed: Tenant 414ede7ad50f775a8e7d9ba0e43b9efc is not active
@@ -103,6 +115,20 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     workload = Workload(env, tenant_id, timeline_id)
     workload.init(env.pageservers[0].id)
     workload.write_rows(256, env.pageservers[0].id)
+
+    # Discourage the storage controller from interfering with the changes we will make directly on the pageserver
+    env.storage_controller.tenant_policy_update(
+        tenant_id,
+        {
+            "scheduling": "Stop",
+        },
+    )
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Scheduling is disabled by policy Stop.*",
+            ".*Skipping reconcile for policy Stop.*",
+        ]
+    )
 
     # We use a fixed seed to make the test reproducible: we want a randomly
     # chosen order, but not to change the order every time we run the test.
@@ -214,7 +240,7 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, seed: int):
     # Having done a bunch of attach/detach cycles, we will have generated some index garbage: check
     # that the scrubber sees it and cleans it up.  We do this before the final attach+validate pass,
     # to also validate that the scrubber isn't breaking anything.
-    gc_summary = StorageScrubber(neon_env_builder).pageserver_physical_gc(min_age_secs=1)
+    gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=1)
     assert gc_summary["remote_storage_errors"] == 0
     assert gc_summary["indices_deleted"] > 0
 
@@ -363,8 +389,10 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
 
     # Check that deletion works properly on a tenant that was live-migrated
     # (reproduce https://github.com/neondatabase/neon/issues/6802)
-    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-    tenant_delete_wait_completed(pageserver_b.http_client(), tenant_id, iterations)
+    pageserver_b.http_client().tenant_delete(tenant_id)
+
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
 
 
 def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
@@ -408,6 +436,35 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
     log.info(f"Read back heatmap: {heatmap_second}")
     assert heatmap_second != heatmap_first
     validate_heatmap(heatmap_second)
+
+
+def list_elegible_layers(
+    pageserver, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+) -> list[Path]:
+    """
+    The subset of layer filenames that are elegible for secondary download: at time of writing this
+    is all resident layers which are also visible.
+    """
+    candidates = pageserver.list_layers(tenant_id, timeline_id)
+
+    layer_map = pageserver.http_client().layer_map_info(tenant_id, timeline_id)
+
+    # Map of layer filenames to their visibility the "layer name" is not the same as the filename: add suffix to resolve one to the other
+    visible_map = dict(
+        (f"{layer.layer_file_name}-v1-00000001", layer.visible)
+        for layer in layer_map.historic_layers
+    )
+
+    def is_visible(layer_file_name):
+        try:
+            return visible_map[str(layer_file_name)]
+        except KeyError:
+            # Unexpected: tests should call this when pageservers are in a quiet state such that the layer map
+            # matches what's on disk.
+            log.warn(f"Lookup {layer_file_name} from {list(visible_map.keys())}")
+            raise
+
+    return list(c for c in candidates if is_visible(c))
 
 
 def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
@@ -464,7 +521,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
 
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
+    assert list_elegible_layers(ps_attached, tenant_id, timeline_id) == ps_secondary.list_layers(
         tenant_id, timeline_id
     )
 
@@ -482,9 +539,9 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
     try:
-        assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
-            tenant_id, timeline_id
-        )
+        assert list_elegible_layers(
+            ps_attached, tenant_id, timeline_id
+        ) == ps_secondary.list_layers(tenant_id, timeline_id)
     except:
         # Do a full listing of the secondary location on errors, to help debug of
         # https://github.com/neondatabase/neon/issues/6966
@@ -505,8 +562,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # ==================================================================
     try:
         log.info("Evicting a layer...")
-        layer_to_evict = ps_attached.list_layers(tenant_id, timeline_id)[0]
-        some_other_layer = ps_attached.list_layers(tenant_id, timeline_id)[1]
+        layer_to_evict = list_elegible_layers(ps_attached, tenant_id, timeline_id)[0]
+        some_other_layer = list_elegible_layers(ps_attached, tenant_id, timeline_id)[1]
         log.info(f"Victim layer: {layer_to_evict.name}")
         ps_attached.http_client().evict_layer(
             tenant_id, timeline_id, layer_name=layer_to_evict.name
@@ -524,9 +581,9 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
         assert layer_to_evict not in ps_attached.list_layers(tenant_id, timeline_id)
-        assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
-            tenant_id, timeline_id
-        )
+        assert list_elegible_layers(
+            ps_attached, tenant_id, timeline_id
+        ) == ps_secondary.list_layers(tenant_id, timeline_id)
     except:
         # On assertion failures, log some details to help with debugging
         heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
@@ -536,7 +593,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # Scrub the remote storage
     # ========================
     # This confirms that the scrubber isn't upset by the presence of the heatmap
-    StorageScrubber(neon_env_builder).scan_metadata()
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
 
     # Detach secondary and delete tenant
     # ===================================
@@ -552,7 +610,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     )
 
     log.info("Deleting tenant...")
-    tenant_delete_wait_completed(ps_attached.http_client(), tenant_id, 10)
+    ps_attached.http_client().tenant_delete(tenant_id)
 
     assert_prefix_empty(
         neon_env_builder.pageserver_remote_storage,
@@ -564,6 +622,9 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         ),
     )
     workload.stop()
+
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
 
 
 def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):

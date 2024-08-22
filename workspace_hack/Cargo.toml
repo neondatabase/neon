@@ -25,18 +25,22 @@ axum = { version = "0.6", features = ["ws"] }
 base64 = { version = "0.21", features = ["alloc"] }
 base64ct = { version = "1", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }
+camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", features = ["derive", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "help", "std", "string", "suggestions", "usage"] }
 crossbeam-utils = { version = "0.8" }
+crypto-bigint = { version = "0.5", features = ["generic-array", "zeroize"] }
+der = { version = "0.7", default-features = false, features = ["oid", "pem", "std"] }
+deranged = { version = "0.3", default-features = false, features = ["powerfmt", "serde", "std"] }
+digest = { version = "0.10", features = ["mac", "oid", "std"] }
 either = { version = "1" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 futures-channel = { version = "0.3", features = ["sink"] }
-futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-io = { version = "0.3" }
-futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
+generic-array = { version = "0.14", default-features = false, features = ["more_lengths", "zeroize"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hashbrown = { version = "0.14", features = ["raw"] }
 hex = { version = "0.4", features = ["serde"] }
@@ -44,6 +48,7 @@ hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper = { version = "0.14", features = ["full"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
 itertools = { version = "0.10" }
+lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
@@ -64,23 +69,24 @@ rustls = { version = "0.21", features = ["dangerous_configuration"] }
 scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-sha2 = { version = "0.10", features = ["asm"] }
+sha2 = { version = "0.10", features = ["asm", "oid"] }
+signature = { version = "2", default-features = false, features = ["digest", "rand_core", "std"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "write"] }
+spki = { version = "0.7", default-features = false, features = ["pem", "std"] }
 subtle = { version = "2" }
 sync_wrapper = { version = "0.1", default-features = false, features = ["futures"] }
+tikv-jemalloc-sys = { version = "0.5" }
 time = { version = "0.3", features = ["macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-rustls = { version = "0.24" }
 tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
-toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
-toml_edit = { version = "0.19", features = ["serde"] }
 tonic = { version = "0.9", features = ["tls-roots"] }
 tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "log", "timeout", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
-zeroize = { version = "1", features = ["derive"] }
+zeroize = { version = "1", features = ["derive", "serde"] }
 zstd = { version = "0.13" }
 zstd-safe = { version = "7", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }
@@ -96,6 +102,7 @@ getrandom = { version = "0.2", default-features = false, features = ["std"] }
 hashbrown = { version = "0.14", features = ["raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
 itertools = { version = "0.10" }
+lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
@@ -105,7 +112,9 @@ num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 parquet = { git = "https://github.com/apache/arrow-rs", branch = "master", default-features = false, features = ["zstd"] }
+proc-macro2 = { version = "1" }
 prost = { version = "0.11" }
+quote = { version = "1" }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
 regex-syntax = { version = "0.8" }
@@ -113,8 +122,6 @@ serde = { version = "1", features = ["alloc", "derive"] }
 syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full", "visit"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
-toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
-toml_edit = { version = "0.19", features = ["serde"] }
 zstd = { version = "0.13" }
 zstd-safe = { version = "7", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }

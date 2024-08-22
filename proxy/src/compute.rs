@@ -44,11 +44,10 @@ pub enum ConnectionError {
 
 impl UserFacingError for ConnectionError {
     fn to_string_client(&self) -> String {
-        use ConnectionError::*;
         match self {
             // This helps us drop irrelevant library-specific prefixes.
             // TODO: propagate severity level and other parameters.
-            Postgres(err) => match err.as_db_error() {
+            ConnectionError::Postgres(err) => match err.as_db_error() {
                 Some(err) => {
                     let msg = err.message();
 
@@ -62,8 +61,8 @@ impl UserFacingError for ConnectionError {
                 }
                 None => err.to_string(),
             },
-            WakeComputeError(err) => err.to_string_client(),
-            TooManyConnectionAttempts(_) => {
+            ConnectionError::WakeComputeError(err) => err.to_string_client(),
+            ConnectionError::TooManyConnectionAttempts(_) => {
                 "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
             }
             _ => COULD_NOT_CONNECT.to_owned(),
@@ -276,12 +275,12 @@ impl ConnCfg {
     /// Connect to a corresponding compute node.
     pub async fn connect(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         allow_self_signed_compute: bool,
         aux: MetricsAuxInfo,
         timeout: Duration,
     ) -> Result<PostgresConnection, ConnectionError> {
-        let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (socket_addr, stream, host) = self.connect_raw(timeout).await?;
         drop(pause);
 
@@ -304,14 +303,14 @@ impl ConnCfg {
         )?;
 
         // connect_raw() will not use TLS if sslmode is "disable"
-        let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (client, connection) = self.0.connect_raw(stream, tls).await?;
         drop(pause);
-        tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
+        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
         let stream = connection.stream.into_inner();
 
         info!(
-            cold_start_info = ctx.cold_start_info.as_str(),
+            cold_start_info = ctx.cold_start_info().as_str(),
             "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
             self.0.get_ssl_mode()
         );
@@ -330,7 +329,7 @@ impl ConnCfg {
             params,
             cancel_closure,
             aux,
-            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol),
+            _guage: Metrics::get().proxy.db_connections.guard(ctx.protocol()),
         };
 
         Ok(connection)
@@ -366,16 +365,16 @@ static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
 struct AcceptEverythingVerifier;
 impl ServerCertVerifier for AcceptEverythingVerifier {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        use rustls::SignatureScheme::*;
+        use rustls::SignatureScheme;
         // The schemes for which `SignatureScheme::supported_in_tls13` returns true.
         vec![
-            ECDSA_NISTP521_SHA512,
-            ECDSA_NISTP384_SHA384,
-            ECDSA_NISTP256_SHA256,
-            RSA_PSS_SHA512,
-            RSA_PSS_SHA384,
-            RSA_PSS_SHA256,
-            ED25519,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::ED25519,
         ]
     }
     fn verify_server_cert(

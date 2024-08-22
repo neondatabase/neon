@@ -40,6 +40,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::*;
 use utils::lsn::Lsn;
+use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
 
 ///
@@ -53,10 +54,18 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    /// The current [`process::WalRedoProcess`] that is used by new redo requests.
-    /// We use [`heavier_once_cell`] for coalescing the spawning, but the redo
-    /// requests don't use the [`heavier_once_cell::Guard`] to keep ahold of the
+    /// We use [`heavier_once_cell`] for
+    ///
+    /// 1. coalescing the lazy spawning of walredo processes ([`ProcessOnceCell::Spawned`])
+    /// 2. prevent new processes from being spawned on [`Self::shutdown`] (=> [`ProcessOnceCell::ManagerShutDown`]).
+    ///
+    /// # Spawning
+    ///
+    /// Redo requests use the once cell to coalesce onto one call to [`process::WalRedoProcess::launch`].
+    ///
+    /// Notably, requests don't use the [`heavier_once_cell::Guard`] to keep ahold of the
     /// their process object; we use [`Arc::clone`] for that.
+    ///
     /// This is primarily because earlier implementations that didn't  use [`heavier_once_cell`]
     /// had that behavior; it's probably unnecessary.
     /// The only merit of it is that if one walredo process encounters an error,
@@ -65,7 +74,65 @@ pub struct PostgresRedoManager {
     /// still be using the old redo process. But, those other tasks will most likely
     /// encounter an error as well, and errors are an unexpected condition anyway.
     /// So, probably we could get rid of the `Arc` in the future.
-    redo_process: heavier_once_cell::OnceCell<Arc<process::WalRedoProcess>>,
+    ///
+    /// # Shutdown
+    ///
+    /// See [`Self::launched_processes`].
+    redo_process: heavier_once_cell::OnceCell<ProcessOnceCell>,
+
+    /// Gate that is entered when launching a walredo process and held open
+    /// until the process has been `kill()`ed and `wait()`ed upon.
+    ///
+    /// Manager shutdown waits for this gate to close after setting the
+    /// [`ProcessOnceCell::ManagerShutDown`] state in [`Self::redo_process`].
+    ///
+    /// This type of usage is a bit unusual because gates usually keep track of
+    /// concurrent operations, e.g., every [`Self::request_redo`] that is inflight.
+    /// But we use it here to keep track of the _processes_ that we have launched,
+    /// which may outlive any individual redo request because
+    /// - we keep walredo process around until its quiesced to amortize spawn cost and
+    /// - the Arc may be held by multiple concurrent redo requests, so, just because
+    ///   you replace the [`Self::redo_process`] cell's content doesn't mean the
+    ///   process gets killed immediately.
+    ///
+    /// We could simplify this by getting rid of the [`Arc`].
+    /// See the comment on [`Self::redo_process`] for more details.
+    launched_processes: utils::sync::gate::Gate,
+}
+
+/// See [`PostgresRedoManager::redo_process`].
+enum ProcessOnceCell {
+    Spawned(Arc<Process>),
+    ManagerShutDown,
+}
+
+struct Process {
+    process: process::WalRedoProcess,
+    /// This field is last in this struct so the guard gets dropped _after_ [`Self::process`].
+    /// (Reminder: dropping [`Self::process`] synchronously sends SIGKILL and then `wait()`s for it to exit).
+    _launched_processes_guard: utils::sync::gate::GateGuard,
+}
+
+impl std::ops::Deref for Process {
+    type Target = process::WalRedoProcess;
+
+    fn deref(&self) -> &Self::Target {
+        &self.process
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+macro_rules! bail {
+    ($($arg:tt)*) => {
+        return Err($crate::walredo::Error::Other(::anyhow::anyhow!($($arg)*)));
+    }
 }
 
 ///
@@ -88,9 +155,9 @@ impl PostgresRedoManager {
         base_img: Option<(Lsn, Bytes)>,
         records: Vec<(Lsn, NeonWalRecord)>,
         pg_version: u32,
-    ) -> anyhow::Result<Bytes> {
+    ) -> Result<Bytes, Error> {
         if records.is_empty() {
-            anyhow::bail!("invalid WAL redo request with no records");
+            bail!("invalid WAL redo request with no records");
         }
 
         let base_img_lsn = base_img.as_ref().map(|p| p.0).unwrap_or(Lsn::INVALID);
@@ -148,10 +215,10 @@ impl PostgresRedoManager {
                     chrono::Utc::now().checked_sub_signed(chrono::Duration::from_std(age).ok()?)
                 })
             },
-            process: self
-                .redo_process
-                .get()
-                .map(|p| WalRedoManagerProcessStatus { pid: p.id() }),
+            process: self.redo_process.get().and_then(|p| match &*p {
+                ProcessOnceCell::Spawned(p) => Some(WalRedoManagerProcessStatus { pid: p.id() }),
+                ProcessOnceCell::ManagerShutDown => None,
+            }),
         }
     }
 }
@@ -170,7 +237,50 @@ impl PostgresRedoManager {
             conf,
             last_redo_at: std::sync::Mutex::default(),
             redo_process: heavier_once_cell::OnceCell::default(),
+            launched_processes: utils::sync::gate::Gate::default(),
         }
+    }
+
+    /// Shut down the WAL redo manager.
+    ///
+    /// Returns `true` if this call was the one that initiated shutdown.
+    /// `true` may be observed by no caller if the first caller stops polling.
+    ///
+    /// After this future completes
+    /// - no redo process is running
+    /// - no new redo process will be spawned
+    /// - redo requests that need walredo process will fail with [`Error::Cancelled`]
+    /// - [`apply_neon`]-only redo requests may still work, but this may change in the future
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
+    pub async fn shutdown(&self) -> bool {
+        // prevent new processes from being spawned
+        let maybe_permit = match self.redo_process.get_or_init_detached().await {
+            Ok(guard) => {
+                if matches!(&*guard, ProcessOnceCell::ManagerShutDown) {
+                    None
+                } else {
+                    let (proc, permit) = guard.take_and_deinit();
+                    drop(proc); // this just drops the Arc, its refcount may not be zero yet
+                    Some(permit)
+                }
+            }
+            Err(permit) => Some(permit),
+        };
+        let it_was_us = if let Some(permit) = maybe_permit {
+            self.redo_process
+                .set(ProcessOnceCell::ManagerShutDown, permit);
+            true
+        } else {
+            false
+        };
+        // wait for ongoing requests to drain and the refcounts of all Arc<WalRedoProcess> that
+        // we ever launched to drop to zero, which when it happens synchronously kill()s & wait()s
+        // for the underlying process.
+        self.launched_processes.close().await;
+        it_was_us
     }
 
     /// This type doesn't have its own background task to check for idleness: we
@@ -203,38 +313,51 @@ impl PostgresRedoManager {
         records: &[(Lsn, NeonWalRecord)],
         wal_redo_timeout: Duration,
         pg_version: u32,
-    ) -> anyhow::Result<Bytes> {
+    ) -> Result<Bytes, Error> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
 
         let (rel, blknum) = key.to_rel_block().context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
         loop {
-            let proc: Arc<process::WalRedoProcess> =
-                match self.redo_process.get_or_init_detached().await {
-                    Ok(guard) => Arc::clone(&guard),
-                    Err(permit) => {
-                        // don't hold poison_guard, the launch code can bail
-                        let start = Instant::now();
-                        let proc = Arc::new(
-                            process::WalRedoProcess::launch(
-                                self.conf,
-                                self.tenant_shard_id,
-                                pg_version,
-                            )
-                            .context("launch walredo process")?,
-                        );
-                        let duration = start.elapsed();
-                        WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
-                        info!(
-                            duration_ms = duration.as_millis(),
-                            pid = proc.id(),
-                            "launched walredo process"
-                        );
-                        self.redo_process.set(Arc::clone(&proc), permit);
-                        proc
+            let proc: Arc<Process> = match self.redo_process.get_or_init_detached().await {
+                Ok(guard) => match &*guard {
+                    ProcessOnceCell::Spawned(proc) => Arc::clone(proc),
+                    ProcessOnceCell::ManagerShutDown => {
+                        return Err(Error::Cancelled);
                     }
-                };
+                },
+                Err(permit) => {
+                    let start = Instant::now();
+                    // acquire guard before spawning process, so that we don't spawn new processes
+                    // if the gate is already closed.
+                    let _launched_processes_guard = match self.launched_processes.enter() {
+                                Ok(guard) => guard,
+                                Err(GateError::GateClosed) => unreachable!(
+                                    "shutdown sets the once cell to `ManagerShutDown` state before closing the gate"
+                                ),
+                            };
+                    let proc = Arc::new(Process {
+                        process: process::WalRedoProcess::launch(
+                            self.conf,
+                            self.tenant_shard_id,
+                            pg_version,
+                        )
+                        .context("launch walredo process")?,
+                        _launched_processes_guard,
+                    });
+                    let duration = start.elapsed();
+                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                    info!(
+                        duration_ms = duration.as_millis(),
+                        pid = proc.id(),
+                        "launched walredo process"
+                    );
+                    self.redo_process
+                        .set(ProcessOnceCell::Spawned(Arc::clone(&proc)), permit);
+                    proc
+                }
+            };
 
             let started_at = std::time::Instant::now();
 
@@ -299,12 +422,17 @@ impl PostgresRedoManager {
                 match self.redo_process.get() {
                     None => (),
                     Some(guard) => {
-                        if Arc::ptr_eq(&proc, &*guard) {
-                            // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
-                            guard.take_and_deinit();
-                        } else {
-                            // Another task already spawned another redo process (further up in this method)
-                            // and put it into `redo_process`. Do nothing, our view of the world is behind.
+                        match &*guard {
+                            ProcessOnceCell::ManagerShutDown => {}
+                            ProcessOnceCell::Spawned(guard_proc) => {
+                                if Arc::ptr_eq(&proc, guard_proc) {
+                                    // We're the first to observe an error from `proc`, it's our job to take it out of rotation.
+                                    guard.take_and_deinit();
+                                } else {
+                                    // Another task already spawned another redo process (further up in this method)
+                                    // and put it into `redo_process`. Do nothing, our view of the world is behind.
+                                }
+                            }
                         }
                     }
                 }
@@ -315,7 +443,7 @@ impl PostgresRedoManager {
             }
             n_attempts += 1;
             if n_attempts > MAX_RETRY_ATTEMPTS || result.is_ok() {
-                return result;
+                return result.map_err(Error::Other);
             }
         }
     }
@@ -329,7 +457,7 @@ impl PostgresRedoManager {
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
-    ) -> anyhow::Result<Bytes> {
+    ) -> Result<Bytes, Error> {
         let start_time = Instant::now();
 
         let mut page = BytesMut::new();
@@ -338,7 +466,7 @@ impl PostgresRedoManager {
             page.extend_from_slice(&fpi[..]);
         } else {
             // All the current WAL record types that we can handle require a base image.
-            anyhow::bail!("invalid neon WAL redo request with no base image");
+            bail!("invalid neon WAL redo request with no base image");
         }
 
         // Apply all the WAL records in the batch

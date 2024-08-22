@@ -13,12 +13,39 @@ enum TransferState {
     Done(u64),
 }
 
+#[derive(Debug)]
+pub enum ErrorDirection {
+    Read(io::Error),
+    Write(io::Error),
+}
+
+impl ErrorSource {
+    fn from_client(err: ErrorDirection) -> ErrorSource {
+        match err {
+            ErrorDirection::Read(client) => Self::Client(client),
+            ErrorDirection::Write(compute) => Self::Compute(compute),
+        }
+    }
+    fn from_compute(err: ErrorDirection) -> ErrorSource {
+        match err {
+            ErrorDirection::Write(client) => Self::Client(client),
+            ErrorDirection::Read(compute) => Self::Compute(compute),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ErrorSource {
+    Client(io::Error),
+    Compute(io::Error),
+}
+
 fn transfer_one_direction<A, B>(
     cx: &mut Context<'_>,
     state: &mut TransferState,
     r: &mut A,
     w: &mut B,
-) -> Poll<io::Result<u64>>
+) -> Poll<Result<u64, ErrorDirection>>
 where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     B: AsyncRead + AsyncWrite + Unpin + ?Sized,
@@ -32,7 +59,7 @@ where
                 *state = TransferState::ShuttingDown(count);
             }
             TransferState::ShuttingDown(count) => {
-                ready!(w.as_mut().poll_shutdown(cx))?;
+                ready!(w.as_mut().poll_shutdown(cx)).map_err(ErrorDirection::Write)?;
                 *state = TransferState::Done(*count);
             }
             TransferState::Done(count) => return Poll::Ready(Ok(*count)),
@@ -44,7 +71,7 @@ where
 pub async fn copy_bidirectional_client_compute<Client, Compute>(
     client: &mut Client,
     compute: &mut Compute,
-) -> Result<(u64, u64), std::io::Error>
+) -> Result<(u64, u64), ErrorSource>
 where
     Client: AsyncRead + AsyncWrite + Unpin + ?Sized,
     Compute: AsyncRead + AsyncWrite + Unpin + ?Sized,
@@ -54,9 +81,11 @@ where
 
     poll_fn(|cx| {
         let mut client_to_compute_result =
-            transfer_one_direction(cx, &mut client_to_compute, client, compute)?;
+            transfer_one_direction(cx, &mut client_to_compute, client, compute)
+                .map_err(ErrorSource::from_client)?;
         let mut compute_to_client_result =
-            transfer_one_direction(cx, &mut compute_to_client, compute, client)?;
+            transfer_one_direction(cx, &mut compute_to_client, compute, client)
+                .map_err(ErrorSource::from_compute)?;
 
         // Early termination checks from compute to client.
         if let TransferState::Done(_) = compute_to_client {
@@ -65,18 +94,20 @@ where
                 // Initiate shutdown
                 client_to_compute = TransferState::ShuttingDown(buf.amt);
                 client_to_compute_result =
-                    transfer_one_direction(cx, &mut client_to_compute, client, compute)?;
+                    transfer_one_direction(cx, &mut client_to_compute, client, compute)
+                        .map_err(ErrorSource::from_client)?;
             }
         }
 
-        // Early termination checks from compute to client.
+        // Early termination checks from client to compute.
         if let TransferState::Done(_) = client_to_compute {
             if let TransferState::Running(buf) = &compute_to_client {
                 info!("Client is done, terminate compute");
                 // Initiate shutdown
                 compute_to_client = TransferState::ShuttingDown(buf.amt);
                 compute_to_client_result =
-                    transfer_one_direction(cx, &mut compute_to_client, client, compute)?;
+                    transfer_one_direction(cx, &mut compute_to_client, compute, client)
+                        .map_err(ErrorSource::from_compute)?;
             }
         }
 
@@ -138,7 +169,7 @@ impl CopyBuffer {
         cx: &mut Context<'_>,
         mut reader: Pin<&mut R>,
         mut writer: Pin<&mut W>,
-    ) -> Poll<io::Result<usize>>
+    ) -> Poll<Result<usize, ErrorDirection>>
     where
         R: AsyncRead + ?Sized,
         W: AsyncWrite + ?Sized,
@@ -149,11 +180,11 @@ impl CopyBuffer {
                 // Top up the buffer towards full if we can read a bit more
                 // data - this should improve the chances of a large write
                 if !me.read_done && me.cap < me.buf.len() {
-                    ready!(me.poll_fill_buf(cx, reader.as_mut()))?;
+                    ready!(me.poll_fill_buf(cx, reader.as_mut())).map_err(ErrorDirection::Read)?;
                 }
                 Poll::Pending
             }
-            res => res,
+            res @ Poll::Ready(_) => res.map_err(ErrorDirection::Write),
         }
     }
 
@@ -162,7 +193,7 @@ impl CopyBuffer {
         cx: &mut Context<'_>,
         mut reader: Pin<&mut R>,
         mut writer: Pin<&mut W>,
-    ) -> Poll<io::Result<u64>>
+    ) -> Poll<Result<u64, ErrorDirection>>
     where
         R: AsyncRead + ?Sized,
         W: AsyncWrite + ?Sized,
@@ -176,12 +207,13 @@ impl CopyBuffer {
 
                 match self.poll_fill_buf(cx, reader.as_mut()) {
                     Poll::Ready(Ok(())) => (),
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(ErrorDirection::Read(err))),
                     Poll::Pending => {
                         // Try flushing when the reader has no progress to avoid deadlock
                         // when the reader depends on buffered writer.
                         if self.need_flush {
-                            ready!(writer.as_mut().poll_flush(cx))?;
+                            ready!(writer.as_mut().poll_flush(cx))
+                                .map_err(ErrorDirection::Write)?;
                             self.need_flush = false;
                         }
 
@@ -194,10 +226,10 @@ impl CopyBuffer {
             while self.pos < self.cap {
                 let i = ready!(self.poll_write_buf(cx, reader.as_mut(), writer.as_mut()))?;
                 if i == 0 {
-                    return Poll::Ready(Err(io::Error::new(
+                    return Poll::Ready(Err(ErrorDirection::Write(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "write zero byte into writer",
-                    )));
+                    ))));
                 } else {
                     self.pos += i;
                     self.amt += i as u64;
@@ -216,7 +248,7 @@ impl CopyBuffer {
             // If we've written all the data and we've seen EOF, flush out the
             // data and finish the transfer.
             if self.pos == self.cap && self.read_done {
-                ready!(writer.as_mut().poll_flush(cx))?;
+                ready!(writer.as_mut().poll_flush(cx)).map_err(ErrorDirection::Write)?;
                 return Poll::Ready(Ok(self.amt));
             }
         }

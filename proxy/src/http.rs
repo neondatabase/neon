@@ -4,14 +4,17 @@
 
 pub mod health_server;
 
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::time::Duration;
 
-use futures::FutureExt;
+use anyhow::bail;
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use hyper1::body::Body;
+use serde::de::DeserializeOwned;
+
 pub use reqwest::{Request, Response, StatusCode};
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-use tokio::time::Instant;
-use tracing::trace;
 
 use crate::{
     metrics::{ConsoleRequest, Metrics},
@@ -24,8 +27,6 @@ use reqwest_middleware::RequestBuilder;
 /// We deliberately don't want to replace this with a public static.
 pub fn new_client() -> ClientWithMiddleware {
     let client = reqwest::ClientBuilder::new()
-        .dns_resolver(Arc::new(GaiResolver::default()))
-        .connection_verbose(true)
         .build()
         .expect("Failed to create http client");
 
@@ -36,8 +37,6 @@ pub fn new_client() -> ClientWithMiddleware {
 
 pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
     let timeout_client = reqwest::ClientBuilder::new()
-        .dns_resolver(Arc::new(GaiResolver::default()))
-        .connection_verbose(true)
         .timeout(default_timout)
         .build()
         .expect("Failed to create http client with timeout");
@@ -103,36 +102,31 @@ impl Endpoint {
     }
 }
 
-use hyper_util::client::legacy::connect::dns::{
-    GaiResolver as HyperGaiResolver, Name as HyperName,
-};
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-/// https://docs.rs/reqwest/0.11.18/src/reqwest/dns/gai.rs.html
-use tower_service::Service;
-#[derive(Debug)]
-pub struct GaiResolver(HyperGaiResolver);
+pub async fn parse_json_body_with_limit<D: DeserializeOwned>(
+    mut b: impl Body<Data = Bytes, Error = reqwest::Error> + Unpin,
+    limit: usize,
+) -> anyhow::Result<D> {
+    // We could use `b.limited().collect().await.to_bytes()` here
+    // but this ends up being slightly more efficient as far as I can tell.
 
-impl Default for GaiResolver {
-    fn default() -> Self {
-        Self(HyperGaiResolver::new())
-    }
-}
+    // check the lower bound of the size hint.
+    // in reqwest, this value is influenced by the Content-Length header.
+    let lower_bound = match usize::try_from(b.size_hint().lower()) {
+        Ok(bound) if bound <= limit => bound,
+        _ => bail!("Content length exceeds limit of {limit} bytes"),
+    };
+    let mut bytes = Vec::with_capacity(lower_bound);
 
-impl Resolve for GaiResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let this = &mut self.0.clone();
-        let hyper_name = HyperName::from_str(name.as_str()).expect("name should be valid");
-        let start = Instant::now();
-        Box::pin(
-            Service::<HyperName>::call(this, hyper_name).map(move |result| {
-                let resolve_duration = start.elapsed();
-                trace!(duration = ?resolve_duration, addr = %name.as_str(), "resolve host complete");
-                result
-                    .map(|addrs| -> Addrs { Box::new(addrs) })
-                    .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })
-            }),
-        )
+    while let Some(frame) = b.frame().await.transpose()? {
+        if let Ok(data) = frame.into_data() {
+            if bytes.len() + data.len() > limit {
+                bail!("Content length exceeds limit of {limit} bytes")
+            }
+            bytes.extend_from_slice(&data);
+        }
     }
+
+    Ok(serde_json::from_slice::<D>(&bytes)?)
 }
 
 #[cfg(test)]

@@ -102,10 +102,16 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     # failing to connect to them.
     ".*Call to node.*management API.*failed.*receive body.*",
     ".*Call to node.*management API.*failed.*ReceiveBody.*",
+    ".*Failed to update node .+ after heartbeat round.*error sending request for url.*",
     # Many tests will start up with a node offline
     ".*startup_reconcile: Could not scan node.*",
     # Tests run in dev mode
     ".*Starting in dev mode.*",
+    # Tests that stop endpoints & use the storage controller's neon_local notification
+    # mechanism might fail (neon_local's stopping and endpoint isn't atomic wrt the storage
+    # controller's attempts to notify the endpoint).
+    ".*reconciler.*neon_local notification hook failed.*",
+    ".*reconciler.*neon_local error.*",
 ]
 
 

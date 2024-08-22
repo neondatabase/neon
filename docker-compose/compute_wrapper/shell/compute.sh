@@ -23,18 +23,17 @@ echo "Page server is ready."
 echo "Create a tenant and timeline"
 generate_id tenant_id
 PARAMS=(
-     -sb 
-     -X POST
+     -X PUT
      -H "Content-Type: application/json"
-     -d "{\"new_tenant_id\": \"${tenant_id}\"}"
-     http://pageserver:9898/v1/tenant/
+     -d "{\"mode\": \"AttachedSingle\", \"generation\": 1, \"tenant_conf\": {}}"
+     "http://pageserver:9898/v1/tenant/${tenant_id}/location_config"
 )
 result=$(curl "${PARAMS[@]}")
 echo $result | jq .
 
 generate_id timeline_id
 PARAMS=(
-     -sb 
+     -sbf
      -X POST
      -H "Content-Type: application/json"
      -d "{\"new_timeline_id\": \"${timeline_id}\", \"pg_version\": ${PG_VERSION}}"

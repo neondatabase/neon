@@ -12,21 +12,22 @@ use std::ops::Deref;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::control_file_upgrade::downgrade_v9_to_v8;
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
-use crate::state::TimelinePersistentState;
+use crate::state::{EvictionState, TimelinePersistentState};
 use crate::{control_file_upgrade::upgrade_control_file, timeline::get_timeline_dir};
 use utils::{bin_ser::LeSer, id::TenantTimelineId};
 
 use crate::SafeKeeperConf;
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 8;
+pub const SK_FORMAT_VERSION: u32 = 9;
 
 // contains persistent metadata for safekeeper
 pub const CONTROL_FILE_NAME: &str = "safekeeper.control";
 // needed to atomically update the state using `rename`
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
-pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
+pub const CHECKSUM_SIZE: usize = size_of::<u32>();
 
 /// Storage should keep actual state inside of it. It should implement Deref
 /// trait to access state fields and have persist method for updating that state.
@@ -71,6 +72,9 @@ impl FileStorage {
         conf: &SafeKeeperConf,
         state: TimelinePersistentState,
     ) -> Result<FileStorage> {
+        // we don't support creating new timelines in offloaded state
+        assert!(matches!(state.eviction_state, EvictionState::Present));
+
         let store = FileStorage {
             timeline_dir,
             no_sync: conf.no_sync,
@@ -102,7 +106,7 @@ impl FileStorage {
     }
 
     /// Load control file from given directory.
-    pub fn load_control_file_from_dir(timeline_dir: &Utf8Path) -> Result<TimelinePersistentState> {
+    fn load_control_file_from_dir(timeline_dir: &Utf8Path) -> Result<TimelinePersistentState> {
         let path = timeline_dir.join(CONTROL_FILE_NAME);
         Self::load_control_file(path)
     }
@@ -160,6 +164,30 @@ impl Deref for FileStorage {
     }
 }
 
+impl TimelinePersistentState {
+    pub(crate) fn write_to_buf(&self) -> Result<Vec<u8>> {
+        let mut buf: Vec<u8> = Vec::new();
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_MAGIC)?;
+
+        if self.eviction_state == EvictionState::Present {
+            // temp hack for forward compatibility
+            const PREV_FORMAT_VERSION: u32 = 8;
+            let prev = downgrade_v9_to_v8(self);
+            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, PREV_FORMAT_VERSION)?;
+            prev.ser_into(&mut buf)?;
+        } else {
+            // otherwise, we write the current format version
+            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
+            self.ser_into(&mut buf)?;
+        }
+
+        // calculate checksum before resize
+        let checksum = crc32c::crc32c(&buf);
+        buf.extend_from_slice(&checksum.to_le_bytes());
+        Ok(buf)
+    }
+}
+
 #[async_trait::async_trait]
 impl Storage for FileStorage {
     /// Persists state durably to the underlying storage.
@@ -176,14 +204,8 @@ impl Storage for FileStorage {
                 &control_partial_path
             )
         })?;
-        let mut buf: Vec<u8> = Vec::new();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_MAGIC)?;
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
-        s.ser_into(&mut buf)?;
 
-        // calculate checksum before resize
-        let checksum = crc32c::crc32c(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
+        let buf: Vec<u8> = s.write_to_buf()?;
 
         control_partial.write_all(&buf).await.with_context(|| {
             format!(

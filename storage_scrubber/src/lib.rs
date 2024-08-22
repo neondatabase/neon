@@ -2,6 +2,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 pub mod checks;
 pub mod cloud_admin_api;
+pub mod find_large_objects;
 pub mod garbage;
 pub mod metadata_stream;
 pub mod pageserver_physical_gc;
@@ -15,29 +16,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use aws_config::environment::EnvironmentVariableCredentialsProvider;
-use aws_config::imds::credentials::ImdsCredentialsProvider;
-use aws_config::meta::credentials::CredentialsProviderChain;
-use aws_config::profile::ProfileFileCredentialsProvider;
-use aws_config::retry::RetryConfig;
-use aws_config::sso::SsoCredentialsProvider;
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::{AsyncSleep, Region, SharedAsyncSleep};
-use aws_sdk_s3::{Client, Config};
-use aws_smithy_async::rt::sleep::TokioSleep;
+use aws_config::retry::{RetryConfigBuilder, RetryMode};
+use aws_sdk_s3::config::Region;
+use aws_sdk_s3::error::DisplayErrorContext;
+use aws_sdk_s3::Client;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
+use futures::{Stream, StreamExt};
+use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_timeline_path};
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use pageserver_api::shard::TenantShardId;
+use remote_storage::{
+    GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+    S3Config, DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use storage_controller_client::control_api;
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use utils::fs_ext;
-use utils::id::{TenantId, TimelineId};
+use utils::id::{TenantId, TenantTimelineId, TimelineId};
 
 const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
@@ -60,7 +63,7 @@ pub struct S3Target {
 /// in the pageserver, as all timeline objects existing in the scope of a particular
 /// tenant: the scrubber is different in that it handles collections of data referring to many
 /// TenantShardTimelineIds in on place.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TenantShardTimelineId {
     tenant_shard_id: TenantShardId,
     timeline_id: TimelineId,
@@ -72,6 +75,10 @@ impl TenantShardTimelineId {
             tenant_shard_id,
             timeline_id,
         }
+    }
+
+    fn as_tenant_timeline_id(&self) -> TenantTimelineId {
+        TenantTimelineId::new(self.tenant_shard_id.tenant_id, self.timeline_id)
     }
 }
 
@@ -185,6 +192,22 @@ impl RootTarget {
             .with_sub_segment(&id.timeline_id.to_string())
     }
 
+    /// Given RemotePath "tenants/foo/timelines/bar/layerxyz", prefix it to a literal
+    /// key in the S3 bucket.
+    pub fn absolute_key(&self, key: &RemotePath) -> String {
+        let root = match self {
+            Self::Pageserver(root) => root,
+            Self::Safekeeper(root) => root,
+        };
+
+        let prefix = &root.prefix_in_bucket;
+        if prefix.ends_with('/') {
+            format!("{prefix}{key}")
+        } else {
+            format!("{prefix}/{key}")
+        }
+    }
+
     pub fn bucket_name(&self) -> &str {
         match self {
             Self::Pageserver(root) => &root.bucket_name,
@@ -198,6 +221,10 @@ impl RootTarget {
             Self::Safekeeper(root) => &root.delimiter,
         }
     }
+}
+
+pub fn remote_timeline_path_id(id: &TenantShardTimelineId) -> RemotePath {
+    remote_timeline_path(&id.tenant_shard_id, &id.timeline_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +249,20 @@ impl BucketConfig {
     }
 }
 
+pub struct ControllerClientConfig {
+    /// URL to storage controller.  e.g. http://127.0.0.1:1234 when using `neon_local`
+    pub controller_api: Url,
+
+    /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
+    pub controller_jwt: String,
+}
+
+impl ControllerClientConfig {
+    pub fn build_client(self) -> control_api::Client {
+        control_api::Client::new(self.controller_api, Some(self.controller_jwt))
+    }
+}
+
 pub struct ConsoleConfig {
     pub token: String,
     pub base_url: Url,
@@ -241,168 +282,234 @@ impl ConsoleConfig {
     }
 }
 
-pub fn init_logging(file_name: &str) -> WorkerGuard {
-    let (file_writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::never("./logs/", file_name));
-
-    let file_logs = fmt::Layer::new()
-        .with_target(false)
-        .with_ansi(false)
-        .with_writer(file_writer);
+pub fn init_logging(file_name: &str) -> Option<WorkerGuard> {
     let stderr_logs = fmt::Layer::new()
         .with_target(false)
         .with_writer(std::io::stderr);
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(file_logs)
-        .with(stderr_logs)
-        .init();
 
-    guard
-}
-
-pub fn init_s3_client(bucket_region: Region) -> Client {
-    let credentials_provider = {
-        // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-        let chain = CredentialsProviderChain::first_try(
-            "env",
-            EnvironmentVariableCredentialsProvider::new(),
-        )
-        // uses "AWS_PROFILE" / `aws sso login --profile <profile>`
-        .or_else(
-            "profile-sso",
-            ProfileFileCredentialsProvider::builder().build(),
-        );
-
-        // Use SSO if we were given an account ID
-        match std::env::var("SSO_ACCOUNT_ID").ok() {
-            Some(sso_account) => chain.or_else(
-                "sso",
-                SsoCredentialsProvider::builder()
-                    .account_id(sso_account)
-                    .role_name("PowerUserAccess")
-                    .start_url("https://neondb.awsapps.com/start")
-                    .region(bucket_region.clone())
-                    .build(),
-            ),
-            None => chain,
-        }
-        .or_else(
-            // Finally try IMDS
-            "imds",
-            ImdsCredentialsProvider::builder().build(),
-        )
+    let disable_file_logging = match std::env::var("PAGESERVER_DISABLE_FILE_LOGGING") {
+        Ok(s) => s == "1" || s.to_lowercase() == "true",
+        Err(_) => false,
     };
 
-    let sleep_impl: Arc<dyn AsyncSleep> = Arc::new(TokioSleep::new());
-
-    let mut builder = Config::builder()
-        .behavior_version(
-            #[allow(deprecated)] /* TODO: https://github.com/neondatabase/neon/issues/7665 */
-            BehaviorVersion::v2023_11_09(),
-        )
-        .region(bucket_region)
-        .retry_config(RetryConfig::adaptive().with_max_attempts(3))
-        .sleep_impl(SharedAsyncSleep::from(sleep_impl))
-        .credentials_provider(credentials_provider);
-
-    if let Ok(endpoint) = env::var("AWS_ENDPOINT_URL") {
-        builder = builder.endpoint_url(endpoint)
+    if disable_file_logging {
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(stderr_logs)
+            .init();
+        None
+    } else {
+        let (file_writer, guard) =
+            tracing_appender::non_blocking(tracing_appender::rolling::never("./logs/", file_name));
+        let file_logs = fmt::Layer::new()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(file_writer);
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(stderr_logs)
+            .with(file_logs)
+            .init();
+        Some(guard)
     }
-
-    Client::from_conf(builder.build())
 }
 
-fn init_remote(
+async fn init_s3_client(bucket_region: Region) -> Client {
+    let mut retry_config_builder = RetryConfigBuilder::new();
+
+    retry_config_builder
+        .set_max_attempts(Some(3))
+        .set_mode(Some(RetryMode::Adaptive));
+
+    let config = aws_config::defaults(aws_config::BehaviorVersion::v2024_03_28())
+        .region(bucket_region)
+        .retry_config(retry_config_builder.build())
+        .load()
+        .await;
+    Client::new(&config)
+}
+
+fn default_prefix_in_bucket(node_kind: NodeKind) -> &'static str {
+    match node_kind {
+        NodeKind::Pageserver => "pageserver/v1/",
+        NodeKind::Safekeeper => "wal/",
+    }
+}
+
+fn make_root_target(
+    bucket_name: String,
+    prefix_in_bucket: String,
+    node_kind: NodeKind,
+) -> RootTarget {
+    let s3_target = S3Target {
+        bucket_name,
+        prefix_in_bucket,
+        delimiter: "/".to_string(),
+    };
+    match node_kind {
+        NodeKind::Pageserver => RootTarget::Pageserver(s3_target),
+        NodeKind::Safekeeper => RootTarget::Safekeeper(s3_target),
+    }
+}
+
+async fn init_remote_s3(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
 ) -> anyhow::Result<(Arc<Client>, RootTarget)> {
     let bucket_region = Region::new(bucket_config.region);
-    let delimiter = "/".to_string();
-    let s3_client = Arc::new(init_s3_client(bucket_region));
+    let s3_client = Arc::new(init_s3_client(bucket_region).await);
+    let default_prefix = default_prefix_in_bucket(node_kind).to_string();
 
-    let s3_root = match node_kind {
-        NodeKind::Pageserver => RootTarget::Pageserver(S3Target {
-            bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config
-                .prefix_in_bucket
-                .unwrap_or("pageserver/v1".to_string()),
-            delimiter,
-        }),
-        NodeKind::Safekeeper => RootTarget::Safekeeper(S3Target {
-            bucket_name: bucket_config.bucket,
-            prefix_in_bucket: bucket_config.prefix_in_bucket.unwrap_or("wal/".to_string()),
-            delimiter,
-        }),
-    };
+    let s3_root = make_root_target(
+        bucket_config.bucket,
+        bucket_config.prefix_in_bucket.unwrap_or(default_prefix),
+        node_kind,
+    );
 
     Ok((s3_client, s3_root))
 }
 
+async fn init_remote(
+    bucket_config: BucketConfig,
+    node_kind: NodeKind,
+) -> anyhow::Result<(GenericRemoteStorage, RootTarget)> {
+    let endpoint = env::var("AWS_ENDPOINT_URL").ok();
+    let default_prefix = default_prefix_in_bucket(node_kind).to_string();
+    let prefix_in_bucket = Some(bucket_config.prefix_in_bucket.unwrap_or(default_prefix));
+    let storage = S3Config {
+        bucket_name: bucket_config.bucket.clone(),
+        bucket_region: bucket_config.region,
+        prefix_in_bucket,
+        endpoint,
+        concurrency_limit: DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
+            .try_into()
+            .unwrap(),
+        max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+        upload_storage_class: None,
+    };
+    let storage_config = RemoteStorageConfig {
+        storage: RemoteStorageKind::AwsS3(storage),
+        timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+    };
+
+    // We already pass the prefix to the remote client above
+    let prefix_in_root_target = String::new();
+    let root_target = make_root_target(bucket_config.bucket, prefix_in_root_target, node_kind);
+
+    let client = GenericRemoteStorage::from_config(&storage_config).await?;
+    Ok((client, root_target))
+}
+
+/// Listing possibly large amounts of keys in a streaming fashion.
+fn stream_objects_with_retries<'a>(
+    storage_client: &'a GenericRemoteStorage,
+    listing_mode: ListingMode,
+    s3_target: &'a S3Target,
+) -> impl Stream<Item = Result<Listing, anyhow::Error>> + 'a {
+    async_stream::stream! {
+        let mut trial = 0;
+        let cancel = CancellationToken::new();
+        let prefix_str = &s3_target
+            .prefix_in_bucket
+            .strip_prefix("/")
+            .unwrap_or(&s3_target.prefix_in_bucket);
+        let prefix = RemotePath::from_string(prefix_str)?;
+        let mut list_stream =
+            storage_client.list_streaming(Some(&prefix), listing_mode, None, &cancel);
+        while let Some(res) = list_stream.next().await {
+            match res {
+                Err(err) => {
+                    let yield_err = if err.is_permanent() {
+                        true
+                    } else {
+                        let backoff_time = 1 << trial.max(5);
+                        tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+                        trial += 1;
+                        trial == MAX_RETRIES - 1
+                    };
+                    if yield_err {
+                        yield Err(err)
+                            .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                        break;
+                    }
+                }
+                Ok(res) => {
+                    trial = 0;
+                    yield Ok(res);
+                }
+            }
+        }
+    }
+}
+
+/// If you want to list a bounded amount of prefixes or keys. For larger numbers of keys/prefixes,
+/// use [`stream_objects_with_retries`] instead.
 async fn list_objects_with_retries(
-    s3_client: &Client,
+    remote_client: &GenericRemoteStorage,
+    listing_mode: ListingMode,
     s3_target: &S3Target,
-    continuation_token: Option<String>,
-) -> anyhow::Result<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output> {
-    for _ in 0..MAX_RETRIES {
-        match s3_client
-            .list_objects_v2()
-            .bucket(&s3_target.bucket_name)
-            .prefix(&s3_target.prefix_in_bucket)
-            .delimiter(&s3_target.delimiter)
-            .set_continuation_token(continuation_token.clone())
-            .send()
+) -> anyhow::Result<Listing> {
+    let cancel = CancellationToken::new();
+    let prefix_str = &s3_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&s3_target.prefix_in_bucket);
+    let prefix = RemotePath::from_string(prefix_str)?;
+    for trial in 0..MAX_RETRIES {
+        match remote_client
+            .list(Some(&prefix), listing_mode, None, &cancel)
             .await
         {
             Ok(response) => return Ok(response),
             Err(e) => {
+                if trial == MAX_RETRIES - 1 {
+                    return Err(e)
+                        .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
+                }
                 error!(
-                    "list_objects_v2 query failed: {e}, bucket_name={}, prefix={}, delimiter={}",
-                    s3_target.bucket_name, s3_target.prefix_in_bucket, s3_target.delimiter
+                    "list_objects_v2 query failed: bucket_name={}, prefix={}, delimiter={}, error={}",
+                    s3_target.bucket_name,
+                    s3_target.prefix_in_bucket,
+                    s3_target.delimiter,
+                    DisplayErrorContext(e),
                 );
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             }
         }
     }
-
-    anyhow::bail!("Failed to list objects {MAX_RETRIES} times")
+    panic!("MAX_RETRIES is not allowed to be 0");
 }
 
 async fn download_object_with_retries(
-    s3_client: &Client,
-    bucket_name: &str,
-    key: &str,
+    remote_client: &GenericRemoteStorage,
+    key: &RemotePath,
 ) -> anyhow::Result<Vec<u8>> {
-    for _ in 0..MAX_RETRIES {
-        let mut body_buf = Vec::new();
-        let response_stream = match s3_client
-            .get_object()
-            .bucket(bucket_name)
-            .key(key)
-            .send()
-            .await
-        {
+    let cancel = CancellationToken::new();
+    for trial in 0..MAX_RETRIES {
+        let mut buf = Vec::new();
+        let download = match remote_client.download(key, &cancel).await {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to download object for key {key}: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
                 continue;
             }
         };
 
-        match response_stream
-            .body
-            .into_async_read()
-            .read_to_end(&mut body_buf)
+        match tokio_util::io::StreamReader::new(download.download_stream)
+            .read_to_end(&mut buf)
             .await
         {
             Ok(bytes_read) => {
                 tracing::debug!("Downloaded {bytes_read} bytes for object {key}");
-                return Ok(body_buf);
+                return Ok(buf);
             }
             Err(e) => {
                 error!("Failed to stream object body for key {key}: {e}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let backoff_time = 1 << trial.max(5);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             }
         }
     }
@@ -410,7 +517,7 @@ async fn download_object_with_retries(
     anyhow::bail!("Failed to download objects with key {key} {MAX_RETRIES} times")
 }
 
-async fn download_object_to_file(
+async fn download_object_to_file_s3(
     s3_client: &Client,
     bucket_name: &str,
     key: &str,

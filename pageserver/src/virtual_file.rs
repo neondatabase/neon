@@ -13,10 +13,11 @@
 use crate::context::RequestContext;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
-use crate::page_cache::PageWriteGuard;
+use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
+use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
@@ -30,10 +31,12 @@ use tokio::time::Instant;
 pub use pageserver_api::models::virtual_file as api;
 pub(crate) mod io_engine;
 pub use io_engine::feature_test as io_engine_feature_test;
+pub use io_engine::io_engine_for_bench;
 pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
 use self::owned_buffers_io::write::OwnedAsyncWriter;
+pub(crate) use api::DirectIoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
@@ -48,6 +51,8 @@ pub(crate) mod owned_buffers_io {
     //! but for the time being we're proving out the primitives in the neon.git repo
     //! for faster iteration.
 
+    pub(crate) mod io_buf_ext;
+    pub(crate) mod slice;
     pub(crate) mod write;
     pub(crate) mod util {
         pub(crate) mod size_tracking_writer;
@@ -143,16 +148,17 @@ struct SlotInner {
 /// Impl of [`tokio_epoll_uring::IoBuf`] and [`tokio_epoll_uring::IoBufMut`] for [`PageWriteGuard`].
 struct PageWriteGuardBuf {
     page: PageWriteGuard<'static>,
-    init_up_to: usize,
 }
 // Safety: the [`PageWriteGuard`] gives us exclusive ownership of the page cache slot,
 // and the location remains stable even if [`Self`] or the [`PageWriteGuard`] is moved.
+// Page cache pages are zero-initialized, so, wrt uninitialized memory we're good.
+// (Page cache tracks separately whether the contents are valid, see `PageWriteGuard::mark_valid`.)
 unsafe impl tokio_epoll_uring::IoBuf for PageWriteGuardBuf {
     fn stable_ptr(&self) -> *const u8 {
         self.page.as_ptr()
     }
     fn bytes_init(&self) -> usize {
-        self.init_up_to
+        self.page.len()
     }
     fn bytes_total(&self) -> usize {
         self.page.len()
@@ -166,8 +172,8 @@ unsafe impl tokio_epoll_uring::IoBufMut for PageWriteGuardBuf {
     }
 
     unsafe fn set_init(&mut self, pos: usize) {
+        // There shouldn't really be any reason to call this API since bytes_init() == bytes_total().
         assert!(pos <= self.page.len());
-        self.init_up_to = pos;
     }
 }
 
@@ -585,37 +591,37 @@ impl VirtualFile {
         Ok(self.pos)
     }
 
-    pub async fn read_exact_at<B>(
+    /// Read the file contents in range `offset..(offset + slice.bytes_total())` into `slice[0..slice.bytes_total()]`.
+    ///
+    /// The returned `Slice<Buf>` is equivalent to the input `slice`, i.e., it's the same view into the same buffer.
+    pub async fn read_exact_at<Buf>(
         &self,
-        buf: B,
+        slice: Slice<Buf>,
         offset: u64,
         ctx: &RequestContext,
-    ) -> Result<B, Error>
+    ) -> Result<Slice<Buf>, Error>
     where
-        B: IoBufMut + Send,
+        Buf: IoBufMut + Send,
     {
-        let (buf, res) = read_exact_at_impl(buf, offset, None, |buf, offset| {
-            self.read_at(buf, offset, ctx)
-        })
-        .await;
-        res.map(|()| buf)
-    }
+        let assert_we_return_original_bounds = if cfg!(debug_assertions) {
+            Some((slice.stable_ptr() as usize, slice.bytes_total()))
+        } else {
+            None
+        };
 
-    pub async fn read_exact_at_n<B>(
-        &self,
-        buf: B,
-        offset: u64,
-        count: usize,
-        ctx: &RequestContext,
-    ) -> Result<B, Error>
-    where
-        B: IoBufMut + Send,
-    {
-        let (buf, res) = read_exact_at_impl(buf, offset, Some(count), |buf, offset| {
-            self.read_at(buf, offset, ctx)
-        })
-        .await;
-        res.map(|()| buf)
+        let original_bounds = slice.bounds();
+        let (buf, res) =
+            read_exact_at_impl(slice, offset, |buf, offset| self.read_at(buf, offset, ctx)).await;
+        let res = res.map(|_| buf.slice(original_bounds));
+
+        if let Some(original_bounds) = assert_we_return_original_bounds {
+            if let Ok(slice) = &res {
+                let returned_bounds = (slice.stable_ptr() as usize, slice.bytes_total());
+                assert_eq!(original_bounds, returned_bounds);
+            }
+        }
+
+        res
     }
 
     /// Like [`Self::read_exact_at`] but for [`PageWriteGuard`].
@@ -625,34 +631,32 @@ impl VirtualFile {
         offset: u64,
         ctx: &RequestContext,
     ) -> Result<PageWriteGuard<'static>, Error> {
-        let buf = PageWriteGuardBuf {
-            page,
-            init_up_to: 0,
-        };
-        let res = self.read_exact_at(buf, offset, ctx).await;
-        res.map(|PageWriteGuardBuf { page, .. }| page)
-            .map_err(|e| Error::new(ErrorKind::Other, e))
+        let buf = PageWriteGuardBuf { page }.slice_full();
+        debug_assert_eq!(buf.bytes_total(), PAGE_SZ);
+        self.read_exact_at(buf, offset, ctx)
+            .await
+            .map(|slice| slice.into_inner().page)
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
-    pub async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    pub async fn write_all_at<Buf: IoBuf + Send>(
         &self,
-        buf: B,
+        buf: FullSlice<Buf>,
         mut offset: u64,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<(), Error>) {
-        let buf_len = buf.bytes_init();
-        if buf_len == 0 {
-            return (Slice::into_inner(buf.slice_full()), Ok(()));
-        }
-        let mut buf = buf.slice(0..buf_len);
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
+        let buf = buf.into_raw_slice();
+        let bounds = buf.bounds();
+        let restore =
+            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
+        let mut buf = buf;
         while !buf.is_empty() {
-            let res;
-            (buf, res) = self.write_at(buf, offset, ctx).await;
+            let (tmp, res) = self.write_at(FullSlice::must_new(buf), offset, ctx).await;
+            buf = tmp.into_raw_slice();
             match res {
                 Ok(0) => {
                     return (
-                        Slice::into_inner(buf),
+                        restore(buf),
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -664,33 +668,33 @@ impl VirtualFile {
                     offset += n as u64;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(buf), Err(e)),
+                Err(e) => return (restore(buf), Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(()))
+        (restore(buf), Ok(()))
     }
 
-    /// Writes `buf.slice(0..buf.bytes_init())`.
-    /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
-    /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
-    /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
-    pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    /// Writes `buf` to the file at the current offset.
+    ///
+    /// Panics if there is an uninitialized range in `buf`, as that is most likely a bug in the caller.
+    pub async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<usize, Error>) {
-        let nbytes = buf.bytes_init();
-        if nbytes == 0 {
-            return (Slice::into_inner(buf.slice_full()), Ok(0));
-        }
-        let mut buf = buf.slice(0..nbytes);
+    ) -> (FullSlice<Buf>, Result<usize, Error>) {
+        let buf = buf.into_raw_slice();
+        let bounds = buf.bounds();
+        let restore =
+            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
+        let nbytes = buf.len();
+        let mut buf = buf;
         while !buf.is_empty() {
-            let res;
-            (buf, res) = self.write(buf, ctx).await;
+            let (tmp, res) = self.write(FullSlice::must_new(buf), ctx).await;
+            buf = tmp.into_raw_slice();
             match res {
                 Ok(0) => {
                     return (
-                        Slice::into_inner(buf),
+                        restore(buf),
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -701,17 +705,17 @@ impl VirtualFile {
                     buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(buf), Err(e)),
+                Err(e) => return (restore(buf), Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(nbytes))
+        (restore(buf), Ok(nbytes))
     }
 
     async fn write<B: IoBuf + Send>(
         &mut self,
-        buf: Slice<B>,
+        buf: FullSlice<B>,
         ctx: &RequestContext,
-    ) -> (Slice<B>, Result<usize, std::io::Error>) {
+    ) -> (FullSlice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
         let (buf, res) = self.write_at(buf, pos, ctx).await;
         let n = match res {
@@ -722,14 +726,14 @@ impl VirtualFile {
         (buf, Ok(n))
     }
 
-    pub(crate) async fn read_at<B>(
+    pub(crate) async fn read_at<Buf>(
         &self,
-        buf: B,
+        buf: tokio_epoll_uring::Slice<Buf>,
         offset: u64,
         _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
-    ) -> (B, Result<usize, Error>)
+    ) -> (tokio_epoll_uring::Slice<Buf>, Result<usize, Error>)
     where
-        B: tokio_epoll_uring::BoundedBufMut + Send,
+        Buf: tokio_epoll_uring::IoBufMut + Send,
     {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
@@ -752,12 +756,24 @@ impl VirtualFile {
         })
     }
 
+    /// The function aborts the process if the error is fatal.
     async fn write_at<B: IoBuf + Send>(
         &self,
-        buf: Slice<B>,
+        buf: FullSlice<B>,
         offset: u64,
         _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
-    ) -> (Slice<B>, Result<usize, Error>) {
+    ) -> (FullSlice<B>, Result<usize, Error>) {
+        let (slice, result) = self.write_at_inner(buf, offset, _ctx).await;
+        let result = result.maybe_fatal_err("write_at");
+        (slice, result)
+    }
+
+    async fn write_at_inner<B: IoBuf + Send>(
+        &self,
+        buf: FullSlice<B>,
+        offset: u64,
+        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+    ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
             Err(e) => return (buf, Err(e)),
@@ -781,26 +797,16 @@ impl VirtualFile {
 }
 
 // Adapted from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#117-135
-pub async fn read_exact_at_impl<B, F, Fut>(
-    buf: B,
+pub async fn read_exact_at_impl<Buf, F, Fut>(
+    mut buf: tokio_epoll_uring::Slice<Buf>,
     mut offset: u64,
-    count: Option<usize>,
     mut read_at: F,
-) -> (B, std::io::Result<()>)
+) -> (Buf, std::io::Result<()>)
 where
-    B: IoBufMut + Send,
-    F: FnMut(tokio_epoll_uring::Slice<B>, u64) -> Fut,
-    Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<B>, std::io::Result<usize>)>,
+    Buf: IoBufMut + Send,
+    F: FnMut(tokio_epoll_uring::Slice<Buf>, u64) -> Fut,
+    Fut: std::future::Future<Output = (tokio_epoll_uring::Slice<Buf>, std::io::Result<usize>)>,
 {
-    let mut buf: tokio_epoll_uring::Slice<B> = match count {
-        Some(count) => {
-            assert!(count <= buf.bytes_total());
-            assert!(count > 0);
-            buf.slice(..count) // may include uninitialized memory
-        }
-        None => buf.slice_full(), // includes all the uninitialized memory
-    };
-
     while buf.bytes_total() != 0 {
         let res;
         (buf, res) = read_at(buf, offset).await;
@@ -882,7 +888,7 @@ mod test_read_exact_at_impl {
 
     #[tokio::test]
     async fn test_basic() {
-        let buf = Vec::with_capacity(5);
+        let buf = Vec::with_capacity(5).slice_full();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::from(vec![Expectation {
                 offset: 0,
@@ -890,7 +896,7 @@ mod test_read_exact_at_impl {
                 result: Ok(vec![b'a', b'b', b'c', b'd', b'e']),
             }]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -900,32 +906,12 @@ mod test_read_exact_at_impl {
     }
 
     #[tokio::test]
-    async fn test_with_count() {
-        let buf = Vec::with_capacity(5);
-        let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
-            expectations: VecDeque::from(vec![Expectation {
-                offset: 0,
-                bytes_total: 3,
-                result: Ok(vec![b'a', b'b', b'c']),
-            }]),
-        }));
-
-        let (buf, res) = read_exact_at_impl(buf, 0, Some(3), |buf, offset| {
-            let mock_read_at = Arc::clone(&mock_read_at);
-            async move { mock_read_at.lock().await.read_at(buf, offset).await }
-        })
-        .await;
-        assert!(res.is_ok());
-        assert_eq!(buf, vec![b'a', b'b', b'c']);
-    }
-
-    #[tokio::test]
     async fn test_empty_buf_issues_no_syscall() {
-        let buf = Vec::new();
+        let buf = Vec::new().slice_full();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::new(),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -935,7 +921,7 @@ mod test_read_exact_at_impl {
 
     #[tokio::test]
     async fn test_two_read_at_calls_needed_until_buf_filled() {
-        let buf = Vec::with_capacity(4);
+        let buf = Vec::with_capacity(4).slice_full();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::from(vec![
                 Expectation {
@@ -950,7 +936,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
+        let (buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -961,7 +947,7 @@ mod test_read_exact_at_impl {
 
     #[tokio::test]
     async fn test_eof_before_buffer_full() {
-        let buf = Vec::with_capacity(3);
+        let buf = Vec::with_capacity(3).slice_full();
         let mock_read_at = Arc::new(tokio::sync::Mutex::new(MockReadAt {
             expectations: VecDeque::from(vec![
                 Expectation {
@@ -981,7 +967,7 @@ mod test_read_exact_at_impl {
                 },
             ]),
         }));
-        let (_buf, res) = read_exact_at_impl(buf, 0, None, |buf, offset| {
+        let (_buf, res) = read_exact_at_impl(buf, 0, |buf, offset| {
             let mock_read_at = Arc::clone(&mock_read_at);
             async move { mock_read_at.lock().await.read_at(buf, offset).await }
         })
@@ -1051,27 +1037,29 @@ impl VirtualFile {
         ctx: &RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
-        let buf = vec![0; PAGE_SZ];
-        let buf = self
-            .read_exact_at(buf, blknum as u64 * (PAGE_SZ as u64), ctx)
+        let slice = Vec::with_capacity(PAGE_SZ).slice_full();
+        assert_eq!(slice.bytes_total(), PAGE_SZ);
+        let slice = self
+            .read_exact_at(slice, blknum as u64 * (PAGE_SZ as u64), ctx)
             .await?;
-        Ok(crate::tenant::block_io::BlockLease::Vec(buf))
+        Ok(crate::tenant::block_io::BlockLease::Vec(slice.into_inner()))
     }
 
     async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
         let mut tmp = vec![0; 128];
         loop {
-            let res;
-            (tmp, res) = self.read_at(tmp, self.pos, ctx).await;
+            let slice = tmp.slice(..128);
+            let (slice, res) = self.read_at(slice, self.pos, ctx).await;
             match res {
                 Ok(0) => return Ok(()),
                 Ok(n) => {
                     self.pos += n as u64;
-                    buf.extend_from_slice(&tmp[..n]);
+                    buf.extend_from_slice(&slice[..n]);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
+            tmp = slice.into_inner();
         }
     }
 }
@@ -1119,11 +1107,11 @@ impl Drop for VirtualFile {
 
 impl OwnedAsyncWriter for VirtualFile {
     #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, B::Buf)> {
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
         res.map(move |v| (v, buf))
     }
@@ -1185,6 +1173,8 @@ mod tests {
     use crate::task_mgr::TaskKind;
 
     use super::*;
+    use owned_buffers_io::io_buf_ext::IoBufExt;
+    use owned_buffers_io::slice::SliceMutExt;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
@@ -1206,18 +1196,21 @@ mod tests {
     impl MaybeVirtualFile {
         async fn read_exact_at(
             &self,
-            mut buf: Vec<u8>,
+            mut slice: tokio_epoll_uring::Slice<Vec<u8>>,
             offset: u64,
             ctx: &RequestContext,
-        ) -> Result<Vec<u8>, Error> {
+        ) -> Result<tokio_epoll_uring::Slice<Vec<u8>>, Error> {
             match self {
-                MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(buf, offset, ctx).await,
-                MaybeVirtualFile::File(file) => file.read_exact_at(&mut buf, offset).map(|()| buf),
+                MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(slice, offset, ctx).await,
+                MaybeVirtualFile::File(file) => {
+                    let rust_slice: &mut [u8] = slice.as_mut_rust_slice_full_zeroed();
+                    file.read_exact_at(rust_slice, offset).map(|()| slice)
+                }
             }
         }
-        async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all_at<Buf: IoBuf + Send>(
             &self,
-            buf: B,
+            buf: FullSlice<Buf>,
             offset: u64,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
@@ -1226,13 +1219,7 @@ mod tests {
                     let (_buf, res) = file.write_all_at(buf, offset, ctx).await;
                     res
                 }
-                MaybeVirtualFile::File(file) => {
-                    let buf_len = buf.bytes_init();
-                    if buf_len == 0 {
-                        return Ok(());
-                    }
-                    file.write_all_at(&buf.slice(0..buf_len), offset)
-                }
+                MaybeVirtualFile::File(file) => file.write_all_at(&buf[..], offset),
             }
         }
         async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
@@ -1241,9 +1228,9 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all<Buf: IoBuf + Send>(
             &mut self,
-            buf: B,
+            buf: FullSlice<Buf>,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
             match self {
@@ -1251,13 +1238,7 @@ mod tests {
                     let (_buf, res) = file.write_all(buf, ctx).await;
                     res.map(|_| ())
                 }
-                MaybeVirtualFile::File(file) => {
-                    let buf_len = buf.bytes_init();
-                    if buf_len == 0 {
-                        return Ok(());
-                    }
-                    file.write_all(&buf.slice(0..buf_len))
-                }
+                MaybeVirtualFile::File(file) => file.write_all(&buf[..]),
             }
         }
 
@@ -1286,9 +1267,12 @@ mod tests {
             len: usize,
             ctx: &RequestContext,
         ) -> Result<String, Error> {
-            let buf = vec![0; len];
-            let buf = self.read_exact_at(buf, pos, ctx).await?;
-            Ok(String::from_utf8(buf).unwrap())
+            let slice = Vec::with_capacity(len).slice_full();
+            assert_eq!(slice.bytes_total(), len);
+            let slice = self.read_exact_at(slice, pos, ctx).await?;
+            let vec = slice.into_inner();
+            assert_eq!(vec.len(), len);
+            Ok(String::from_utf8(vec).unwrap())
         }
     }
 
@@ -1366,7 +1350,9 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_a.write_all(b"foobar".to_vec(), &ctx).await?;
+        file_a
+            .write_all(b"foobar".to_vec().slice_len(), &ctx)
+            .await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string(&ctx).await.unwrap_err();
@@ -1375,7 +1361,10 @@ mod tests {
         let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
+        let _ = file_a
+            .write_all(b"bar".to_vec().slice_len(), &ctx)
+            .await
+            .unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string(&ctx).await?);
@@ -1418,8 +1407,12 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_b.write_all_at(b"BAR".to_vec(), 3, &ctx).await?;
-        file_b.write_all_at(b"FOO".to_vec(), 0, &ctx).await?;
+        file_b
+            .write_all_at(b"BAR".to_vec().slice_len(), 3, &ctx)
+            .await?;
+        file_b
+            .write_all_at(b"FOO".to_vec().slice_len(), 0, &ctx)
+            .await?;
 
         assert_eq!(file_b.read_string_at(2, 3, &ctx).await?, "OBA");
 
@@ -1507,7 +1500,11 @@ mod tests {
                 let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
                     let f = &files[rng.gen_range(0..files.len())];
-                    buf = f.read_exact_at(buf, 0, &ctx).await.unwrap();
+                    buf = f
+                        .read_exact_at(buf.slice_full(), 0, &ctx)
+                        .await
+                        .unwrap()
+                        .into_inner();
                     assert!(buf == SAMPLE);
                 }
             });
