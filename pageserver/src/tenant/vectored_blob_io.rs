@@ -527,18 +527,14 @@ impl<'a> VectoredBlobReader<'a> {
         // Blobs in `read` only provide their starting offset. The end offset
         // of a blob is implicit: the start of the next blob if one exists
         // or the end of the read.
-        let pairs = blobs_at.iter().zip(
-            blobs_at
-                .iter()
-                .map(Some)
-                .skip(1)
-                .chain(std::iter::once(None)),
-        );
+
+        // SAFETY(unwrap): A vectored blob contains at least one blob.
+        let last_blob_start = blobs_at.last().unwrap().0;
 
         // Some scratch space, put here for reusing the allocation
         let mut decompressed_vec = Vec::new();
 
-        for ((blob_start, (blob_end, meta)), next) in pairs {
+        for (blob_start, (blob_end, meta)) in blobs_at {
             let blob_start_in_buf = blob_start - start_offset;
             let first_len_byte = buf[blob_start_in_buf as usize];
 
@@ -564,9 +560,12 @@ impl<'a> VectoredBlobReader<'a> {
             };
 
             let start_raw = blob_start_in_buf + size_length;
-            let end_raw = match next {
-                Some(_) => blob_end - start_offset,
-                None => start_raw + blob_size,
+            let end_raw = {
+                if *blob_start == last_blob_start {
+                    start_raw + blob_size
+                } else {
+                    blob_end - start_offset
+                }
             };
             assert_eq!(end_raw - start_raw, blob_size);
             let (start, end);
