@@ -28,7 +28,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     env.pageserver.allowed_errors.extend(
         [
             ".*basebackup .* failed: invalid basebackup lsn.*",
-            ".*page_service.*error obtaining lsn lease.*.*tried to request a page version that was garbage collected",
+            ".*page_service.*handle_make_lsn_lease.*.*tried to request a page version that was garbage collected",
         ]
     )
 
