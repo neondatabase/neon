@@ -7,8 +7,8 @@ use itertools::Itertools;
 use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 
 use crate::{
+    assert_u64_eq_usize::{U64IsUsize, UsizeIsU64},
     context::RequestContext,
-    tenant::storage_layer::inmemory_layer::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64},
 };
 
 mod sealed {

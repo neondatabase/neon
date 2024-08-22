@@ -4,6 +4,7 @@
 //! held in an ephemeral file, not in memory. The metadata for each page version, i.e.
 //! its position in the file, is kept in memory, though.
 //!
+use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::repository::{Key, Value};
@@ -13,7 +14,6 @@ use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
 use anyhow::{anyhow, Context, Result};
-use assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
@@ -39,7 +39,6 @@ use super::{
     DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
 };
 
-pub(crate) mod assert_u64_eq_usize;
 mod vectored_dio_read;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]

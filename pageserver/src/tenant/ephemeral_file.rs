@@ -1,10 +1,10 @@
 //! Implementation of append-only file data structure
 //! used to keep in-memory layers spilled on disk.
 
+use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
-use crate::tenant::storage_layer::inmemory_layer::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
@@ -379,5 +379,101 @@ mod tests {
 
         let buffer_contents = file.buffered_writer.inspect_buffer();
         assert_eq!(buffer_contents, &content[cap..write_nbytes]);
+    }
+
+    #[tokio::test]
+    async fn test_flushes_do_happen() {
+        let (conf, tenant_id, timeline_id, ctx) = harness("test_flushes_do_happen").unwrap();
+
+        let gate = utils::sync::gate::Gate::default();
+
+        let mut file =
+            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
+                .await
+                .unwrap();
+
+        let cap = file.buffered_writer.inspect_buffer().capacity();
+
+        let content: Vec<u8> = rand::thread_rng()
+            .sample_iter(rand::distributions::Standard)
+            .take(cap + cap / 2)
+            .collect();
+
+        file.write_raw(&content, &ctx).await.unwrap();
+
+        // assert the state is as this test expects it to be
+        assert_eq!(
+            &file.load_to_vec(&ctx).await.unwrap(),
+            &content[0..cap + cap / 2]
+        );
+        let md = file
+            .buffered_writer
+            .as_inner()
+            .as_inner()
+            .path
+            .metadata()
+            .unwrap();
+        assert_eq!(
+            md.len(),
+            cap.into_u64(),
+            "buffered writer does one write if we write 1.5x buffer capacity"
+        );
+        assert_eq!(
+            &file.buffered_writer.inspect_buffer()[0..cap / 2],
+            &content[cap..cap + cap / 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_split_across_file_and_buffer() {
+        // This test exercises the logic on the read path that splits the logical read
+        // into a read from the flushed part (= the file) and a copy from the buffered writer's buffer.
+        //
+        // This test build on the assertions in test_flushes_do_happen
+
+        let (conf, tenant_id, timeline_id, ctx) =
+            harness("test_read_split_across_file_and_buffer").unwrap();
+
+        let gate = utils::sync::gate::Gate::default();
+
+        let mut file =
+            EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
+                .await
+                .unwrap();
+
+        let cap = file.buffered_writer.inspect_buffer().capacity();
+
+        let content: Vec<u8> = rand::thread_rng()
+            .sample_iter(rand::distributions::Standard)
+            .take(cap + cap / 2)
+            .collect();
+
+        file.write_raw(&content, &ctx).await.unwrap();
+
+        let test_read = |start: usize, len: usize| {
+            let file = &file;
+            let ctx = &ctx;
+            let content = &content;
+            async move {
+                let (buf, nread) = file
+                    .read_at_to_end(start.into_u64(), Vec::with_capacity(len).slice_full(), ctx)
+                    .await
+                    .unwrap();
+                assert_eq!(nread, len);
+                assert_eq!(&buf.into_inner(), &content[start..(start + len)]);
+            }
+        };
+
+        // completely within the file range
+        assert!(20 < cap, "test assumption");
+        test_read(10, 10).await;
+        // border onto edge of file
+        test_read(cap - 10, 10).await;
+        // read across file and buffer
+        test_read(cap - 10, 20).await;
+        // stay from start of buffer
+        test_read(cap, 10).await;
+        // completely within buffer
+        test_read(cap + 10, 10).await;
     }
 }
