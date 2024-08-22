@@ -592,7 +592,7 @@ impl InMemoryLayer {
     /// Get layer size.
     pub async fn size(&self) -> Result<u64> {
         let inner = self.inner.read().await;
-        Ok(inner.file.len() as u64)
+        Ok(inner.file.len())
     }
 
     /// Create a new, empty, in-memory layer
@@ -698,7 +698,7 @@ impl InMemoryLayer {
     pub(crate) async fn tick(&self) -> Option<u64> {
         let mut inner = self.inner.write().await;
         let size = inner.file.len();
-        inner.resource_units.publish_size(size as u64)
+        inner.resource_units.publish_size(size)
     }
 
     pub(crate) async fn put_tombstones(&self, _key_ranges: &[(Range<Key>, Lsn)]) -> Result<()> {
