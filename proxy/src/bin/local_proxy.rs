@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{bail, ensure};
 use dashmap::DashMap;
-use futures::future::Either;
+use futures::{future::Either, FutureExt};
 use proxy::{
     auth::backend::local::{JwksRoleSettings, LocalBackend, JWKS_ROLE_MAP},
     cancellation::CancellationHandlerMain,
@@ -133,9 +133,11 @@ async fn main() -> anyhow::Result<()> {
         16,
     ));
 
+    refresh_config(args.config_path.clone()).await;
+
     let mut maintenance_tasks = JoinSet::new();
     maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone(), move || {
-        refresh_config(args.config_path.clone())
+        refresh_config(args.config_path.clone()).map(Ok)
     }));
     maintenance_tasks.spawn(proxy::http::health_server::task_main(
         metrics_listener,
@@ -234,12 +236,11 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
     })))
 }
 
-async fn refresh_config(path: PathBuf) -> anyhow::Result<()> {
+async fn refresh_config(path: PathBuf) {
     match refresh_config_inner(&path).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {}
         Err(e) => {
             error!(error=?e, ?path, "could not read config file");
-            Ok(())
         }
     }
 }
@@ -266,15 +267,18 @@ async fn refresh_config_inner(path: &Path) -> anyhow::Result<()> {
             );
 
             // clear username, password and ports
-            jwks.jwks_url.set_port(None).expect(
-                "url can be a base and has a valid host and is not a file. should not error",
-            );
             jwks.jwks_url.set_username("").expect(
                 "url can be a base and has a valid host and is not a file. should not error",
             );
             jwks.jwks_url.set_password(None).expect(
                 "url can be a base and has a valid host and is not a file. should not error",
             );
+            // local testing is hard if we need to have a specific restricted port
+            if cfg!(not(feature = "testing")) {
+                jwks.jwks_url.set_port(None).expect(
+                    "url can be a base and has a valid host and is not a file. should not error",
+                );
+            }
 
             // clear query params
             jwks.jwks_url.set_fragment(None);
