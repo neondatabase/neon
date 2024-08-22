@@ -12,7 +12,8 @@ use crate::tenant::block_io::{BlockCursor, BlockReader, BlockReaderRef};
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
-use crate::{l0_flush, page_cache, walrecord};
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
+use crate::{l0_flush, page_cache};
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
@@ -248,48 +249,13 @@ impl InMemoryLayer {
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
-    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        let inner = self.inner.read().await;
-
+    pub async fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let end_str = self.end_lsn_or_max();
 
         println!(
             "----- in-memory layer for tli {} LSNs {}-{} ----",
             self.timeline_id, self.start_lsn, end_str,
         );
-
-        if !verbose {
-            return Ok(());
-        }
-
-        let cursor = inner.file.block_cursor();
-        let mut buf = Vec::new();
-        for (key, vec_map) in inner.index.iter() {
-            for (lsn, pos) in vec_map.as_slice() {
-                let mut desc = String::new();
-                cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
-                let val = Value::des(&buf);
-                match val {
-                    Ok(Value::Image(img)) => {
-                        write!(&mut desc, " img {} bytes", img.len())?;
-                    }
-                    Ok(Value::WalRecord(rec)) => {
-                        let wal_desc = walrecord::describe_wal_record(&rec).unwrap();
-                        write!(
-                            &mut desc,
-                            " rec {} bytes will_init: {} {}",
-                            buf.len(),
-                            rec.will_init(),
-                            wal_desc
-                        )?;
-                    }
-                    Err(err) => {
-                        write!(&mut desc, " DESERIALIZATION ERROR: {}", err)?;
-                    }
-                }
-                println!("  key {} at {}: {}", key, lsn, desc);
-            }
-        }
 
         Ok(())
     }
@@ -535,7 +501,6 @@ impl InMemoryLayer {
 
         use l0_flush::Inner;
         let _concurrency_permit = match l0_flush_global_state {
-            Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
         };
 
@@ -567,28 +532,6 @@ impl InMemoryLayer {
         .await?;
 
         match l0_flush_global_state {
-            l0_flush::Inner::PageCached => {
-                let ctx = RequestContextBuilder::extend(ctx)
-                    .page_content_kind(PageContentKind::InMemoryLayer)
-                    .build();
-
-                let mut buf = Vec::new();
-
-                let cursor = inner.file.block_cursor();
-
-                for (key, vec_map) in inner.index.iter() {
-                    // Write all page versions
-                    for (lsn, pos) in vec_map.as_slice() {
-                        cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
-                        let will_init = Value::des(&buf)?.will_init();
-                        let res;
-                        (buf, res) = delta_layer_writer
-                            .put_value_bytes(Key::from_compact(*key), *lsn, buf, will_init, &ctx)
-                            .await;
-                        res?;
-                    }
-                }
-            }
             l0_flush::Inner::Direct { .. } => {
                 let file_contents: Vec<u8> = inner.file.load_to_vec(ctx).await?;
                 assert_eq!(
@@ -620,11 +563,17 @@ impl InMemoryLayer {
                         // => https://github.com/neondatabase/neon/issues/8183
                         cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
                         let will_init = Value::des(&buf)?.will_init();
-                        let res;
-                        (buf, res) = delta_layer_writer
-                            .put_value_bytes(Key::from_compact(*key), *lsn, buf, will_init, ctx)
+                        let (tmp, res) = delta_layer_writer
+                            .put_value_bytes(
+                                Key::from_compact(*key),
+                                *lsn,
+                                buf.slice_len(),
+                                will_init,
+                                ctx,
+                            )
                             .await;
                         res?;
+                        buf = tmp.into_raw_slice().into_inner();
                     }
                 }
             }

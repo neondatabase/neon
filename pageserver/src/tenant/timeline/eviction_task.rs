@@ -30,7 +30,8 @@ use crate::{
     pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
+        storage_layer::LayerVisibilityHint, tasks::BackgroundLoopKind, timeline::EvictionError,
+        LogicalSizeCalculationCause, Tenant,
     },
 };
 
@@ -59,7 +60,7 @@ impl Timeline {
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             &format!(
                 "layer eviction for {}/{}",
@@ -241,7 +242,22 @@ impl Timeline {
                         }
                     };
 
-                    no_activity_for > p.threshold
+                    match layer.visibility() {
+                        LayerVisibilityHint::Visible => {
+                            // Usual case: a visible layer might be read any time, and we will keep it
+                            // resident until it hits our configured TTL threshold.
+                            no_activity_for > p.threshold
+                        }
+                        LayerVisibilityHint::Covered => {
+                            // Covered layers: this is probably a layer that was recently covered by
+                            // an image layer during compaction.  We don't evict it immediately, but
+                            // it doesn't stay resident for the full `threshold`: we just keep it
+                            // for a shorter time in case
+                            // - it is used for Timestamp->LSN lookups
+                            // - a new branch is created in recent history which will read this layer
+                            no_activity_for > p.period
+                        }
+                    }
                 })
                 .cloned()
                 .for_each(|layer| {

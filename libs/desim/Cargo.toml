@@ -14,5 +14,3 @@ parking_lot.workspace = true
 hex.workspace = true
 scopeguard.workspace = true
 smallvec = { workspace = true, features = ["write"] }
-
-workspace_hack.workspace = true

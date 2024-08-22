@@ -390,7 +390,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             .write()
             .get_conn_entry(conn_info.db_and_user())
         {
-            client = Some(entry.conn)
+            client = Some(entry.conn);
         }
         let endpoint_pool = Arc::downgrade(&endpoint_pool);
 
@@ -662,13 +662,13 @@ impl<C: ClientInnerExt> Discard<'_, C> {
     pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
         let conn_info = &self.conn_info;
         if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is not idle")
+            info!("pool: throwing away connection '{conn_info}' because connection is not idle");
         }
     }
     pub fn discard(&mut self) {
         let conn_info = &self.conn_info;
         if std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
+            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
         }
     }
 }
@@ -758,6 +758,7 @@ mod tests {
     async fn test_pool() {
         let _ = env_logger::try_init();
         let config = Box::leak(Box::new(crate::config::HttpConfig {
+            accept_websockets: false,
             pool_options: GlobalConnPoolOptions {
                 max_conns_per_endpoint: 2,
                 gc_epoch: Duration::from_secs(1),

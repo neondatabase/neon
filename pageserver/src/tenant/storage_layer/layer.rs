@@ -312,7 +312,9 @@ impl Layer {
             .get_or_maybe_download(true, Some(ctx))
             .await
             .map_err(|err| match err {
-                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
+                    GetVectoredError::Cancelled
+                }
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
 
@@ -1610,6 +1612,12 @@ pub(crate) enum DownloadError {
     #[cfg(test)]
     #[error("failpoint: {0:?}")]
     Failpoint(failpoints::FailpointKind),
+}
+
+impl DownloadError {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self, DownloadError::DownloadCancelled)
+    }
 }
 
 #[derive(Debug, PartialEq)]

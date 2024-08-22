@@ -798,7 +798,7 @@ impl Tenant {
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::Attach,
-            Some(tenant_shard_id),
+            tenant_shard_id,
             None,
             "attach tenant",
             async move {
@@ -4491,10 +4491,13 @@ mod tests {
 
         // This needs to traverse to the parent, and fails.
         let err = newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await.unwrap_err();
-        assert!(err.to_string().starts_with(&format!(
-            "Bad state on timeline {}: Broken",
-            tline.timeline_id
-        )));
+        assert!(
+            err.to_string().starts_with(&format!(
+                "bad state on timeline {}: Broken",
+                tline.timeline_id
+            )),
+            "{err}"
+        );
 
         Ok(())
     }

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
-use aws_sdk_s3::Client;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use utils::generation::Generation;
 use utils::id::TimelineId;
@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
-use remote_storage::RemotePath;
+use remote_storage::{GenericRemoteStorage, ListingObject, RemotePath};
 
 pub(crate) struct TimelineAnalysis {
     /// Anomalies detected
@@ -48,13 +48,12 @@ impl TimelineAnalysis {
 }
 
 pub(crate) async fn branch_cleanup_and_check_errors(
-    s3_client: &Client,
-    target: &RootTarget,
+    remote_client: &GenericRemoteStorage,
     id: &TenantShardTimelineId,
     tenant_objects: &mut TenantObjectListing,
     s3_active_branch: Option<&BranchData>,
     console_branch: Option<BranchData>,
-    s3_data: Option<S3TimelineBlobData>,
+    s3_data: Option<RemoteTimelineBlobData>,
 ) -> TimelineAnalysis {
     let mut result = TimelineAnalysis::new();
 
@@ -78,7 +77,9 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 
     match s3_data {
         Some(s3_data) => {
-            result.garbage_keys.extend(s3_data.unknown_keys);
+            result
+                .garbage_keys
+                .extend(s3_data.unknown_keys.into_iter().map(|k| k.key.to_string()));
 
             match s3_data.blob_data {
                 BlobDataParseResult::Parsed {
@@ -143,11 +144,8 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 
                             // HEAD request used here to address a race condition  when an index was uploaded concurrently
                             // with our scan. We check if the object is uploaded to S3 after taking the listing snapshot.
-                            let response = s3_client
-                                .head_object()
-                                .bucket(target.bucket_name())
-                                .key(path.get_path().as_str())
-                                .send()
+                            let response = remote_client
+                                .head_object(&path, &CancellationToken::new())
                                 .await;
 
                             if response.is_err() {
@@ -284,14 +282,14 @@ impl TenantObjectListing {
 }
 
 #[derive(Debug)]
-pub(crate) struct S3TimelineBlobData {
+pub(crate) struct RemoteTimelineBlobData {
     pub(crate) blob_data: BlobDataParseResult,
 
     // Index objects that were not used when loading `blob_data`, e.g. those from old generations
-    pub(crate) unused_index_keys: Vec<String>,
+    pub(crate) unused_index_keys: Vec<ListingObject>,
 
     // Objects whose keys were not recognized at all, i.e. not layer files, not indices
-    pub(crate) unknown_keys: Vec<String>,
+    pub(crate) unknown_keys: Vec<ListingObject>,
 }
 
 #[derive(Debug)]
@@ -323,31 +321,37 @@ pub(crate) fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generati
 }
 
 pub(crate) async fn list_timeline_blobs(
-    s3_client: &Client,
+    remote_client: &GenericRemoteStorage,
     id: TenantShardTimelineId,
-    s3_root: &RootTarget,
-) -> anyhow::Result<S3TimelineBlobData> {
+    root_target: &RootTarget,
+) -> anyhow::Result<RemoteTimelineBlobData> {
     let mut s3_layers = HashSet::new();
 
     let mut errors = Vec::new();
     let mut unknown_keys = Vec::new();
 
-    let mut timeline_dir_target = s3_root.timeline_root(&id);
+    let mut timeline_dir_target = root_target.timeline_root(&id);
     timeline_dir_target.delimiter = String::new();
 
-    let mut index_part_keys: Vec<String> = Vec::new();
+    let mut index_part_keys: Vec<ListingObject> = Vec::new();
     let mut initdb_archive: bool = false;
 
-    let mut stream = std::pin::pin!(stream_listing(s3_client, &timeline_dir_target));
-    while let Some(obj) = stream.next().await {
-        let obj = obj?;
-        let key = obj.key();
+    let prefix_str = &timeline_dir_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&timeline_dir_target.prefix_in_bucket);
 
-        let blob_name = key.strip_prefix(&timeline_dir_target.prefix_in_bucket);
+    let mut stream = std::pin::pin!(stream_listing(remote_client, &timeline_dir_target));
+    while let Some(obj) = stream.next().await {
+        let (key, Some(obj)) = obj? else {
+            panic!("ListingObject not specified");
+        };
+
+        let blob_name = key.get_path().as_str().strip_prefix(prefix_str);
         match blob_name {
             Some(name) if name.starts_with("index_part.json") => {
                 tracing::debug!("Index key {key}");
-                index_part_keys.push(key.to_owned())
+                index_part_keys.push(obj)
             }
             Some("initdb.tar.zst") => {
                 tracing::debug!("initdb archive {key}");
@@ -358,7 +362,7 @@ pub(crate) async fn list_timeline_blobs(
             }
             Some(maybe_layer_name) => match parse_layer_object_name(maybe_layer_name) {
                 Ok((new_layer, gen)) => {
-                    tracing::debug!("Parsed layer key: {} {:?}", new_layer, gen);
+                    tracing::debug!("Parsed layer key: {new_layer} {gen:?}");
                     s3_layers.insert((new_layer, gen));
                 }
                 Err(e) => {
@@ -366,13 +370,13 @@ pub(crate) async fn list_timeline_blobs(
                     errors.push(
                         format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
                     );
-                    unknown_keys.push(key.to_string());
+                    unknown_keys.push(obj);
                 }
             },
             None => {
-                tracing::warn!("Unknown key {}", key);
+                tracing::warn!("Unknown key {key}");
                 errors.push(format!("S3 list response got an object with odd key {key}"));
-                unknown_keys.push(key.to_string());
+                unknown_keys.push(obj);
             }
         }
     }
@@ -381,7 +385,7 @@ pub(crate) async fn list_timeline_blobs(
         tracing::debug!(
             "Timeline is empty apart from initdb archive: expected post-deletion state."
         );
-        return Ok(S3TimelineBlobData {
+        return Ok(RemoteTimelineBlobData {
             blob_data: BlobDataParseResult::Relic,
             unused_index_keys: index_part_keys,
             unknown_keys: Vec::new(),
@@ -395,13 +399,13 @@ pub(crate) async fn list_timeline_blobs(
             // Stripping the index key to the last part, because RemotePath doesn't
             // like absolute paths, and depending on prefix_in_bucket it's possible
             // for the keys we read back to start with a slash.
-            let basename = key.rsplit_once('/').unwrap().1;
+            let basename = key.key.get_path().as_str().rsplit_once('/').unwrap().1;
             parse_remote_index_path(RemotePath::from_string(basename).unwrap()).map(|g| (key, g))
         })
         .max_by_key(|i| i.1)
         .map(|(k, g)| (k.clone(), g))
     {
-        Some((key, gen)) => (Some(key), gen),
+        Some((key, gen)) => (Some::<ListingObject>(key.to_owned()), gen),
         None => {
             // Legacy/missing case: one or zero index parts, which did not have a generation
             (index_part_keys.pop(), Generation::none())
@@ -416,17 +420,14 @@ pub(crate) async fn list_timeline_blobs(
     }
 
     if let Some(index_part_object_key) = index_part_object.as_ref() {
-        let index_part_bytes = download_object_with_retries(
-            s3_client,
-            &timeline_dir_target.bucket_name,
-            index_part_object_key,
-        )
-        .await
-        .context("index_part.json download")?;
+        let index_part_bytes =
+            download_object_with_retries(remote_client, &index_part_object_key.key)
+                .await
+                .context("index_part.json download")?;
 
         match serde_json::from_slice(&index_part_bytes) {
             Ok(index_part) => {
-                return Ok(S3TimelineBlobData {
+                return Ok(RemoteTimelineBlobData {
                     blob_data: BlobDataParseResult::Parsed {
                         index_part: Box::new(index_part),
                         index_part_generation,
@@ -448,7 +449,7 @@ pub(crate) async fn list_timeline_blobs(
         );
     }
 
-    Ok(S3TimelineBlobData {
+    Ok(RemoteTimelineBlobData {
         blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
         unused_index_keys: index_part_keys,
         unknown_keys,

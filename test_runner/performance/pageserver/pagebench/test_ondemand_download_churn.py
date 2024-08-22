@@ -5,8 +5,12 @@ from typing import Any, Dict, Tuple
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.pageserver.utils import wait_for_upload_queue_empty
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PgBin,
+    flush_ep_to_pageserver,
+)
 from fixtures.remote_storage import s3_storage
 from fixtures.utils import humantime_to_ms
 
@@ -62,9 +66,6 @@ def test_download_churn(
 
     run_benchmark(env, pg_bin, record, io_engine, concurrency_per_target, duration)
 
-    # see https://github.com/neondatabase/neon/issues/8712
-    env.stop(immediate=True)
-
 
 def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     remote_storage_kind = s3_storage()
@@ -98,9 +99,9 @@ def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             f"INSERT INTO data SELECT lpad(i::text, {bytes_per_row}, '0') FROM generate_series(1, {int(nrows)})  as i",
             options="-c statement_timeout=0",
         )
-        wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
-    # TODO: this is a bit imprecise, there could be frozen layers being written out that we don't observe here
-    wait_for_upload_queue_empty(client, tenant_id, timeline_id)
+        flush_ep_to_pageserver(env, ep, tenant_id, timeline_id)
+
+    client.timeline_checkpoint(tenant_id, timeline_id, compact=False, wait_until_uploaded=True)
 
     return env
 
