@@ -7,6 +7,7 @@ use futures::future::try_join;
 use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
+use http::header::AUTHORIZATION;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper1::body::Body;
@@ -89,6 +90,7 @@ enum Payload {
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
+static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
@@ -110,7 +112,7 @@ where
 #[derive(Debug, thiserror::Error)]
 pub enum ConnInfoError {
     #[error("invalid header: {0}")]
-    InvalidHeader(&'static str),
+    InvalidHeader(&'static HeaderName),
     #[error("invalid connection string: {0}")]
     UrlParseError(#[from] url::ParseError),
     #[error("incorrect scheme")]
@@ -154,10 +156,10 @@ fn get_conn_info(
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     let connection_string = headers
-        .get("Neon-Connection-String")
-        .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
+        .get(&CONN_STRING)
+        .ok_or(ConnInfoError::InvalidHeader(&CONN_STRING))?
         .to_str()
-        .map_err(|_| ConnInfoError::InvalidHeader("Neon-Connection-String"))?;
+        .map_err(|_| ConnInfoError::InvalidHeader(&CONN_STRING))?;
 
     let connection_url = Url::parse(connection_string)?;
 
@@ -180,10 +182,10 @@ fn get_conn_info(
     }
     ctx.set_user(username.clone());
 
-    let auth = if let Some(auth) = headers.get("Authorization") {
+    let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
         let auth = auth
             .to_str()
-            .map_err(|_| ConnInfoError::InvalidHeader("Authorization"))?;
+            .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
         AuthData::Jwt(
             auth.strip_prefix("Bearer ")
                 .ok_or(ConnInfoError::MissingPassword)?
