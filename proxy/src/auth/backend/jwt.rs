@@ -1,4 +1,8 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
@@ -7,9 +11,10 @@ use jose_jwk::crypto::KeyInfo;
 use signature::Verifier;
 use tokio::time::Instant;
 
-use crate::{http::parse_json_body_with_limit, intern::EndpointIdInt};
+use crate::{context::RequestMonitoring, http::parse_json_body_with_limit, EndpointId, RoleName};
 
 // TODO(conrad): make these configurable.
+const LEEWAY: Duration = Duration::from_secs(30);
 const MIN_RENEW: Duration = Duration::from_secs(30);
 const AUTO_RENEW: Duration = Duration::from_secs(300);
 const MAX_RENEW: Duration = Duration::from_secs(3600);
@@ -17,30 +22,23 @@ const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
 
 /// How to get the JWT auth rules
 pub trait FetchAuthRules: Clone + Send + Sync + 'static {
-    fn fetch_auth_rules(&self) -> impl Future<Output = anyhow::Result<AuthRules>> + Send;
+    fn fetch_auth_rules(
+        &self,
+        role_name: RoleName,
+    ) -> impl Future<Output = anyhow::Result<Vec<AuthRule>>> + Send;
 }
 
-#[derive(Clone)]
-struct FetchAuthRulesFromCplane {
-    #[allow(dead_code)]
-    endpoint: EndpointIdInt,
-}
-
-impl FetchAuthRules for FetchAuthRulesFromCplane {
-    async fn fetch_auth_rules(&self) -> anyhow::Result<AuthRules> {
-        Err(anyhow::anyhow!("not yet implemented"))
-    }
-}
-
-pub struct AuthRules {
-    jwks_urls: Vec<url::Url>,
+pub struct AuthRule {
+    pub id: String,
+    pub jwks_url: url::Url,
+    pub aud: Option<String>,
 }
 
 #[derive(Default)]
 pub struct JwkCache {
     client: reqwest::Client,
 
-    map: DashMap<EndpointIdInt, Arc<JwkCacheEntryLock>>,
+    map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
 }
 
 pub struct JwkCacheEntryLock {
@@ -63,7 +61,12 @@ pub struct JwkCacheEntry {
     last_retrieved: Instant,
 
     /// cplane will return multiple JWKs urls that we need to scrape.
-    key_sets: ahash::HashMap<url::Url, jose_jwk::JwkSet>,
+    key_sets: ahash::HashMap<String, KeySet>,
+}
+
+struct KeySet {
+    jwks: jose_jwk::JwkSet,
+    aud: Option<String>,
 }
 
 impl JwkCacheEntryLock {
@@ -79,6 +82,7 @@ impl JwkCacheEntryLock {
         &self,
         _permit: JwkRenewalPermit<'_>,
         client: &reqwest::Client,
+        role_name: RoleName,
         auth_rules: &F,
     ) -> anyhow::Result<Arc<JwkCacheEntry>> {
         // double check that no one beat us to updating the cache.
@@ -91,20 +95,19 @@ impl JwkCacheEntryLock {
             }
         }
 
-        let rules = auth_rules.fetch_auth_rules().await?;
-        let mut key_sets = ahash::HashMap::with_capacity_and_hasher(
-            rules.jwks_urls.len(),
-            ahash::RandomState::new(),
-        );
+        let rules = auth_rules.fetch_auth_rules(role_name).await?;
+        let mut key_sets =
+            ahash::HashMap::with_capacity_and_hasher(rules.len(), ahash::RandomState::new());
         // TODO(conrad): run concurrently
         // TODO(conrad): strip the JWKs urls (should be checked by cplane as well - cloud#16284)
-        for url in rules.jwks_urls {
-            let req = client.get(url.clone());
+        for rule in rules {
+            let req = client.get(rule.jwks_url.clone());
             // TODO(conrad): eventually switch to using reqwest_middleware/`new_client_with_timeout`.
+            // TODO(conrad): We need to filter out URLs that point to local resources. Public internet only.
             match req.send().await.and_then(|r| r.error_for_status()) {
                 // todo: should we re-insert JWKs if we want to keep this JWKs URL?
                 // I expect these failures would be quite sparse.
-                Err(e) => tracing::warn!(?url, error=?e, "could not fetch JWKs"),
+                Err(e) => tracing::warn!(url=?rule.jwks_url, error=?e, "could not fetch JWKs"),
                 Ok(r) => {
                     let resp: http::Response<reqwest::Body> = r.into();
                     match parse_json_body_with_limit::<jose_jwk::JwkSet>(
@@ -113,9 +116,17 @@ impl JwkCacheEntryLock {
                     )
                     .await
                     {
-                        Err(e) => tracing::warn!(?url, error=?e, "could not decode JWKs"),
+                        Err(e) => {
+                            tracing::warn!(url=?rule.jwks_url, error=?e, "could not decode JWKs");
+                        }
                         Ok(jwks) => {
-                            key_sets.insert(url, jwks);
+                            key_sets.insert(
+                                rule.id,
+                                KeySet {
+                                    jwks,
+                                    aud: rule.aud,
+                                },
+                            );
                         }
                     }
                 }
@@ -133,7 +144,9 @@ impl JwkCacheEntryLock {
 
     async fn get_or_update_jwk_cache<F: FetchAuthRules>(
         self: &Arc<Self>,
+        ctx: &RequestMonitoring,
         client: &reqwest::Client,
+        role_name: RoleName,
         fetch: &F,
     ) -> Result<Arc<JwkCacheEntry>, anyhow::Error> {
         let now = Instant::now();
@@ -141,18 +154,20 @@ impl JwkCacheEntryLock {
 
         // if we have no cached JWKs, try and get some
         let Some(cached) = guard else {
+            let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
             let permit = self.acquire_permit().await;
-            return self.renew_jwks(permit, client, fetch).await;
+            return self.renew_jwks(permit, client, role_name, fetch).await;
         };
 
         let last_update = now.duration_since(cached.last_retrieved);
 
         // check if the cached JWKs need updating.
         if last_update > MAX_RENEW {
+            let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
             let permit = self.acquire_permit().await;
 
             // it's been too long since we checked the keys. wait for them to update.
-            return self.renew_jwks(permit, client, fetch).await;
+            return self.renew_jwks(permit, client, role_name, fetch).await;
         }
 
         // every 5 minutes we should spawn a job to eagerly update the token.
@@ -164,7 +179,7 @@ impl JwkCacheEntryLock {
                 let client = client.clone();
                 let fetch = fetch.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = entry.renew_jwks(permit, &client, &fetch).await {
+                    if let Err(e) = entry.renew_jwks(permit, &client, role_name, &fetch).await {
                         tracing::warn!(error=?e, "could not fetch JWKs in background job");
                     }
                 });
@@ -178,8 +193,10 @@ impl JwkCacheEntryLock {
 
     async fn check_jwt<F: FetchAuthRules>(
         self: &Arc<Self>,
-        jwt: String,
+        ctx: &RequestMonitoring,
+        jwt: &str,
         client: &reqwest::Client,
+        role_name: RoleName,
         fetch: &F,
     ) -> Result<(), anyhow::Error> {
         // JWT compact form is defined to be
@@ -189,13 +206,13 @@ impl JwkCacheEntryLock {
         let (header_payload, signature) = jwt
             .rsplit_once(".")
             .context("Provided authentication token is not a valid JWT encoding")?;
-        let (header, _payload) = header_payload
+        let (header, payload) = header_payload
             .split_once(".")
             .context("Provided authentication token is not a valid JWT encoding")?;
 
         let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)
             .context("Provided authentication token is not a valid JWT encoding")?;
-        let header = serde_json::from_slice::<JWTHeader<'_>>(&header)
+        let header = serde_json::from_slice::<JwtHeader<'_>>(&header)
             .context("Provided authentication token is not a valid JWT encoding")?;
 
         let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
@@ -204,21 +221,32 @@ impl JwkCacheEntryLock {
         ensure!(header.typ == "JWT");
         let kid = header.kid.context("missing key id")?;
 
-        let mut guard = self.get_or_update_jwk_cache(client, fetch).await?;
+        let mut guard = self
+            .get_or_update_jwk_cache(ctx, client, role_name.clone(), fetch)
+            .await?;
 
         // get the key from the JWKs if possible. If not, wait for the keys to update.
-        let jwk = loop {
+        let (jwk, aud) = loop {
             let jwk = guard
                 .key_sets
                 .values()
-                .flat_map(|jwks| &jwks.keys)
-                .find(|jwk| jwk.prm.kid.as_deref() == Some(kid));
+                .flat_map(|key_set| {
+                    std::iter::zip(
+                        &key_set.jwks.keys,
+                        std::iter::repeat(key_set.aud.as_deref()),
+                    )
+                })
+                .find(|(jwk, _aud)| jwk.prm.kid.as_deref() == Some(kid));
 
             match jwk {
                 Some(jwk) => break jwk,
                 None if guard.last_retrieved.elapsed() > MIN_RENEW => {
+                    let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
+
                     let permit = self.acquire_permit().await;
-                    guard = self.renew_jwks(permit, client, fetch).await?;
+                    guard = self
+                        .renew_jwks(permit, client, role_name.clone(), fetch)
+                        .await?;
                 }
                 _ => {
                     bail!("jwk not found");
@@ -241,31 +269,62 @@ impl JwkCacheEntryLock {
             key => bail!("unsupported key type {key:?}"),
         };
 
-        // TODO(conrad): verify iss, exp, nbf, etc...
+        let now = SystemTime::now();
+
+        let payload = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)
+            .context("Provided authentication token is not a valid JWT encoding")?;
+        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payload)
+            .context("Provided authentication token is not a valid JWT encoding")?;
+
+        tracing::debug!(?payload, "JWT signature valid with claims");
+
+        match (aud, payload.aud) {
+            // check the audience matches
+            (Some(aud1), Some(aud2)) => ensure!(aud1 == aud2, "invalid JWT token audience"),
+            // the audience is expected but is missing
+            (Some(_), None) => bail!("invalid JWT token audience"),
+            // we don't care for the audience field
+            (None, _) => {}
+        }
+
+        if let Some(exp) = payload.exp {
+            let exp = SystemTime::UNIX_EPOCH + Duration::from_secs(exp);
+            ensure!(now < exp + LEEWAY);
+        }
+
+        if let Some(nbf) = payload.nbf {
+            let nbf = SystemTime::UNIX_EPOCH + Duration::from_secs(nbf);
+            ensure!(nbf < now + LEEWAY);
+        }
 
         Ok(())
     }
 }
 
 impl JwkCache {
-    pub async fn check_jwt(
+    pub async fn check_jwt<F: FetchAuthRules>(
         &self,
-        endpoint: EndpointIdInt,
-        jwt: String,
+        ctx: &RequestMonitoring,
+        endpoint: EndpointId,
+        role_name: RoleName,
+        fetch: &F,
+        jwt: &str,
     ) -> Result<(), anyhow::Error> {
         // try with just a read lock first
-        let entry = self.map.get(&endpoint).as_deref().map(Arc::clone);
+        let key = (endpoint, role_name.clone());
+        let entry = self.map.get(&key).as_deref().map(Arc::clone);
         let entry = match entry {
             Some(entry) => entry,
             None => {
                 // acquire a write lock after to insert.
-                let entry = self.map.entry(endpoint).or_default();
+                let entry = self.map.entry(key).or_default();
                 Arc::clone(&*entry)
             }
         };
 
-        let fetch = FetchAuthRulesFromCplane { endpoint };
-        entry.check_jwt(jwt, &self.client, &fetch).await
+        entry
+            .check_jwt(ctx, jwt, &self.client, role_name, fetch)
+            .await
     }
 }
 
@@ -315,13 +374,28 @@ fn verify_rsa_signature(
 
 /// <https://datatracker.ietf.org/doc/html/rfc7515#section-4.1>
 #[derive(serde::Deserialize, serde::Serialize)]
-struct JWTHeader<'a> {
+struct JwtHeader<'a> {
     /// must be "JWT"
     typ: &'a str,
     /// must be a supported alg
     alg: jose_jwa::Algorithm,
     /// key id, must be provided for our usecase
     kid: Option<&'a str>,
+}
+
+/// <https://datatracker.ietf.org/doc/html/rfc7519#section-4.1>
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+struct JwtPayload<'a> {
+    /// Audience - Recipient for which the JWT is intended
+    aud: Option<&'a str>,
+    /// Expiration - Time after which the JWT expires
+    exp: Option<u64>,
+    /// Not before - Time after which the JWT expires
+    nbf: Option<u64>,
+    /// Subject - Subject of the JWT (the user)
+    sub: Option<&'a str>,
+    /// JWT ID - Unique identifier
+    jti: Option<&'a str>,
 }
 
 struct JwkRenewalPermit<'a> {
@@ -388,6 +462,8 @@ impl Drop for JwkRenewalPermit<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::RoleName;
+
     use super::*;
 
     use std::{future::IntoFuture, net::SocketAddr, time::SystemTime};
@@ -431,7 +507,7 @@ mod tests {
     }
 
     fn build_jwt_payload(kid: String, sig: jose_jwa::Signing) -> String {
-        let header = JWTHeader {
+        let header = JwtHeader {
             typ: "JWT",
             alg: jose_jwa::Algorithm::Signing(sig),
             kid: Some(&kid),
@@ -524,33 +600,40 @@ mod tests {
         struct Fetch(SocketAddr);
 
         impl FetchAuthRules for Fetch {
-            async fn fetch_auth_rules(&self) -> anyhow::Result<AuthRules> {
-                Ok(AuthRules {
-                    jwks_urls: vec![
-                        format!("http://{}/foo", self.0).parse().unwrap(),
-                        format!("http://{}/bar", self.0).parse().unwrap(),
-                    ],
-                })
+            async fn fetch_auth_rules(
+                &self,
+                _role_name: RoleName,
+            ) -> anyhow::Result<Vec<AuthRule>> {
+                Ok(vec![
+                    AuthRule {
+                        id: "foo".to_owned(),
+                        jwks_url: format!("http://{}/foo", self.0).parse().unwrap(),
+                        aud: None,
+                    },
+                    AuthRule {
+                        id: "bar".to_owned(),
+                        jwks_url: format!("http://{}/bar", self.0).parse().unwrap(),
+                        aud: None,
+                    },
+                ])
             }
         }
 
+        let role_name = RoleName::from("user");
+
         let jwk_cache = Arc::new(JwkCacheEntryLock::default());
 
-        jwk_cache
-            .check_jwt(jwt1, &client, &Fetch(addr))
-            .await
-            .unwrap();
-        jwk_cache
-            .check_jwt(jwt2, &client, &Fetch(addr))
-            .await
-            .unwrap();
-        jwk_cache
-            .check_jwt(jwt3, &client, &Fetch(addr))
-            .await
-            .unwrap();
-        jwk_cache
-            .check_jwt(jwt4, &client, &Fetch(addr))
-            .await
-            .unwrap();
+        for token in [jwt1, jwt2, jwt3, jwt4] {
+            jwk_cache
+                .check_jwt(
+                    &RequestMonitoring::test(),
+                    &token,
+                    &client,
+                    role_name.clone(),
+                    &Fetch(addr),
+                )
+                .await
+                .unwrap();
+        }
     }
 }
