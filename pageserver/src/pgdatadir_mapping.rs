@@ -727,10 +727,7 @@ impl Timeline {
         let current_policy = self.last_aux_file_policy.load();
         match current_policy {
             Some(AuxFilePolicy::V1) | None => {
-                warn!(
-                    "tenant={} timeline={} is using deprecated aux file policy V1",
-                    self.tenant_shard_id, self.timeline_id
-                );
+                warn!("this timeline is using deprecated aux file policy V1");
                 self.list_aux_files_v1(lsn, ctx).await
             }
             Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
@@ -1593,10 +1590,7 @@ impl<'a> DatadirModification<'a> {
                 if aux_files_key_v1.is_empty() {
                     None
                 } else {
-                    warn!(
-                        "tenant={} timeline={} is using deprecated aux file policy V1",
-                        self.tline.tenant_shard_id, self.tline.timeline_id
-                    );
+                    warn!("this timeline is using deprecated aux file policy V1");
                     self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
                     Some(AuxFilePolicy::V1)
                 }

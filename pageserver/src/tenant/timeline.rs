@@ -2236,10 +2236,7 @@ impl Timeline {
             };
 
             if aux_file_policy == Some(AuxFilePolicy::V1) {
-                warn!(
-                    "tenant={} timeline={} is using deprecated aux file policy V1",
-                    result.tenant_shard_id, result.timeline_id
-                );
+                warn!("this timeline is using deprecated aux file policy V1");
             }
 
             result.repartition_threshold =
