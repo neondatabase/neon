@@ -262,7 +262,6 @@ where
                 }
                 LogicalReadState::Ongoing(buf) => buf,
                 LogicalReadState::Ok(_) | LogicalReadState::Error(_) => {
-                    debug_assert!(logical_read_state_borrow.is_terminal());
                     continue;
                 }
                 LogicalReadState::Undefined => unreachable!(),
