@@ -28,6 +28,7 @@ use utils::{
     auth::{encode_from_key_file, Claims, Scope},
     id::{NodeId, TenantId},
 };
+use whoami::username;
 
 pub struct StorageController {
     env: LocalEnv,
@@ -46,7 +47,6 @@ const COMMAND: &str = "storage_controller";
 const STORAGE_CONTROLLER_POSTGRES_VERSION: u32 = 16;
 
 const DB_NAME: &str = "storage_controller";
-const USER_NAME: &str = "ana";
 
 pub struct NeonStorageControllerStartArgs {
     pub instance_id: u8,
@@ -216,7 +216,7 @@ impl StorageController {
             "-h",
             "localhost",
             "-U",
-            USER_NAME,
+            &username(),
             "-d",
             DB_NAME,
             "-p",
@@ -236,7 +236,8 @@ impl StorageController {
     /// Returns the database url
     pub async fn setup_database(&self, postgres_port: u16) -> anyhow::Result<String> {
         let database_url = format!(
-            "postgresql://{USER_NAME}@localhost:{}/{DB_NAME}",
+            "postgresql://{}@localhost:{}/{DB_NAME}",
+            &username(),
             postgres_port
         );
 
@@ -249,9 +250,9 @@ impl StorageController {
                 "-p",
                 &format!("{}", postgres_port),
                 "-U",
-                USER_NAME,
+                &username(),
                 "-O",
-                USER_NAME,
+                &username(),
                 DB_NAME,
             ])
             .output()
@@ -288,7 +289,7 @@ impl StorageController {
             // But tokio-postgres fork doesn't have this upstream commit:
             // https://github.com/sfackler/rust-postgres/commit/cb609be758f3fb5af537f04b584a2ee0cebd5e79
             // => we should rebase our fork => TODO https://github.com/neondatabase/neon/issues/8399
-            .user(USER_NAME)
+            .user(&username())
             .dbname(DB_NAME)
             .connect(tokio_postgres::NoTls)
             .await
@@ -345,7 +346,7 @@ impl StorageController {
             let pg_log_path = pg_data_path.join("postgres.log");
 
             if !tokio::fs::try_exists(&pg_data_path).await? {
-                let initdb_args = ["-D", pg_data_path.as_ref(), "--username", USER_NAME];
+                let initdb_args = ["-D", pg_data_path.as_ref(), "--username", &username()];
                 tracing::info!(
                     "Initializing storage controller database with args: {:?}",
                     initdb_args
@@ -388,7 +389,7 @@ impl StorageController {
                 "-l",
                 pg_log_path.as_ref(),
                 "-U",
-                USER_NAME,
+                &username(),
                 "start",
             ];
             tracing::info!(
