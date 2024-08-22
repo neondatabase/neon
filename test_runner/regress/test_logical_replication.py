@@ -22,7 +22,7 @@ def random_string(n: int):
 
 
 @pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.V2, AuxFileStore.CrossValidation]
+    "pageserver_aux_file_policy", [AuxFileStore.V2, AuxFileStore.CrossValidation]
 )
 def test_aux_file_v2_flag(neon_simple_env: NeonEnv, pageserver_aux_file_policy: AuxFileStore):
     env = neon_simple_env
@@ -32,7 +32,7 @@ def test_aux_file_v2_flag(neon_simple_env: NeonEnv, pageserver_aux_file_policy: 
 
 
 @pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+    "pageserver_aux_file_policy", [AuxFileStore.CrossValidation]
 )
 def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
@@ -176,7 +176,7 @@ COMMIT;
 
 # Test that neon.logical_replication_max_snap_files works
 @pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+    "pageserver_aux_file_policy", [AuxFileStore.CrossValidation]
 )
 def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     def slot_removed(ep):
@@ -356,7 +356,7 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
 # Most pages start with a contrecord, so we don't do anything special
 # to ensure that.
 @pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+    "pageserver_aux_file_policy", [AuxFileStore.CrossValidation]
 )
 def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
@@ -403,7 +403,7 @@ def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
 # records passed ot the WAL redo process are never large enough to hit
 # the bug.
 @pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+    "pageserver_aux_file_policy", [AuxFileStore.CrossValidation]
 )
 def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
@@ -477,7 +477,7 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
 
 
 @pytest.mark.parametrize(
-    "pageserver_aux_file_policy", [AuxFileStore.V1, AuxFileStore.CrossValidation]
+    "pageserver_aux_file_policy", [AuxFileStore.CrossValidation]
 )
 def test_replication_shutdown(neon_simple_env: NeonEnv):
     # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
