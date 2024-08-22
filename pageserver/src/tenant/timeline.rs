@@ -5742,7 +5742,7 @@ impl<'a> TimelineWriter<'a> {
     ) -> anyhow::Result<()> {
         use utils::bin_ser::BeSer;
         if !key.is_i128_representable() {
-            bail!("the request contains data not supported by pageserver");
+            bail!("the request contains data not supported by pageserver at TimelineWriter::put");
         }
         let val_ser_size = value.serialized_size().unwrap() as usize;
         self.put_batch(
