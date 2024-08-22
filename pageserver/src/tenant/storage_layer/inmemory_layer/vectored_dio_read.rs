@@ -20,7 +20,7 @@ pub trait File: Send {
     /// The only reason why the read may be short (i.e., `nread != dst.bytes_total()`)
     /// is if the file is shorter than `start+dst.len()`.
     ///
-    /// This is unlike [`std::os::unix::fs::File::read_exact_at`] which returns an
+    /// This is unlike [`std::os::unix::fs::FileExt::read_exact_at`] which returns an
     /// [`std::io::ErrorKind::UnexpectedEof`] error if the file is shorter than `start+dst.len()`.
     ///
     /// No guarantees are made about the remaining bytes in `dst` in case of a short read.
