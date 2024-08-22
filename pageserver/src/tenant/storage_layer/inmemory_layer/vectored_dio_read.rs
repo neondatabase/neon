@@ -100,6 +100,12 @@ where
     F: File,
     B: Buffer + IoBufMut + Send,
 {
+    // Terminology:
+    // logical read = a request to read an arbitrary range of bytes from `file`; byte-level granularity
+    // chunk = we conceptually divide up the byte range of `file` into DIO_CHUNK_SIZEs ranges
+    // interest = a range within a chunk that a logical read is interested in; one logical read gets turned into many interests
+    // physical read = the read request we're going to issue to the OS; covers a range of chunks; chunk-level granularity
+
     // Preserve a copy of the logical reads for debug assertions at the end
     #[cfg(debug_assertions)]
     let (reads, assert_logical_reads) = {
@@ -161,9 +167,9 @@ where
     struct PhysicalRead<'a, B: Buffer> {
         start_chunk_no: u64,
         nchunks: usize,
-        dsts: Vec<MergedInterest<'a, B>>,
+        dsts: Vec<PhysicalInterest<'a, B>>,
     }
-    struct MergedInterest<'a, B: Buffer> {
+    struct PhysicalInterest<'a, B: Buffer> {
         logical_read: &'a LogicalRead<B>,
         offset_in_physical_read: u64,
         len: u64,
@@ -198,7 +204,7 @@ where
                               offset_in_chunk,
                               len,
                           }| {
-                        MergedInterest {
+                        PhysicalInterest {
                             logical_read,
                             offset_in_physical_read: i
                                 .checked_mul(DIO_CHUNK_SIZE)
@@ -230,7 +236,7 @@ where
     {
         let all_done = dsts
             .iter()
-            .all(|MergedInterest { logical_read, .. }| logical_read.state.borrow().is_terminal());
+            .all(|PhysicalInterest { logical_read, .. }| logical_read.state.borrow().is_terminal());
         if all_done {
             continue;
         }
@@ -244,7 +250,7 @@ where
             Ok(t) => t,
             Err(e) => {
                 let e = Arc::new(e);
-                for MergedInterest { logical_read, .. } in dsts {
+                for PhysicalInterest { logical_read, .. } in dsts {
                     *logical_read.state.borrow_mut() = LogicalReadState::Error(Arc::clone(&e));
                     // this will make later reads for the given LogicalRead short-circuit, see top of loop body
                 }
@@ -257,7 +263,7 @@ where
             "the last chunk in the file can be a short read, so, no =="
         );
         let io_buf = &io_buf[..nread];
-        for MergedInterest {
+        for PhysicalInterest {
             logical_read,
             offset_in_physical_read,
             len,
