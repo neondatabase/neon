@@ -266,11 +266,7 @@ where
                 }
                 LogicalReadState::Undefined => unreachable!(),
             };
-            struct Range {
-                start: usize, // inclusive
-                end: usize,   // exclusive
-            }
-            let range_in_io_buf = Range {
+            let range_in_io_buf = std::ops::Range {
                 start: offset_in_physical_read as usize,
                 end: offset_in_physical_read as usize + len as usize,
             };
@@ -286,7 +282,7 @@ where
                 )));
                 continue;
             }
-            let data = &io_buf[range_in_io_buf.start..range_in_io_buf.end];
+            let data = &io_buf[range_in_io_buf];
 
             // Copy data from io buffer into the logical read buffer.
             // (And in debug mode, validate that the buffer impl adheres to the Buffer trait spec.)
