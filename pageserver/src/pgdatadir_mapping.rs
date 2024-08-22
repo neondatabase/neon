@@ -1794,6 +1794,9 @@ impl<'a> DatadirModification<'a> {
             let mut write_batch = Vec::new();
             for (lsn, value_ser_size, value) in values {
                 if key.is_rel_block_key() || key.is_slru_block_key() {
+                    if !key.is_i128_representable() {
+                        bail!("the request contains data not supported by pageserver");
+                    }
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
                     write_batch.push((key.to_compact(), lsn, value_ser_size, value));
