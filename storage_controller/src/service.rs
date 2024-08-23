@@ -3139,9 +3139,12 @@ impl Service {
             let latest_generations = self.persistence.peek_generations(tenant_id).await?;
             if latest_generations
                 .into_iter()
-                .map(|g| g.1)
+                .map(|g| (g.0, g.1))
                 .collect::<Vec<_>>()
-                != target_gens.into_iter().map(|i| i.2).collect::<Vec<_>>()
+                != target_gens
+                    .into_iter()
+                    .map(|i| (i.0, i.2))
+                    .collect::<Vec<_>>()
             {
                 // We raced with something that incremented the generation, and therefore cannot be
                 // confident that our actions are persistent (they might have hit an old generation).
