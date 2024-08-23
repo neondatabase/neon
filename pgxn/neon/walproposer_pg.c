@@ -91,7 +91,7 @@ static void walprop_pg_init_bgworker(void);
 static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
 static void walprop_pg_load_libpqwalreceiver(void);
 
-static process_interrupts_callback_t PrevProcessInterruptsCallback;
+static process_interrupts_callback_t PrevProcessInterruptsCallback = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook_type;
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
@@ -353,12 +353,13 @@ WalproposerShmemInit_SyncSafekeeper(void)
 static bool
 backpressure_throttling_impl(void)
 {
-	int64		lag;
+	uint64		lag;
 	TimestampTz start,
 				stop;
-	bool		retry = PrevProcessInterruptsCallback
-		? PrevProcessInterruptsCallback()
-		: false;
+	bool		retry = false;
+
+	if (PointerIsValid(PrevProcessInterruptsCallback))
+		retry = PrevProcessInterruptsCallback();
 
 	/*
 	 * Don't throttle read only transactions or wal sender. Do throttle CREATE
