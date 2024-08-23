@@ -33,7 +33,7 @@ def test_tenant_s3_restore(
 
     # change it back after initdb, recovery doesn't work if the two
     # index_part.json uploads happen at same second or too close to each other.
-    initial_tenant_conf = MANY_SMALL_LAYERS_TENANT_CONFIG
+    initial_tenant_conf = dict(MANY_SMALL_LAYERS_TENANT_CONFIG)
     del initial_tenant_conf["checkpoint_distance"]
 
     env = neon_env_builder.init_start(initial_tenant_conf)
