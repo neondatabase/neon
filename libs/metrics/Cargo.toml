@@ -12,8 +12,6 @@ chrono.workspace = true
 twox-hash.workspace = true
 measured.workspace = true
 
-workspace_hack.workspace = true
-
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs.workspace = true
 measured-process.workspace = true

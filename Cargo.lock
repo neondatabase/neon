@@ -1208,7 +1208,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -1321,7 +1320,6 @@ dependencies = [
  "serde",
  "serde_with",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -1670,7 +1668,6 @@ dependencies = [
  "smallvec",
  "tracing",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -3147,7 +3144,6 @@ dependencies = [
  "rand 0.8.5",
  "rand_distr",
  "twox-hash",
- "workspace_hack",
 ]
 
 [[package]]
@@ -3791,7 +3787,6 @@ dependencies = [
  "strum_macros",
  "thiserror",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4193,7 +4188,6 @@ dependencies = [
  "tokio-rustls 0.25.0",
  "tokio-util",
  "tracing",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4206,7 +4200,6 @@ dependencies = [
  "postgres",
  "tokio-postgres",
  "url",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4229,7 +4222,6 @@ dependencies = [
  "serde",
  "thiserror",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4267,7 +4259,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "workspace_hack",
 ]
 
 [[package]]
@@ -4832,7 +4823,6 @@ dependencies = [
  "toml_edit 0.19.10",
  "tracing",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -5357,7 +5347,6 @@ dependencies = [
  "serde",
  "serde_with",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -5601,11 +5590,12 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.96"
+version = "1.0.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "057d394a50403bcac12672b2b18fb387ab6d289d957dab67dd201875391e52f1"
+checksum = "83c8e735a073ccf5be70aa8066aa984eaf2fa000db6c8d0100ae605b366d31ed"
 dependencies = [
  "itoa",
+ "memchr",
  "ryu",
  "serde",
 ]
@@ -6193,7 +6183,6 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "workspace_hack",
 ]
 
 [[package]]
@@ -6794,7 +6783,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "workspace_hack",
 ]
 
 [[package]]
@@ -7012,7 +7000,6 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
- "workspace_hack",
 ]
 
 [[package]]
@@ -7091,7 +7078,6 @@ dependencies = [
  "postgres_ffi",
  "regex",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -7112,7 +7098,6 @@ dependencies = [
  "bindgen",
  "postgres_ffi",
  "utils",
- "workspace_hack",
 ]
 
 [[package]]
@@ -7669,8 +7654,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.24.0",
  "tokio-util",
- "toml_datetime",
- "toml_edit 0.19.10",
  "tonic",
  "tower",
  "tracing",
