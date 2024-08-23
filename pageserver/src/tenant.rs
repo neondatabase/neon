@@ -3741,13 +3741,21 @@ impl Tenant {
     /// less than this (via eviction and on-demand downloads), but this function enables
     /// the Tenant to advertise how much storage it would prefer to have to provide fast I/O
     /// by keeping important things on local disk.
+    ///
+    /// This is a heuristic, not a guarantee: tenants that are long-idle will actually use less
+    /// than they report here, due to layer eviction.  Tenants with many active branches may
+    /// actually use more than they report here.
     pub(crate) fn local_storage_wanted(&self) -> u64 {
-        let mut wanted = 0;
         let timelines = self.timelines.lock().unwrap();
-        for timeline in timelines.values() {
-            wanted += timeline.metrics.visible_physical_size_gauge.get();
-        }
-        wanted
+
+        // Heuristic: we use the max() of the timelines' visible sizes, rather than the sum.  This
+        // reflects the observation that on tenants with multiple large branches, typically only one
+        // of them is used actively enough to occupy space on disk.
+        timelines
+            .values()
+            .map(|t| t.metrics.visible_physical_size_gauge.get())
+            .max()
+            .unwrap_or(0)
     }
 }
 

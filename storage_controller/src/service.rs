@@ -44,7 +44,7 @@ use pageserver_api::{
         NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest,
         TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
         TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
-        TenantShardMigrateRequest, TenantShardMigrateResponse, UtilizationScore,
+        TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
 };
@@ -542,7 +542,7 @@ impl Service {
             let locked = self.inner.read().unwrap();
             locked.nodes.clone()
         };
-        let nodes_online = self.initial_heartbeat_round(all_nodes.keys()).await;
+        let mut nodes_online = self.initial_heartbeat_round(all_nodes.keys()).await;
 
         // List of tenants for which we will attempt to notify compute of their location at startup
         let mut compute_notifications = Vec::new();
@@ -556,10 +556,8 @@ impl Service {
             // Mark nodes online if they responded to us: nodes are offline by default after a restart.
             let mut new_nodes = (**nodes).clone();
             for (node_id, node) in new_nodes.iter_mut() {
-                if let Some(utilization) = nodes_online.get(node_id) {
-                    node.set_availability(NodeAvailability::Active(UtilizationScore(
-                        utilization.utilization_score,
-                    )));
+                if let Some(utilization) = nodes_online.remove(node_id) {
+                    node.set_availability(NodeAvailability::Active(utilization));
                     scheduler.node_upsert(node);
                 }
             }
@@ -925,9 +923,9 @@ impl Service {
             if let Ok(deltas) = res {
                 for (node_id, state) in deltas.0 {
                     let new_availability = match state {
-                        PageserverState::Available { utilization, .. } => NodeAvailability::Active(
-                            UtilizationScore(utilization.utilization_score),
-                        ),
+                        PageserverState::Available { utilization, .. } => {
+                            NodeAvailability::Active(utilization)
+                        }
                         PageserverState::WarmingUp { started_at } => {
                             NodeAvailability::WarmingUp(started_at)
                         }
@@ -936,14 +934,17 @@ impl Service {
                             // while the heartbeat round was on-going. Hence, filter out
                             // offline transitions for WarmingUp nodes that are still within
                             // their grace period.
-                            if let Ok(NodeAvailability::WarmingUp(started_at)) =
-                                self.get_node(node_id).await.map(|n| n.get_availability())
+                            if let Ok(NodeAvailability::WarmingUp(started_at)) = self
+                                .get_node(node_id)
+                                .await
+                                .as_ref()
+                                .map(|n| n.get_availability())
                             {
                                 let now = Instant::now();
-                                if now - started_at >= self.config.max_warming_up_interval {
+                                if now - *started_at >= self.config.max_warming_up_interval {
                                     NodeAvailability::Offline
                                 } else {
-                                    NodeAvailability::WarmingUp(started_at)
+                                    NodeAvailability::WarmingUp(*started_at)
                                 }
                             } else {
                                 NodeAvailability::Offline
@@ -1625,7 +1626,7 @@ impl Service {
         // This Node is a mutable local copy: we will set it active so that we can use its
         // API client to reconcile with the node.  The Node in [`Self::nodes`] will get updated
         // later.
-        node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+        node.set_availability(NodeAvailability::Active(PageserverUtilization::full()));
 
         let configs = match node
             .with_client_retries(
@@ -2473,7 +2474,7 @@ impl Service {
         .await;
 
         let node = {
-            let locked = self.inner.read().unwrap();
+            let mut locked = self.inner.write().unwrap();
             // Just a sanity check to prevent misuse: the API expects that the tenant is fully
             // detached everywhere, and nothing writes to S3 storage. Here, we verify that,
             // but only at the start of the process, so it's really just to prevent operator
@@ -2500,7 +2501,7 @@ impl Service {
                     return Err(ApiError::InternalServerError(anyhow::anyhow!("We observed attached={mode:?} tenant in node_id={node_id} shard with tenant_shard_id={shard_id}")));
                 }
             }
-            let scheduler = &locked.scheduler;
+            let scheduler = &mut locked.scheduler;
             // Right now we only perform the operation on a single node without parallelization
             // TODO fan out the operation to multiple nodes for better performance
             let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
@@ -4761,7 +4762,7 @@ impl Service {
         //
         // The transition we calculate here remains valid later in the function because we hold the op lock on the node:
         // nothing else can mutate its availability while we run.
-        let availability_transition = if let Some(input_availability) = availability {
+        let availability_transition = if let Some(input_availability) = availability.as_ref() {
             let (activate_node, availability_transition) = {
                 let locked = self.inner.read().unwrap();
                 let Some(node) = locked.nodes.get(&node_id) else {
@@ -4797,8 +4798,8 @@ impl Service {
             ));
         };
 
-        if let Some(availability) = &availability {
-            node.set_availability(*availability);
+        if let Some(availability) = availability.as_ref() {
+            node.set_availability(availability.clone());
         }
 
         if let Some(scheduling) = scheduling {
