@@ -164,8 +164,13 @@ postgres-clean-%:
 postgres-check-%: postgres-%
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
 
+# Note: We do *not* need postgres itself to be compiled to compile
+# PostgreSQL-extensions: we only need the headers for the type definitions.
+# This is different for non-extension binaries, but those are not included
+# in this makefile target, so they should register their own dependency on
+# the postgres-% binary target.
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-%
+neon-pg-ext-%: postgres-headers-%
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
