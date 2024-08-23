@@ -68,7 +68,7 @@ const parseReportJson = async ({ reportJsonUrl, fetch }) => {
                     console.info(`Cannot get BUILD_TYPE and Postgres Version from test name: "${test.name}", defaulting to "release" and "14"`)
 
                     buildType = "release"
-                    pgVersion = "14"
+                    pgVersion = "16"
                 }
 
                 pgVersions.add(pgVersion)
