@@ -42,6 +42,39 @@ pub struct JwkCache {
     map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
 }
 
+pub struct JwkCacheEntry {
+    /// Should refetch at least every hour to verify when old keys have been removed.
+    /// Should refetch when new key IDs are seen only every 5 minutes or so
+    last_retrieved: Instant,
+
+    /// cplane will return multiple JWKs urls that we need to scrape.
+    key_sets: ahash::HashMap<String, KeySet>,
+}
+
+impl JwkCacheEntry {
+    fn find_jwk_and_audience(&self, key_id: &str) -> Option<(&jose_jwk::Jwk, Option<&str>)> {
+        self.key_sets.values().find_map(|key_set| {
+            key_set
+                .find_key(key_id)
+                .map(|jwk| (jwk, key_set.audience.as_deref()))
+        })
+    }
+}
+
+struct KeySet {
+    jwks: jose_jwk::JwkSet,
+    audience: Option<String>,
+}
+
+impl KeySet {
+    fn find_key(&self, key_id: &str) -> Option<&jose_jwk::Jwk> {
+        self.jwks
+            .keys
+            .iter()
+            .find(|jwk| jwk.prm.kid.as_deref() == Some(key_id))
+    }
+}
+
 pub struct JwkCacheEntryLock {
     cached: ArcSwapOption<JwkCacheEntry>,
     lookup: tokio::sync::Semaphore,
@@ -54,20 +87,6 @@ impl Default for JwkCacheEntryLock {
             lookup: tokio::sync::Semaphore::new(1),
         }
     }
-}
-
-pub struct JwkCacheEntry {
-    /// Should refetch at least every hour to verify when old keys have been removed.
-    /// Should refetch when new key IDs are seen only every 5 minutes or so
-    last_retrieved: Instant,
-
-    /// cplane will return multiple JWKs urls that we need to scrape.
-    key_sets: ahash::HashMap<String, KeySet>,
-}
-
-struct KeySet {
-    jwks: jose_jwk::JwkSet,
-    audience: Option<String>,
 }
 
 impl JwkCacheEntryLock {
@@ -228,18 +247,7 @@ impl JwkCacheEntryLock {
 
         // get the key from the JWKs if possible. If not, wait for the keys to update.
         let (jwk, expected_audience) = loop {
-            let jwk = guard
-                .key_sets
-                .values()
-                .flat_map(|key_set| {
-                    std::iter::zip(
-                        &key_set.jwks.keys,
-                        std::iter::repeat(key_set.audience.as_deref()),
-                    )
-                })
-                .find(|(jwk, _aud)| jwk.prm.kid.as_deref() == Some(kid));
-
-            match jwk {
+            match guard.find_jwk_and_audience(kid) {
                 Some(jwk) => break jwk,
                 None if guard.last_retrieved.elapsed() > MIN_RENEW => {
                     let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
