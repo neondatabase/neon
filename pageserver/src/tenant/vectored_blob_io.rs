@@ -86,7 +86,7 @@ pub enum VectoredReadCoalesceMode {
 }
 
 impl VectoredReadCoalesceMode {
-    fn get() -> Self {
+    pub(crate) fn get() -> Self {
         let align = virtual_file::get_io_buffer_alignment();
         if align == 1 {
             VectoredReadCoalesceMode::AdjacentOnly
@@ -512,6 +512,18 @@ impl<'a> VectoredBlobReader<'a> {
             read.size(),
             buf.capacity()
         );
+
+        if cfg!(debug_assertions) {
+            let align = virtual_file::get_io_buffer_alignment() as u64;
+            debug_assert_eq!(
+                read.start % align,
+                0,
+                "Read start at {} does not satisfy the required io buffer alignment ({} bytes)",
+                read.start,
+                align
+            );
+        }
+
         let mut buf = self
             .file
             .read_exact_at(buf.slice(0..read.size()), read.start, ctx)
@@ -719,7 +731,9 @@ mod tests {
     use super::*;
 
     fn validate_read(read: &VectoredRead, offset_range: &[(Key, Lsn, u64, BlobFlag)]) {
-        assert_eq!(read.start, offset_range.first().unwrap().2);
+        let align = virtual_file::get_io_buffer_alignment() as u64;
+        assert_eq!(read.start % align, 0);
+        assert_eq!(read.start / align, offset_range.first().unwrap().2 / align);
 
         let expected_offsets_in_read: Vec<_> = offset_range.iter().map(|o| o.2).collect();
 
@@ -744,7 +758,7 @@ mod tests {
         let lsn = Lsn(0);
 
         let blob_descriptions = [
-            (key, lsn, 0, BlobFlag::None),                // Read 1 BEGIN
+            (key, lsn, CHUNK_SIZE / 8, BlobFlag::None), // Read 1 BEGIN
             (key, lsn, CHUNK_SIZE / 4, BlobFlag::Ignore), // Gap
             (key, lsn, CHUNK_SIZE / 2, BlobFlag::None),
             (key, lsn, CHUNK_SIZE - 2, BlobFlag::Ignore), // Gap
@@ -775,7 +789,7 @@ mod tests {
         ];
 
         let mut planner = VectoredReadPlanner::new(max_read_size);
-        for (key, lsn, offset, flag) in blob_descriptions.clone() {
+        for (key, lsn, offset, flag) in blob_descriptions {
             planner.handle(key, lsn, offset, flag);
         }
 

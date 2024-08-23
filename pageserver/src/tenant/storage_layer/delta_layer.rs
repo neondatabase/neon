@@ -1195,6 +1195,7 @@ impl DeltaLayerInner {
         let mut prev: Option<(Key, Lsn, BlobRef)> = None;
 
         let mut read_builder: Option<VectoredReadBuilder> = None;
+        let read_mode = VectoredReadCoalesceMode::get();
 
         let max_read_size = self
             .max_vectored_read_bytes
@@ -1243,7 +1244,7 @@ impl DeltaLayerInner {
                         offsets.end.pos(),
                         meta,
                         max_read_size,
-                        VectoredReadCoalesceMode::AdjacentOnly,
+                        read_mode,
                     ))
                 }
             } else {
