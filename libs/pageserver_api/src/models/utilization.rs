@@ -90,7 +90,7 @@ impl PageserverUtilization {
     /// If a node is currently hosting more work than it can comfortably handle.  This does not indicate that
     /// it will fail, but it is a strong signal that more work should not be added unless there is no alternative.
     pub fn is_overloaded(score: RawScore) -> bool {
-        score > Self::UTILIZATION_FULL
+        score >= Self::UTILIZATION_FULL
     }
 
     pub fn adjust_shard_count_max(&mut self, shard_count: u32) {
