@@ -7,6 +7,7 @@ use futures::future::try_join;
 use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
+use http::header::AUTHORIZATION;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper1::body::Body;
@@ -56,6 +57,7 @@ use crate::DbName;
 use crate::RoleName;
 
 use super::backend::PoolingBackend;
+use super::conn_pool::AuthData;
 use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
 use super::http_util::json_response;
@@ -88,6 +90,7 @@ enum Payload {
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
+static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
@@ -109,7 +112,7 @@ where
 #[derive(Debug, thiserror::Error)]
 pub enum ConnInfoError {
     #[error("invalid header: {0}")]
-    InvalidHeader(&'static str),
+    InvalidHeader(&'static HeaderName),
     #[error("invalid connection string: {0}")]
     UrlParseError(#[from] url::ParseError),
     #[error("incorrect scheme")]
@@ -153,10 +156,10 @@ fn get_conn_info(
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     let connection_string = headers
-        .get("Neon-Connection-String")
-        .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
+        .get(&CONN_STRING)
+        .ok_or(ConnInfoError::InvalidHeader(&CONN_STRING))?
         .to_str()
-        .map_err(|_| ConnInfoError::InvalidHeader("Neon-Connection-String"))?;
+        .map_err(|_| ConnInfoError::InvalidHeader(&CONN_STRING))?;
 
     let connection_url = Url::parse(connection_string)?;
 
@@ -179,10 +182,23 @@ fn get_conn_info(
     }
     ctx.set_user(username.clone());
 
-    let password = connection_url
-        .password()
-        .ok_or(ConnInfoError::MissingPassword)?;
-    let password = urlencoding::decode_binary(password.as_bytes());
+    let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
+        let auth = auth
+            .to_str()
+            .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
+        AuthData::Jwt(
+            auth.strip_prefix("Bearer ")
+                .ok_or(ConnInfoError::MissingPassword)?
+                .into(),
+        )
+    } else if let Some(pass) = connection_url.password() {
+        AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
+            std::borrow::Cow::Borrowed(b) => b.into(),
+            std::borrow::Cow::Owned(b) => b.into(),
+        })
+    } else {
+        return Err(ConnInfoError::MissingPassword);
+    };
 
     let endpoint = match connection_url.host() {
         Some(url::Host::Domain(hostname)) => {
@@ -225,10 +241,7 @@ fn get_conn_info(
     Ok(ConnInfo {
         user_info,
         dbname,
-        password: match password {
-            std::borrow::Cow::Borrowed(b) => b.into(),
-            std::borrow::Cow::Owned(b) => b.into(),
-        },
+        auth,
     })
 }
 
@@ -550,9 +563,24 @@ async fn handle_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let keys = backend
-                .authenticate(ctx, &config.authentication_config, &conn_info)
-                .await?;
+            let keys = match &conn_info.auth {
+                AuthData::Password(pw) => {
+                    backend
+                        .authenticate_with_password(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.user_info,
+                            pw,
+                        )
+                        .await?
+                }
+                AuthData::Jwt(jwt) => {
+                    backend
+                        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
+                        .await?
+                }
+            };
+
             let client = backend
                 .connect_to_compute(ctx, conn_info, keys, !allow_pool)
                 .await?;
