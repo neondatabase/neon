@@ -8,13 +8,14 @@ use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
+use serde::{Deserialize, Deserializer};
 use signature::Verifier;
 use tokio::time::Instant;
 
 use crate::{context::RequestMonitoring, http::parse_json_body_with_limit, EndpointId, RoleName};
 
 // TODO(conrad): make these configurable.
-const LEEWAY: Duration = Duration::from_secs(30);
+const CLOCK_SKEW_LEEWAY: Duration = Duration::from_secs(30);
 const MIN_RENEW: Duration = Duration::from_secs(30);
 const AUTO_RENEW: Duration = Duration::from_secs(300);
 const MAX_RENEW: Duration = Duration::from_secs(3600);
@@ -31,7 +32,7 @@ pub trait FetchAuthRules: Clone + Send + Sync + 'static {
 pub struct AuthRule {
     pub id: String,
     pub jwks_url: url::Url,
-    pub aud: Option<String>,
+    pub audience: Option<String>,
 }
 
 #[derive(Default)]
@@ -66,7 +67,7 @@ pub struct JwkCacheEntry {
 
 struct KeySet {
     jwks: jose_jwk::JwkSet,
-    aud: Option<String>,
+    audience: Option<String>,
 }
 
 impl JwkCacheEntryLock {
@@ -124,7 +125,7 @@ impl JwkCacheEntryLock {
                                 rule.id,
                                 KeySet {
                                     jwks,
-                                    aud: rule.aud,
+                                    audience: rule.audience,
                                 },
                             );
                         }
@@ -219,21 +220,21 @@ impl JwkCacheEntryLock {
             .context("Provided authentication token is not a valid JWT encoding")?;
 
         ensure!(header.typ == "JWT");
-        let kid = header.kid.context("missing key id")?;
+        let kid = header.key_id.context("missing key id")?;
 
         let mut guard = self
             .get_or_update_jwk_cache(ctx, client, role_name.clone(), fetch)
             .await?;
 
         // get the key from the JWKs if possible. If not, wait for the keys to update.
-        let (jwk, aud) = loop {
+        let (jwk, expected_audience) = loop {
             let jwk = guard
                 .key_sets
                 .values()
                 .flat_map(|key_set| {
                     std::iter::zip(
                         &key_set.jwks.keys,
-                        std::iter::repeat(key_set.aud.as_deref()),
+                        std::iter::repeat(key_set.audience.as_deref()),
                     )
                 })
                 .find(|(jwk, _aud)| jwk.prm.kid.as_deref() == Some(kid));
@@ -255,7 +256,7 @@ impl JwkCacheEntryLock {
         };
 
         ensure!(
-            jwk.is_supported(&header.alg),
+            jwk.is_supported(&header.algorithm),
             "signature algorithm not supported"
         );
 
@@ -269,8 +270,6 @@ impl JwkCacheEntryLock {
             key => bail!("unsupported key type {key:?}"),
         };
 
-        let now = SystemTime::now();
-
         let payload = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)
             .context("Provided authentication token is not a valid JWT encoding")?;
         let payload = serde_json::from_slice::<JwtPayload<'_>>(&payload)
@@ -278,7 +277,7 @@ impl JwkCacheEntryLock {
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
-        match (aud, payload.aud) {
+        match (expected_audience, payload.audience) {
             // check the audience matches
             (Some(aud1), Some(aud2)) => ensure!(aud1 == aud2, "invalid JWT token audience"),
             // the audience is expected but is missing
@@ -287,14 +286,14 @@ impl JwkCacheEntryLock {
             (None, _) => {}
         }
 
-        if let Some(exp) = payload.exp {
-            let exp = SystemTime::UNIX_EPOCH + Duration::from_secs(exp);
-            ensure!(now < exp + LEEWAY);
+        let now = SystemTime::now();
+
+        if let Some(exp) = payload.expiration {
+            ensure!(now < exp + CLOCK_SKEW_LEEWAY);
         }
 
-        if let Some(nbf) = payload.nbf {
-            let nbf = SystemTime::UNIX_EPOCH + Duration::from_secs(nbf);
-            ensure!(nbf < now + LEEWAY);
+        if let Some(nbf) = payload.not_before {
+            ensure!(nbf < now + CLOCK_SKEW_LEEWAY);
         }
 
         Ok(())
@@ -376,26 +375,47 @@ fn verify_rsa_signature(
 #[derive(serde::Deserialize, serde::Serialize)]
 struct JwtHeader<'a> {
     /// must be "JWT"
+    #[serde(rename = "typ")]
     typ: &'a str,
     /// must be a supported alg
-    alg: jose_jwa::Algorithm,
+    #[serde(rename = "alg")]
+    algorithm: jose_jwa::Algorithm,
     /// key id, must be provided for our usecase
-    kid: Option<&'a str>,
+    #[serde(rename = "kid")]
+    key_id: Option<&'a str>,
 }
 
 /// <https://datatracker.ietf.org/doc/html/rfc7519#section-4.1>
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 struct JwtPayload<'a> {
     /// Audience - Recipient for which the JWT is intended
-    aud: Option<&'a str>,
+    #[serde(rename = "aud")]
+    audience: Option<&'a str>,
     /// Expiration - Time after which the JWT expires
-    exp: Option<u64>,
+    #[serde(deserialize_with = "numeric_date_opt")]
+    expiration: Option<SystemTime>,
     /// Not before - Time after which the JWT expires
-    nbf: Option<u64>,
-    /// Subject - Subject of the JWT (the user)
-    sub: Option<&'a str>,
-    /// JWT ID - Unique identifier
-    jti: Option<&'a str>,
+    #[serde(deserialize_with = "numeric_date_opt")]
+    not_before: Option<SystemTime>,
+
+    // the following entries are only extracted for the sake of debug logging.
+    /// Issuer of the JWT
+    #[serde(rename = "iss")]
+    issuer: Option<&'a str>,
+    /// Subject of the JWT (the user)
+    #[serde(rename = "sub")]
+    subject: Option<&'a str>,
+    /// Unique token identifier
+    #[serde(rename = "jti")]
+    jwt_id: Option<&'a str>,
+    /// Unique session identifier
+    #[serde(rename = "sid")]
+    session_id: Option<&'a str>,
+}
+
+fn numeric_date_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
+    let d = <Option<u64>>::deserialize(d)?;
+    Ok(d.map(|n| SystemTime::UNIX_EPOCH + Duration::from_secs(n)))
 }
 
 struct JwkRenewalPermit<'a> {
@@ -509,8 +529,8 @@ mod tests {
     fn build_jwt_payload(kid: String, sig: jose_jwa::Signing) -> String {
         let header = JwtHeader {
             typ: "JWT",
-            alg: jose_jwa::Algorithm::Signing(sig),
-            kid: Some(&kid),
+            algorithm: jose_jwa::Algorithm::Signing(sig),
+            key_id: Some(&kid),
         };
         let body = typed_json::json! {{
             "exp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() + 3600,
@@ -608,12 +628,12 @@ mod tests {
                     AuthRule {
                         id: "foo".to_owned(),
                         jwks_url: format!("http://{}/foo", self.0).parse().unwrap(),
-                        aud: None,
+                        audience: None,
                     },
                     AuthRule {
                         id: "bar".to_owned(),
                         jwks_url: format!("http://{}/bar", self.0).parse().unwrap(),
-                        aud: None,
+                        audience: None,
                     },
                 ])
             }
