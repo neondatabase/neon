@@ -787,7 +787,7 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 
 static uint64
 prefetch_register_bufferv(BufferTag tag, neon_request_lsns *force_request_lsns,
-						  BlockNumber nblocks)
+						  BlockNumber nblocks, const bits8 *mask)
 {
 	uint64		ring_index;
 	PrefetchRequest req;
@@ -802,6 +802,9 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *force_request_lsns,
 Retry:
 	for (int i = 0; i < nblocks; i++)
 	{
+		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
+			continue;
+
 		req.buftag.blockNum = tag.blockNum + i;
 		entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &req);
 
@@ -954,7 +957,7 @@ Retry:
 static uint64
 prefetch_register_buffer(BufferTag tag, neon_request_lsns *force_request_lsns)
 {
-	return prefetch_register_bufferv(tag, force_request_lsns, 1);
+	return prefetch_register_bufferv(tag, force_request_lsns, 1, NULL);
 }
 
 
@@ -2576,12 +2579,16 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		io_initiated = true;
 
 		tag.blockNum = blocknum;
+		
+		for (int i = 0; i < PG_IOV_MAX / 8; i++)
+			lfc_present[i] = ~(lfc_present[i]);
 
-		ring_index = prefetch_register_bufferv(tag, NULL, 1);
+		ring_index = prefetch_register_bufferv(tag, NULL, iterblocks,
+											   lfc_present);
 
 		Assert(ring_index < MyPState->ring_unused &&
-			   MyPState->ring_last <= ring_index);	}
-
+			   MyPState->ring_last <= ring_index);
+	}
 
 	return false;
 }
@@ -2674,7 +2681,7 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 
 static void
 neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neon_request_lsns *request_lsns,
-				  void **buffers, BlockNumber nblocks, bits8 *mask)
+				  void **buffers, BlockNumber nblocks, const bits8 *mask)
 {
 	NeonResponse *resp;
 	uint64		ring_index;
@@ -2705,7 +2712,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neo
 	 * weren't for the behaviour of the LwLsn cache that uses the highest
 	 * value of the LwLsn cache when the entry is not found.
 	 */
-	prefetch_register_bufferv(buftag, request_lsns, nblocks);
+	prefetch_register_bufferv(buftag, request_lsns, nblocks, mask);
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -2758,7 +2765,7 @@ Retry:
 			{
 				pgBufferUsage.prefetch.misses += 1;
 
-				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1);
+				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1, NULL);
 				slot = GetPrfSlot(ring_index);
 			}
 			else
