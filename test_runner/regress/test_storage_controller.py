@@ -23,11 +23,11 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
-    MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
     enable_remote_storage_versioning,
     list_prefix,
+    many_small_layers_tenant_config,
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
@@ -654,7 +654,7 @@ def test_storage_controller_s3_time_travel_recovery(
         tenant_id,
         shard_count=2,
         shard_stripe_size=8192,
-        tenant_config=MANY_SMALL_LAYERS_TENANT_CONFIG,
+        tenant_config=many_small_layers_tenant_config(),
     )
 
     # Check that the consistency check passes
