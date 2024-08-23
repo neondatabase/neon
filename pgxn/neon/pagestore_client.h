@@ -284,6 +284,9 @@ extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum,
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, const void *buffer, bool skipFsync);
 #endif
+
+extern PGDLLEXPORT void neon_dump_relsize_cache(void);
+
 extern void neon_writeback(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber blocknum, BlockNumber nblocks);
 extern BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);

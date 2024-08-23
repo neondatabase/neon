@@ -441,6 +441,11 @@ WAL-log them periodically, from a backgound worker.
 
 Similarly to replications snapshot files, the CID mapping files generated during VACUUM FULL of a catalog table are WAL-logged
 
+FIXME: But they're not, AFAICS?
+
+FIXME: However, we do WAL-log the file in pg_logical/mappings. But AFAICS that's WAL-logged
+by PostgreSQL too. Why do we need separate WAL-logging for that? See changes in rewriteheap.c
+
 ### How to get rid of the patch
 
 WAL-log them periodically, from a backgound worker.
