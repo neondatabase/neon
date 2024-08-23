@@ -81,6 +81,7 @@ static void nwp_register_gucs(void);
 static void assign_neon_safekeepers(const char *newval, void *extra);
 static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
+static uint64 startup_backpressure_wrap(void);
 static bool backpressure_throttling_impl(void);
 static void walprop_register_bgworker(void);
 
@@ -178,7 +179,7 @@ pg_init_walproposer(void)
 
 	nwp_prepare_shmem();
 
-	delay_backend_us = &backpressure_lag_impl;
+	delay_backend_us = &startup_backpressure_wrap;
 	PrevProcessInterruptsCallback = ProcessInterruptsCallback;
 	ProcessInterruptsCallback = backpressure_throttling_impl;
 
@@ -285,6 +286,22 @@ backpressure_lag_impl(void)
 		}
 	}
 	return 0;
+}
+
+/*
+ * We don't apply backpressure when we're the postmaster, or the startup
+ * process, because in postmaster we can't apply backpressure, and in
+ * the startup process we can't afford to slow down.
+ */
+static uint64
+startup_backpressure_wrap(void)
+{
+	if (AmStartupProcess() || !IsUnderPostmaster)
+		return 0;
+
+	delay_backend_us = &backpressure_lag_impl;
+
+	return backpressure_lag_impl();
 }
 
 /*

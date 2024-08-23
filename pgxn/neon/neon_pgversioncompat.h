@@ -54,7 +54,7 @@
 #define CopyNRelFileInfoToBufTag(tag, rinfo) \
 	do { \
 		(tag).rnode = (rinfo); \
-	} while (false);
+	} while (false)
 
 #define BufTagGetNRelFileInfo(tag) tag.rnode
 
@@ -102,7 +102,7 @@
 		(tag).spcOid = (rinfo).spcOid; \
 		(tag).dbOid = (rinfo).dbOid; \
 		(tag).relNumber = (rinfo).relNumber; \
-	} while (false);
+	} while (false)
 
 #define BufTagGetNRelFileInfo(tag) \
 	((RelFileLocator) { \

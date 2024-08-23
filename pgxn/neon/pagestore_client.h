@@ -6,8 +6,6 @@
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * contrib/neon/pagestore_client.h
- *
  *-------------------------------------------------------------------------
  */
 #ifndef pageserver_h
@@ -188,7 +186,7 @@ extern char *nm_to_string(NeonMessage *msg);
  * API
  */
 
-typedef unsigned shardno_t;
+typedef uint16 shardno_t;
 
 typedef struct
 {
@@ -239,7 +237,7 @@ extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum, int nblocks);
 #else
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
-						  BlockNumber blocknum);	
+						  BlockNumber blocknum);
 #endif
 
 /*
@@ -303,9 +301,12 @@ extern void lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum,
 /* returns number of blocks read, with one bit set in *read for each  */
 extern int lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum,
 							BlockNumber blkno, void **buffers,
-							BlockNumber nblocks, bits32 *read);
+							BlockNumber nblocks, bits8 *mask);
 
-extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
+extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
+							   BlockNumber blkno);
+extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
+							   BlockNumber blkno, int nblocks, bits8 *bitmap);
 extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
 
@@ -313,7 +314,7 @@ static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		 void *buffer)
 {
-	bits32	rv = 0;
+	bits8		rv = 0;
 	return lfc_readv_select(rinfo, forkNum, blkno, &buffer, 1, &rv) == 1;
 }
 

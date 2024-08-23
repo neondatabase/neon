@@ -471,6 +471,84 @@ lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 }
 
 /*
+ * Check if page is present in the cache.
+ * Returns true if page is found in local cache.
+ */
+int
+lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+					int nblocks, bits8 *bitmap)
+{
+	BufferTag	tag;
+	FileCacheEntry *entry;
+	uint32		chunk_offs;
+	int			found = 0;
+	uint32		hash;
+	int			i = 0;
+
+	if (lfc_maybe_disabled())	/* fast exit if file cache is disabled */
+		return 0;
+
+	CopyNRelFileInfoToBufTag(tag, rinfo);
+	tag.forkNum = forkNum;
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
+
+	tag.blockNum = (blkno + i) & ~(BLOCKS_PER_CHUNK - 1);
+	hash = get_hash_value(lfc_hash, &tag);
+	chunk_offs = (blkno + i) & (BLOCKS_PER_CHUNK - 1);
+
+	LWLockAcquire(lfc_lock, LW_SHARED);
+
+	while (true)
+	{
+		int		this_chunk = Min(nblocks, BLOCKS_PER_CHUNK - chunk_offs);
+		if (LFC_ENABLED())
+		{
+			entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, NULL);
+
+			if (entry != NULL)
+			{
+				for (; chunk_offs < BLOCKS_PER_CHUNK; chunk_offs++, i++)
+				{
+					if ((entry->bitmap[chunk_offs >> 5] & 
+						(1 << (chunk_offs & 31))) != 0)
+					{
+						bitmap[i / 0x8] |= 1 << i & 0x7;
+						found++;
+					}
+				}
+			}
+			else
+			{
+				i += this_chunk;
+			}
+		}
+		else
+		{
+			return found;
+		}
+
+		/*
+		 * Break out of the iteration before doing expensive stuff for
+		 * a next iteration
+		 */
+		if (i >= nblocks)
+			break;
+
+		/*
+		 * Prepare for the next iteration. We don't unlock here, as that'd
+		 * probably be more expensive than the gains it'd get us.
+		 */
+		tag.blockNum = (blkno + i) & ~(BLOCKS_PER_CHUNK - 1);
+		hash = get_hash_value(lfc_hash, &tag);
+		chunk_offs = (blkno + i) & (BLOCKS_PER_CHUNK - 1);
+	}
+
+	LWLockRelease(lfc_lock);
+
+	return found;
+}
+
+/*
  * Evict a page (if present) from the local file cache
  */
 void
@@ -557,10 +635,13 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
  * In case of error local file cache is disabled (lfc->limit is set to zero),
  * and -1 is returned. Note that 'read' and the buffers may be touched and in
  * an otherwise invalid state.
+ *
+ * If the mask argument is supplied, bits will be set at the offsets of pages
+ * that were present and read from the LFC.
  */
 int
 lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-				 void **buffers, BlockNumber nblocks, bits32 *read)
+				 void **buffers, BlockNumber nblocks, bits8 *mask)
 {
 	BufferTag	tag;
 	FileCacheEntry *entry;
@@ -663,7 +744,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			 */
 			if (entry->bitmap[(chunk_offs + i) / 32] & (1 << ((chunk_offs + i) % 32)))
 			{
-				read[(buf_offset + i) / 32] |= 1 << ((buf_offset + i) % 32);
+				mask[(buf_offset + i) / 32] |= 1 << ((buf_offset + i) % 32);
 				iteration_hits++;
 			}
 			else
