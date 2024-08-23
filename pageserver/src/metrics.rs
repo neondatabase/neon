@@ -1806,7 +1806,7 @@ pub(crate) static SECONDARY_RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::n
 pub(crate) static NODE_UTILIZATION_SCORE: Lazy<UIntGauge> = Lazy::new(|| {
     register_uint_gauge!(
         "pageserver_utilization_score",
-        "The utilization score we report to the storage controller for scheduling, where 0.0 is empty and 1.0 is full.  May exceed 1.0.",
+        "The utilization score we report to the storage controller for scheduling, where 0 is empty, 1000000 is full, and anything above is considered overloaded",
     )
     .expect("failed to define a metric")
 });
