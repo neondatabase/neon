@@ -509,6 +509,8 @@ impl Persistence {
     /// latest generation)
     ///
     /// If the tenant doesn't exist, an empty vector is returned.
+    ///
+    /// Output is sorted by shard number
     pub(crate) async fn peek_generations(
         &self,
         filter_tenant_id: TenantId,
