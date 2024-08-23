@@ -400,10 +400,10 @@ struct JwtPayload<'a> {
     #[serde(rename = "aud")]
     audience: Option<&'a str>,
     /// Expiration - Time after which the JWT expires
-    #[serde(deserialize_with = "numeric_date_opt")]
+    #[serde(deserialize_with = "numeric_date_opt", rename = "exp")]
     expiration: Option<SystemTime>,
     /// Not before - Time after which the JWT expires
-    #[serde(deserialize_with = "numeric_date_opt")]
+    #[serde(deserialize_with = "numeric_date_opt", rename = "nbf")]
     not_before: Option<SystemTime>,
 
     // the following entries are only extracted for the sake of debug logging.
