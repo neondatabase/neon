@@ -18,13 +18,11 @@ use tracing::{info, warn};
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{validate_password_and_exchange, AuthError};
 use crate::cache::Cached;
-use crate::compute::ConnCfg;
 use crate::console::errors::GetAuthInfoError;
-use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
 use crate::console::{AuthSecret, NodeInfo};
 use crate::context::RequestMonitoring;
-use crate::intern::{BranchIdTag, EndpointIdInt, EndpointIdTag, InternId, ProjectIdTag};
+use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
@@ -506,20 +504,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
         match self {
             Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
             Self::Link(_, info) => Ok(Cached::new_uncached(info.clone())),
-            Self::Local(local) => Ok(Cached::new_uncached(NodeInfo {
-                config: {
-                    let mut cfg = ConnCfg::new();
-                    cfg.host(&local.postgres.to_string());
-                    cfg
-                },
-                aux: MetricsAuxInfo {
-                    endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),
-                    project_id: ProjectIdTag::get_interner().get_or_intern("local"),
-                    branch_id: BranchIdTag::get_interner().get_or_intern("local"),
-                    cold_start_info: ColdStartInfo::WarmCached,
-                },
-                allow_self_signed_compute: false,
-            })),
+            Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
 
@@ -541,21 +526,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
         match self {
             Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
             Self::Link(_, _) => unreachable!("link auth flow doesn't support waking the compute"),
-            Self::Local(local) => Ok(Cached::new_uncached(NodeInfo {
-                config: {
-                    let mut cfg = ConnCfg::new();
-                    cfg.host(&local.postgres.ip().to_string());
-                    cfg.port(local.postgres.port());
-                    cfg
-                },
-                aux: MetricsAuxInfo {
-                    endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),
-                    project_id: ProjectIdTag::get_interner().get_or_intern("local"),
-                    branch_id: BranchIdTag::get_interner().get_or_intern("local"),
-                    cold_start_info: ColdStartInfo::WarmCached,
-                },
-                allow_self_signed_compute: false,
-            })),
+            Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
 

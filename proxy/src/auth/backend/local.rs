@@ -4,8 +4,12 @@ use anyhow::Context;
 use arc_swap::ArcSwapOption;
 
 use crate::{
-    console::messages::EndpointJwksResponse,
-    intern::{BranchIdInt, ProjectIdInt},
+    compute::ConnCfg,
+    console::{
+        messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
+        NodeInfo,
+    },
+    intern::{BranchIdInt, BranchIdTag, EndpointIdTag, InternId, ProjectIdInt, ProjectIdTag},
     RoleName,
 };
 
@@ -13,7 +17,33 @@ use super::jwt::{AuthRule, FetchAuthRules, JwkCache};
 
 pub struct LocalBackend {
     pub jwks_cache: JwkCache,
-    pub postgres: SocketAddr,
+    pub postgres_addr: SocketAddr,
+    pub node_info: NodeInfo,
+}
+
+impl LocalBackend {
+    pub fn new(postgres_addr: SocketAddr) -> Self {
+        LocalBackend {
+            jwks_cache: JwkCache::default(),
+            postgres_addr,
+            node_info: NodeInfo {
+                config: {
+                    let mut cfg = ConnCfg::new();
+                    cfg.host(&postgres_addr.ip().to_string());
+                    cfg.port(postgres_addr.port());
+                    cfg
+                },
+                // TODO(conrad): make this better reflect compute info rather than endpoint info.
+                aux: MetricsAuxInfo {
+                    endpoint_id: EndpointIdTag::get_interner().get_or_intern("local"),
+                    project_id: ProjectIdTag::get_interner().get_or_intern("local"),
+                    branch_id: BranchIdTag::get_interner().get_or_intern("local"),
+                    cold_start_info: ColdStartInfo::WarmCached,
+                },
+                allow_self_signed_compute: false,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
