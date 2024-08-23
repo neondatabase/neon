@@ -1074,7 +1074,6 @@ pub fn make_router(
                 RequestName("control_v1_metadata_health_list_outdated"),
             )
         })
-        // TODO(vlad): endpoint for cancelling drain and fill
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(
