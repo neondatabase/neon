@@ -2585,6 +2585,8 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 		ring_index = prefetch_register_bufferv(tag, NULL, iterblocks,
 											   lfc_present);
+		nblocks -= iterblocks;
+		blocknum += iterblocks;
 
 		Assert(ring_index < MyPState->ring_unused &&
 			   MyPState->ring_last <= ring_index);
