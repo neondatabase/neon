@@ -259,7 +259,7 @@ files:
           from
             (values ('5m'),('15m'),('1h')) as t (x);
 
-      - metric_name: current_lsn
+      - metric_name: compute_current_lsn
         type: gauge
         help: 'Current LSN of the database'
         key_labels:
@@ -271,6 +271,19 @@ files:
               then (pg_last_wal_replay_lsn() - '0/0')::FLOAT8
               else (pg_current_wal_lsn() - '0/0')::FLOAT8
             end as lsn;
+
+      - metric_name: compute_receive_lsn
+        type: gauge
+        help: 'Returns the last write-ahead log location that has been received and synced to disk by streaming replication'
+        key_labels:
+        values: [lsn]
+        query: |
+          SELECT
+            CASE
+              WHEN pg_catalog.pg_is_in_recovery()
+              THEN (pg_last_wal_receive_lsn() - '0/0')::FLOAT8
+              ELSE 0
+            END AS lsn;
 
       - metric_name: replication_delay_bytes
         type: gauge
@@ -311,6 +324,22 @@ files:
         values: [checkpoints_timed]
         query: |
           SELECT checkpoints_timed FROM pg_stat_bgwriter;
+
+      - metric_name: compute_logical_snapshot_files
+        type: guage
+        help: 'Number of snapshot files in pg_logical/snapshot'
+        key_labels:
+          - tenant_id
+          - timeline_id
+        values: [num_logical_snapshot_files]
+        query: |
+          SELECT
+            (SELECT setting FROM pg_settings WHERE name = 'neon.tenant_id') AS tenant_id,
+            (SELECT setting FROM pg_settings WHERE name = 'neon.timeline_id') AS timeline_id,
+            -- Postgres creates temporary snapshot files of the form %X-%X.snap.%d.tmp. These
+            -- temporary snapshot files are renamed to the actual snapshot files after they are
+            -- completely built. We only WAL-log the completely built snapshot files.
+            (SELECT COUNT(*) FROM pg_ls_logicalsnapdir() WHERE name LIKE '%.snap') AS num_logical_snapshot_files;
 
       # In all the below metrics, we cast LSNs to floats because Prometheus only supports floats.
       # It's probably fine because float64 can store integers from -2^53 to +2^53 exactly.

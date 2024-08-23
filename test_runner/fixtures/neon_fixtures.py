@@ -61,8 +61,6 @@ from fixtures.pageserver.common_types import IndexPartDump, LayerName, parse_lay
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
-    wait_for_upload,
-    wait_for_upload_queue_empty,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
@@ -5347,9 +5345,7 @@ def last_flush_lsn_upload(
     for tenant_shard_id, pageserver in shards:
         ps_http = pageserver.http_client(auth_token=auth_token)
         wait_for_last_record_lsn(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
-        # force a checkpoint to trigger upload
-        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id)
-        wait_for_upload(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
+        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id, wait_until_uploaded=True)
     return last_flush_lsn
 
 
@@ -5434,9 +5430,5 @@ def generate_uploads_and_deletions(
         # ensures that the pageserver is in a fully idle state: there will be no more
         # background ingest, no more uploads pending, and therefore no non-determinism
         # in subsequent actions like pageserver restarts.
-        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id)
-        # Finish uploads
-        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
-        # Finish all remote writes (including deletions)
-        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
+        flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)

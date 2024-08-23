@@ -84,9 +84,12 @@ impl Heartbeater {
                 pageservers,
                 reply: sender,
             })
-            .unwrap();
+            .map_err(|_| HeartbeaterError::Cancel)?;
 
-        receiver.await.unwrap()
+        receiver
+            .await
+            .map_err(|_| HeartbeaterError::Cancel)
+            .and_then(|x| x)
     }
 }
 
