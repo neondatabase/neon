@@ -1359,6 +1359,7 @@ impl Tenant {
         timeline_id: TimelineId,
         state: TimelineArchivalState,
     ) -> Result<(), TimelineArchivalError> {
+        info!("setting timeline archival config");
         let timeline = {
             let timelines = self.timelines.lock().unwrap();
 
@@ -1392,6 +1393,7 @@ impl Tenant {
             .schedule_index_upload_for_timeline_archival_state(state)?;
 
         if upload_needed {
+            info!("Uploading new state");
             const MAX_WAIT: Duration = Duration::from_secs(10);
             let Ok(v) =
                 tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
