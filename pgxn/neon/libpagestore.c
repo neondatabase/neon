@@ -49,7 +49,7 @@ char	   *neon_auth_token;
 int			readahead_buffer_size = 128;
 int			flush_every_n_requests = 8;
 
-int         neon_protocol_version = 2;
+int         neon_protocol_version = 3;
 
 static int	max_reconnect_attempts = 60;
 static int	stripe_size;
@@ -547,6 +547,9 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 		switch (neon_protocol_version)
 		{
+		case 3:
+			pagestream_query = psprintf("pagestream_v3 %s %s", neon_tenant, neon_timeline);
+			break;
 		case 2:
 			pagestream_query = psprintf("pagestream_v2 %s %s", neon_tenant, neon_timeline);
 			break;
@@ -1062,9 +1065,9 @@ pg_init_libpagestore(void)
 							"Version of compute<->page server protocol",
 							NULL,
 							&neon_protocol_version,
-							2, /* use protocol version 2 */
+							3, /* use protocol version 3 */
 							1, /* min */
-							2, /* max */
+							3, /* max */
 							PGC_SU_BACKEND,
 							0,	/* no flags required */
 							NULL, NULL, NULL);

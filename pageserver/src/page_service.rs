@@ -695,7 +695,9 @@ impl PageServerHandler {
             };
 
             // marshal & transmit response message
-            pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
+            pgb.write_message_noflush(&BeMessage::CopyData(
+                &response_msg.serialize(protocol_version),
+            ))?;
             tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => {
@@ -860,6 +862,9 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
+            rel: req.rel,
+            lsn: req.request_lsn,
+            not_modified_since: req.not_modified_since,
             exists,
         }))
     }
@@ -896,6 +901,9 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
+            rel: req.rel,
+            lsn: req.request_lsn,
+            not_modified_since: req.not_modified_since,
             n_blocks,
         }))
     }
@@ -933,6 +941,8 @@ impl PageServerHandler {
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
+            lsn: req.request_lsn,
+            not_modified_since: req.not_modified_since,
             db_size,
         }))
     }
@@ -990,6 +1000,10 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
+            rel: req.rel,
+            blkno: req.blkno,
+            lsn: req.request_lsn,
+            not_modified_since: req.not_modified_since,
             page,
         }))
     }
@@ -1246,7 +1260,36 @@ where
         let ctx = self.connection_ctx.attached_child();
         debug!("process query {query_string:?}");
         let parts = query_string.split_whitespace().collect::<Vec<_>>();
-        if let Some(params) = parts.strip_prefix(&["pagestream_v2"]) {
+        if let Some(params) = parts.strip_prefix(&["pagestream_v3"]) {
+            if params.len() != 2 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for pagestream command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
+            self.check_permission(Some(tenant_id))?;
+
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::PageStreamV3)
+                .inc();
+
+            self.handle_pagerequests(
+                pgb,
+                tenant_id,
+                timeline_id,
+                PagestreamProtocolVersion::V3,
+                ctx,
+            )
+            .await?;
+        } else if let Some(params) = parts.strip_prefix(&["pagestream_v2"]) {
             if params.len() != 2 {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "invalid param number for pagestream command"
