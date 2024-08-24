@@ -215,6 +215,7 @@ class TenantShardId:
     def __hash__(self) -> int:
         return hash(self._tuple())
 
+
 # TODO: Replace with `StrEnum` when we upgrade to python 3.11
 class TimelineArchivalState(str, Enum):
     ARCHIVED = "Archived"
