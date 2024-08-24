@@ -1,5 +1,6 @@
 import random
 from dataclasses import dataclass
+from enum import Enum
 from functools import total_ordering
 from typing import Any, Dict, Type, TypeVar, Union
 
@@ -213,3 +214,8 @@ class TenantShardId:
 
     def __hash__(self) -> int:
         return hash(self._tuple())
+
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class TimelineArchivalState(str, Enum):
+    ARCHIVED = "Archived"
+    UNARCHIVED = "Unarchived"

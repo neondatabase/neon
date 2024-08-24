@@ -10,7 +10,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
@@ -625,14 +625,15 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self,
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
-        config: dict[str, Any],
+        state: TimelineArchivalState,
     ):
+        config = {"state": state.value}
         log.info(
             f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
         )
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
-            json=config.copy(),
+            json=config,
         )
         self.verbose_error(res)
 
