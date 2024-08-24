@@ -1359,9 +1359,33 @@ impl Tenant {
         timeline_id: TimelineId,
         state: TimelineArchivalState,
     ) -> Result<(), TimelineArchivalError> {
-        let timeline = self
-            .get_timeline(timeline_id, false)
-            .context("Cannot apply timeline archival config to inexistent timeline")?;
+        let timeline = {
+            let timelines = self.timelines.lock().unwrap();
+
+            let timeline = match timelines.get(&timeline_id) {
+                Some(t) => t,
+                None => return Err(TimelineArchivalError::NotFound),
+            };
+
+            // Ensure that there are no non-archived child timelines
+            let children: Vec<TimelineId> = timelines
+                .iter()
+                .filter_map(|(id, entry)| {
+                    if entry.get_ancestor_timeline_id() != Some(timeline_id) {
+                        return None;
+                    }
+                    if entry.is_archived() == Some(true) {
+                        return None;
+                    }
+                    Some(*id)
+                })
+                .collect();
+
+            if !children.is_empty() && state == TimelineArchivalState::Archived {
+                return Err(TimelineArchivalError::HasUnarchivedChildren(children));
+            }
+            Arc::clone(timeline)
+        };
 
         let upload_needed = timeline
             .remote_client
