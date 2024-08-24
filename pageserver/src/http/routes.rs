@@ -318,6 +318,24 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
     }
 }
 
+impl From<crate::tenant::TimelineArchivalError> for ApiError {
+    fn from(value: crate::tenant::TimelineArchivalError) -> Self {
+        use crate::tenant::TimelineArchivalError::*;
+        match value {
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
+            Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            HasUnarchivedChildren(children) => ApiError::PreconditionFailed(
+                format!(
+                    "Cannot archive timeline which has non-archived child timelines: {children:?}"
+                )
+                .into_boxed_str(),
+            ),
+            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
+            Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
 impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::mgr::DeleteTimelineError) -> Self {
         use crate::tenant::mgr::DeleteTimelineError::*;
@@ -689,9 +707,7 @@ async fn timeline_archival_config_handler(
 
         tenant
             .apply_timeline_archival_config(timeline_id, request_data.state)
-            .await
-            .context("applying archival config")
-            .map_err(ApiError::InternalServerError)?;
+            .await?;
         Ok::<_, ApiError>(())
     }
     .instrument(info_span!("timeline_archival_config",

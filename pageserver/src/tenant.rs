@@ -501,6 +501,38 @@ impl Debug for DeleteTimelineError {
     }
 }
 
+#[derive(thiserror::Error)]
+pub enum TimelineArchivalError {
+    #[error("NotFound")]
+    NotFound,
+
+    #[error("Timeout")]
+    Timeout,
+
+    #[error("HasUnarchivedChildren")]
+    HasUnarchivedChildren(Vec<TimelineId>),
+
+    #[error("Timeline archival is already in progress")]
+    AlreadyInProgress,
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl Debug for TimelineArchivalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "NotFound"),
+            Self::Timeout => write!(f, "Timeout"),
+            Self::HasUnarchivedChildren(c) => {
+                f.debug_tuple("HasUnarchivedChildren").field(c).finish()
+            }
+            Self::AlreadyInProgress => f.debug_tuple("AlreadyInProgress").finish(),
+            Self::Other(e) => f.debug_tuple("Other").field(e).finish(),
+        }
+    }
+}
+
 pub enum SetStoppingError {
     AlreadyStopping(completion::Barrier),
     Broken,
@@ -1326,7 +1358,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         state: TimelineArchivalState,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), TimelineArchivalError> {
         let timeline = self
             .get_timeline(timeline_id, false)
             .context("Cannot apply timeline archival config to inexistent timeline")?;
@@ -1341,9 +1373,9 @@ impl Tenant {
                 tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
             else {
                 tracing::warn!("reached timeout for waiting on upload queue");
-                bail!("reached timeout for upload queue flush");
+                return Err(TimelineArchivalError::Timeout);
             };
-            v?;
+            v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
         }
         Ok(())
     }
