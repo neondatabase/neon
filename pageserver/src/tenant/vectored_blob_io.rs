@@ -60,7 +60,7 @@ pub struct VectoredBlobsBuf {
 pub struct VectoredRead {
     pub start: u64,
     pub end: u64,
-    /// Starting offsets and metadata for each blob in this read
+    /// Start offset and metadata for each blob in this read
     pub blobs_at: VecMap<u64, BlobMeta>,
 }
 
@@ -171,7 +171,7 @@ pub(crate) struct AdjacentVectoredReadBuilder {
     start: u64,
     // End offset of the read.
     end: u64,
-    /// Blobs (metadata, end offset) ordered by blobs start offset.
+    /// Start offset and metadata for each blob in this read
     blobs_at: VecMap<u64, BlobMeta>,
     max_read_size: Option<usize>,
 }
@@ -244,7 +244,7 @@ pub(crate) struct ChunkedVectoredReadBuilder {
     start_blk_no: usize,
     /// End block number (exclusive).
     end_blk_no: usize,
-    /// Blobs (metadata, end offset) ordered by blobs start offset.
+    /// Start offset and metadata for each blob in this read
     blobs_at: VecMap<u64, BlobMeta>,
     max_read_size: Option<usize>,
     /// Chunk size reads are coalesced into.
@@ -524,7 +524,6 @@ impl<'a> VectoredBlobReader<'a> {
 
         let blobs_at = read.blobs_at.as_slice();
 
-        // Note: read.start != blobs_at.first().start
         let start_offset = read.start;
 
         let mut metas = Vec::with_capacity(blobs_at.len());
