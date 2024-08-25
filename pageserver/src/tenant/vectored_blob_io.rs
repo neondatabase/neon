@@ -302,18 +302,18 @@ impl ChunkedVectoredReadBuilder {
             }
         };
 
-        /// Returns true if the second block starts in the same block or the immediate next block where the first block ended.
-        ///
-        /// Note: This automatically handles the case where two blocks are adjacent to each other,
-        /// whether they starts on chunk size boundary or not.
-        fn is_adjacent_chunk_read(first_end_blk_no: usize, second_start_blk_no: usize) -> bool {
+        // True if the second block starts in the same block or the immediate next block where the first block ended.
+        //
+        // Note: This automatically handles the case where two blocks are adjacent to each other,
+        // whether they starts on chunk size boundary or not.
+        let is_adjacent_chunk_read = {
             // 1. first.end & second.start are in the same block
-            first_end_blk_no == second_start_blk_no + 1 ||
+            self.end_blk_no == start_blk_no + 1 ||
             // 2. first.end ends one block before second.start
-            first_end_blk_no == second_start_blk_no
-        }
+            self.end_blk_no == start_blk_no
+        };
 
-        if is_adjacent_chunk_read(self.end_blk_no, start_blk_no) && not_limited_by_max_read_size() {
+        if is_adjacent_chunk_read && not_limited_by_max_read_size() {
             self.end_blk_no = end_blk_no;
             self.blobs_at
                 .append(start, (end, meta))
