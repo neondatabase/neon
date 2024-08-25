@@ -206,7 +206,7 @@ impl AdjacentVectoredReadBuilder {
     pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
         tracing::trace!(start, end, "trying to extend");
         let size = (end - start) as usize;
-        let not_limited_by_max_read_size = || {
+        let not_limited_by_max_read_size = {
             if let Some(max_read_size) = self.max_read_size {
                 self.size() + size <= max_read_size
             } else {
@@ -214,7 +214,7 @@ impl AdjacentVectoredReadBuilder {
             }
         };
 
-        if self.end == start && not_limited_by_max_read_size() {
+        if self.end == start && not_limited_by_max_read_size {
             self.end = end;
             self.blobs_at
                 .append(start, (end, meta))
@@ -293,7 +293,7 @@ impl ChunkedVectoredReadBuilder {
         let start_blk_no = start as usize / self.chunk_size;
         let end_blk_no = div_round_up(end as usize, self.chunk_size);
 
-        let not_limited_by_max_read_size = || {
+        let not_limited_by_max_read_size = {
             if let Some(max_read_size) = self.max_read_size {
                 let coalesced_size = (end_blk_no - self.start_blk_no) * self.chunk_size;
                 coalesced_size <= max_read_size
@@ -313,7 +313,7 @@ impl ChunkedVectoredReadBuilder {
             self.end_blk_no == start_blk_no
         };
 
-        if is_adjacent_chunk_read && not_limited_by_max_read_size() {
+        if is_adjacent_chunk_read && not_limited_by_max_read_size {
             self.end_blk_no = end_blk_no;
             self.blobs_at
                 .append(start, (end, meta))
