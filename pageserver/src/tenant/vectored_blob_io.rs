@@ -61,7 +61,7 @@ pub struct VectoredRead {
     pub start: u64,
     pub end: u64,
     /// Starting offsets and metadata for each blob in this read
-    pub blobs_at: VecMap<u64, (u64, BlobMeta)>,
+    pub blobs_at: VecMap<u64, BlobMeta>,
 }
 
 impl VectoredRead {
@@ -172,7 +172,7 @@ pub(crate) struct AdjacentVectoredReadBuilder {
     // End offset of the read.
     end: u64,
     /// Blobs (metadata, end offset) ordered by blobs start offset.
-    blobs_at: VecMap<u64, (u64, BlobMeta)>,
+    blobs_at: VecMap<u64, BlobMeta>,
     max_read_size: Option<usize>,
 }
 
@@ -190,7 +190,7 @@ impl AdjacentVectoredReadBuilder {
     ) -> Self {
         let mut blobs_at = VecMap::default();
         blobs_at
-            .append(start_offset, (end_offset, meta))
+            .append(start_offset, meta)
             .expect("First insertion always succeeds");
 
         Self {
@@ -217,7 +217,7 @@ impl AdjacentVectoredReadBuilder {
         if self.end == start && not_limited_by_max_read_size {
             self.end = end;
             self.blobs_at
-                .append(start, (end, meta))
+                .append(start, meta)
                 .expect("LSNs are ordered within vectored reads");
 
             return VectoredReadExtended::Yes;
@@ -245,7 +245,7 @@ pub(crate) struct ChunkedVectoredReadBuilder {
     /// End block number (exclusive).
     end_blk_no: usize,
     /// Blobs (metadata, end offset) ordered by blobs start offset.
-    blobs_at: VecMap<u64, (u64, BlobMeta)>,
+    blobs_at: VecMap<u64, BlobMeta>,
     max_read_size: Option<usize>,
     /// Chunk size reads are coalesced into.
     chunk_size: usize,
@@ -271,7 +271,7 @@ impl ChunkedVectoredReadBuilder {
     ) -> Self {
         let mut blobs_at = VecMap::default();
         blobs_at
-            .append(start_offset, (end_offset, meta))
+            .append(start_offset, meta)
             .expect("First insertion always succeeds");
 
         let start_blk_no = start_offset as usize / chunk_size;
@@ -316,7 +316,7 @@ impl ChunkedVectoredReadBuilder {
         if is_adjacent_chunk_read && not_limited_by_max_read_size {
             self.end_blk_no = end_blk_no;
             self.blobs_at
-                .append(start, (end, meta))
+                .append(start, meta)
                 .expect("LSNs are ordered within vectored reads");
 
             return VectoredReadExtended::Yes;
@@ -532,13 +532,10 @@ impl<'a> VectoredBlobReader<'a> {
         // of a blob is implicit: the start of the next blob if one exists
         // or the end of the read.
 
-        // SAFETY(unwrap): A vectored blob contains at least one blob.
-        let last_blob_start = blobs_at.last().unwrap().0;
-
         // Some scratch space, put here for reusing the allocation
         let mut decompressed_vec = Vec::new();
 
-        for (blob_start, (blob_end, meta)) in blobs_at {
+        for (blob_start, meta) in blobs_at {
             let blob_start_in_buf = blob_start - start_offset;
             let first_len_byte = buf[blob_start_in_buf as usize];
 
@@ -564,14 +561,7 @@ impl<'a> VectoredBlobReader<'a> {
             };
 
             let start_raw = blob_start_in_buf + size_length;
-            let end_raw = {
-                if *blob_start == last_blob_start {
-                    start_raw + blob_size
-                } else {
-                    blob_end - start_offset
-                }
-            };
-            assert_eq!(end_raw - start_raw, blob_size);
+            let end_raw = start_raw + blob_size;
             let (start, end);
             if compression_bits == BYTE_UNCOMPRESSED {
                 start = start_raw as usize;
