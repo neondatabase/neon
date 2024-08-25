@@ -102,11 +102,11 @@ pub(crate) enum VectoredReadBuilder {
 }
 
 impl VectoredReadBuilder {
-    pub(crate) fn new(
+    fn new_impl(
         start_offset: u64,
         end_offset: u64,
         meta: BlobMeta,
-        max_read_size: usize,
+        max_read_size: Option<usize>,
         mode: VectoredReadCoalesceMode,
     ) -> Self {
         match mode {
@@ -115,7 +115,7 @@ impl VectoredReadBuilder {
                     start_offset,
                     end_offset,
                     meta,
-                    Some(max_read_size),
+                    max_read_size,
                 ))
             }
             VectoredReadCoalesceMode::Chunked(chunk_size) => {
@@ -123,11 +123,21 @@ impl VectoredReadBuilder {
                     start_offset,
                     end_offset,
                     meta,
-                    Some(max_read_size),
+                    max_read_size,
                     chunk_size,
                 ))
             }
         }
+    }
+
+    pub(crate) fn new(
+        start_offset: u64,
+        end_offset: u64,
+        meta: BlobMeta,
+        max_read_size: usize,
+        mode: VectoredReadCoalesceMode,
+    ) -> Self {
+        Self::new_impl(start_offset, end_offset, meta, Some(max_read_size), mode)
     }
 
     pub(crate) fn new_streaming(
@@ -136,20 +146,7 @@ impl VectoredReadBuilder {
         meta: BlobMeta,
         mode: VectoredReadCoalesceMode,
     ) -> Self {
-        match mode {
-            VectoredReadCoalesceMode::AdjacentOnly => Self::Adajacent(
-                AdjacentVectoredReadBuilderInner::new(start_offset, end_offset, meta, None),
-            ),
-            VectoredReadCoalesceMode::Chunked(chunk_size) => {
-                Self::Chunked(ChunkedVectoredReadBuilderInner::new(
-                    start_offset,
-                    end_offset,
-                    meta,
-                    None,
-                    chunk_size,
-                ))
-            }
-        }
+        Self::new_impl(start_offset, end_offset, meta, None, mode)
     }
 
     pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
