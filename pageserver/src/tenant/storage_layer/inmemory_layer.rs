@@ -519,7 +519,7 @@ impl SerializedBatch {
     pub fn from_values(batch: Vec<(CompactKey, Lsn, usize, Value)>) -> Self {
         // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
         // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
-        let buffer_size = batch.iter().map(|i| i.2).sum::<usize>() + 4 * batch.len();
+        let buffer_size = batch.iter().map(|i| i.2).sum::<usize>();
         let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
 
         let mut offsets: Vec<SerializedBatchOffset> = Vec::with_capacity(batch.len());
