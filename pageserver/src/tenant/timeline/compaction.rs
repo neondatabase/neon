@@ -1929,11 +1929,8 @@ impl Timeline {
         );
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
-        let mut lsn_split_point = BTreeSet::new();
-        let mut downloaded_layers = Vec::new();
+        let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
         for layer in &layer_selection {
-            let resident_layer = layer.download_and_keep_resident().await?;
-            downloaded_layers.push(resident_layer);
             let desc = layer.layer_desc();
             if desc.is_delta() {
                 // ignore single-key layer files
@@ -1973,6 +1970,11 @@ impl Timeline {
         let hack_end_key = Key::NON_L0_MAX;
         let mut delta_layers = Vec::new();
         let mut image_layers = Vec::new();
+        let mut downloaded_layers = Vec::new();
+        for layer in &layer_selection {
+            let resident_layer = layer.download_and_keep_resident().await?;
+            downloaded_layers.push(resident_layer);
+        }
         for resident_layer in &downloaded_layers {
             if resident_layer.layer_desc().is_delta() {
                 let layer = resident_layer.get_as_delta(ctx).await?;

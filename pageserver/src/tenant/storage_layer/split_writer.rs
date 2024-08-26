@@ -130,6 +130,7 @@ impl SplitImageLayerWriter {
         self.inner.put_image(key, img, ctx).await
     }
 
+    #[cfg(test)]
     pub async fn put_image(
         &mut self,
         key: Key,
@@ -175,7 +176,6 @@ impl SplitImageLayerWriter {
         Ok(generated_layers)
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn finish(
         self,
         tline: &Arc<Timeline>,
@@ -261,7 +261,7 @@ impl SplitDeltaLayerWriter {
         // number, and therefore the final layer size could be a little bit larger or smaller than the target.
         //
         // Also, keep all updates of a single key in a single file. TODO: split them using the legacy compaction
-        // strategy.
+        // strategy. https://github.com/neondatabase/neon/issues/8837
         let addition_size_estimation = KEY_SIZE as u64 + 8 /* LSN u64 size */ + 80 /* value size estimation */;
         if self.inner.num_keys() >= 1
             && self.inner.estimated_size() + addition_size_estimation >= self.target_layer_size
@@ -352,7 +352,6 @@ impl SplitDeltaLayerWriter {
         Ok(generated_layers)
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn finish(
         self,
         tline: &Arc<Timeline>,

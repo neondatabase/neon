@@ -5452,20 +5452,20 @@ impl Timeline {
             }
 
             if deltas.key_range.start.next() != deltas.key_range.end {
-                // skip single-key layer files
                 let guard = self.layers.read().await;
-                for layer in guard.layer_map()?.iter_historic_layers() {
-                    if layer.is_delta()
+                let invalid_layers = guard.layer_map()?.iter_historic_layers().filter(|layer| {
+                    layer.is_delta()
                         && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
                         && layer.lsn_range != deltas.lsn_range
+                        // skip single-key layer files
                         && layer.key_range.start.next() != layer.key_range.end
-                    {
-                        // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
-                        panic!(
+                });
+                for layer in invalid_layers {
+                    // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
+                    panic!(
                         "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",
                         deltas.lsn_range.start, deltas.lsn_range.end, layer.lsn_range.start, layer.lsn_range.end
                     );
-                    }
                 }
             }
         }
