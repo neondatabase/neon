@@ -133,7 +133,9 @@ async fn main() -> anyhow::Result<()> {
         proxy_listener,
         cancellation_token.clone(),
     ));
-    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token));
+    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token, || async {
+        Ok(())
+    }));
 
     // the signal task cant ever succeed.
     // the main task can error, or can succeed on cancellation.

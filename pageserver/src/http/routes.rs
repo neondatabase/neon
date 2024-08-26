@@ -1706,11 +1706,6 @@ async fn timeline_compact_handler(
         flags |= CompactFlags::ForceImageLayerCreation;
     }
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
-        if !cfg!(feature = "testing") {
-            return Err(ApiError::InternalServerError(anyhow!(
-                "enhanced_gc_bottom_most_compaction is only available in testing mode"
-            )));
-        }
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
     let wait_until_uploaded =
@@ -2942,7 +2937,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
-            |r| testing_api_handler("run timeline compaction", r, timeline_compact_handler),
+            |r| api_handler(r, timeline_compact_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",

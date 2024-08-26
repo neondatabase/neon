@@ -430,12 +430,17 @@ def enable_remote_storage_versioning(
     return response
 
 
-MANY_SMALL_LAYERS_TENANT_CONFIG = {
-    "gc_period": "0s",
-    "compaction_period": "0s",
-    "checkpoint_distance": 1024**2,
-    "image_creation_threshold": 100,
-}
+def many_small_layers_tenant_config() -> Dict[str, Any]:
+    """
+    Create a new dict to avoid issues with deleting from the global value.
+    In python, the global is mutable.
+    """
+    return {
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        "checkpoint_distance": 1024**2,
+        "image_creation_threshold": 100,
+    }
 
 
 def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:

@@ -88,7 +88,7 @@
 // List of temporarily allowed lints to unblock beta/nightly.
 #![allow(unknown_lints, clippy::manual_inspect)]
 
-use std::convert::Infallible;
+use std::{convert::Infallible, future::Future};
 
 use anyhow::{bail, Context};
 use intern::{EndpointIdInt, EndpointIdTag, InternId};
@@ -123,7 +123,14 @@ pub mod usage_metrics;
 pub mod waiters;
 
 /// Handle unix signals appropriately.
-pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<Infallible> {
+pub async fn handle_signals<F, Fut>(
+    token: CancellationToken,
+    mut refresh_config: F,
+) -> anyhow::Result<Infallible>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut hangup = signal(SignalKind::hangup())?;
@@ -134,7 +141,8 @@ pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<Infallib
         tokio::select! {
             // Hangup is commonly used for config reload.
             _ = hangup.recv() => {
-                warn!("received SIGHUP; config reload is not supported");
+                warn!("received SIGHUP");
+                refresh_config().await?;
             }
             // Shut down the whole application.
             _ = interrupt.recv() => {

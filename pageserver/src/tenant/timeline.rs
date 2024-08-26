@@ -3002,7 +3002,10 @@ impl Timeline {
         // - For L1 & image layers, download most recent LSNs first: the older the LSN, the sooner
         //   the layer is likely to be covered by an image layer during compaction.
         layers.sort_by_key(|(desc, _meta, _atime)| {
-            std::cmp::Reverse((!LayerMap::is_l0(&desc.key_range), desc.lsn_range.end))
+            std::cmp::Reverse((
+                !LayerMap::is_l0(&desc.key_range, desc.is_delta),
+                desc.lsn_range.end,
+            ))
         });
 
         let layers = layers
@@ -4585,7 +4588,7 @@ impl Timeline {
                 // for compact_level0_phase1 creating an L0, which does not happen in practice
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
-            } else if LayerMap::is_l0(&l.layer_desc().key_range) {
+            } else if LayerMap::is_l0(&l.layer_desc().key_range, l.layer_desc().is_delta) {
                 return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
                 insert_layers.push(l.clone());
@@ -5877,7 +5880,7 @@ mod tests {
             };
 
             // Apart from L0s, newest Layers should come first
-            if !LayerMap::is_l0(layer.name.key_range()) {
+            if !LayerMap::is_l0(layer.name.key_range(), layer.name.is_delta()) {
                 assert!(layer_lsn <= last_lsn);
                 last_lsn = layer_lsn;
             }

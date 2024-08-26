@@ -148,7 +148,7 @@ struct ProxyCliArgs {
     disable_dynamic_rate_limiter: bool,
     /// Endpoint rate limiter max number of requests per second.
     ///
-    /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
+    /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
@@ -447,7 +447,10 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
+    maintenance_tasks.spawn(proxy::handle_signals(
+        cancellation_token.clone(),
+        || async { Ok(()) },
+    ));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {

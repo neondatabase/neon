@@ -91,6 +91,7 @@ pub(crate) enum DatabaseOperation {
     Detach,
     ReAttach,
     IncrementGeneration,
+    PeekGenerations,
     ListTenantShards,
     InsertTenantShards,
     UpdateTenantShard,
@@ -500,6 +501,43 @@ impl Persistence {
         };
 
         Ok(Generation::new(g as u32))
+    }
+
+    /// When we want to call out to the running shards for a tenant, e.g. during timeline CRUD operations,
+    /// we need to know where the shard is attached, _and_ the generation, so that we can re-check the generation
+    /// afterwards to confirm that our timeline CRUD operation is truly persistent (it must have happened in the
+    /// latest generation)
+    ///
+    /// If the tenant doesn't exist, an empty vector is returned.
+    ///
+    /// Output is sorted by shard number
+    pub(crate) async fn peek_generations(
+        &self,
+        filter_tenant_id: TenantId,
+    ) -> Result<Vec<(TenantShardId, Option<Generation>, Option<NodeId>)>, DatabaseError> {
+        use crate::schema::tenant_shards::dsl::*;
+        let rows = self
+            .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
+                let result = tenant_shards
+                    .filter(tenant_id.eq(filter_tenant_id.to_string()))
+                    .select(TenantShardPersistence::as_select())
+                    .order(shard_number)
+                    .load(conn)?;
+                Ok(result)
+            })
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|p| {
+                (
+                    p.get_tenant_shard_id()
+                        .expect("Corrupt tenant shard id in database"),
+                    p.generation.map(|g| Generation::new(g as u32)),
+                    p.generation_pageserver.map(|n| NodeId(n as u64)),
+                )
+            })
+            .collect())
     }
 
     #[allow(non_local_definitions)]

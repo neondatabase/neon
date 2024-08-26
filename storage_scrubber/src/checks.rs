@@ -150,7 +150,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 
                             if response.is_err() {
                                 // Object is not present.
-                                let is_l0 = LayerMap::is_l0(layer.key_range());
+                                let is_l0 = LayerMap::is_l0(layer.key_range(), layer.is_delta());
 
                                 let msg = format!(
                                     "index_part.json contains a layer {}{} (shard {}) that is not present in remote storage (layer_is_l0: {})",
