@@ -964,7 +964,7 @@ RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
 RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
 # cmake is required for the h3 test
 RUN apt-get update && apt-get install -y cmake
-RUN patch -p1 < /ext-src/pg_hintplan.patch
+RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN patch -p1 </ext-src/pg_anon.patch
 RUN patch -p1 </ext-src/pg_cron.patch

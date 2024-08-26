@@ -1,13 +1,7 @@
-commit f7925d4d1406c0f0229e3c691c94b69e381899b1 (HEAD -> master)
-Author: Alexey Masterov <alexeymasterov@neon.tech>
-Date:   Thu Jun 6 08:02:42 2024 +0000
-
-    Patch expected files to consider Neon's log messages
-
-diff --git a/ext-src/pg_hint_plan-src/expected/ut-A.out b/ext-src/pg_hint_plan-src/expected/ut-A.out
-index da723b8..f8d0102 100644
---- a/ext-src/pg_hint_plan-src/expected/ut-A.out
-+++ b/ext-src/pg_hint_plan-src/expected/ut-A.out
+diff --git a/expected/ut-A.out b/expected/ut-A.out
+index da723b8..5328114 100644
+--- a/expected/ut-A.out
++++ b/expected/ut-A.out
 @@ -9,13 +9,16 @@ SET search_path TO public;
  ----
  -- No.A-1-1-3
@@ -25,10 +19,18 @@ index da723b8..f8d0102 100644
  DROP SCHEMA other_schema;
  ----
  ---- No. A-5-1 comment pattern
-diff --git a/ext-src/pg_hint_plan-src/expected/ut-fdw.out b/ext-src/pg_hint_plan-src/expected/ut-fdw.out
+@@ -3175,6 +3178,7 @@ SELECT s.query, s.calls
+   FROM public.pg_stat_statements s
+   JOIN pg_catalog.pg_database d
+     ON (s.dbid = d.oid)
++  WHERE s.query LIKE 'SELECT * FROM s1.t1%' OR s.query LIKE '%pg_stat_statements_reset%'
+  ORDER BY 1;
+                 query                 | calls 
+ --------------------------------------+-------
+diff --git a/expected/ut-fdw.out b/expected/ut-fdw.out
 index d372459..6282afe 100644
---- a/ext-src/pg_hint_plan-src/expected/ut-fdw.out
-+++ b/ext-src/pg_hint_plan-src/expected/ut-fdw.out
+--- a/expected/ut-fdw.out
++++ b/expected/ut-fdw.out
 @@ -7,6 +7,7 @@ SET pg_hint_plan.debug_print TO on;
  SET client_min_messages TO LOG;
  SET pg_hint_plan.enable_hint TO on;
@@ -37,3 +39,15 @@ index d372459..6282afe 100644
  CREATE SERVER file_server FOREIGN DATA WRAPPER file_fdw;
  CREATE USER MAPPING FOR PUBLIC SERVER file_server;
  CREATE FOREIGN TABLE ft1 (id int, val int) SERVER file_server OPTIONS (format 'csv', filename :'filename');
+diff --git a/sql/ut-A.sql b/sql/ut-A.sql
+index 7c7d58a..4fd1a07 100644
+--- a/sql/ut-A.sql
++++ b/sql/ut-A.sql
+@@ -963,6 +963,7 @@ SELECT s.query, s.calls
+   FROM public.pg_stat_statements s
+   JOIN pg_catalog.pg_database d
+     ON (s.dbid = d.oid)
++  WHERE s.query LIKE 'SELECT * FROM s1.t1%' OR s.query LIKE '%pg_stat_statements_reset%'
+  ORDER BY 1;
+ 
+ ----
