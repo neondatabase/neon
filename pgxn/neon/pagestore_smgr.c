@@ -1872,10 +1872,13 @@ GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
  * Return LSN for requesting pages and number of blocks from page server
  */
 static void
-neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno, neon_request_lsns *output,
-					  BlockNumber nblocks, const bits8 *mask)
+neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum, BlockNumber blkno,
+					  neon_request_lsns *output, BlockNumber nblocks,
+					  const bits8 *mask)
 {
 	XLogRecPtr	last_written_lsns[PG_IOV_MAX];
+
+	Assert(nblocks <= PG_IOV_MAX);
 
 	GetLastWrittenLSNv(rinfo, forknum, blkno, (int) nblocks, last_written_lsns);
 
