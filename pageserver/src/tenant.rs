@@ -501,6 +501,38 @@ impl Debug for DeleteTimelineError {
     }
 }
 
+#[derive(thiserror::Error)]
+pub enum TimelineArchivalError {
+    #[error("NotFound")]
+    NotFound,
+
+    #[error("Timeout")]
+    Timeout,
+
+    #[error("HasUnarchivedChildren")]
+    HasUnarchivedChildren(Vec<TimelineId>),
+
+    #[error("Timeline archival is already in progress")]
+    AlreadyInProgress,
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl Debug for TimelineArchivalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "NotFound"),
+            Self::Timeout => write!(f, "Timeout"),
+            Self::HasUnarchivedChildren(c) => {
+                f.debug_tuple("HasUnarchivedChildren").field(c).finish()
+            }
+            Self::AlreadyInProgress => f.debug_tuple("AlreadyInProgress").finish(),
+            Self::Other(e) => f.debug_tuple("Other").field(e).finish(),
+        }
+    }
+}
+
 pub enum SetStoppingError {
     AlreadyStopping(completion::Barrier),
     Broken,
@@ -1326,24 +1358,50 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         state: TimelineArchivalState,
-    ) -> anyhow::Result<()> {
-        let timeline = self
-            .get_timeline(timeline_id, false)
-            .context("Cannot apply timeline archival config to inexistent timeline")?;
+    ) -> Result<(), TimelineArchivalError> {
+        info!("setting timeline archival config");
+        let timeline = {
+            let timelines = self.timelines.lock().unwrap();
+
+            let timeline = match timelines.get(&timeline_id) {
+                Some(t) => t,
+                None => return Err(TimelineArchivalError::NotFound),
+            };
+
+            // Ensure that there are no non-archived child timelines
+            let children: Vec<TimelineId> = timelines
+                .iter()
+                .filter_map(|(id, entry)| {
+                    if entry.get_ancestor_timeline_id() != Some(timeline_id) {
+                        return None;
+                    }
+                    if entry.is_archived() == Some(true) {
+                        return None;
+                    }
+                    Some(*id)
+                })
+                .collect();
+
+            if !children.is_empty() && state == TimelineArchivalState::Archived {
+                return Err(TimelineArchivalError::HasUnarchivedChildren(children));
+            }
+            Arc::clone(timeline)
+        };
 
         let upload_needed = timeline
             .remote_client
             .schedule_index_upload_for_timeline_archival_state(state)?;
 
         if upload_needed {
+            info!("Uploading new state");
             const MAX_WAIT: Duration = Duration::from_secs(10);
             let Ok(v) =
                 tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
             else {
                 tracing::warn!("reached timeout for waiting on upload queue");
-                bail!("reached timeout for upload queue flush");
+                return Err(TimelineArchivalError::Timeout);
             };
-            v?;
+            v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
         }
         Ok(())
     }

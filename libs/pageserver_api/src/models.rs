@@ -718,6 +718,7 @@ pub struct TimelineInfo {
     pub pg_version: u32,
 
     pub state: TimelineState,
+    pub is_archived: bool,
 
     pub walreceiver_status: String,
 
