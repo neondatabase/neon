@@ -269,11 +269,15 @@ typedef struct PrefetchState
 
 static PrefetchState *MyPState;
 
+#define GetPrfSlotNoCheck(ring_index) ( \
+	&MyPState->prf_buffer[((ring_index) % readahead_buffer_size)] \
+)
+
 #define GetPrfSlot(ring_index) ( \
 	( \
 		AssertMacro((ring_index) < MyPState->ring_unused && \
 					(ring_index) >= MyPState->ring_last), \
-		&MyPState->prf_buffer[((ring_index) % readahead_buffer_size)] \
+		GetPrfSlotNoCheck(ring_index) \
 	) \
 )
 
@@ -786,13 +790,16 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
  */
 
 static uint64
-prefetch_register_bufferv(BufferTag tag, neon_request_lsns *force_request_lsns,
+prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 						  BlockNumber nblocks, const bits8 *mask)
 {
 	uint64		ring_index;
 	PrefetchRequest req;
 	PrefetchRequest *slot;
 	PrfHashEntry *entry;
+#if USE_ASSERT_CHECKING
+	bool		any_hits = false;
+#endif
 	/* We will never read further ahead than our buffer can store. */
 	nblocks = Min(nblocks, readahead_buffer_size);
 
@@ -802,8 +809,21 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *force_request_lsns,
 Retry:
 	for (int i = 0; i < nblocks; i++)
 	{
+		neon_request_lsns *lsns;
 		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
 			continue;
+
+		if (frlsns)
+			lsns = &frlsns[i];
+		else
+			lsns = NULL;
+
+#if USE_ASSERT_CHECKING
+		any_hits = true;
+#endif
+
+		slot = NULL;
+		entry = NULL;
 
 		req.buftag.blockNum = tag.blockNum + i;
 		entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &req);
@@ -823,15 +843,16 @@ Retry:
 			 * If the caller specified a request LSN to use, only accept
 			 * prefetch responses that satisfy that request.
 			 */
-			if (force_request_lsns)
+			if (lsns)
 			{
-				if (!neon_prefetch_response_usable(force_request_lsns, slot))
+				if (!neon_prefetch_response_usable(lsns, slot))
 				{
 					/* Wait for the old request to finish and discard it */
 					if (!prefetch_wait_for(ring_index))
 						goto Retry;
 					prefetch_set_unused(ring_index);
 					entry = NULL;
+					slot = NULL;
 				}
 			}
 
@@ -846,6 +867,7 @@ Retry:
 				{
 					prefetch_set_unused(ring_index);
 					entry = NULL;
+					slot = NULL;
 				}
 				else
 				{
@@ -855,6 +877,17 @@ Retry:
 				}
 			}
 		}
+
+		/*
+		 * We can only leave the block above by finding that there's
+		 * no entry that can satisfy this request, either because there
+		 * was no entry, or because the entry was invalid or didn't satisfy
+		 * the LSNs provided.
+		 *
+		 * The code should've made sure to clear up the data.
+		 */
+		Assert(entry == NULL);
+		Assert(slot == NULL);
 
 		/*
 		 * If the prefetch queue is full, we need to make room by clearing the
@@ -915,9 +948,11 @@ Retry:
 		 * we can insert the new request to it.
 		 */
 		ring_index = MyPState->ring_unused;
-		slot = &MyPState->prf_buffer[((ring_index) % readahead_buffer_size)];
 
-		Assert(MyPState->ring_last <= ring_index);
+		Assert(MyPState->ring_last <= ring_index &&
+			   ring_index <= MyPState->ring_unused);
+
+		slot = GetPrfSlotNoCheck(ring_index);
 
 		Assert(slot->status == PRFS_UNUSED);
 
@@ -929,8 +964,10 @@ Retry:
 		slot->shard_no = get_shard_number(&tag);
 		slot->my_ring_index = ring_index;
 
-		prefetch_do_request(slot, force_request_lsns);
+		prefetch_do_request(slot, lsns);
 	}
+
+	Assert(any_hits);
 
 	Assert(slot->status == PRFS_REQUESTED);
 	Assert(MyPState->ring_last <= ring_index &&
@@ -2541,7 +2578,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 {
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
 	BufferTag	tag;
-	bits8		lfc_present[PG_IOV_MAX / 8];
 	bool		io_initiated = false;
 
 	switch (reln->smgr_relpersistence)
@@ -2567,6 +2603,8 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	{
 		int		iterblocks = Min(nblocks, PG_IOV_MAX);
 		int		seqlen = 0;
+		bits8		lfc_present[PG_IOV_MAX / 8];
+		memset(lfc_present, 0, sizeof(lfc_present));
 
 		if (lfc_cache_containsv(InfoFromSMgrRel(reln), forknum, blocknum,
 								iterblocks, lfc_present) == iterblocks)
