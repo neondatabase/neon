@@ -58,6 +58,7 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/interrupt.h"
+#include "port/pg_iovec.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/buf_internals.h"
@@ -297,6 +298,11 @@ static void prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_
 static bool prefetch_wait_for(uint64 ring_index);
 static void prefetch_cleanup_trailing_unused(void);
 static inline void prefetch_set_unused(uint64 ring_index);
+#if PG_MAJORVERSION_NUM < 17
+static void
+GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
+				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns);
+#endif
 
 static void
 neon_get_request_lsns(NRelFileInfo rinfo, ForkNumber forknum,
@@ -1848,6 +1854,20 @@ nm_adjust_lsn(XLogRecPtr lsn)
 	return lsn;
 }
 
+
+/*
+ * Since PG17 we use vetorized version,
+ * so add compatibility function for older versions
+ */
+#if PG_MAJORVERSION_NUM < 17
+static void
+GetLastWrittenLSNv(NRelFileInfo relfilenode, ForkNumber forknum,
+				   BlockNumber blkno, int nblocks, XLogRecPtr *lsns)
+{
+	lsns[0] = GetLastWrittenLSN(relfilenode, forknum, blkno);
+}
+#endif
+
 /*
  * Return LSN for requesting pages and number of blocks from page server
  */
@@ -2720,8 +2740,13 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 }
 
 static void
+#if PG_MAJORVERSION_NUM < 16
+neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neon_request_lsns *request_lsns,
+				  char **buffers, BlockNumber nblocks, const bits8 *mask)
+#else
 neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neon_request_lsns *request_lsns,
 				  void **buffers, BlockNumber nblocks, const bits8 *mask)
+#endif
 {
 	NeonResponse *resp;
 	uint64		ring_index;
@@ -2913,7 +2938,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 		return;
 	}
 
-	request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno);
+	neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, blkno, &request_lsns, 1, NULL);
 	neon_read_at_lsn(InfoFromSMgrRel(reln), forkNum, blkno, request_lsns, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
