@@ -135,6 +135,8 @@ pub fn get_current_timestamp() -> TimestampTz {
 mod timestamp_conversions {
     use std::time::Duration;
 
+    use anyhow::Context;
+
     use super::*;
 
     const UNIX_EPOCH_JDATE: u64 = 2440588; // == date2j(1970, 1, 1)
@@ -154,18 +156,23 @@ mod timestamp_conversions {
         }
     }
 
+    /// TODO: this function should be deprecated, likely malicious input could cause the .unwrap() to panic.
     pub fn from_pg_timestamp(time: TimestampTz) -> SystemTime {
+        try_from_pg_timestamp(time).unwrap()
+    }
+
+    pub fn try_from_pg_timestamp(time: TimestampTz) -> anyhow::Result<SystemTime> {
         let time: u64 = time
             .try_into()
-            .expect("timestamp before millenium (postgres epoch)");
+            .context("timestamp before millenium (postgres epoch)")?;
         let since_unix_epoch = time + SECS_DIFF_UNIX_TO_POSTGRES_EPOCH * USECS_PER_SEC;
         SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_micros(since_unix_epoch))
-            .expect("SystemTime overflow")
+            .context("SystemTime overflow")
     }
 }
 
-pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp};
+pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp, try_from_pg_timestamp};
 
 // Returns (aligned) end_lsn of the last record in data_dir with WAL segments.
 // start_lsn must point to some previously known record boundary (beginning of

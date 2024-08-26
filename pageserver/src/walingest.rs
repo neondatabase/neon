@@ -21,6 +21,9 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::time::Duration;
+use std::time::SystemTime;
+
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
@@ -30,6 +33,7 @@ use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 use utils::failpoint_support;
+use utils::rate_limit::RateLimit;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
@@ -53,6 +57,9 @@ pub struct WalIngest {
     shard: ShardIdentity,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
+    warn_lag_ratelimit: RateLimit,
+    warn_future_lsn_ratelimit: RateLimit,
+    warn_timestamp_invalid_ratelimit: RateLimit,
 }
 
 impl WalIngest {
@@ -71,6 +78,9 @@ impl WalIngest {
             shard: *timeline.get_shard_identity(),
             checkpoint,
             checkpoint_modified: false,
+            warn_lag_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+            warn_future_lsn_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+            warn_timestamp_invalid_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
         })
     }
 
@@ -1228,6 +1238,43 @@ impl WalIngest {
         let mut rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut page_xids: Vec<TransactionId> = vec![parsed.xid];
 
+        let now = SystemTime::now();
+        let mut warn_ingest_delay = |xact_time| {
+            match try_from_pg_timestamp(xact_time) {
+                Ok(ts) => {
+                    match now.duration_since(ts) {
+                        Ok(lag) => {
+                            if lag > modification.tline.conf.wait_lsn_timeout {
+                                self.warn_lag_ratelimit.call2(|rate_limit_stats| {
+                                    let lag = humantime::format_duration(lag);
+                                    warn!(%rate_limit_stats, %lag, "ingesting record with timestamp lagging more than wait_lsn_timeout");
+                                })
+                            }
+                        },
+                        Err(e) => {
+                            let delta_t = e.duration();
+                            // determined by prod victoriametrics query: 1000 * (timestamp(node_time_seconds{neon_service="pageserver"}) - node_time_seconds)
+                            // => https://www.robustperception.io/time-metric-from-the-node-exporter/
+                            const IGNORED_DRIFT: Duration = Duration::from_millis(100);
+                            if delta_t > IGNORED_DRIFT {
+                                let delta_t = humantime::format_duration(delta_t);
+                                self.warn_future_lsn_ratelimit.call2(|rate_limit_stats| {
+                                    warn!(%rate_limit_stats, %delta_t, "ingesting record with timestamp from future");
+                                })
+                            }
+                        }
+                    };
+
+                }
+                Err(error) => {
+                    self.warn_timestamp_invalid_ratelimit.call2(|rate_limit_stats| {
+                        warn!(%rate_limit_stats, %error, "ingesting record with invalid timestamp, cannot calculate lag and will fail find-lsn-for-timestamp type queries");
+                    })
+                }
+            }
+            xact_time
+        };
+
         for subxact in &parsed.subxacts {
             let subxact_pageno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
             if subxact_pageno != pageno {
@@ -1241,7 +1288,7 @@ impl WalIngest {
                     if is_commit {
                         NeonWalRecord::ClogSetCommitted {
                             xids: page_xids,
-                            timestamp: parsed.xact_time,
+                            timestamp: warn_ingest_delay(parsed.xact_time),
                         }
                     } else {
                         NeonWalRecord::ClogSetAborted { xids: page_xids }
@@ -1261,7 +1308,7 @@ impl WalIngest {
             if is_commit {
                 NeonWalRecord::ClogSetCommitted {
                     xids: page_xids,
-                    timestamp: parsed.xact_time,
+                    timestamp: warn_ingest_delay(parsed.xact_time),
                 }
             } else {
                 NeonWalRecord::ClogSetAborted { xids: page_xids }
