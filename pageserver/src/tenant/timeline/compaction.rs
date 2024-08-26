@@ -1889,7 +1889,8 @@ impl Timeline {
                 info!("no layers to compact with gc");
                 return Ok(());
             };
-            // Then, pick all the layers that are below the max_layer_lsn.
+            // Then, pick all the layers that are below the max_layer_lsn. This is to ensure we can pick all single-key
+            // layers to compact.
             for desc in layers.iter_historic_layers() {
                 if desc.get_lsn_range().end <= max_layer_lsn {
                     selected_layers.push(guard.get_from_desc(&desc));

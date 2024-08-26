@@ -236,6 +236,7 @@ impl Key {
         field5: u8::MAX,
         field6: u32::MAX,
     };
+    /// A key slightly smaller than [`Key::MAX`] for use in layer key ranges to avoid them to be confused with L0 layers
     pub const NON_L0_MAX: Key = Key {
         field1: u8::MAX,
         field2: u32::MAX,
