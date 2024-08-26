@@ -667,6 +667,10 @@ impl PageServerConfigBuilder {
         self.virtual_file_direct_io = BuilderValue::Set(value);
     }
 
+    pub fn io_buffer_alignment(&mut self, value: usize) {
+        self.io_buffer_alignment = BuilderValue::Set(value);
+    }
+
     pub fn build(self, id: NodeId) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
@@ -992,6 +996,9 @@ impl PageServerConf {
                 }
                 "virtual_file_direct_io" => {
                     builder.virtual_file_direct_io(utils::toml_edit_ext::deserialize_item(item).context("virtual_file_direct_io")?)
+                }
+                "io_buffer_alignment" => {
+                    builder.io_buffer_alignment(parse_toml_u64("io_buffer_alignment", item)? as usize)
                 }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
