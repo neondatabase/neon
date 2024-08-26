@@ -89,7 +89,7 @@ impl<'a> ClientFirstMessage<'a> {
         write!(&mut message, "r={}", self.nonce).unwrap();
         base64::encode_config_buf(nonce, base64::STANDARD, &mut message);
         let combined_nonce = 2..message.len();
-        write!(&mut message, ",s={},i={}", salt_base64, iterations).unwrap();
+        write!(&mut message, ",s={salt_base64},i={iterations}").unwrap();
 
         // This design guarantees that it's impossible to create a
         // server-first-message without receiving a client-first-message

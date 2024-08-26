@@ -12,6 +12,8 @@
 // https://rust-lang.github.io/rust-clippy/master/index.html#?groups=restriction
 #![warn(
     clippy::undocumented_unsafe_blocks,
+    // TODO: Enable once all individual checks are enabled.
+    //clippy::as_conversions,
     clippy::dbg_macro,
     clippy::empty_enum_variants_with_brackets,
     clippy::exit,
@@ -31,8 +33,15 @@
 )]
 // List of permanently allowed lints.
 #![allow(
-    // It's ok to cast u8 to bool, etc.
+    // It's ok to cast bool to u8, etc.
     clippy::cast_lossless,
+    // Seems unavoidable.
+    clippy::multiple_crate_versions,
+    // While #[must_use] is a great feature this check is too noisy.
+    clippy::must_use_candidate,
+    // Inline consts, structs, fns, imports, etc. are ok if they're used by
+    // the following statement(s).
+    clippy::items_after_statements,
 )]
 // List of temporarily allowed lints.
 // TODO: Switch to except() once stable with 1.81.
@@ -43,46 +52,26 @@
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    clippy::default_trait_access,
     clippy::doc_markdown,
-    clippy::explicit_iter_loop,
-    clippy::float_cmp,
-    clippy::if_not_else,
-    clippy::ignored_unit_patterns,
     clippy::implicit_hasher,
-    clippy::inconsistent_struct_constructor,
     clippy::inline_always,
-    clippy::items_after_statements,
-    clippy::manual_assert,
-    clippy::manual_let_else,
-    clippy::manual_string_new,
-    clippy::match_bool,
     clippy::match_same_arms,
     clippy::match_wild_err_arm,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
-    clippy::multiple_crate_versions,
-    clippy::must_use_candidate,
-    clippy::needless_for_each,
     clippy::needless_pass_by_value,
     clippy::needless_raw_string_hashes,
-    clippy::option_as_ref_cloned,
     clippy::redundant_closure_for_method_calls,
-    clippy::redundant_else,
     clippy::return_self_not_must_use,
     clippy::similar_names,
-    clippy::single_char_pattern,
     clippy::single_match_else,
     clippy::struct_excessive_bools,
     clippy::struct_field_names,
     clippy::too_many_lines,
-    clippy::uninlined_format_args,
-    clippy::unnested_or_patterns,
     clippy::unreadable_literal,
     clippy::unused_async,
     clippy::unused_self,
-    clippy::used_underscore_binding,
     clippy::wildcard_imports
 )]
 // List of temporarily allowed lints to unblock beta/nightly.

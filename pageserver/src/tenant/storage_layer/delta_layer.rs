@@ -36,6 +36,7 @@ use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, Fi
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
+use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
@@ -568,7 +569,6 @@ impl DeltaLayerWriterInner {
         // 5GB limit for objects without multipart upload (which we don't want to use)
         // Make it a little bit below to account for differing GB units
         // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
-        const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
         ensure!(
             metadata.len() <= S3_UPLOAD_LIMIT,
             "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
@@ -702,12 +702,10 @@ impl DeltaLayerWriter {
         self.inner.take().unwrap().finish(key_end, ctx).await
     }
 
-    #[cfg(test)]
     pub(crate) fn num_keys(&self) -> usize {
         self.inner.as_ref().unwrap().num_keys
     }
 
-    #[cfg(test)]
     pub(crate) fn estimated_size(&self) -> u64 {
         let inner = self.inner.as_ref().unwrap();
         inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64

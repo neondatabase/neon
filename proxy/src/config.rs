@@ -318,7 +318,7 @@ impl CertResolver {
             // a) Instead of multi-cert approach use single cert with extra
             //    domains listed in Subject Alternative Name (SAN).
             // b) Deploy separate proxy instances for extra domains.
-            self.default.as_ref().cloned()
+            self.default.clone()
         }
     }
 }

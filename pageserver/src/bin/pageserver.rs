@@ -127,10 +127,56 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
     info!(?conf.io_buffer_alignment, "starting with setting for IO buffer alignment");
 
+    // The tenants directory contains all the pageserver local disk state.
+    // Create if not exists and make sure all the contents are durable before proceeding.
+    // Ensuring durability eliminates a whole bug class where we come up after an unclean shutdown.
+    // After unclea shutdown, we don't know if all the filesystem content we can read via syscalls is actually durable or not.
+    // Examples for that: OOM kill, systemd killing us during shutdown, self abort due to unrecoverable IO error.
     let tenants_path = conf.tenants_path();
-    if !tenants_path.exists() {
-        utils::crashsafe::create_dir_all(conf.tenants_path())
-            .with_context(|| format!("Failed to create tenants root dir at '{tenants_path}'"))?;
+    {
+        let open = || {
+            nix::dir::Dir::open(
+                tenants_path.as_std_path(),
+                nix::fcntl::OFlag::O_DIRECTORY | nix::fcntl::OFlag::O_RDONLY,
+                nix::sys::stat::Mode::empty(),
+            )
+        };
+        let dirfd = match open() {
+            Ok(dirfd) => dirfd,
+            Err(e) => match e {
+                nix::errno::Errno::ENOENT => {
+                    utils::crashsafe::create_dir_all(&tenants_path).with_context(|| {
+                        format!("Failed to create tenants root dir at '{tenants_path}'")
+                    })?;
+                    open().context("open tenants dir after creating it")?
+                }
+                e => anyhow::bail!(e),
+            },
+        };
+
+        let started = Instant::now();
+        // Linux guarantees durability for syncfs.
+        // POSIX doesn't have syncfs, and further does not actually guarantee durability of sync().
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            nix::unistd::syncfs(dirfd.as_raw_fd()).context("syncfs")?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // macOS is not a production platform for Neon, don't even bother.
+            drop(dirfd);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            compile_error!("Unsupported OS");
+        }
+
+        let elapsed = started.elapsed();
+        info!(
+            elapsed_ms = elapsed.as_millis(),
+            "made tenant directory contents durable"
+        );
     }
 
     // Initialize up failpoints support

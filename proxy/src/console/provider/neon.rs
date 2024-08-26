@@ -38,9 +38,9 @@ impl Api {
         locks: &'static ApiLocks<EndpointCacheKey>,
         wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     ) -> Self {
-        let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
+        let jwt = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
             Ok(v) => v,
-            Err(_) => "".to_string(),
+            Err(_) => String::new(),
         };
         Self {
             endpoint,
@@ -96,10 +96,10 @@ impl Api {
                 // Error 404 is special: it's ok not to have a secret.
                 // TODO(anna): retry
                 Err(e) => {
-                    if e.get_reason().is_not_found() {
-                        return Ok(AuthInfo::default());
+                    return if e.get_reason().is_not_found() {
+                        Ok(AuthInfo::default())
                     } else {
-                        return Err(e.into());
+                        Err(e.into())
                     }
                 }
             };
