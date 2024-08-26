@@ -282,7 +282,11 @@ mod tests {
     use std::cell::UnsafeCell;
     use utils::id::TenantTimelineId;
 
-    use crate::{api_bindings::Level, bindings::NeonWALReadResult, walproposer::Wrapper};
+    use crate::{
+        api_bindings::Level,
+        bindings::{NeonWALReadResult, PG_VERSION_NUM},
+        walproposer::Wrapper,
+    };
 
     use super::ApiImpl;
 
@@ -489,41 +493,79 @@ mod tests {
 
         let (sender, receiver) = sync_channel(1);
 
+        // Messages definitions are at walproposer.h
+        // xxx: it would be better to extract them from safekeeper crate and
+        // use serialization/deserialization here.
+        let greeting_tag = (b'g' as u64).to_ne_bytes();
+        let proto_version = 2_u32.to_ne_bytes();
+        let pg_version: [u8; 4] = PG_VERSION_NUM.to_ne_bytes();
+        let proposer_id = [0; 16];
+        let system_id = 0_u64.to_ne_bytes();
+        let tenant_id = ttid.tenant_id.as_arr();
+        let timeline_id = ttid.timeline_id.as_arr();
+        let pg_tli = 1_u32.to_ne_bytes();
+        let wal_seg_size = 16777216_u32.to_ne_bytes();
+        let proposer_greeting = [
+            greeting_tag.as_slice(),
+            proto_version.as_slice(),
+            pg_version.as_slice(),
+            proposer_id.as_slice(),
+            system_id.as_slice(),
+            tenant_id.as_slice(),
+            timeline_id.as_slice(),
+            pg_tli.as_slice(),
+            wal_seg_size.as_slice(),
+        ]
+        .concat();
+
+        let voting_tag = (b'v' as u64).to_ne_bytes();
+        let vote_request_term = 3_u64.to_ne_bytes();
+        let proposer_id = [0; 16];
+        let vote_request = [
+            voting_tag.as_slice(),
+            vote_request_term.as_slice(),
+            proposer_id.as_slice(),
+        ]
+        .concat();
+
+        let acceptor_greeting_term = 2_u64.to_ne_bytes();
+        let acceptor_greeting_node_id = 1_u64.to_ne_bytes();
+        let acceptor_greeting = [
+            greeting_tag.as_slice(),
+            acceptor_greeting_term.as_slice(),
+            acceptor_greeting_node_id.as_slice(),
+        ]
+        .concat();
+
+        let vote_response_term = 3_u64.to_ne_bytes();
+        let vote_given = 1_u64.to_ne_bytes();
+        let flush_lsn = 0x539_u64.to_ne_bytes();
+        let truncate_lsn = 0x539_u64.to_ne_bytes();
+        let th_len = 1_u32.to_ne_bytes();
+        let th_term = 2_u64.to_ne_bytes();
+        let th_lsn = 0x539_u64.to_ne_bytes();
+        let timeline_start_lsn = 0x539_u64.to_ne_bytes();
+        let vote_response = [
+            voting_tag.as_slice(),
+            vote_response_term.as_slice(),
+            vote_given.as_slice(),
+            flush_lsn.as_slice(),
+            truncate_lsn.as_slice(),
+            th_len.as_slice(),
+            th_term.as_slice(),
+            th_lsn.as_slice(),
+            timeline_start_lsn.as_slice(),
+        ]
+        .concat();
+
         let my_impl: Box<dyn ApiImpl> = Box::new(MockImpl {
             wait_events: Cell::new(WaitEventsData {
                 sk: std::ptr::null_mut(),
                 event_mask: 0,
             }),
-            expected_messages: vec![
-                // TODO: When updating Postgres versions, this test will cause
-                // problems. Postgres version in message needs updating.
-                //
-                // Greeting(ProposerGreeting { protocol_version: 2, pg_version: 160003, proposer_id: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], system_id: 0, timeline_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tenant_id: 9e4c8f36063c6c6e93bc20d65a820f3d, tli: 1, wal_seg_size: 16777216 })
-                vec![
-                    103, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3, 113, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 158, 76, 143, 54, 6, 60, 108, 110,
-                    147, 188, 32, 214, 90, 130, 15, 61, 158, 76, 143, 54, 6, 60, 108, 110, 147,
-                    188, 32, 214, 90, 130, 15, 61, 1, 0, 0, 0, 0, 0, 0, 1,
-                ],
-                // VoteRequest(VoteRequest { term: 3 })
-                vec![
-                    118, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0,
-                ],
-            ],
+            expected_messages: vec![proposer_greeting, vote_request],
             expected_ptr: AtomicUsize::new(0),
-            safekeeper_replies: vec![
-                // Greeting(AcceptorGreeting { term: 2, node_id: NodeId(1) })
-                vec![
-                    103, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
-                ],
-                // VoteResponse(VoteResponse { term: 3, vote_given: 1, flush_lsn: 0/539, truncate_lsn: 0/539, term_history: [(2, 0/539)], timeline_start_lsn: 0/539 })
-                vec![
-                    118, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 57,
-                    5, 0, 0, 0, 0, 0, 0, 57, 5, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0,
-                    0, 57, 5, 0, 0, 0, 0, 0, 0, 57, 5, 0, 0, 0, 0, 0, 0,
-                ],
-            ],
+            safekeeper_replies: vec![acceptor_greeting, vote_response],
             replies_ptr: AtomicUsize::new(0),
             sync_channel: sender,
             shmem: UnsafeCell::new(crate::api_bindings::empty_shmem()),

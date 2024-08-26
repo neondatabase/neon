@@ -15,12 +15,11 @@ use crate::{aux_file, repository::*};
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
-use itertools::Itertools;
 use pageserver_api::key::{
     dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
     relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
-    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+    CompactKey, AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
 use pageserver_api::models::AuxFilePolicy;
@@ -37,7 +36,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::pausable_failpoint;
-use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
@@ -174,6 +172,7 @@ impl Timeline {
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
             pending_directory_entries: Vec::new(),
+            pending_bytes: 0,
             lsn,
         }
     }
@@ -727,7 +726,17 @@ impl Timeline {
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let current_policy = self.last_aux_file_policy.load();
         match current_policy {
-            Some(AuxFilePolicy::V1) | None => self.list_aux_files_v1(lsn, ctx).await,
+            Some(AuxFilePolicy::V1) => {
+                warn!("this timeline is using deprecated aux file policy V1 (policy=V1)");
+                self.list_aux_files_v1(lsn, ctx).await
+            }
+            None => {
+                let res = self.list_aux_files_v1(lsn, ctx).await?;
+                if !res.is_empty() {
+                    warn!("this timeline is using deprecated aux file policy V1 (policy=None)");
+                }
+                Ok(res)
+            }
             Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
             Some(AuxFilePolicy::CrossValidation) => {
                 let v1_result = self.list_aux_files_v1(lsn, ctx).await;
@@ -1022,19 +1031,31 @@ pub struct DatadirModification<'a> {
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_lsns: Vec<Lsn>,
-    pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
+    pending_updates: HashMap<Key, Vec<(Lsn, usize, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
 
     /// For special "directory" keys that store key-value maps, track the size of the map
     /// if it was updated in this modification.
     pending_directory_entries: Vec<(DirectoryKind, usize)>,
+
+    /// An **approximation** of how large our EphemeralFile write will be when committed.
+    pending_bytes: usize,
 }
 
 impl<'a> DatadirModification<'a> {
+    // When a DatadirModification is committed, we do a monolithic serialization of all its contents.  WAL records can
+    // contain multiple pages, so the pageserver's record-based batch size isn't sufficient to bound this allocation: we
+    // additionally specify a limit on how much payload a DatadirModification may contain before it should be committed.
+    pub(crate) const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+
     /// Get the current lsn
     pub(crate) fn get_lsn(&self) -> Lsn {
         self.lsn
+    }
+
+    pub(crate) fn approx_pending_bytes(&self) -> usize {
+        self.pending_bytes
     }
 
     /// Set the current lsn
@@ -1576,6 +1597,7 @@ impl<'a> DatadirModification<'a> {
                 if aux_files_key_v1.is_empty() {
                     None
                 } else {
+                    warn!("this timeline is using deprecated aux file policy V1");
                     self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
                     Some(AuxFilePolicy::V1)
                 }
@@ -1769,21 +1791,25 @@ impl<'a> DatadirModification<'a> {
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
-            for (lsn, value) in values {
+            let mut write_batch = Vec::new();
+            for (lsn, value_ser_size, value) in values {
                 if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
-                    writer.put(key, lsn, &value, ctx).await?;
+                    write_batch.push((key.to_compact(), lsn, value_ser_size, value));
                 } else {
-                    retained_pending_updates
-                        .entry(key)
-                        .or_default()
-                        .push((lsn, value));
+                    retained_pending_updates.entry(key).or_default().push((
+                        lsn,
+                        value_ser_size,
+                        value,
+                    ));
                 }
             }
+            writer.put_batch(write_batch, ctx).await?;
         }
 
         self.pending_updates = retained_pending_updates;
+        self.pending_bytes = 0;
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
@@ -1809,17 +1835,20 @@ impl<'a> DatadirModification<'a> {
         self.pending_nblocks = 0;
 
         if !self.pending_updates.is_empty() {
-            // The put_batch call below expects expects the inputs to be sorted by Lsn,
-            // so we do that first.
-            let lsn_ordered_batch: VecMap<Lsn, (Key, Value)> = VecMap::from_iter(
-                self.pending_updates
-                    .drain()
-                    .map(|(key, vals)| vals.into_iter().map(move |(lsn, val)| (lsn, (key, val))))
-                    .kmerge_by(|lhs, rhs| lhs.0 < rhs.0),
-                VecMapOrdering::GreaterOrEqual,
-            );
+            // Ordering: the items in this batch do not need to be in any global order, but values for
+            // a particular Key must be in Lsn order relative to one another.  InMemoryLayer relies on
+            // this to do efficient updates to its index.
+            let batch: Vec<(CompactKey, Lsn, usize, Value)> = self
+                .pending_updates
+                .drain()
+                .flat_map(|(key, values)| {
+                    values.into_iter().map(move |(lsn, val_ser_size, value)| {
+                        (key.to_compact(), lsn, val_ser_size, value)
+                    })
+                })
+                .collect::<Vec<_>>();
 
-            writer.put_batch(lsn_ordered_batch, ctx).await?;
+            writer.put_batch(batch, ctx).await?;
         }
 
         if !self.pending_deletions.is_empty() {
@@ -1844,6 +1873,8 @@ impl<'a> DatadirModification<'a> {
             writer.update_directory_entries_count(kind, count as u64);
         }
 
+        self.pending_bytes = 0;
+
         Ok(())
     }
 
@@ -1860,7 +1891,7 @@ impl<'a> DatadirModification<'a> {
         // Note: we don't check pending_deletions. It is an error to request a
         // value that has been removed, deletion only avoids leaking storage.
         if let Some(values) = self.pending_updates.get(&key) {
-            if let Some((_, value)) = values.last() {
+            if let Some((_, _, value)) = values.last() {
                 return if let Value::Image(img) = value {
                     Ok(img.clone())
                 } else {
@@ -1888,13 +1919,17 @@ impl<'a> DatadirModification<'a> {
     fn put(&mut self, key: Key, val: Value) {
         let values = self.pending_updates.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
-        if let Some((last_lsn, last_value)) = values.last_mut() {
+        if let Some((last_lsn, last_value_ser_size, last_value)) = values.last_mut() {
             if *last_lsn == self.lsn {
+                *last_value_ser_size = val.serialized_size().unwrap() as usize;
                 *last_value = val;
                 return;
             }
         }
-        values.push((self.lsn, val));
+
+        let val_serialized_size = val.serialized_size().unwrap() as usize;
+        self.pending_bytes += val_serialized_size;
+        values.push((self.lsn, val_serialized_size, val));
     }
 
     fn delete(&mut self, key_range: Range<Key>) {
@@ -2024,7 +2059,7 @@ mod tests {
 
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         let tline = tline.raw_timeline().unwrap();
 

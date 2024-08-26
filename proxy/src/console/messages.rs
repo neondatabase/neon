@@ -1,11 +1,13 @@
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::{self, Display};
 
 use crate::auth::IpPattern;
 
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
 use crate::proxy::retry::CouldRetry;
+use crate::RoleName;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -22,16 +24,15 @@ impl ConsoleError {
         self.status
             .as_ref()
             .and_then(|s| s.details.error_info.as_ref())
-            .map(|e| e.reason)
-            .unwrap_or(Reason::Unknown)
+            .map_or(Reason::Unknown, |e| e.reason)
     }
+
     pub fn get_user_facing_message(&self) -> String {
         use super::provider::errors::REQUEST_FAILED;
         self.status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
-            .map(|m| m.message.clone().into())
-            .unwrap_or_else(|| {
+            .map_or_else(|| {
                 // Ask @neondatabase/control-plane for review before adding more.
                 match self.http_status_code {
                     http::StatusCode::NOT_FOUND => {
@@ -48,19 +49,18 @@ impl ConsoleError {
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 }
-            })
+            }, |m| m.message.clone().into())
     }
 }
 
 impl Display for ConsoleError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let msg = self
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg: &str = self
             .status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
-            .map(|m| m.message.as_ref())
-            .unwrap_or_else(|| &self.error);
-        write!(f, "{}", msg)
+            .map_or_else(|| self.error.as_ref(), |m| m.message.as_ref());
+        write!(f, "{msg}")
     }
 }
 
@@ -286,7 +286,7 @@ pub struct DatabaseInfo {
 
 // Manually implement debug to omit sensitive info.
 impl fmt::Debug for DatabaseInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatabaseInfo")
             .field("host", &self.host)
             .field("port", &self.port)
@@ -343,6 +343,26 @@ impl ColdStartInfo {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct JwksRoleMapping {
+    pub roles: HashMap<RoleName, EndpointJwksResponse>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EndpointJwksResponse {
+    pub jwks: Vec<JwksSettings>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct JwksSettings {
+    pub id: String,
+    pub project_id: ProjectIdInt,
+    pub branch_id: BranchIdInt,
+    pub jwks_url: url::Url,
+    pub provider_name: String,
+    pub jwt_audience: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,7 +393,7 @@ mod tests {
                 }
             }
         });
-        let _: KickSession = serde_json::from_str(&json.to_string())?;
+        let _: KickSession<'_> = serde_json::from_str(&json.to_string())?;
 
         Ok(())
     }

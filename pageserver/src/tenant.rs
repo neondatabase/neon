@@ -798,7 +798,7 @@ impl Tenant {
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
             TaskKind::Attach,
-            Some(tenant_shard_id),
+            tenant_shard_id,
             None,
             "attach tenant",
             async move {
@@ -3741,13 +3741,21 @@ impl Tenant {
     /// less than this (via eviction and on-demand downloads), but this function enables
     /// the Tenant to advertise how much storage it would prefer to have to provide fast I/O
     /// by keeping important things on local disk.
+    ///
+    /// This is a heuristic, not a guarantee: tenants that are long-idle will actually use less
+    /// than they report here, due to layer eviction.  Tenants with many active branches may
+    /// actually use more than they report here.
     pub(crate) fn local_storage_wanted(&self) -> u64 {
-        let mut wanted = 0;
         let timelines = self.timelines.lock().unwrap();
-        for timeline in timelines.values() {
-            wanted += timeline.metrics.visible_physical_size_gauge.get();
-        }
-        wanted
+
+        // Heuristic: we use the max() of the timelines' visible sizes, rather than the sum.  This
+        // reflects the observation that on tenants with multiple large branches, typically only one
+        // of them is used actively enough to occupy space on disk.
+        timelines
+            .values()
+            .map(|t| t.metrics.visible_physical_size_gauge.get())
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -5932,10 +5940,10 @@ mod tests {
             .await
             .unwrap();
 
-        // the default aux file policy to switch is v1 if not set by the admins
+        // the default aux file policy to switch is v2 if not set by the admins
         assert_eq!(
             harness.tenant_conf.switch_aux_file_policy,
-            AuxFilePolicy::V1
+            AuxFilePolicy::default_tenant_config()
         );
         let (tenant, ctx) = harness.load().await;
 
@@ -5979,8 +5987,8 @@ mod tests {
         );
         assert_eq!(
             tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V1),
-            "aux file is written with switch_aux_file_policy unset (which is v1), so we should keep v1"
+            Some(AuxFilePolicy::V2),
+            "aux file is written with switch_aux_file_policy unset (which is v2), so we should use v2 there"
         );
 
         // we can read everything from the storage
@@ -6002,8 +6010,8 @@ mod tests {
 
         assert_eq!(
             tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V1),
-            "keep v1 storage format when new files are written"
+            Some(AuxFilePolicy::V2),
+            "keep v2 storage format when new files are written"
         );
 
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
@@ -6019,7 +6027,7 @@ mod tests {
 
         // child copies the last flag even if that is not on remote storage yet
         assert_eq!(child.get_switch_aux_file_policy(), AuxFilePolicy::V2);
-        assert_eq!(child.last_aux_file_policy.load(), Some(AuxFilePolicy::V1));
+        assert_eq!(child.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
 
         let files = child.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(files.get("pg_logical/mappings/test1"), None);

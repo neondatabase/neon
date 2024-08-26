@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context};
 use clap::Parser;
-use diesel::Connection;
 use hyper::Uri;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
@@ -27,9 +26,6 @@ use utils::{project_build_tag, project_git_version, tcp_listener};
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
-use diesel_migrations::{embed_migrations, EmbeddedMigrations};
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
-
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help(true))]
@@ -50,6 +46,9 @@ struct Cli {
     /// the compute notification endpoint
     #[arg(long)]
     control_plane_jwt_token: Option<String>,
+
+    #[arg(long)]
+    peer_jwt_token: Option<String>,
 
     /// URL to control plane compute notification endpoint
     #[arg(long)]
@@ -130,28 +129,28 @@ struct Secrets {
     public_key: Option<JwtAuth>,
     jwt_token: Option<String>,
     control_plane_jwt_token: Option<String>,
+    peer_jwt_token: Option<String>,
 }
 
 impl Secrets {
     const DATABASE_URL_ENV: &'static str = "DATABASE_URL";
     const PAGESERVER_JWT_TOKEN_ENV: &'static str = "PAGESERVER_JWT_TOKEN";
     const CONTROL_PLANE_JWT_TOKEN_ENV: &'static str = "CONTROL_PLANE_JWT_TOKEN";
+    const PEER_JWT_TOKEN_ENV: &'static str = "PEER_JWT_TOKEN";
     const PUBLIC_KEY_ENV: &'static str = "PUBLIC_KEY";
 
     /// Load secrets from, in order of preference:
     /// - CLI args if database URL is provided on the CLI
     /// - Environment variables if DATABASE_URL is set.
-    /// - AWS Secrets Manager secrets
     async fn load(args: &Cli) -> anyhow::Result<Self> {
-        let Some(database_url) =
-            Self::load_secret(&args.database_url, Self::DATABASE_URL_ENV).await
+        let Some(database_url) = Self::load_secret(&args.database_url, Self::DATABASE_URL_ENV)
         else {
             anyhow::bail!(
                 "Database URL is not set (set `--database-url`, or `DATABASE_URL` environment)"
             )
         };
 
-        let public_key = match Self::load_secret(&args.public_key, Self::PUBLIC_KEY_ENV).await {
+        let public_key = match Self::load_secret(&args.public_key, Self::PUBLIC_KEY_ENV) {
             Some(v) => Some(JwtAuth::from_key(v).context("Loading public key")?),
             None => None,
         };
@@ -159,18 +158,18 @@ impl Secrets {
         let this = Self {
             database_url,
             public_key,
-            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV).await,
+            jwt_token: Self::load_secret(&args.jwt_token, Self::PAGESERVER_JWT_TOKEN_ENV),
             control_plane_jwt_token: Self::load_secret(
                 &args.control_plane_jwt_token,
                 Self::CONTROL_PLANE_JWT_TOKEN_ENV,
-            )
-            .await,
+            ),
+            peer_jwt_token: Self::load_secret(&args.peer_jwt_token, Self::PEER_JWT_TOKEN_ENV),
         };
 
         Ok(this)
     }
 
-    async fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
+    fn load_secret(cli: &Option<String>, env_name: &str) -> Option<String> {
         if let Some(v) = cli {
             Some(v.clone())
         } else if let Ok(v) = std::env::var(env_name) {
@@ -179,20 +178,6 @@ impl Secrets {
             None
         }
     }
-}
-
-/// Execute the diesel migrations that are built into this binary
-async fn migration_run(database_url: &str) -> anyhow::Result<()> {
-    use diesel::PgConnection;
-    use diesel_migrations::{HarnessWithOutput, MigrationHarness};
-    let mut conn = PgConnection::establish(database_url)?;
-
-    HarnessWithOutput::write_to_stdout(&mut conn)
-        .run_pending_migrations(MIGRATIONS)
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -284,6 +269,7 @@ async fn async_main() -> anyhow::Result<()> {
     let config = Config {
         jwt_token: secrets.jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
+        peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,
         max_offline_interval: args
             .max_offline_interval
@@ -304,12 +290,8 @@ async fn async_main() -> anyhow::Result<()> {
         http_service_port: args.listen.port() as i32,
     };
 
-    // After loading secrets & config, but before starting anything else, apply database migrations
+    // Validate that we can connect to the database
     Persistence::await_connection(&secrets.database_url, args.db_connect_timeout.into()).await?;
-
-    migration_run(&secrets.database_url)
-        .await
-        .context("Running database migrations")?;
 
     let persistence = Arc::new(Persistence::new(secrets.database_url));
 

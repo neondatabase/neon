@@ -19,8 +19,6 @@ thiserror.workspace = true
 serde.workspace = true
 utils.workspace = true
 
-workspace_hack.workspace = true
-
 [dev-dependencies]
 env_logger.workspace = true
 postgres.workspace = true

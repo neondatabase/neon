@@ -256,6 +256,10 @@ impl LayerName {
             LayerName::Delta(layer) => &layer.key_range,
         }
     }
+
+    pub fn is_delta(&self) -> bool {
+        matches!(self, LayerName::Delta(_))
+    }
 }
 
 impl fmt::Display for LayerName {

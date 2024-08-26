@@ -25,9 +25,8 @@ pub struct Aimd {
 
 impl LimitAlgorithm for Aimd {
     fn update(&self, old_limit: usize, sample: Sample) -> usize {
-        use Outcome::*;
         match sample.outcome {
-            Success => {
+            Outcome::Success => {
                 let utilisation = sample.in_flight as f32 / old_limit as f32;
 
                 if utilisation > self.utilisation {
@@ -42,7 +41,7 @@ impl LimitAlgorithm for Aimd {
                     old_limit
                 }
             }
-            Overload => {
+            Outcome::Overload => {
                 let limit = old_limit as f32 * self.dec;
 
                 // Floor instead of round, so the limit reduces even with small numbers.

@@ -23,7 +23,7 @@ use aws_config::{
 use aws_sdk_s3::{
     config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
-    operation::get_object::GetObjectError,
+    operation::{get_object::GetObjectError, head_object::HeadObjectError},
     types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion, StorageClass},
     Client,
 };
@@ -602,6 +602,78 @@ impl RemoteStorage for S3Bucket {
                 };
             }
         }
+    }
+
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        let kind = RequestKind::Head;
+        let _permit = self.permit(kind, cancel).await?;
+
+        let started_at = start_measuring_requests(kind);
+
+        let head_future = self
+            .client
+            .head_object()
+            .bucket(self.bucket_name())
+            .key(self.relative_path_to_s3_object(key))
+            .send();
+
+        let head_future = tokio::time::timeout(self.timeout, head_future);
+
+        let res = tokio::select! {
+            res = head_future => res,
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
+
+        let res = res.map_err(|_e| DownloadError::Timeout)?;
+
+        // do not incl. timeouts as errors in metrics but cancellations
+        let started_at = ScopeGuard::into_inner(started_at);
+        crate::metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, &res, started_at);
+
+        let data = match res {
+            Ok(object_output) => object_output,
+            Err(SdkError::ServiceError(e)) if matches!(e.err(), HeadObjectError::NotFound(_)) => {
+                // Count this in the AttemptOutcome::Ok bucket, because 404 is not
+                // an error: we expect to sometimes fetch an object and find it missing,
+                // e.g. when probing for timeline indices.
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
+                return Err(DownloadError::NotFound);
+            }
+            Err(e) => {
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Err,
+                    started_at,
+                );
+
+                return Err(DownloadError::Other(
+                    anyhow::Error::new(e).context("s3 head object"),
+                ));
+            }
+        };
+
+        let (Some(last_modified), Some(size)) = (data.last_modified, data.content_length) else {
+            return Err(DownloadError::Other(anyhow!(
+                "head_object doesn't contain last_modified or content_length"
+            )))?;
+        };
+        Ok(ListingObject {
+            key: key.to_owned(),
+            last_modified: SystemTime::try_from(last_modified).map_err(|e| {
+                DownloadError::Other(anyhow!("can't convert time '{last_modified}': {e}"))
+            })?,
+            size: size as u64,
+        })
     }
 
     async fn upload(

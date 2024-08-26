@@ -2,6 +2,7 @@ mod classic;
 mod hacks;
 pub mod jwt;
 mod link;
+pub mod local;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 use ipnet::{Ipv4Net, Ipv6Net};
 pub use link::LinkAuthError;
+use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
 use tracing::{info, warn};
@@ -68,6 +70,8 @@ pub enum BackendType<'a, T, D> {
     Console(MaybeOwned<'a, ConsoleBackend>, T),
     /// Authentication via a web browser.
     Link(MaybeOwned<'a, url::ApiUrl>, D),
+    /// Local proxy uses configured auth credentials and does not wake compute
+    Local(MaybeOwned<'a, LocalBackend>),
 }
 
 pub trait TestBackend: Send + Sync + 'static {
@@ -80,9 +84,8 @@ pub trait TestBackend: Send + Sync + 'static {
 
 impl std::fmt::Display for BackendType<'_, (), ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use BackendType::*;
         match self {
-            Console(api, _) => match &**api {
+            Self::Console(api, _) => match &**api {
                 ConsoleBackend::Console(endpoint) => {
                     fmt.debug_tuple("Console").field(&endpoint.url()).finish()
                 }
@@ -93,7 +96,8 @@ impl std::fmt::Display for BackendType<'_, (), ()> {
                 #[cfg(test)]
                 ConsoleBackend::Test(_) => fmt.debug_tuple("Test").finish(),
             },
-            Link(url, _) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+            Self::Link(url, _) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+            Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
     }
 }
@@ -102,10 +106,10 @@ impl<T, D> BackendType<'_, T, D> {
     /// Very similar to [`std::option::Option::as_ref`].
     /// This helps us pass structured config to async tasks.
     pub fn as_ref(&self) -> BackendType<'_, &T, &D> {
-        use BackendType::*;
         match self {
-            Console(c, x) => Console(MaybeOwned::Borrowed(c), x),
-            Link(c, x) => Link(MaybeOwned::Borrowed(c), x),
+            Self::Console(c, x) => BackendType::Console(MaybeOwned::Borrowed(c), x),
+            Self::Link(c, x) => BackendType::Link(MaybeOwned::Borrowed(c), x),
+            Self::Local(l) => BackendType::Local(MaybeOwned::Borrowed(l)),
         }
     }
 }
@@ -115,10 +119,10 @@ impl<'a, T, D> BackendType<'a, T, D> {
     /// Maps [`BackendType<T>`] to [`BackendType<R>`] by applying
     /// a function to a contained value.
     pub fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<'a, R, D> {
-        use BackendType::*;
         match self {
-            Console(c, x) => Console(c, f(x)),
-            Link(c, x) => Link(c, x),
+            Self::Console(c, x) => BackendType::Console(c, f(x)),
+            Self::Link(c, x) => BackendType::Link(c, x),
+            Self::Local(l) => BackendType::Local(l),
         }
     }
 }
@@ -126,10 +130,10 @@ impl<'a, T, D, E> BackendType<'a, Result<T, E>, D> {
     /// Very similar to [`std::option::Option::transpose`].
     /// This is most useful for error handling.
     pub fn transpose(self) -> Result<BackendType<'a, T, D>, E> {
-        use BackendType::*;
         match self {
-            Console(c, x) => x.map(|x| Console(c, x)),
-            Link(c, x) => Ok(Link(c, x)),
+            Self::Console(c, x) => x.map(|x| BackendType::Console(c, x)),
+            Self::Link(c, x) => Ok(BackendType::Link(c, x)),
+            Self::Local(l) => Ok(BackendType::Local(l)),
         }
     }
 }
@@ -161,6 +165,7 @@ impl ComputeUserInfo {
 pub enum ComputeCredentialKeys {
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
+    None,
 }
 
 impl TryFrom<ComputeUserInfoMaybeEndpoint> for ComputeUserInfo {
@@ -293,7 +298,9 @@ async fn auth_quirks(
             ctx.set_endpoint_id(res.info.endpoint.clone());
             let password = match res.keys {
                 ComputeCredentialKeys::Password(p) => p,
-                _ => unreachable!("password hack should return a password"),
+                ComputeCredentialKeys::AuthKeys(_) | ComputeCredentialKeys::None => {
+                    unreachable!("password hack should return a password")
+                }
             };
             (res.info, Some(password))
         }
@@ -400,21 +407,19 @@ async fn authenticate_with_secret(
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
     /// Get compute endpoint name from the credentials.
     pub fn get_endpoint(&self) -> Option<EndpointId> {
-        use BackendType::*;
-
         match self {
-            Console(_, user_info) => user_info.endpoint_id.clone(),
-            Link(_, _) => Some("link".into()),
+            Self::Console(_, user_info) => user_info.endpoint_id.clone(),
+            Self::Link(_, _) => Some("link".into()),
+            Self::Local(_) => Some("local".into()),
         }
     }
 
     /// Get username from the credentials.
     pub fn get_user(&self) -> &str {
-        use BackendType::*;
-
         match self {
-            Console(_, user_info) => &user_info.user,
-            Link(_, _) => "link",
+            Self::Console(_, user_info) => &user_info.user,
+            Self::Link(_, _) => "link",
+            Self::Local(_) => "local",
         }
     }
 
@@ -428,10 +433,8 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> auth::Result<BackendType<'a, ComputeCredentials, NodeInfo>> {
-        use BackendType::*;
-
         let res = match self {
-            Console(api, user_info) => {
+            Self::Console(api, user_info) => {
                 info!(
                     user = &*user_info.user,
                     project = user_info.endpoint(),
@@ -451,12 +454,15 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
                 BackendType::Console(api, credentials)
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Link(url, _) => {
+            Self::Link(url, _) => {
                 info!("performing link authentication");
 
                 let info = link::authenticate(ctx, &url, client).await?;
 
                 BackendType::Link(url, info)
+            }
+            Self::Local(_) => {
+                return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
             }
         };
 
@@ -470,10 +476,10 @@ impl BackendType<'_, ComputeUserInfo, &()> {
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        use BackendType::*;
         match self {
-            Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
-            Link(_, _) => Ok(Cached::new_uncached(None)),
+            Self::Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
+            Self::Link(_, _) => Ok(Cached::new_uncached(None)),
+            Self::Local(_) => Ok(Cached::new_uncached(None)),
         }
     }
 
@@ -481,10 +487,10 @@ impl BackendType<'_, ComputeUserInfo, &()> {
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
-        use BackendType::*;
         match self {
-            Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
-            Link(_, _) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
+            Self::Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Link(_, _) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
+            Self::Local(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
     }
 }
@@ -495,18 +501,18 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
-        use BackendType::*;
-
         match self {
-            Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Link(_, info) => Ok(Cached::new_uncached(info.clone())),
+            Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::Link(_, info) => Ok(Cached::new_uncached(info.clone())),
+            Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
 
-    fn get_keys(&self) -> Option<&ComputeCredentialKeys> {
+    fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
-            BackendType::Console(_, creds) => Some(&creds.keys),
-            BackendType::Link(_, _) => None,
+            Self::Console(_, creds) => &creds.keys,
+            Self::Link(_, _) => &ComputeCredentialKeys::None,
+            Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
 }
@@ -517,18 +523,18 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
-        use BackendType::*;
-
         match self {
-            Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Link(_, _) => unreachable!("link auth flow doesn't support waking the compute"),
+            Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::Link(_, _) => unreachable!("link auth flow doesn't support waking the compute"),
+            Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
 
-    fn get_keys(&self) -> Option<&ComputeCredentialKeys> {
+    fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
-            BackendType::Console(_, creds) => Some(&creds.keys),
-            BackendType::Link(_, _) => None,
+            Self::Console(_, creds) => &creds.keys,
+            Self::Link(_, _) => &ComputeCredentialKeys::None,
+            Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
 }

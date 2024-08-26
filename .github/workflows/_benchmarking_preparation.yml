@@ -48,6 +48,8 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT  
 
+    - uses: actions/checkout@v4
+
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
