@@ -130,9 +130,12 @@ impl ComputeUserInfoMaybeEndpoint {
                 }))
             }
             // Invariant: project name may not contain certain characters.
-            (a, b) => a.or(b).map(|name| match project_name_valid(name.as_ref()) {
-                false => Err(ComputeUserInfoParseError::MalformedProjectName(name)),
-                true => Ok(name),
+            (a, b) => a.or(b).map(|name| {
+                if project_name_valid(name.as_ref()) {
+                    Ok(name)
+                } else {
+                    Err(ComputeUserInfoParseError::MalformedProjectName(name))
+                }
             }),
         }
         .transpose()?;

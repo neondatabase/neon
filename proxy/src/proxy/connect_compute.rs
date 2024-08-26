@@ -30,9 +30,10 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
     if is_cached {
         warn!("invalidating stalled compute node info cache entry");
     }
-    let label = match is_cached {
-        true => ConnectionFailureKind::ComputeCached,
-        false => ConnectionFailureKind::ComputeUncached,
+    let label = if is_cached {
+        ConnectionFailureKind::ComputeCached
+    } else {
+        ConnectionFailureKind::ComputeUncached
     };
     Metrics::get().proxy.connection_failures_total.inc(label);
 

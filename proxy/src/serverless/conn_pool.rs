@@ -339,9 +339,9 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
                 } = pool.get_mut();
 
                 // ensure that closed clients are removed
-                pools.iter_mut().for_each(|(_, db_pool)| {
+                for db_pool in pools.values_mut() {
                     clients_removed += db_pool.clear_closed_clients(total_conns);
-                });
+                }
 
                 // we only remove this pool if it has no active connections
                 if *total_conns == 0 {
@@ -405,21 +405,20 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             if client.is_closed() {
                 info!("pool: cached connection '{conn_info}' is closed, opening a new one");
                 return Ok(None);
-            } else {
-                tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
-                tracing::Span::current().record(
-                    "pid",
-                    tracing::field::display(client.inner.get_process_id()),
-                );
-                info!(
-                    cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-                    "pool: reusing connection '{conn_info}'"
-                );
-                client.session.send(ctx.session_id())?;
-                ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
-                ctx.success();
-                return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
             }
+            tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
+            tracing::Span::current().record(
+                "pid",
+                tracing::field::display(client.inner.get_process_id()),
+            );
+            info!(
+                cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
+                "pool: reusing connection '{conn_info}'"
+            );
+            client.session.send(ctx.session_id())?;
+            ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
+            ctx.success();
+            return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
         }
         Ok(None)
     }
@@ -660,7 +659,7 @@ impl<C: ClientInnerExt> Client<C> {
             span: _,
         } = self;
         let inner = inner.as_mut().expect("client inner should not be removed");
-        (&mut inner.inner, Discard { pool, conn_info })
+        (&mut inner.inner, Discard { conn_info, pool })
     }
 }
 
@@ -722,7 +721,9 @@ impl<C: ClientInnerExt> Drop for Client<C> {
 mod tests {
     use std::{mem, sync::atomic::AtomicBool};
 
-    use crate::{serverless::cancel_set::CancelSet, BranchId, EndpointId, ProjectId};
+    use crate::{
+        proxy::NeonOptions, serverless::cancel_set::CancelSet, BranchId, EndpointId, ProjectId,
+    };
 
     use super::*;
 
@@ -781,7 +782,7 @@ mod tests {
             user_info: ComputeUserInfo {
                 user: "user".into(),
                 endpoint: "endpoint".into(),
-                options: Default::default(),
+                options: NeonOptions::default(),
             },
             dbname: "dbname".into(),
             auth: AuthData::Password("password".as_bytes().into()),
@@ -839,7 +840,7 @@ mod tests {
             user_info: ComputeUserInfo {
                 user: "user".into(),
                 endpoint: "endpoint-2".into(),
-                options: Default::default(),
+                options: NeonOptions::default(),
             },
             dbname: "dbname".into(),
             auth: AuthData::Password("password".as_bytes().into()),

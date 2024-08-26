@@ -207,12 +207,12 @@ fn get_conn_info(
                     .ok_or(ConnInfoError::MalformedEndpoint)?
             } else {
                 hostname
-                    .split_once(".")
+                    .split_once('.')
                     .map_or(hostname, |(prefix, _)| prefix)
                     .into()
             }
         }
-        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) | None => {
+        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
             return Err(ConnInfoError::MissingHostname)
         }
     };

@@ -224,10 +224,10 @@ impl JwkCacheEntryLock {
         // where Signature = alg(<B64(Header)> || . || <B64(Payload)>);
 
         let (header_payload, signature) = jwt
-            .rsplit_once(".")
+            .rsplit_once('.')
             .context("Provided authentication token is not a valid JWT encoding")?;
         let (header, payload) = header_payload
-            .split_once(".")
+            .split_once('.')
             .context("Provided authentication token is not a valid JWT encoding")?;
 
         let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)
@@ -320,14 +320,11 @@ impl JwkCache {
         // try with just a read lock first
         let key = (endpoint, role_name.clone());
         let entry = self.map.get(&key).as_deref().map(Arc::clone);
-        let entry = match entry {
-            Some(entry) => entry,
-            None => {
-                // acquire a write lock after to insert.
-                let entry = self.map.entry(key).or_default();
-                Arc::clone(&*entry)
-            }
-        };
+        let entry = entry.unwrap_or_else(|| {
+            // acquire a write lock after to insert.
+            let entry = self.map.entry(key).or_default();
+            Arc::clone(&*entry)
+        });
 
         entry
             .check_jwt(ctx, jwt, &self.client, role_name, fetch)

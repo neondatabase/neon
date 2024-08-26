@@ -274,13 +274,13 @@ impl ProjectInfoCacheImpl {
         let ttl_disabled_since_us = self
             .ttl_disabled_since_us
             .load(std::sync::atomic::Ordering::Relaxed);
-        let ignore_cache_since = if ttl_disabled_since_us != u64::MAX {
+        let ignore_cache_since = if ttl_disabled_since_us == u64::MAX {
+            None
+        } else {
             let ignore_cache_since = self.start_time + Duration::from_micros(ttl_disabled_since_us);
             // We are fine if entry is not older than ttl or was added before we are getting notifications.
             valid_since = valid_since.min(ignore_cache_since);
             Some(ignore_cache_since)
-        } else {
-            None
         };
         (valid_since, ignore_cache_since)
     }
@@ -306,7 +306,7 @@ impl ProjectInfoCacheImpl {
         let mut removed = 0;
         let shard = self.project2ep.shards()[shard].write();
         for (_, endpoints) in shard.iter() {
-            for endpoint in endpoints.get().iter() {
+            for endpoint in endpoints.get() {
                 self.cache.remove(endpoint);
                 removed += 1;
             }

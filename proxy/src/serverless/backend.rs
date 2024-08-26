@@ -44,7 +44,11 @@ impl PoolingBackend {
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
         let user_info = user_info.clone();
-        let backend = self.config.auth_backend.as_ref().map(|_| user_info.clone());
+        let backend = self
+            .config
+            .auth_backend
+            .as_ref()
+            .map(|()| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
         if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
@@ -101,10 +105,10 @@ impl PoolingBackend {
         jwt: &str,
     ) -> Result<ComputeCredentials, AuthError> {
         match &self.config.auth_backend {
-            crate::auth::BackendType::Console(_, _) => {
+            crate::auth::BackendType::Console(_, ()) => {
                 Err(AuthError::auth_failed("JWT login is not yet supported"))
             }
-            crate::auth::BackendType::Link(_, _) => Err(AuthError::auth_failed(
+            crate::auth::BackendType::Link(_, ()) => Err(AuthError::auth_failed(
                 "JWT login over link proxy is not supported",
             )),
             crate::auth::BackendType::Local(cache) => {
@@ -138,12 +142,12 @@ impl PoolingBackend {
         keys: ComputeCredentials,
         force_new: bool,
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
-        let maybe_client = if !force_new {
-            info!("pool: looking for an existing connection");
-            self.pool.get(ctx, &conn_info)?
-        } else {
+        let maybe_client = if force_new {
             info!("pool: pool is disabled");
             None
+        } else {
+            info!("pool: looking for an existing connection");
+            self.pool.get(ctx, &conn_info)?
         };
 
         if let Some(client) = maybe_client {
@@ -152,7 +156,7 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.config.auth_backend.as_ref().map(|_| keys);
+        let backend = self.config.auth_backend.as_ref().map(|()| keys);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
