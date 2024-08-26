@@ -25,6 +25,7 @@ use tokio_epoll_uring::BoundedBuf;
 use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 
+use crate::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use crate::context::RequestContext;
 use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
 use crate::virtual_file::{self, VirtualFile};
@@ -86,9 +87,11 @@ pub enum VectoredReadCoalesceMode {
 }
 
 impl VectoredReadCoalesceMode {
+    /// [`AdjacentVectoredReadBuilder`] is used if alignment requirement is 0,
+    /// whereas [`ChunkedVectoredReadBuilder`] is used for alignment requirement 1 and higher.
     pub(crate) fn get() -> Self {
         let align = virtual_file::get_io_buffer_alignment();
-        if align == 1 {
+        if align == DEFAULT_IO_BUFFER_ALIGNMENT {
             VectoredReadCoalesceMode::AdjacentOnly
         } else {
             VectoredReadCoalesceMode::Chunked(align)

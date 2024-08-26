@@ -10,6 +10,7 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
+use crate::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use crate::context::RequestContext;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
@@ -1170,8 +1171,7 @@ fn get_open_files() -> &'static OpenFiles {
     }
 }
 
-const IO_BUFFER_ALIGNMENT_NOT_SET: usize = 0;
-static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(IO_BUFFER_ALIGNMENT_NOT_SET);
+static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_ALIGNMENT);
 
 /// Returns true if `x` is a power of two.
 fn is_power_of_two(x: usize) -> bool {
@@ -1188,12 +1188,13 @@ pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
     }
 }
 
+/// Gets the io buffer alignment requirement. Returns 0 if there is no requirement specified.
 pub(crate) fn get_io_buffer_alignment() -> usize {
     let align = IO_BUFFER_ALIGNMENT.load(std::sync::atomic::Ordering::Relaxed);
 
     if cfg!(test) {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
-        if align == IO_BUFFER_ALIGNMENT_NOT_SET {
+        if align == DEFAULT_IO_BUFFER_ALIGNMENT {
             if let Some(test_align) = utils::env::var(env_var_name) {
                 if is_power_of_two(test_align) {
                     test_align
