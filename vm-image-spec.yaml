@@ -326,7 +326,7 @@ files:
           SELECT checkpoints_timed FROM pg_stat_bgwriter;
 
       - metric_name: compute_logical_snapshot_files
-        type: guage
+        type: gauge
         help: 'Number of snapshot files in pg_logical/snapshot'
         key_labels:
           - tenant_id
