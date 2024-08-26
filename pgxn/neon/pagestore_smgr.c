@@ -975,7 +975,7 @@ Retry:
 
 	Assert(any_hits);
 
-	Assert(slot->status == PRFS_REQUESTED);
+	Assert(slot->status == PRFS_REQUESTED || slot->status == PRFS_RECEIVED);
 	Assert(MyPState->ring_last <= ring_index &&
 		   ring_index < MyPState->ring_unused);
 
@@ -1532,7 +1532,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 {
 #define BLOCK_BATCH_SIZE	16
 	bool		log_pages;
-	BlockNumber	blocks[BLOCK_BATCH_SIZE];
+	BlockNumber	batch_blockno = blocknum;
 	XLogRecPtr	lsns[BLOCK_BATCH_SIZE];
 	int			batch_size = 0;
 
@@ -1645,14 +1645,14 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 * Remember the LSN on this page. When we read the page again, we must
 		 * read the same or newer version of it.
 		 */
-		blocks[batch_size] = blkno;
-		lsns[batch_size] = lsn;
-		batch_size++;
+		lsns[batch_size++] = lsn;
+
 		if (batch_size >= BLOCK_BATCH_SIZE)
 		{
 			SetLastWrittenLSNForBlockv(lsns, InfoFromSMgrRel(reln), forknum,
-									   blocknum + i - batch_size + 1,
+									   batch_blockno,
 									   batch_size);
+			batch_blockno += batch_size;
 			batch_size = 0;
 		}
 	}
@@ -1660,7 +1660,7 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (batch_size != 0)
 	{
 		SetLastWrittenLSNForBlockv(lsns, InfoFromSMgrRel(reln), forknum,
-								   blocknum + nblocks - batch_size + 1,
+								   batch_blockno,
 								   batch_size);
 	}
 }
@@ -3051,6 +3051,10 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	/* Read all blocks from LFC, so we're done */
 	if (lfc_result == nblocks)
 		return;
+
+	if (nblocks > PG_IOV_MAX)
+		neon_log(ERROR, "Read request too large: %d is larger than max %d",
+				 nblocks, PG_IOV_MAX);
 
 	if (lfc_result == -1)
 	{
