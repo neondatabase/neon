@@ -41,6 +41,7 @@
 #include "utils/guc.h"
 
 #include "hll.h"
+#include "bitmap.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "Assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
@@ -490,6 +491,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forkNum;
+
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
 	tag.blockNum = (blkno + i) & ~(BLOCKS_PER_CHUNK - 1);
@@ -507,12 +509,12 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 			if (entry != NULL)
 			{
-				for (; chunk_offs < BLOCKS_PER_CHUNK; chunk_offs++, i++)
+				for (; chunk_offs < BLOCKS_PER_CHUNK && i < nblocks; chunk_offs++, i++)
 				{
 					if ((entry->bitmap[chunk_offs >> 5] & 
 						(1 << (chunk_offs & 31))) != 0)
 					{
-						bitmap[i / 0x8] |= 1 << i & 0x7;
+						BITMAP_SET(bitmap, i);
 						found++;
 					}
 				}
@@ -531,7 +533,7 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		 * Break out of the iteration before doing expensive stuff for
 		 * a next iteration
 		 */
-		if (i >= nblocks)
+		if (i + 1 >= nblocks)
 			break;
 
 		/*
@@ -544,6 +546,20 @@ lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	}
 
 	LWLockRelease(lfc_lock);
+
+#if USE_ASSERT_CHECKING
+	do {
+		int count = 0;
+
+		for (int j = 0; j < nblocks; j++)
+		{
+			if (BITMAP_ISSET(bitmap, j))
+				count++;
+		}
+
+		Assert(count == found);
+	} while (false);
+#endif
 
 	return found;
 }
@@ -662,7 +678,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	CopyNRelFileInfoToBufTag(tag, rinfo);
 	tag.forkNum = forkNum;
 
-	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);	hash = get_hash_value(lfc_hash, &tag);
+	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
 	/* 
 	 * For every chunk that has blocks we're interested in, we
@@ -688,7 +704,9 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			iov[i].iov_len = BLCKSZ;
 		}
 
-		tag.blockNum = blkno & ~(BLOCKS_PER_CHUNK - 1);
+		tag.blockNum = blkno - chunk_offs;
+		hash = get_hash_value(lfc_hash, &tag);
+
 		LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
 
 		/* We can return the blocks we've read before LFC got disabled;

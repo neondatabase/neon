@@ -67,6 +67,7 @@
 #include "storage/smgr.h"
 
 #include "pagestore_client.h"
+#include "bitmap.h"
 
 #if PG_VERSION_NUM >= 150000
 #include "access/xlogrecovery.h"
@@ -263,10 +264,6 @@ typedef struct PrefetchState
 	uint8		shard_bitmap[(MAX_SHARDS + 7)/8];
 	PrefetchRequest prf_buffer[];	/* prefetch buffers */
 } PrefetchState;
-
-#define BITMAP_ISSET(bm, bit) ((bm)[(bit) >> 3] & (1 << ((bit) & 7)))
-#define BITMAP_SET(bm, bit) (bm)[(bit) >> 3] |= (1 << ((bit) & 7))
-#define BITMAP_CLR(bm, bit) (bm)[(bit) >> 3] &= ~(1 << ((bit) & 7))
 
 static PrefetchState *MyPState;
 
@@ -807,7 +804,7 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 	bool		any_hits = false;
 #endif
 	/* We will never read further ahead than our buffer can store. */
-	nblocks = Min(nblocks, readahead_buffer_size);
+	nblocks = Max(1, Min(nblocks, readahead_buffer_size));
 
 	/* use an intermediate PrefetchRequest struct to ensure correct alignment */
 	req.buftag = tag;
