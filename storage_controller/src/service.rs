@@ -2974,7 +2974,7 @@ impl Service {
             node: Node,
             jwt: Option<String>,
             req: TimelineArchivalConfigRequest,
-        ) -> Result<ShardNumber, ApiError> {
+        ) -> Result<(), ApiError> {
             tracing::info!(
                 "Setting archival config of timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
             );
@@ -3000,7 +3000,6 @@ impl Service {
                         other => passthrough_api_error(&node, other),
                     }
                 })
-                .map(|_| tenant_shard_id.shard_number)
         }
 
         // no shard needs to go first/last; the operation should be idempotent
