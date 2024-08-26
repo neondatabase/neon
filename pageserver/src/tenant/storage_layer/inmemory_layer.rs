@@ -117,7 +117,7 @@ pub struct InMemoryLayerIndexValue(u64);
 impl InMemoryLayerIndexValue {
     /// Derive remaining space for pos.
     /// TODO: define and enforce a hard limit at the [`crate::tenant::Timeline::should_roll`] level.
-    /// => see also [`Self::does_timeline_should_roll_prevent_failure`]
+    /// => see also [`Self::validate_checkpoint_distance`].
     const MAX_SUPPORTED_POS_BITS: usize = {
         let remainder = 64 - 1 - MAX_SUPPORTED_BLOB_LEN_BITS;
         if remainder < 32 {
@@ -139,26 +139,29 @@ impl InMemoryLayerIndexValue {
         }
     };
 
-    /// Call this with the checkpoint distance enforced by Timeline::should_roll to check whether
-    /// [`Self`] can accomodate large enough values.
+    /// Call this to check whether the checkpoint distance (enforced by [`crate::tenant::Timeline::should_roll`])
+    /// is within the supported value range.
     ///
-    /// TODO: this check should happen much earlier, ideally at the type system level.
+    /// TODO: this check should happen much earlier, ideally at the type system level during config parsing.
     /// When cleaning this up, also look into the s3 max file size check that is performed in delta layer writer.
     /// See also [`Self::MAX_SUPPORTED_POS_BITS`].
-    pub(crate) fn does_timeline_should_roll_prevent_failure(
-        checkpoint_distance: u64,
-    ) -> anyhow::Result<()> {
-        // keep these checks concsistent with Self::new()
-        let checkpoint_distance = u32::try_from(checkpoint_distance)
-            .context("checkpoint distance doesn't fit into u32")?;
+    pub(crate) fn validate_checkpoint_distance(checkpoint_distance: u64) -> anyhow::Result<()> {
+        if checkpoint_distance > Self::MAX_SUPPORTED_POS as u64 {
+            anyhow::bail!(
+                "exceeds the maximum supported value {}",
+                Self::MAX_SUPPORTED_POS
+            );
+        }
         checkpoint_distance
-            .checked_add(MAX_SUPPORTED_BLOB_LEN as u32)
-            .context("checkpoint distane + max supported blob len would not fit")?;
+            .into_usize()
+            .checked_add(MAX_SUPPORTED_BLOB_LEN)
+            .context("checkpoint distance + max supported blob len overflows in-memory addition")?;
+        // NB: it is ok for the result of the addition to be larger than MAX_SUPPORTED_POS
+
         Ok(())
     }
 
-    /// Checks that the `len` is within the supported range
-    /// and that `pos + len` fits within a u32.
+    /// Fails if `arg` cannot be represented by [`Self`].
     #[inline(always)]
     fn new(arg: InMemoryLayerIndexValueNewArgs) -> anyhow::Result<Self> {
         let InMemoryLayerIndexValueNewArgs {

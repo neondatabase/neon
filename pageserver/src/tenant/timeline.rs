@@ -69,7 +69,7 @@ use crate::{
         config::defaults::DEFAULT_PITR_INTERVAL,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::PersistentLayerDesc,
+        storage_layer::{inmemory_layer::InMemoryLayerIndexValue, PersistentLayerDesc},
     },
     walredo,
 };
@@ -1907,8 +1907,8 @@ impl Timeline {
 
             true
         } else if projected_layer_size >= checkpoint_distance {
-            // NB: The InMemoryLayerIndexValue::does_timeline_should_roll_prevent_overflow relies on us
-            // rolling a new layer if we reach checkpoint_distance.
+            // NB: this check is relied upon by:
+            let _ = InMemoryLayerIndexValue::validate_checkpoint_distance;
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 projected_lsn, layer_size, projected_layer_size
