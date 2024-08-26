@@ -5453,14 +5453,15 @@ impl Timeline {
 
             if deltas.key_range.start.next() != deltas.key_range.end {
                 let guard = self.layers.read().await;
-                let invalid_layers = guard.layer_map()?.iter_historic_layers().filter(|layer| {
-                    layer.is_delta()
+                let mut invalid_layers =
+                    guard.layer_map()?.iter_historic_layers().filter(|layer| {
+                        layer.is_delta()
                         && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
                         && layer.lsn_range != deltas.lsn_range
                         // skip single-key layer files
                         && layer.key_range.start.next() != layer.key_range.end
-                });
-                for layer in invalid_layers {
+                    });
+                if let Some(layer) = invalid_layers.next() {
                     // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
                     panic!(
                         "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",

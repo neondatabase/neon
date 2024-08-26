@@ -176,6 +176,7 @@ impl SplitImageLayerWriter {
         Ok(generated_layers)
     }
 
+    #[cfg(test)]
     pub(crate) async fn finish(
         self,
         tline: &Arc<Timeline>,
@@ -352,6 +353,7 @@ impl SplitDeltaLayerWriter {
         Ok(generated_layers)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn finish(
         self,
         tline: &Arc<Timeline>,
