@@ -5691,7 +5691,7 @@ impl<'a> TimelineWriter<'a> {
             return Ok(());
         }
 
-        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch);
+        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch)?;
         let batch_max_lsn = serialized_batch.max_lsn;
         let buf_size: u64 = serialized_batch.raw.len() as u64;
 

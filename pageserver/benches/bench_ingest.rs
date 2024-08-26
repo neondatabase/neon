@@ -103,13 +103,13 @@ async fn ingest(
         batch.push((key.to_compact(), lsn, data_ser_size, data.clone()));
         if batch.len() >= BATCH_SIZE {
             let this_batch = std::mem::take(&mut batch);
-            let serialized = SerializedBatch::from_values(this_batch);
+            let serialized = SerializedBatch::from_values(this_batch).unwrap();
             layer.put_batch(serialized, &ctx).await?;
         }
     }
     if !batch.is_empty() {
         let this_batch = std::mem::take(&mut batch);
-        let serialized = SerializedBatch::from_values(this_batch);
+        let serialized = SerializedBatch::from_values(this_batch).unwrap();
         layer.put_batch(serialized, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;

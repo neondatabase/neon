@@ -516,7 +516,7 @@ pub struct SerializedBatch {
 }
 
 impl SerializedBatch {
-    pub fn from_values(batch: Vec<(CompactKey, Lsn, usize, Value)>) -> Self {
+    pub fn from_values(batch: Vec<(CompactKey, Lsn, usize, Value)>) -> anyhow::Result<Self> {
         // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
         // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
         let buffer_size = batch.iter().map(|i| i.2).sum::<usize>();
@@ -539,7 +539,7 @@ impl SerializedBatch {
                     len: val_ser_size,
                     will_init: val.will_init(),
                 })
-                .expect("higher-level code ensures that values are within supported ranges"),
+                .context("higher-level code ensures that values are within supported ranges")?,
             });
             max_lsn = std::cmp::max(max_lsn, lsn);
         }
@@ -549,11 +549,11 @@ impl SerializedBatch {
         // Assert that we didn't do any extra allocations while building buffer.
         debug_assert!(buffer.len() <= buffer_size);
 
-        Self {
+        Ok(Self {
             raw: buffer,
             offsets,
             max_lsn,
-        }
+        })
     }
 }
 
