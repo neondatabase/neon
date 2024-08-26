@@ -150,7 +150,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                     }
                 }
             }
-            _ => {
+            Notification::AllowedIpsUpdate { .. } | Notification::PasswordUpdate { .. } => {
                 invalidate_cache(self.cache.clone(), msg.clone());
                 if matches!(msg, Notification::AllowedIpsUpdate { .. }) {
                     Metrics::get()

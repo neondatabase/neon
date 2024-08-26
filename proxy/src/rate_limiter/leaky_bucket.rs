@@ -119,6 +119,7 @@ impl Default for LeakyBucketState {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use std::time::Duration;
 

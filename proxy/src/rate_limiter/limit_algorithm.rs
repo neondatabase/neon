@@ -174,9 +174,8 @@ impl DynamicLimiter {
                     let mut inner = self.inner.lock();
                     if inner.take(&self.ready).is_some() {
                         break Ok(Token::new(self.clone()));
-                    } else {
-                        notified.set(self.ready.notified());
                     }
+                    notified.set(self.ready.notified());
                 }
                 notified.as_mut().await;
                 ready = true;

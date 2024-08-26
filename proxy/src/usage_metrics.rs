@@ -450,12 +450,9 @@ async fn upload_events_chunk(
     remote_path: &RemotePath,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    let storage = match storage {
-        Some(storage) => storage,
-        None => {
-            error!("no remote storage configured");
-            return Ok(());
-        }
+    let Some(storage) = storage else {
+        error!("no remote storage configured");
+        return Ok(());
     };
     let data = serde_json::to_vec(&chunk).context("serialize metrics")?;
     let mut encoder = GzipEncoder::new(Vec::new());
