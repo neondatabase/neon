@@ -217,7 +217,9 @@ jobs:
           ${cov_prefix} cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
 
           for io_engine in std-fs tokio-epoll-uring ; do
-            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+            for io_buffer_alignment in 0 1 512 ; do
+              NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT=$io_buffer_alignment ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+            done
           done
 
           # Run separate tests for real S3
