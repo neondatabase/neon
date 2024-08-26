@@ -216,14 +216,13 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
             let to_copy =
                 &buffered[offset_in_buffer..(offset_in_buffer + buffered_range.len().into_usize())];
             let bounds = dst.bounds();
-            let mut view = dst.slice(
-                written_range.len().into_usize()
-                    ..written_range
-                        .len()
-                        .checked_add(buffered_range.len())
-                        .unwrap()
-                        .into_usize(),
-            );
+            let mut view = dst.slice({
+                let start = written_range.len().into_usize();
+                let end = start
+                    .checked_add(buffered_range.len().into_usize())
+                    .unwrap();
+                start..end
+            });
             view.as_mut_rust_slice_full_zeroed()
                 .copy_from_slice(to_copy);
             Slice::from_buf_bounds(Slice::into_inner(view), bounds)
