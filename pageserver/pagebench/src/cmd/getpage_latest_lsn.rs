@@ -58,6 +58,11 @@ pub(crate) struct Args {
     /// [`pageserver_api::models::virtual_file::IoEngineKind`].
     #[clap(long)]
     set_io_engine: Option<pageserver_api::models::virtual_file::IoEngineKind>,
+
+    /// Before starting the benchmark, live-reconfigure the pageserver to use specified alignment for io buffers.
+    #[clap(long)]
+    set_io_alignment: Option<usize>,
+
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -122,6 +127,10 @@ async fn main_impl(
 
     if let Some(engine_str) = &args.set_io_engine {
         mgmt_api_client.put_io_engine(engine_str).await?;
+    }
+
+    if let Some(align) = args.set_io_alignment {
+        mgmt_api_client.put_io_alignment(align).await?;
     }
 
     // discover targets
