@@ -650,28 +650,27 @@ impl InMemoryLayer {
 
         let base_offset = inner.file.len();
 
+        let SerializedBatch {
+            raw,
+            offsets,
+            max_lsn,
+        } = serialized_batch;
+
         // Add the base_offset to the batch's index values which are relative to the batch start.
-        let index_values: Vec<SerializedBatchOffset> = serialized_batch
-            .offsets
-            .into_iter()
-            .map(|SerializedBatchOffset { key, lsn, value }| {
-                let InMemoryLayerIndexValueUnpacked {
-                    will_init,
-                    len,
-                    pos,
-                } = value.unpack();
-                anyhow::Ok(SerializedBatchOffset {
-                    key,
-                    lsn,
-                    value: InMemoryLayerIndexValue::new(InMemoryLayerIndexValueNewArgs {
-                        base_offset,
-                        batch_offset: pos,
-                        len: len.into_usize(),
-                        will_init,
-                    })?,
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        for offset in &mut offsets {
+            let SerializedBatchOffset { key, lsn, value } = offset;
+            let InMemoryLayerIndexValueUnpacked {
+                will_init,
+                len,
+                pos,
+            } = offset.value.unpack();
+            offset.value = InMemoryLayerIndexValue::new(InMemoryLayerIndexValueNewArgs {
+                base_offset,
+                batch_offset: pos,
+                len: len.into_usize(),
+                will_init,
+            })?;
+        }
 
         // Write the batch to the file
         inner.file.write_raw(&serialized_batch.raw, ctx).await?;
