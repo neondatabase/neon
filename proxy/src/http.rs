@@ -12,7 +12,7 @@ use http_body_util::BodyExt;
 use hyper1::body::Body;
 use serde::de::DeserializeOwned;
 
-pub(crate) use reqwest::{Request, Response, StatusCode};
+pub(crate) use reqwest::{Request, Response};
 pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
 pub(crate) use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 

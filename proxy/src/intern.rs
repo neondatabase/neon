@@ -90,15 +90,13 @@ impl<Id: InternId> StringInterner<Id> {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    pub(crate) fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.inner.len()
     }
 
-    pub(crate) fn current_memory_usage(&self) -> usize {
+    #[cfg(test)]
+    fn current_memory_usage(&self) -> usize {
         self.inner.current_memory_usage()
     }
 

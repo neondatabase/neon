@@ -221,17 +221,6 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
 
         (old, cached)
     }
-
-    pub(crate) fn insert(&self, key: K, value: V) -> (Option<V>, Cached<&Self>) {
-        let (created_at, old) = self.insert_raw(key.clone(), value.clone());
-
-        let cached = Cached {
-            token: Some((self, LookupInfo { created_at, key })),
-            value,
-        };
-
-        (old, cached)
-    }
 }
 
 impl<K: Hash + Eq, V: Clone> TimedLru<K, V> {
@@ -252,28 +241,6 @@ impl<K: Hash + Eq, V: Clone> TimedLru<K, V> {
                 value: entry.value.clone(),
             }
         })
-    }
-
-    /// Retrieve a cached entry in convenient wrapper, ignoring its TTL.
-    pub(crate) fn get_ignoring_ttl<Q>(&self, key: &Q) -> Option<timed_lru::Cached<&Self>>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        let mut cache = self.cache.lock();
-        cache
-            .get(key)
-            .map(|entry| Cached::new_uncached(entry.value.clone()))
-    }
-
-    /// Remove an entry from the cache.
-    pub(crate) fn remove<Q>(&self, key: &Q) -> Option<V>
-    where
-        K: Borrow<Q> + Clone,
-        Q: Hash + Eq + ?Sized,
-    {
-        let mut cache = self.cache.lock();
-        cache.remove(key).map(|entry| entry.value)
     }
 }
 

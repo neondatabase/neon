@@ -64,7 +64,7 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    pub(crate) fn to_metric_label(&self) -> &'static str {
+    pub(crate) fn to_metric_label(self) -> &'static str {
         match self {
             ErrorKind::User => "user",
             ErrorKind::ClientDisconnect => "clientdisconnect",

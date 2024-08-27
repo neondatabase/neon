@@ -340,9 +340,9 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         client: stream,
         aux: node.aux.clone(),
         compute: node,
-        req: request_gauge,
-        conn: conn_gauge,
-        cancel: session,
+        _req: request_gauge,
+        _conn: conn_gauge,
+        _cancel: session,
     }))
 }
 

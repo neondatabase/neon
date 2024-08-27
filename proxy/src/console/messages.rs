@@ -88,6 +88,7 @@ impl CouldRetry for ConsoleError {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub(crate) struct Status {
     pub(crate) code: Box<str>,
     pub(crate) message: Box<str>,
@@ -168,7 +169,7 @@ pub(crate) enum Reason {
 }
 
 impl Reason {
-    pub(crate) fn is_not_found(&self) -> bool {
+    pub(crate) fn is_not_found(self) -> bool {
         matches!(
             self,
             Reason::ResourceNotFound
@@ -178,7 +179,7 @@ impl Reason {
         )
     }
 
-    pub(crate) fn can_retry(&self) -> bool {
+    pub(crate) fn can_retry(self) -> bool {
         match self {
             // do not retry role protected errors
             // not a transitive error
@@ -208,6 +209,7 @@ impl Reason {
 }
 
 #[derive(Copy, Clone, Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct RetryInfo {
     pub(crate) retry_delay_ms: u64,
 }
@@ -331,7 +333,7 @@ pub enum ColdStartInfo {
 }
 
 impl ColdStartInfo {
-    pub(crate) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ColdStartInfo::Unknown => "unknown",
             ColdStartInfo::Warm => "warm",

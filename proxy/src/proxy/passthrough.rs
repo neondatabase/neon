@@ -62,9 +62,9 @@ pub(crate) struct ProxyPassthrough<P, S> {
     pub(crate) compute: PostgresConnection,
     pub(crate) aux: MetricsAuxInfo,
 
-    pub(crate) req: NumConnectionRequestsGuard<'static>,
-    pub(crate) conn: NumClientConnectionsGuard<'static>,
-    pub(crate) cancel: cancellation::Session<P>,
+    pub(crate) _req: NumConnectionRequestsGuard<'static>,
+    pub(crate) _conn: NumClientConnectionsGuard<'static>,
+    pub(crate) _cancel: cancellation::Session<P>,
 }
 
 impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {

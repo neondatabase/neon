@@ -157,6 +157,7 @@ macro_rules! smol_str_wrapper {
         pub struct $name(smol_str::SmolStr);
 
         impl $name {
+            #[allow(unused)]
             pub(crate) fn as_str(&self) -> &str {
                 self.0.as_str()
             }
@@ -258,9 +259,9 @@ impl EndpointId {
     pub(crate) fn is_branch(&self) -> bool {
         self.0.starts_with("br-")
     }
-    pub(crate) fn is_project(&self) -> bool {
-        !self.is_endpoint() && !self.is_branch()
-    }
+    // pub(crate) fn is_project(&self) -> bool {
+    //     !self.is_endpoint() && !self.is_branch()
+    // }
     pub(crate) fn as_branch(&self) -> BranchId {
         BranchId(self.0.clone())
     }

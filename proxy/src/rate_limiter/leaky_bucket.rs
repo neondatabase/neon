@@ -73,6 +73,7 @@ pub struct LeakyBucketState {
     time: Instant,
 }
 
+#[cfg(test)]
 impl LeakyBucketConfig {
     pub(crate) fn new(rps: f64, max: f64) -> Self {
         assert!(rps > 0.0, "rps must be positive");

@@ -25,8 +25,6 @@ use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
-pub(crate) use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;

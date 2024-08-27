@@ -17,7 +17,6 @@ use super::jwt::{AuthRule, FetchAuthRules, JwkCache};
 
 pub struct LocalBackend {
     pub(crate) jwks_cache: JwkCache,
-    pub(crate) postgres_addr: SocketAddr,
     pub(crate) node_info: NodeInfo,
 }
 
@@ -25,7 +24,6 @@ impl LocalBackend {
     pub fn new(postgres_addr: SocketAddr) -> Self {
         LocalBackend {
             jwks_cache: JwkCache::default(),
-            postgres_addr,
             node_info: NodeInfo {
                 config: {
                     let mut cfg = ConnCfg::new();

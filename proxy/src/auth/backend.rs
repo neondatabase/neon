@@ -80,7 +80,6 @@ pub(crate) trait TestBackend: Send + Sync + 'static {
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
-    fn get_role_secret(&self) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, (), ()> {
@@ -405,15 +404,6 @@ async fn authenticate_with_secret(
 }
 
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
-    /// Get compute endpoint name from the credentials.
-    pub(crate) fn get_endpoint(&self) -> Option<EndpointId> {
-        match self {
-            Self::Console(_, user_info) => user_info.endpoint_id.clone(),
-            Self::Link(_, ()) => Some("link".into()),
-            Self::Local(_) => Some("local".into()),
-        }
-    }
-
     /// Get username from the credentials.
     pub(crate) fn get_user(&self) -> &str {
         match self {

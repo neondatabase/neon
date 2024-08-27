@@ -133,9 +133,9 @@ pub(crate) struct Token {
 ///
 /// Not guaranteed to be consistent under high concurrency.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct LimiterState {
+#[cfg(test)]
+struct LimiterState {
     limit: usize,
-    in_flight: usize,
 }
 
 impl DynamicLimiter {
@@ -211,12 +211,10 @@ impl DynamicLimiter {
     }
 
     /// The current state of the limiter.
-    pub(crate) fn state(&self) -> LimiterState {
+    #[cfg(test)]
+    fn state(&self) -> LimiterState {
         let inner = self.inner.lock();
-        LimiterState {
-            limit: inner.limit,
-            in_flight: inner.in_flight,
-        }
+        LimiterState { limit: inner.limit }
     }
 }
 
@@ -255,13 +253,10 @@ impl Drop for Token {
     }
 }
 
+#[cfg(test)]
 impl LimiterState {
     /// The current concurrency limit.
-    pub(crate) fn limit(&self) -> usize {
+    fn limit(self) -> usize {
         self.limit
-    }
-    /// The number of jobs in flight.
-    pub(crate) fn in_flight(&self) -> usize {
-        self.in_flight
     }
 }
