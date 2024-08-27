@@ -1009,6 +1009,7 @@ impl PageServerConf {
         InMemoryLayerIndexValue::validate_checkpoint_distance(
             conf.default_tenant_conf.checkpoint_distance,
         )
+        .map_err(|msg| anyhow::anyhow!("{msg}"))
         .with_context(|| {
             format!(
                 "effective checkpoint distance is unsupported: {}",

@@ -4,7 +4,7 @@
 //! held in an ephemeral file, not in memory. The metadata for each page version, i.e.
 //! its position in the file, is kept in memory, though.
 //!
-use crate::assert_u64_eq_usize::{U64IsUsize, UsizeIsU64};
+use crate::assert_u64_eq_usize::{u64_to_usize, U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::repository::{Key, Value};
@@ -115,9 +115,7 @@ const MAX_SUPPORTED_BLOB_LEN_BITS: usize = {
 pub struct InMemoryLayerIndexValue(u64);
 
 impl InMemoryLayerIndexValue {
-    /// Derive remaining space for pos.
-    /// TODO: define and enforce a hard limit at the [`crate::tenant::Timeline::should_roll`] level.
-    /// => see also [`Self::validate_checkpoint_distance`].
+    /// See [`Self::MAX_SUPPORTED_POS`].
     const MAX_SUPPORTED_POS_BITS: usize = {
         let remainder = 64 - 1 - MAX_SUPPORTED_BLOB_LEN_BITS;
         if remainder < 32 {
@@ -125,6 +123,8 @@ impl InMemoryLayerIndexValue {
         }
         remainder
     };
+    /// The maximum supported blob offset that can be represented by [`Self`].
+    /// See also [`Self::validate_checkpoint_distance`].
     const MAX_SUPPORTED_POS: usize = (1 << Self::MAX_SUPPORTED_POS_BITS) - 1;
 
     // Layout
@@ -139,29 +139,16 @@ impl InMemoryLayerIndexValue {
         }
     };
 
-    /// Call this to check whether the checkpoint distance (enforced by [`crate::tenant::Timeline::should_roll`])
-    /// is within the supported value range.
+    /// Fails if and only if the offset or length encoded in `arg` is too large to be represented by [`Self`].
     ///
-    /// TODO: this check should happen much earlier, ideally at the type system level during config parsing.
+    /// The only reason why that can happen in the system is if the [`InMemoryLayer`] grows too long.
+    /// The [`InMemoryLayer`] size is determined by the checkpoint distance, enforced by [`crate::tenant::Timeline::should_roll`].
+    ///
+    /// Thus, to avoid failure of this function, whenever we start up and/or change checkpoint distance,
+    /// call [`Self::validate_checkpoint_distance`] with the new checkpoint distance value.
+    ///
+    /// TODO: this check should happen ideally at config parsing time (and in the request handler when a change to checkpoint distance is requested)
     /// When cleaning this up, also look into the s3 max file size check that is performed in delta layer writer.
-    /// See also [`Self::MAX_SUPPORTED_POS_BITS`].
-    pub(crate) fn validate_checkpoint_distance(checkpoint_distance: u64) -> anyhow::Result<()> {
-        if checkpoint_distance > Self::MAX_SUPPORTED_POS as u64 {
-            anyhow::bail!(
-                "exceeds the maximum supported value {}",
-                Self::MAX_SUPPORTED_POS
-            );
-        }
-        checkpoint_distance
-            .into_usize()
-            .checked_add(MAX_SUPPORTED_BLOB_LEN)
-            .context("checkpoint distance + max supported blob len overflows in-memory addition")?;
-        // NB: it is ok for the result of the addition to be larger than MAX_SUPPORTED_POS
-
-        Ok(())
-    }
-
-    /// Fails if `arg` cannot be represented by [`Self`].
     #[inline(always)]
     fn new(arg: InMemoryLayerIndexValueNewArgs) -> anyhow::Result<Self> {
         let InMemoryLayerIndexValueNewArgs {
@@ -206,6 +193,34 @@ impl InMemoryLayerIndexValue {
             pos: self.0.get_bits(Self::POS_RANGE),
         }
     }
+
+    /// See [`Self::new`].
+    pub(crate) const fn validate_checkpoint_distance(
+        checkpoint_distance: u64,
+    ) -> Result<(), &'static str> {
+        if checkpoint_distance > Self::MAX_SUPPORTED_POS as u64 {
+            return Err("exceeds the maximum supported value");
+        }
+        let res = u64_to_usize(checkpoint_distance).checked_add(MAX_SUPPORTED_BLOB_LEN);
+        if res.is_none() {
+            return Err(
+                "checkpoint distance + max supported blob len overflows in-memory addition",
+            );
+        }
+
+        // NB: it is ok for the result of the addition to be larger than MAX_SUPPORTED_POS
+
+        Ok(())
+    }
+
+    const _ASSERT_DEFAULT_CHECKPOINT_DISTANCE_IS_VALID: () = {
+        let res = Self::validate_checkpoint_distance(
+            crate::tenant::config::defaults::DEFAULT_CHECKPOINT_DISTANCE,
+        );
+        if res.is_err() {
+            panic!("default checkpoint distance is valid")
+        }
+    };
 }
 
 /// Args to [`InMemoryLayerIndexValue::new`].
