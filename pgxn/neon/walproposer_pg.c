@@ -220,6 +220,64 @@ nwp_register_gucs(void)
 							NULL, NULL, NULL);
 }
 
+
+static int
+split_safekeepers_list(char *safekeepers_list, char *safekeepers[])
+{
+	int n_safekeepers = 0;
+	char *curr_sk = safekeepers_list;
+
+	for (char *coma = safekeepers_list; coma != NULL && *coma != '\0'; curr_sk = coma)
+	{
+		if (++n_safekeepers >= MAX_SAFEKEEPERS) {
+			wpg_log(FATAL, "too many safekeepers");
+		}
+
+		coma = strchr(coma, ',');
+		safekeepers[n_safekeepers-1] = curr_sk;
+
+		if (coma != NULL) {
+			*coma++ = '\0';
+		}
+	}
+
+	return n_safekeepers;
+}
+
+/*
+ * Accept two coma-separated strings with list of safekeeper host:port addresses.
+ * Split them into arrays and return false if two sets do not match, ignoring the order.
+ */
+static bool
+safekeepers_cmp(char *old, char *new)
+{
+	char *safekeepers_old[MAX_SAFEKEEPERS];
+	char *safekeepers_new[MAX_SAFEKEEPERS];
+	int len_old = 0;
+	int len_new = 0;
+
+	len_old = split_safekeepers_list(old, safekeepers_old);
+	len_new = split_safekeepers_list(new, safekeepers_new);
+
+	if (len_old != len_new)
+	{
+		return false;
+	}
+
+	qsort(&safekeepers_old, len_old, sizeof(char *), pg_qsort_strcmp);
+	qsort(&safekeepers_new, len_new, sizeof(char *), pg_qsort_strcmp);
+
+	for (int i = 0; i < len_new; i++)
+	{
+		if (strcmp(safekeepers_old[i], safekeepers_new[i]) != 0)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
 /*
  * GUC assign_hook for neon.safekeepers. Restarts walproposer through FATAL if
  * the list changed.
@@ -235,19 +293,26 @@ assign_neon_safekeepers(const char *newval, void *extra)
 		wpg_log(FATAL, "neon.safekeepers is empty");
 	}
 
+	/* Copy values because we will modify them in split_safekeepers_list() */
+	char *newval_copy = pstrdup(newval);
+	char *oldval = pstrdup(wal_acceptors_list);
+
 	/* 
 	 * TODO: restarting through FATAL is stupid and introduces 1s delay before
 	 * next bgw start. We should refactor walproposer to allow graceful exit and
 	 * thus remove this delay.
+	 * XXX: If you change anything here, sync with test_safekeepers_reconfigure_reorder.
 	 */
-	if (strcmp(wal_acceptors_list, newval) != 0)
+	if (!safekeepers_cmp(oldval, newval_copy))
 	{
 		wpg_log(FATAL, "restarting walproposer to change safekeeper list from %s to %s",
 				wal_acceptors_list, newval);
 	}
+	pfree(newval_copy);
+	pfree(oldval);
 }
 
-/*  Check if we need to suspend inserts because of lagging replication. */
+/* Check if we need to suspend inserts because of lagging replication. */
 static uint64
 backpressure_lag_impl(void)
 {
