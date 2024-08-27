@@ -291,13 +291,11 @@ class RemoteCompare(PgCompare):
 
 @pytest.fixture(scope="function")
 def neon_compare(
-    request: FixtureRequest,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     neon_simple_env: NeonEnv,
 ) -> NeonCompare:
-    branch_name = request.node.name
-    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
+    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin)
 
 
 @pytest.fixture(scope="function")
