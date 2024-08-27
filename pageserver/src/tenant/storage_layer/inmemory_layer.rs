@@ -80,9 +80,9 @@ impl std::fmt::Debug for InMemoryLayer {
 
 pub struct InMemoryLayerInner {
     /// All versions of all pages in the layer are kept here. Indexed
-    /// by block number and LSN. The value is an offset into the
+    /// by block number and LSN. The [`IndexEntry`] is an offset into the
     /// ephemeral file where the page version is stored.
-    index: BTreeMap<CompactKey, VecMap<Lsn, InMemoryLayerIndexValue>>,
+    index: BTreeMap<CompactKey, VecMap<Lsn, IndexEntry>>,
 
     /// The values are stored in a serialized format in this file.
     /// Each serialized Value is preceded by a 'u32' length field.
@@ -105,16 +105,16 @@ const MAX_SUPPORTED_BLOB_LEN_BITS: usize = {
 
 /// See [`InMemoryLayerInner::index`].
 ///
-/// For space-efficiency, this value is a bitfield.
+/// For memory efficiency, the data is packed into a u64.
 ///
 /// Layout:
 /// - 1 bit: `will_init`
 /// - [`MAX_SUPPORTED_BLOB_LEN_BITS`]: `len`
 /// - [`MAX_SUPPORTED_POS_BITS`]: `pos`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InMemoryLayerIndexValue(u64);
+pub struct IndexEntry(u64);
 
-impl InMemoryLayerIndexValue {
+impl IndexEntry {
     /// See [`Self::MAX_SUPPORTED_POS`].
     const MAX_SUPPORTED_POS_BITS: usize = {
         let remainder = 64 - 1 - MAX_SUPPORTED_BLOB_LEN_BITS;
@@ -150,8 +150,8 @@ impl InMemoryLayerIndexValue {
     /// TODO: this check should happen ideally at config parsing time (and in the request handler when a change to checkpoint distance is requested)
     /// When cleaning this up, also look into the s3 max file size check that is performed in delta layer writer.
     #[inline(always)]
-    fn new(arg: InMemoryLayerIndexValueNewArgs) -> anyhow::Result<Self> {
-        let InMemoryLayerIndexValueNewArgs {
+    fn new(arg: IndexEntryNewArgs) -> anyhow::Result<Self> {
+        let IndexEntryNewArgs {
             base_offset,
             batch_offset,
             len,
@@ -185,9 +185,9 @@ impl InMemoryLayerIndexValue {
     }
 
     #[inline(always)]
-    fn unpack(&self) -> InMemoryLayerIndexValueUnpacked {
+    fn unpack(&self) -> IndexEntryUnpacked {
         use bit_field::BitField;
-        InMemoryLayerIndexValueUnpacked {
+        IndexEntryUnpacked {
             will_init: self.0.get_bits(Self::WILL_INIT_RANGE) != 0,
             len: self.0.get_bits(Self::LEN_RANGE),
             pos: self.0.get_bits(Self::POS_RANGE),
@@ -223,18 +223,18 @@ impl InMemoryLayerIndexValue {
     };
 }
 
-/// Args to [`InMemoryLayerIndexValue::new`].
+/// Args to [`IndexEntry::new`].
 #[derive(Clone, Copy)]
-struct InMemoryLayerIndexValueNewArgs {
+struct IndexEntryNewArgs {
     base_offset: u64,
     batch_offset: u64,
     len: usize,
     will_init: bool,
 }
 
-/// Unpacked representation of the bitfielded [`InMemoryLayerIndexValue`].
+/// Unpacked representation of the bitfielded [`IndexEntry`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct InMemoryLayerIndexValueUnpacked {
+struct IndexEntryUnpacked {
     will_init: bool,
     len: u64,
     pos: u64,
@@ -446,12 +446,12 @@ impl InMemoryLayer {
 
                 let slice = vec_map.slice_range(lsn_range);
 
-                for (entry_lsn, index_value) in slice.iter().rev() {
-                    let InMemoryLayerIndexValueUnpacked {
+                for (entry_lsn, index_entry) in slice.iter().rev() {
+                    let IndexEntryUnpacked {
                         pos,
                         len,
                         will_init,
-                    } = index_value.unpack();
+                    } = index_entry.unpack();
                     reads.entry(key).or_default().push(ValueRead {
                         entry_lsn: *entry_lsn,
                         read: vectored_dio_read::LogicalRead::new(
@@ -519,7 +519,7 @@ struct SerializedBatchOffset {
     lsn: Lsn,
     // TODO: separate type when we start serde-serializing this value, to avoid coupling
     // in-memory representation to serialization format.
-    value: InMemoryLayerIndexValue,
+    index_entry: IndexEntry,
 }
 
 pub struct SerializedBatch {
@@ -551,7 +551,7 @@ impl SerializedBatch {
             offsets.push(SerializedBatchOffset {
                 key,
                 lsn,
-                value: InMemoryLayerIndexValue::new(InMemoryLayerIndexValueNewArgs {
+                index_entry: IndexEntry::new(IndexEntryNewArgs {
                     base_offset: 0,
                     batch_offset: relative_off,
                     len: val_ser_size,
@@ -656,15 +656,19 @@ impl InMemoryLayer {
             max_lsn,
         } = serialized_batch;
 
-        // Add the base_offset to the batch's index values which are relative to the batch start.
+        // Add the base_offset to the batch's index entries which are relative to the batch start.
         for offset in &mut offsets {
-            let SerializedBatchOffset { key, lsn, value } = offset;
-            let InMemoryLayerIndexValueUnpacked {
+            let SerializedBatchOffset {
+                key,
+                lsn,
+                index_entry,
+            } = offset;
+            let IndexEntryUnpacked {
                 will_init,
                 len,
                 pos,
-            } = offset.value.unpack();
-            offset.value = InMemoryLayerIndexValue::new(InMemoryLayerIndexValueNewArgs {
+            } = offset.index_entry.unpack();
+            offset.index_entry = IndexEntry::new(IndexEntryNewArgs {
                 base_offset,
                 batch_offset: pos,
                 len: len.into_usize(),
@@ -678,15 +682,20 @@ impl InMemoryLayer {
         let expected_new_len = base_offset
             .checked_add(serialized_batch.raw.len().into_u64())
             // write_raw would error if we were to overflow u64.
-            // also InMemoryLayerIndexValue and higher levels in
+            // also IndexEntry and higher levels in
             //the code don't allow the file to grow that large
             .unwrap();
         assert_eq!(new_size, expected_new_len);
 
-        // Update the index with the new values
-        for SerializedBatchOffset { key, lsn, value } in offsets {
+        // Update the index with the new entries
+        for SerializedBatchOffset {
+            key,
+            lsn,
+            index_entry,
+        } in offsets
+        {
             let vec_map = inner.index.entry(key).or_default();
-            let old = vec_map.append_or_update_last(lsn, value).unwrap().0;
+            let old = vec_map.append_or_update_last(lsn, index_entry).unwrap().0;
             if old.is_some() {
                 // We already had an entry for this LSN. That's odd..
                 warn!("Key {} at {} already exists", key, lsn);
@@ -737,7 +746,7 @@ impl InMemoryLayer {
         {
             let inner = self.inner.write().await;
             for vec_map in inner.index.values() {
-                for (lsn, _pos) in vec_map.as_slice() {
+                for (lsn, _) in vec_map.as_slice() {
                     assert!(*lsn < end_lsn);
                 }
             }
@@ -811,7 +820,7 @@ impl InMemoryLayer {
                         .iter()
                         .map(|(lsn, entry)| (lsn, entry.unpack()))
                     {
-                        let InMemoryLayerIndexValueUnpacked {
+                        let IndexEntryUnpacked {
                             pos,
                             len,
                             will_init,
@@ -854,14 +863,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_index_value() {
-        const MAX_SUPPORTED_POS: usize = InMemoryLayerIndexValue::MAX_SUPPORTED_POS;
-        use InMemoryLayerIndexValueNewArgs as Args;
-        use InMemoryLayerIndexValueUnpacked as Unpacked;
+    fn test_index_entry() {
+        const MAX_SUPPORTED_POS: usize = IndexEntry::MAX_SUPPORTED_POS;
+        use IndexEntryNewArgs as Args;
+        use IndexEntryUnpacked as Unpacked;
 
         let roundtrip = |args, expect: Unpacked| {
-            let res = InMemoryLayerIndexValue::new(args).expect("this tests expects no errors");
-            let InMemoryLayerIndexValueUnpacked {
+            let res = IndexEntry::new(args).expect("this tests expects no errors");
+            let IndexEntryUnpacked {
                 will_init,
                 len,
                 pos,
@@ -909,7 +918,7 @@ mod tests {
             base_offset: 0,
             batch_offset: 0,
         };
-        assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+        assert!(IndexEntry::new(too_large).is_err());
 
         // too-large pos
         {
@@ -919,14 +928,14 @@ mod tests {
                 base_offset: MAX_SUPPORTED_POS.into_u64() + 1,
                 batch_offset: 0,
             };
-            assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+            assert!(IndexEntry::new(too_large).is_err());
             let too_large = Args {
                 will_init: false,
                 len: 0,
                 base_offset: 0,
                 batch_offset: MAX_SUPPORTED_POS.into_u64() + 1,
             };
-            assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+            assert!(IndexEntry::new(too_large).is_err());
         }
 
         // too large (base_offset + batch_offset)
@@ -937,14 +946,14 @@ mod tests {
                 base_offset: MAX_SUPPORTED_POS.into_u64(),
                 batch_offset: 1,
             };
-            assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+            assert!(IndexEntry::new(too_large).is_err());
             let too_large = Args {
                 will_init: false,
                 len: 0,
                 base_offset: MAX_SUPPORTED_POS.into_u64() - 1,
                 batch_offset: MAX_SUPPORTED_POS.into_u64() - 1,
             };
-            assert!(InMemoryLayerIndexValue::new(too_large).is_err());
+            assert!(IndexEntry::new(too_large).is_err());
         }
 
         // valid special cases
