@@ -684,7 +684,7 @@ impl InMemoryLayer {
         assert_eq!(new_size, expected_new_len);
 
         // Update the index with the new values
-        for SerializedBatchOffset { key, lsn, value } in index_values {
+        for SerializedBatchOffset { key, lsn, value } in offsets {
             let vec_map = inner.index.entry(key).or_default();
             let old = vec_map.append_or_update_last(lsn, value).unwrap().0;
             if old.is_some() {
