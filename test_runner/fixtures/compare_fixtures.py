@@ -102,7 +102,6 @@ class NeonCompare(PgCompare):
         zenbenchmark: NeonBenchmarker,
         neon_simple_env: NeonEnv,
         pg_bin: PgBin,
-        branch_name: str,
     ):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
@@ -110,16 +109,11 @@ class NeonCompare(PgCompare):
         self.pageserver_http_client = self.env.pageserver.http_client()
 
         # note that neon_simple_env now uses LOCAL_FS remote storage
-
-        # Create tenant
-        tenant_conf: Dict[str, str] = {}
-        self.tenant, _ = self.env.neon_cli.create_tenant(conf=tenant_conf)
-
-        # Create timeline
-        self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
+        self.tenant = self.env.initial_tenant
+        self.timeline = self.env.initial_timeline
 
         # Start pg
-        self._pg = self.env.endpoints.create_start(branch_name, "main", self.tenant)
+        self._pg = self.env.endpoints.create_start("main", "main", self.tenant)
 
     @property
     def pg(self) -> PgProtocol:
