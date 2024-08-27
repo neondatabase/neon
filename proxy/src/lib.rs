@@ -12,6 +12,8 @@
 // https://rust-lang.github.io/rust-clippy/master/index.html#?groups=restriction
 #![warn(
     clippy::undocumented_unsafe_blocks,
+    // TODO: Enable once all individual checks are enabled.
+    //clippy::as_conversions,
     clippy::dbg_macro,
     clippy::empty_enum_variants_with_brackets,
     clippy::exit,
@@ -31,8 +33,15 @@
 )]
 // List of permanently allowed lints.
 #![allow(
-    // It's ok to cast u8 to bool, etc.
+    // It's ok to cast bool to u8, etc.
     clippy::cast_lossless,
+    // Seems unavoidable.
+    clippy::multiple_crate_versions,
+    // While #[must_use] is a great feature this check is too noisy.
+    clippy::must_use_candidate,
+    // Inline consts, structs, fns, imports, etc. are ok if they're used by
+    // the following statement(s).
+    clippy::items_after_statements,
 )]
 // List of temporarily allowed lints.
 // TODO: Switch to except() once stable with 1.81.
@@ -43,52 +52,32 @@
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    clippy::default_trait_access,
     clippy::doc_markdown,
-    clippy::explicit_iter_loop,
-    clippy::float_cmp,
-    clippy::if_not_else,
-    clippy::ignored_unit_patterns,
     clippy::implicit_hasher,
-    clippy::inconsistent_struct_constructor,
     clippy::inline_always,
-    clippy::items_after_statements,
-    clippy::manual_assert,
-    clippy::manual_let_else,
-    clippy::manual_string_new,
-    clippy::match_bool,
     clippy::match_same_arms,
     clippy::match_wild_err_arm,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
-    clippy::multiple_crate_versions,
-    clippy::must_use_candidate,
-    clippy::needless_for_each,
     clippy::needless_pass_by_value,
     clippy::needless_raw_string_hashes,
-    clippy::option_as_ref_cloned,
     clippy::redundant_closure_for_method_calls,
-    clippy::redundant_else,
     clippy::return_self_not_must_use,
     clippy::similar_names,
-    clippy::single_char_pattern,
     clippy::single_match_else,
     clippy::struct_excessive_bools,
     clippy::struct_field_names,
     clippy::too_many_lines,
-    clippy::uninlined_format_args,
-    clippy::unnested_or_patterns,
     clippy::unreadable_literal,
     clippy::unused_async,
     clippy::unused_self,
-    clippy::used_underscore_binding,
     clippy::wildcard_imports
 )]
 // List of temporarily allowed lints to unblock beta/nightly.
 #![allow(unknown_lints, clippy::manual_inspect)]
 
-use std::convert::Infallible;
+use std::{convert::Infallible, future::Future};
 
 use anyhow::{bail, Context};
 use intern::{EndpointIdInt, EndpointIdTag, InternId};
@@ -123,7 +112,14 @@ pub mod usage_metrics;
 pub mod waiters;
 
 /// Handle unix signals appropriately.
-pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<Infallible> {
+pub async fn handle_signals<F, Fut>(
+    token: CancellationToken,
+    mut refresh_config: F,
+) -> anyhow::Result<Infallible>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut hangup = signal(SignalKind::hangup())?;
@@ -134,7 +130,8 @@ pub async fn handle_signals(token: CancellationToken) -> anyhow::Result<Infallib
         tokio::select! {
             // Hangup is commonly used for config reload.
             _ = hangup.recv() => {
-                warn!("received SIGHUP; config reload is not supported");
+                warn!("received SIGHUP");
+                refresh_config().await?;
             }
             // Shut down the whole application.
             _ = interrupt.recv() => {
@@ -160,7 +157,8 @@ macro_rules! smol_str_wrapper {
         pub struct $name(smol_str::SmolStr);
 
         impl $name {
-            pub fn as_str(&self) -> &str {
+            #[allow(unused)]
+            pub(crate) fn as_str(&self) -> &str {
                 self.0.as_str()
             }
         }
@@ -255,19 +253,19 @@ smol_str_wrapper!(Host);
 
 // Endpoints are a bit tricky. Rare they might be branches or projects.
 impl EndpointId {
-    pub fn is_endpoint(&self) -> bool {
+    pub(crate) fn is_endpoint(&self) -> bool {
         self.0.starts_with("ep-")
     }
-    pub fn is_branch(&self) -> bool {
+    pub(crate) fn is_branch(&self) -> bool {
         self.0.starts_with("br-")
     }
-    pub fn is_project(&self) -> bool {
-        !self.is_endpoint() && !self.is_branch()
-    }
-    pub fn as_branch(&self) -> BranchId {
+    // pub(crate) fn is_project(&self) -> bool {
+    //     !self.is_endpoint() && !self.is_branch()
+    // }
+    pub(crate) fn as_branch(&self) -> BranchId {
         BranchId(self.0.clone())
     }
-    pub fn as_project(&self) -> ProjectId {
+    pub(crate) fn as_project(&self) -> ProjectId {
         ProjectId(self.0.clone())
     }
 }

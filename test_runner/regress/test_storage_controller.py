@@ -21,13 +21,13 @@ from fixtures.neon_fixtures import (
     TokenScope,
     last_flush_lsn_upload,
 )
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
     enable_remote_storage_versioning,
     list_prefix,
+    many_small_layers_tenant_config,
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
@@ -41,6 +41,7 @@ from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
 from pytest_httpserver import HTTPServer
+from urllib3 import Retry
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
@@ -654,7 +655,7 @@ def test_storage_controller_s3_time_travel_recovery(
         tenant_id,
         shard_count=2,
         shard_stripe_size=8192,
-        tenant_config=MANY_SMALL_LAYERS_TENANT_CONFIG,
+        tenant_config=many_small_layers_tenant_config(),
     )
 
     # Check that the consistency check passes
@@ -2266,3 +2267,66 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
 
     # allow for small delay between actually having cancelled and being able reconfigure again
     wait_until(4, 0.5, reconfigure_node_again)
+
+
+def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder):
+    """
+    The storage controller is meant to handle the case where a timeline CRUD operation races
+    with a generation-incrementing change to the tenant: this should trigger a retry so that
+    the operation lands on the highest-generation'd tenant location.
+    """
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+    tenant_id = TenantId.generate()
+    env.storage_controller.tenant_create(tenant_id)
+
+    # Set up a failpoint so that a timeline creation will be very slow
+    failpoint = "timeline-creation-after-uninit"
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints((failpoint, "sleep(10000)"))
+
+    # Start a timeline creation in the background
+    create_timeline_id = TimelineId.generate()
+    futs = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=2 + len(env.pageservers) + len(env.safekeepers)
+    ) as executor:
+        futs.append(
+            executor.submit(
+                env.storage_controller.pageserver_api(
+                    retries=Retry(
+                        status=0,
+                        connect=0,  # Disable retries: we want to see the 503
+                    )
+                ).timeline_create,
+                PgVersion.NOT_SET,
+                tenant_id,
+                create_timeline_id,
+            )
+        )
+
+        def has_hit_failpoint():
+            assert any(
+                ps.log_contains(f"at failpoint {failpoint}") is not None for ps in env.pageservers
+            )
+
+        wait_until(10, 1, has_hit_failpoint)
+
+        # Migrate the tenant while the timeline creation is in progress: this migration will complete once it
+        # can detach from the old pageserver, which will happen once the failpoint completes.
+        env.storage_controller.tenant_shard_migrate(
+            TenantShardId(tenant_id, 0, 0), env.pageservers[1].id
+        )
+
+        with pytest.raises(PageserverApiException, match="Tenant attachment changed, please retry"):
+            futs[0].result(timeout=20)
+
+    # Timeline creation should work when there isn't a concurrent migration, even though it's
+    # slow (our failpoint is still enabled)
+    env.storage_controller.pageserver_api(
+        retries=Retry(
+            status=0,
+            connect=0,  # Disable retries: we want to see the 503
+        )
+    ).timeline_create(PgVersion.NOT_SET, tenant_id, create_timeline_id)

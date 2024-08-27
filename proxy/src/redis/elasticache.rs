@@ -51,7 +51,7 @@ impl CredentialsProvider {
             credentials_provider,
         }
     }
-    pub async fn provide_credentials(&self) -> anyhow::Result<(String, String)> {
+    pub(crate) async fn provide_credentials(&self) -> anyhow::Result<(String, String)> {
         let aws_credentials = self
             .credentials_provider
             .provide_credentials()

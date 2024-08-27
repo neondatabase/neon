@@ -550,9 +550,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		case 2:
 			pagestream_query = psprintf("pagestream_v2 %s %s", neon_tenant, neon_timeline);
 			break;
-		case 1:
-			pagestream_query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
-			break;
 		default:
 			elog(ERROR, "unexpected neon_protocol_version %d", neon_protocol_version);
 		}
@@ -1063,7 +1060,7 @@ pg_init_libpagestore(void)
 							NULL,
 							&neon_protocol_version,
 							2, /* use protocol version 2 */
-							1, /* min */
+							2, /* min */
 							2, /* max */
 							PGC_SU_BACKEND,
 							0,	/* no flags required */

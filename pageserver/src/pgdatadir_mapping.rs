@@ -726,7 +726,17 @@ impl Timeline {
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         let current_policy = self.last_aux_file_policy.load();
         match current_policy {
-            Some(AuxFilePolicy::V1) | None => self.list_aux_files_v1(lsn, ctx).await,
+            Some(AuxFilePolicy::V1) => {
+                warn!("this timeline is using deprecated aux file policy V1 (policy=V1)");
+                self.list_aux_files_v1(lsn, ctx).await
+            }
+            None => {
+                let res = self.list_aux_files_v1(lsn, ctx).await?;
+                if !res.is_empty() {
+                    warn!("this timeline is using deprecated aux file policy V1 (policy=None)");
+                }
+                Ok(res)
+            }
             Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
             Some(AuxFilePolicy::CrossValidation) => {
                 let v1_result = self.list_aux_files_v1(lsn, ctx).await;
@@ -1587,6 +1597,7 @@ impl<'a> DatadirModification<'a> {
                 if aux_files_key_v1.is_empty() {
                     None
                 } else {
+                    warn!("this timeline is using deprecated aux file policy V1");
                     self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
                     Some(AuxFilePolicy::V1)
                 }
@@ -2048,7 +2059,7 @@ mod tests {
 
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         let tline = tline.raw_timeline().unwrap();
 
