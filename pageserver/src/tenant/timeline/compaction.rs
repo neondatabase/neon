@@ -1809,7 +1809,6 @@ impl Timeline {
             .unwrap();
         // We don't want any of the produced layers to cover the full key range (i.e., MIN..MAX) b/c it will then be recognized
         // as an L0 layer.
-        let hack_end_key = Key::NON_L0_MAX;
         let mut delta_layers = Vec::new();
         let mut image_layers = Vec::new();
         let mut downloaded_layers = Vec::new();
@@ -1855,7 +1854,6 @@ impl Timeline {
             self.conf,
             self.timeline_id,
             self.tenant_shard_id,
-            Key::MIN,
             lowest_retain_lsn..end_lsn,
             self.get_compaction_target_size(),
             ctx,
@@ -1965,7 +1963,7 @@ impl Timeline {
         let produced_image_layers = if let Some(writer) = image_layer_writer {
             if !dry_run {
                 writer
-                    .finish_with_discard_fn(self, ctx, hack_end_key, discard)
+                    .finish_with_discard_fn(self, ctx, Key::MAX, discard)
                     .await?
             } else {
                 let (layers, _) = writer.take()?;
@@ -1978,7 +1976,7 @@ impl Timeline {
 
         let produced_delta_layers = if !dry_run {
             delta_layer_writer
-                .finish_with_discard_fn(self, ctx, hack_end_key, discard)
+                .finish_with_discard_fn(self, ctx, discard)
                 .await?
         } else {
             let (layers, _) = delta_layer_writer.take()?;

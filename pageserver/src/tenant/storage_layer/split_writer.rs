@@ -204,7 +204,7 @@ impl SplitImageLayerWriter {
 /// will split them into multiple files based on size.
 #[must_use]
 pub struct SplitDeltaLayerWriter {
-    inner: DeltaLayerWriter,
+    inner: Option<(Key, DeltaLayerWriter)>,
     target_layer_size: u64,
     generated_layers: Vec<SplitWriterResult>,
     conf: &'static PageServerConf,
@@ -212,7 +212,6 @@ pub struct SplitDeltaLayerWriter {
     tenant_shard_id: TenantShardId,
     lsn_range: Range<Lsn>,
     last_key_written: Key,
-    start_key: Key,
 }
 
 impl SplitDeltaLayerWriter {
@@ -220,29 +219,19 @@ impl SplitDeltaLayerWriter {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_shard_id: TenantShardId,
-        start_key: Key,
         lsn_range: Range<Lsn>,
         target_layer_size: u64,
-        ctx: &RequestContext,
+        #[allow(unused)] ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             target_layer_size,
-            inner: DeltaLayerWriter::new(
-                conf,
-                timeline_id,
-                tenant_shard_id,
-                start_key,
-                lsn_range.clone(),
-                ctx,
-            )
-            .await?,
+            inner: None,
             generated_layers: Vec::new(),
             conf,
             timeline_id,
             tenant_shard_id,
             lsn_range,
             last_key_written: Key::MIN,
-            start_key,
         })
     }
 
@@ -265,9 +254,26 @@ impl SplitDeltaLayerWriter {
         //
         // Also, keep all updates of a single key in a single file. TODO: split them using the legacy compaction
         // strategy. https://github.com/neondatabase/neon/issues/8837
+
+        if self.inner.is_none() {
+            self.inner = Some((
+                key,
+                DeltaLayerWriter::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_shard_id,
+                    key,
+                    self.lsn_range.clone(),
+                    ctx,
+                )
+                .await?,
+            ));
+        }
+        let (_, inner) = self.inner.as_mut().unwrap();
+
         let addition_size_estimation = KEY_SIZE as u64 + 8 /* LSN u64 size */ + 80 /* value size estimation */;
-        if self.inner.num_keys() >= 1
-            && self.inner.estimated_size() + addition_size_estimation >= self.target_layer_size
+        if inner.num_keys() >= 1
+            && inner.estimated_size() + addition_size_estimation >= self.target_layer_size
         {
             if key != self.last_key_written {
                 let next_delta_writer = DeltaLayerWriter::new(
@@ -279,13 +285,13 @@ impl SplitDeltaLayerWriter {
                     ctx,
                 )
                 .await?;
-                let prev_delta_writer = std::mem::replace(&mut self.inner, next_delta_writer);
+                let (start_key, prev_delta_writer) =
+                    std::mem::replace(&mut self.inner, Some((key, next_delta_writer))).unwrap();
                 let layer_key = PersistentLayerKey {
-                    key_range: self.start_key..key,
+                    key_range: start_key..key,
                     lsn_range: self.lsn_range.clone(),
                     is_delta: true,
                 };
-                self.start_key = key;
                 if discard(&layer_key).await {
                     drop(prev_delta_writer);
                     self.generated_layers
@@ -296,17 +302,18 @@ impl SplitDeltaLayerWriter {
                     self.generated_layers
                         .push(SplitWriterResult::Produced(delta_layer));
                 }
-            } else if self.inner.estimated_size() >= S3_UPLOAD_LIMIT {
+            } else if inner.estimated_size() >= S3_UPLOAD_LIMIT {
                 // We have to produce a very large file b/c a key is updated too often.
                 anyhow::bail!(
                     "a single key is updated too often: key={}, estimated_size={}, and the layer file cannot be produced",
                     key,
-                    self.inner.estimated_size()
+                    inner.estimated_size()
                 );
             }
         }
         self.last_key_written = key;
-        self.inner.put_value(key, lsn, val, ctx).await
+        let (_, inner) = self.inner.as_mut().unwrap();
+        inner.put_value(key, lsn, val, ctx).await
     }
 
     pub async fn put_value(
@@ -325,7 +332,6 @@ impl SplitDeltaLayerWriter {
         self,
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
-        end_key: Key,
         discard: D,
     ) -> anyhow::Result<Vec<SplitWriterResult>>
     where
@@ -337,11 +343,15 @@ impl SplitDeltaLayerWriter {
             inner,
             ..
         } = self;
+        let Some((start_key, inner)) = inner else {
+            return Ok(generated_layers);
+        };
         if inner.num_keys() == 0 {
             return Ok(generated_layers);
         }
+        let end_key = self.last_key_written.next();
         let layer_key = PersistentLayerKey {
-            key_range: self.start_key..end_key,
+            key_range: start_key..end_key,
             lsn_range: self.lsn_range.clone(),
             is_delta: true,
         };
@@ -360,15 +370,14 @@ impl SplitDeltaLayerWriter {
         self,
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
-        end_key: Key,
     ) -> anyhow::Result<Vec<SplitWriterResult>> {
-        self.finish_with_discard_fn(tline, ctx, end_key, |_| async { false })
+        self.finish_with_discard_fn(tline, ctx, |_| async { false })
             .await
     }
 
     /// When split writer fails, the caller should call this function and handle partially generated layers.
-    pub(crate) fn take(self) -> anyhow::Result<(Vec<SplitWriterResult>, DeltaLayerWriter)> {
-        Ok((self.generated_layers, self.inner))
+    pub(crate) fn take(self) -> anyhow::Result<(Vec<SplitWriterResult>, Option<DeltaLayerWriter>)> {
+        Ok((self.generated_layers, self.inner.map(|x| x.1)))
     }
 }
 
@@ -432,7 +441,6 @@ mod tests {
             tenant.conf,
             tline.timeline_id,
             tenant.tenant_shard_id,
-            get_key(0),
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
             &ctx,
@@ -460,11 +468,22 @@ mod tests {
             )
             .await
             .unwrap();
-        let layers = delta_writer
-            .finish(&tline, &ctx, get_key(10))
-            .await
-            .unwrap();
+        let layers = delta_writer.finish(&tline, &ctx).await.unwrap();
         assert_eq!(layers.len(), 1);
+        assert_eq!(
+            layers
+                .into_iter()
+                .next()
+                .unwrap()
+                .into_resident_layer()
+                .layer_desc()
+                .key(),
+            PersistentLayerKey {
+                key_range: get_key(0)..get_key(1),
+                lsn_range: Lsn(0x18)..Lsn(0x20),
+                is_delta: true
+            }
+        );
     }
 
     #[tokio::test]
@@ -501,7 +520,6 @@ mod tests {
             tenant.conf,
             tline.timeline_id,
             tenant.tenant_shard_id,
-            get_key(0),
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
             &ctx,
@@ -533,10 +551,7 @@ mod tests {
             .finish(&tline, &ctx, get_key(N as u32))
             .await
             .unwrap();
-        let delta_layers = delta_writer
-            .finish(&tline, &ctx, get_key(N as u32))
-            .await
-            .unwrap();
+        let delta_layers = delta_writer.finish(&tline, &ctx).await.unwrap();
         if discard {
             for layer in image_layers {
                 layer.into_discarded_layer();
@@ -555,6 +570,14 @@ mod tests {
                 .collect_vec();
             assert_eq!(image_layers.len(), N / 512 + 1);
             assert_eq!(delta_layers.len(), N / 512 + 1);
+            assert_eq!(
+                delta_layers.first().unwrap().layer_desc().key_range.start,
+                get_key(0)
+            );
+            assert_eq!(
+                delta_layers.last().unwrap().layer_desc().key_range.end,
+                get_key(N as u32)
+            );
             for idx in 0..image_layers.len() {
                 assert_ne!(image_layers[idx].layer_desc().key_range.start, Key::MIN);
                 assert_ne!(image_layers[idx].layer_desc().key_range.end, Key::MAX);
@@ -602,7 +625,6 @@ mod tests {
             tenant.conf,
             tline.timeline_id,
             tenant.tenant_shard_id,
-            get_key(0),
             Lsn(0x18)..Lsn(0x20),
             4 * 1024,
             &ctx,
@@ -644,11 +666,35 @@ mod tests {
             )
             .await
             .unwrap();
-        let layers = delta_writer
-            .finish(&tline, &ctx, get_key(10))
-            .await
-            .unwrap();
+        let layers = delta_writer.finish(&tline, &ctx).await.unwrap();
         assert_eq!(layers.len(), 2);
+        let mut layers_iter = layers.into_iter();
+        assert_eq!(
+            layers_iter
+                .next()
+                .unwrap()
+                .into_resident_layer()
+                .layer_desc()
+                .key(),
+            PersistentLayerKey {
+                key_range: get_key(0)..get_key(1),
+                lsn_range: Lsn(0x18)..Lsn(0x20),
+                is_delta: true
+            }
+        );
+        assert_eq!(
+            layers_iter
+                .next()
+                .unwrap()
+                .into_resident_layer()
+                .layer_desc()
+                .key(),
+            PersistentLayerKey {
+                key_range: get_key(1)..get_key(2),
+                lsn_range: Lsn(0x18)..Lsn(0x20),
+                is_delta: true
+            }
+        );
     }
 
     #[tokio::test]
@@ -668,7 +714,6 @@ mod tests {
             tenant.conf,
             tline.timeline_id,
             tenant.tenant_shard_id,
-            get_key(0),
             Lsn(0x10)..Lsn(N as u64 * 16 + 0x10),
             4 * 1024 * 1024,
             &ctx,
@@ -689,10 +734,20 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let delta_layers = delta_writer
-            .finish(&tline, &ctx, get_key(N as u32))
-            .await
-            .unwrap();
+        let delta_layers = delta_writer.finish(&tline, &ctx).await.unwrap();
         assert_eq!(delta_layers.len(), 1);
+        let delta_layer = delta_layers
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_resident_layer();
+        assert_eq!(
+            delta_layer.layer_desc().key(),
+            PersistentLayerKey {
+                key_range: get_key(0)..get_key(1),
+                lsn_range: Lsn(0x10)..Lsn(N as u64 * 16 + 0x10),
+                is_delta: true
+            }
+        );
     }
 }
