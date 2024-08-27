@@ -475,7 +475,6 @@ class NeonEnvBuilder:
         test_name: str,
         top_output_dir: Path,
         test_output_dir: Path,
-        pageserver_io_buffer_alignment: int,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
         # toml that will be decomposed into `--config-override` flags during `pageserver --init`
@@ -497,6 +496,7 @@ class NeonEnvBuilder:
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
         storage_controller_port_override: Optional[int] = None,
+        pageserver_io_buffer_alignment: Optional[int] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -1431,7 +1431,7 @@ def _shared_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
-    pageserver_io_buffer_alignment: int,
+    pageserver_io_buffer_alignment: Optional[int],
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1507,7 +1507,7 @@ def neon_env_builder(
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
     record_property: Callable[[str, object], None],
-    pageserver_io_buffer_alignment: int,
+    pageserver_io_buffer_alignment: Optional[int],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.

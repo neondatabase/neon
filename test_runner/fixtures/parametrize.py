@@ -35,8 +35,8 @@ def pageserver_virtual_file_io_engine() -> Optional[str]:
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_io_buffer_alignment() -> Optional[str]:
-    return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")
+def pageserver_io_buffer_alignment() -> Optional[int]:
+    return None
 
 
 @pytest.fixture(scope="function", autouse=True)
