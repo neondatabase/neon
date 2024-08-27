@@ -1173,14 +1173,14 @@ fn get_open_files() -> &'static OpenFiles {
 
 static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_ALIGNMENT);
 
-/// Returns true if `x` is a power of two or 0.
-fn is_power_of_two_or_zero(x: usize) -> bool {
-    (x & (x - 1)) == 0
+/// Returns true if `x` is zero or a power of two.
+fn is_zero_or_power_of_two(x: usize) -> bool {
+    (x == 0) || ((x & (x - 1)) == 0)
 }
 
 #[allow(unused)]
 pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
-    if is_power_of_two_or_zero(align) {
+    if is_zero_or_power_of_two(align) {
         IO_BUFFER_ALIGNMENT.store(align, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     } else {
@@ -1189,14 +1189,16 @@ pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
 }
 
 /// Gets the io buffer alignment requirement. Returns 0 if there is no requirement specified.
-pub(crate) fn get_io_buffer_alignment() -> usize {
+///
+/// This function should be used to check the raw config value.
+pub(crate) fn get_io_buffer_alignment_raw() -> usize {
     let align = IO_BUFFER_ALIGNMENT.load(std::sync::atomic::Ordering::Relaxed);
 
     if cfg!(test) {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
         if align == DEFAULT_IO_BUFFER_ALIGNMENT {
             if let Some(test_align) = utils::env::var(env_var_name) {
-                if is_power_of_two_or_zero(test_align) {
+                if is_zero_or_power_of_two(test_align) {
                     test_align
                 } else {
                     panic!("IO buffer alignment ({test_align}) is not a power of two");
@@ -1207,6 +1209,18 @@ pub(crate) fn get_io_buffer_alignment() -> usize {
         } else {
             align
         }
+    } else {
+        align
+    }
+}
+
+/// Gets the io buffer alignment requirement. Returns 1 if the alignment config is set to zero.
+///
+/// This function should be used for getting the actual alignment value to use.
+pub(crate) fn get_io_buffer_alignment() -> usize {
+    let align = get_io_buffer_alignment_raw();
+    if align == DEFAULT_IO_BUFFER_ALIGNMENT {
+        1
     } else {
         align
     }

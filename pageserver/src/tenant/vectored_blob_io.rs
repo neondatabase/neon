@@ -90,7 +90,7 @@ impl VectoredReadCoalesceMode {
     /// [`AdjacentVectoredReadBuilder`] is used if alignment requirement is 0,
     /// whereas [`ChunkedVectoredReadBuilder`] is used for alignment requirement 1 and higher.
     pub(crate) fn get() -> Self {
-        let align = virtual_file::get_io_buffer_alignment();
+        let align = virtual_file::get_io_buffer_alignment_raw();
         if align == DEFAULT_IO_BUFFER_ALIGNMENT {
             VectoredReadCoalesceMode::AdjacentOnly
         } else {
