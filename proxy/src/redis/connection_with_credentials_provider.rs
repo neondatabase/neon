@@ -81,7 +81,7 @@ impl ConnectionWithCredentialsProvider {
         redis::cmd("PING").query_async(con).await
     }
 
-    pub async fn connect(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn connect(&mut self) -> anyhow::Result<()> {
         let _guard = self.mutex.lock().await;
         if let Some(con) = self.con.as_mut() {
             match Self::ping(con).await {
@@ -149,7 +149,7 @@ impl ConnectionWithCredentialsProvider {
 
     // PubSub does not support credentials refresh.
     // Requires manual reconnection every 12h.
-    pub async fn get_async_pubsub(&self) -> anyhow::Result<redis::aio::PubSub> {
+    pub(crate) async fn get_async_pubsub(&self) -> anyhow::Result<redis::aio::PubSub> {
         Ok(self.get_client().await?.get_async_pubsub().await?)
     }
 
@@ -187,7 +187,10 @@ impl ConnectionWithCredentialsProvider {
     }
     /// Sends an already encoded (packed) command into the TCP socket and
     /// reads the single response from it.
-    pub async fn send_packed_command(&mut self, cmd: &redis::Cmd) -> RedisResult<redis::Value> {
+    pub(crate) async fn send_packed_command(
+        &mut self,
+        cmd: &redis::Cmd,
+    ) -> RedisResult<redis::Value> {
         // Clone connection to avoid having to lock the ArcSwap in write mode
         let con = self.con.as_mut().ok_or(redis::RedisError::from((
             redis::ErrorKind::IoError,
@@ -199,7 +202,7 @@ impl ConnectionWithCredentialsProvider {
     /// Sends multiple already encoded (packed) command into the TCP socket
     /// and reads `count` responses from it.  This is used to implement
     /// pipelining.
-    pub async fn send_packed_commands(
+    pub(crate) async fn send_packed_commands(
         &mut self,
         cmd: &redis::Pipeline,
         offset: usize,

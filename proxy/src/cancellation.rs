@@ -18,7 +18,7 @@ use crate::{
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
 pub type CancellationHandlerMain = CancellationHandler<Option<Arc<Mutex<RedisPublisherClient>>>>;
-pub type CancellationHandlerMainInternal = Option<Arc<Mutex<RedisPublisherClient>>>;
+pub(crate) type CancellationHandlerMainInternal = Option<Arc<Mutex<RedisPublisherClient>>>;
 
 /// Enables serving `CancelRequest`s.
 ///
@@ -32,7 +32,7 @@ pub struct CancellationHandler<P> {
 }
 
 #[derive(Debug, Error)]
-pub enum CancelError {
+pub(crate) enum CancelError {
     #[error("{0}")]
     IO(#[from] std::io::Error),
     #[error("{0}")]
@@ -53,7 +53,7 @@ impl ReportableError for CancelError {
 
 impl<P: CancellationPublisher> CancellationHandler<P> {
     /// Run async action within an ephemeral session identified by [`CancelKeyData`].
-    pub fn get_session(self: Arc<Self>) -> Session<P> {
+    pub(crate) fn get_session(self: Arc<Self>) -> Session<P> {
         // HACK: We'd rather get the real backend_pid but tokio_postgres doesn't
         // expose it and we don't want to do another roundtrip to query
         // for it. The client will be able to notice that this is not the
@@ -81,7 +81,7 @@ impl<P: CancellationPublisher> CancellationHandler<P> {
     }
     /// Try to cancel a running query for the corresponding connection.
     /// If the cancellation key is not found, it will be published to Redis.
-    pub async fn cancel_session(
+    pub(crate) async fn cancel_session(
         &self,
         key: CancelKeyData,
         session_id: Uuid,
@@ -155,14 +155,14 @@ pub struct CancelClosure {
 }
 
 impl CancelClosure {
-    pub fn new(socket_addr: SocketAddr, cancel_token: CancelToken) -> Self {
+    pub(crate) fn new(socket_addr: SocketAddr, cancel_token: CancelToken) -> Self {
         Self {
             socket_addr,
             cancel_token,
         }
     }
     /// Cancels the query running on user's compute node.
-    pub async fn try_cancel_query(self) -> Result<(), CancelError> {
+    pub(crate) async fn try_cancel_query(self) -> Result<(), CancelError> {
         let socket = TcpStream::connect(self.socket_addr).await?;
         self.cancel_token.cancel_query_raw(socket, NoTls).await?;
         info!("query was cancelled");
@@ -171,7 +171,7 @@ impl CancelClosure {
 }
 
 /// Helper for registering query cancellation tokens.
-pub struct Session<P> {
+pub(crate) struct Session<P> {
     /// The user-facing key identifying this session.
     key: CancelKeyData,
     /// The [`CancelMap`] this session belongs to.
@@ -181,7 +181,7 @@ pub struct Session<P> {
 impl<P> Session<P> {
     /// Store the cancel token for the given session.
     /// This enables query cancellation in `crate::proxy::prepare_client_connection`.
-    pub fn enable_query_cancellation(&self, cancel_closure: CancelClosure) -> CancelKeyData {
+    pub(crate) fn enable_query_cancellation(&self, cancel_closure: CancelClosure) -> CancelKeyData {
         info!("enabling query cancellation for this session");
         self.cancellation_handler
             .map

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ipnet::{Ipv4Net, Ipv6Net};
-pub use link::LinkAuthError;
+pub(crate) use link::LinkAuthError;
 use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
@@ -74,12 +74,12 @@ pub enum BackendType<'a, T, D> {
     Local(MaybeOwned<'a, LocalBackend>),
 }
 
-pub trait TestBackend: Send + Sync + 'static {
+#[cfg(test)]
+pub(crate) trait TestBackend: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
-    fn get_role_secret(&self) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for BackendType<'_, (), ()> {
@@ -105,7 +105,7 @@ impl std::fmt::Display for BackendType<'_, (), ()> {
 impl<T, D> BackendType<'_, T, D> {
     /// Very similar to [`std::option::Option::as_ref`].
     /// This helps us pass structured config to async tasks.
-    pub fn as_ref(&self) -> BackendType<'_, &T, &D> {
+    pub(crate) fn as_ref(&self) -> BackendType<'_, &T, &D> {
         match self {
             Self::Console(c, x) => BackendType::Console(MaybeOwned::Borrowed(c), x),
             Self::Link(c, x) => BackendType::Link(MaybeOwned::Borrowed(c), x),
@@ -118,7 +118,7 @@ impl<'a, T, D> BackendType<'a, T, D> {
     /// Very similar to [`std::option::Option::map`].
     /// Maps [`BackendType<T>`] to [`BackendType<R>`] by applying
     /// a function to a contained value.
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<'a, R, D> {
+    pub(crate) fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<'a, R, D> {
         match self {
             Self::Console(c, x) => BackendType::Console(c, f(x)),
             Self::Link(c, x) => BackendType::Link(c, x),
@@ -129,7 +129,7 @@ impl<'a, T, D> BackendType<'a, T, D> {
 impl<'a, T, D, E> BackendType<'a, Result<T, E>, D> {
     /// Very similar to [`std::option::Option::transpose`].
     /// This is most useful for error handling.
-    pub fn transpose(self) -> Result<BackendType<'a, T, D>, E> {
+    pub(crate) fn transpose(self) -> Result<BackendType<'a, T, D>, E> {
         match self {
             Self::Console(c, x) => x.map(|x| BackendType::Console(c, x)),
             Self::Link(c, x) => Ok(BackendType::Link(c, x)),
@@ -138,31 +138,31 @@ impl<'a, T, D, E> BackendType<'a, Result<T, E>, D> {
     }
 }
 
-pub struct ComputeCredentials {
-    pub info: ComputeUserInfo,
-    pub keys: ComputeCredentialKeys,
+pub(crate) struct ComputeCredentials {
+    pub(crate) info: ComputeUserInfo,
+    pub(crate) keys: ComputeCredentialKeys,
 }
 
 #[derive(Debug, Clone)]
-pub struct ComputeUserInfoNoEndpoint {
-    pub user: RoleName,
-    pub options: NeonOptions,
+pub(crate) struct ComputeUserInfoNoEndpoint {
+    pub(crate) user: RoleName,
+    pub(crate) options: NeonOptions,
 }
 
 #[derive(Debug, Clone)]
-pub struct ComputeUserInfo {
-    pub endpoint: EndpointId,
-    pub user: RoleName,
-    pub options: NeonOptions,
+pub(crate) struct ComputeUserInfo {
+    pub(crate) endpoint: EndpointId,
+    pub(crate) user: RoleName,
+    pub(crate) options: NeonOptions,
 }
 
 impl ComputeUserInfo {
-    pub fn endpoint_cache_key(&self) -> EndpointCacheKey {
+    pub(crate) fn endpoint_cache_key(&self) -> EndpointCacheKey {
         self.options.get_cache_key(&self.endpoint)
     }
 }
 
-pub enum ComputeCredentialKeys {
+pub(crate) enum ComputeCredentialKeys {
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
     None,
@@ -222,7 +222,7 @@ impl RateBucketInfo {
 }
 
 impl AuthenticationConfig {
-    pub fn check_rate_limit(
+    pub(crate) fn check_rate_limit(
         &self,
         ctx: &RequestMonitoring,
         config: &AuthenticationConfig,
@@ -404,17 +404,8 @@ async fn authenticate_with_secret(
 }
 
 impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
-    /// Get compute endpoint name from the credentials.
-    pub fn get_endpoint(&self) -> Option<EndpointId> {
-        match self {
-            Self::Console(_, user_info) => user_info.endpoint_id.clone(),
-            Self::Link(_, ()) => Some("link".into()),
-            Self::Local(_) => Some("local".into()),
-        }
-    }
-
     /// Get username from the credentials.
-    pub fn get_user(&self) -> &str {
+    pub(crate) fn get_user(&self) -> &str {
         match self {
             Self::Console(_, user_info) => &user_info.user,
             Self::Link(_, ()) => "link",
@@ -424,7 +415,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
 
     /// Authenticate the client via the requested backend, possibly using credentials.
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
-    pub async fn authenticate(
+    pub(crate) async fn authenticate(
         self,
         ctx: &RequestMonitoring,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -471,7 +462,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
 }
 
 impl BackendType<'_, ComputeUserInfo, &()> {
-    pub async fn get_role_secret(
+    pub(crate) async fn get_role_secret(
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
@@ -482,7 +473,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
         }
     }
 
-    pub async fn get_allowed_ips_and_secret(
+    pub(crate) async fn get_allowed_ips_and_secret(
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {

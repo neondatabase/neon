@@ -12,22 +12,22 @@ use crate::RoleName;
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
 #[derive(Debug, Deserialize, Clone)]
-pub struct ConsoleError {
-    pub error: Box<str>,
+pub(crate) struct ConsoleError {
+    pub(crate) error: Box<str>,
     #[serde(skip)]
-    pub http_status_code: http::StatusCode,
-    pub status: Option<Status>,
+    pub(crate) http_status_code: http::StatusCode,
+    pub(crate) status: Option<Status>,
 }
 
 impl ConsoleError {
-    pub fn get_reason(&self) -> Reason {
+    pub(crate) fn get_reason(&self) -> Reason {
         self.status
             .as_ref()
             .and_then(|s| s.details.error_info.as_ref())
             .map_or(Reason::Unknown, |e| e.reason)
     }
 
-    pub fn get_user_facing_message(&self) -> String {
+    pub(crate) fn get_user_facing_message(&self) -> String {
         use super::provider::errors::REQUEST_FAILED;
         self.status
             .as_ref()
@@ -88,27 +88,28 @@ impl CouldRetry for ConsoleError {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Status {
-    pub code: Box<str>,
-    pub message: Box<str>,
-    pub details: Details,
+#[allow(dead_code)]
+pub(crate) struct Status {
+    pub(crate) code: Box<str>,
+    pub(crate) message: Box<str>,
+    pub(crate) details: Details,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Details {
-    pub error_info: Option<ErrorInfo>,
-    pub retry_info: Option<RetryInfo>,
-    pub user_facing_message: Option<UserFacingMessage>,
+pub(crate) struct Details {
+    pub(crate) error_info: Option<ErrorInfo>,
+    pub(crate) retry_info: Option<RetryInfo>,
+    pub(crate) user_facing_message: Option<UserFacingMessage>,
 }
 
 #[derive(Copy, Clone, Debug, Deserialize)]
-pub struct ErrorInfo {
-    pub reason: Reason,
+pub(crate) struct ErrorInfo {
+    pub(crate) reason: Reason,
     // Schema could also have `metadata` field, but it's not structured. Skip it for now.
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Default)]
-pub enum Reason {
+pub(crate) enum Reason {
     /// RoleProtected indicates that the role is protected and the attempted operation is not permitted on protected roles.
     #[serde(rename = "ROLE_PROTECTED")]
     RoleProtected,
@@ -168,7 +169,7 @@ pub enum Reason {
 }
 
 impl Reason {
-    pub fn is_not_found(&self) -> bool {
+    pub(crate) fn is_not_found(self) -> bool {
         matches!(
             self,
             Reason::ResourceNotFound
@@ -178,7 +179,7 @@ impl Reason {
         )
     }
 
-    pub fn can_retry(&self) -> bool {
+    pub(crate) fn can_retry(self) -> bool {
         match self {
             // do not retry role protected errors
             // not a transitive error
@@ -208,22 +209,23 @@ impl Reason {
 }
 
 #[derive(Copy, Clone, Debug, Deserialize)]
-pub struct RetryInfo {
-    pub retry_delay_ms: u64,
+#[allow(dead_code)]
+pub(crate) struct RetryInfo {
+    pub(crate) retry_delay_ms: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct UserFacingMessage {
-    pub message: Box<str>,
+pub(crate) struct UserFacingMessage {
+    pub(crate) message: Box<str>,
 }
 
 /// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].
 /// Returned by the `/proxy_get_role_secret` API method.
 #[derive(Deserialize)]
-pub struct GetRoleSecret {
-    pub role_secret: Box<str>,
-    pub allowed_ips: Option<Vec<IpPattern>>,
-    pub project_id: Option<ProjectIdInt>,
+pub(crate) struct GetRoleSecret {
+    pub(crate) role_secret: Box<str>,
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
+    pub(crate) project_id: Option<ProjectIdInt>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -236,21 +238,21 @@ impl fmt::Debug for GetRoleSecret {
 /// Response which holds compute node's `host:port` pair.
 /// Returned by the `/proxy_wake_compute` API method.
 #[derive(Debug, Deserialize)]
-pub struct WakeCompute {
-    pub address: Box<str>,
-    pub aux: MetricsAuxInfo,
+pub(crate) struct WakeCompute {
+    pub(crate) address: Box<str>,
+    pub(crate) aux: MetricsAuxInfo,
 }
 
 /// Async response which concludes the link auth flow.
 /// Also known as `kickResponse` in the console.
 #[derive(Debug, Deserialize)]
-pub struct KickSession<'a> {
+pub(crate) struct KickSession<'a> {
     /// Session ID is assigned by the proxy.
-    pub session_id: &'a str,
+    pub(crate) session_id: &'a str,
 
     /// Compute node connection params.
     #[serde(deserialize_with = "KickSession::parse_db_info")]
-    pub result: DatabaseInfo,
+    pub(crate) result: DatabaseInfo,
 }
 
 impl KickSession<'_> {
@@ -273,15 +275,15 @@ impl KickSession<'_> {
 
 /// Compute node connection params.
 #[derive(Deserialize)]
-pub struct DatabaseInfo {
-    pub host: Box<str>,
-    pub port: u16,
-    pub dbname: Box<str>,
-    pub user: Box<str>,
+pub(crate) struct DatabaseInfo {
+    pub(crate) host: Box<str>,
+    pub(crate) port: u16,
+    pub(crate) dbname: Box<str>,
+    pub(crate) user: Box<str>,
     /// Console always provides a password, but it might
     /// be inconvenient for debug with local PG instance.
-    pub password: Option<Box<str>>,
-    pub aux: MetricsAuxInfo,
+    pub(crate) password: Option<Box<str>>,
+    pub(crate) aux: MetricsAuxInfo,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -299,12 +301,12 @@ impl fmt::Debug for DatabaseInfo {
 /// Various labels for prometheus metrics.
 /// Also known as `ProxyMetricsAuxInfo` in the console.
 #[derive(Debug, Deserialize, Clone)]
-pub struct MetricsAuxInfo {
-    pub endpoint_id: EndpointIdInt,
-    pub project_id: ProjectIdInt,
-    pub branch_id: BranchIdInt,
+pub(crate) struct MetricsAuxInfo {
+    pub(crate) endpoint_id: EndpointIdInt,
+    pub(crate) project_id: ProjectIdInt,
+    pub(crate) branch_id: BranchIdInt,
     #[serde(default)]
-    pub cold_start_info: ColdStartInfo,
+    pub(crate) cold_start_info: ColdStartInfo,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, FixedCardinalityLabel)]
@@ -331,7 +333,7 @@ pub enum ColdStartInfo {
 }
 
 impl ColdStartInfo {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ColdStartInfo::Unknown => "unknown",
             ColdStartInfo::Warm => "warm",

@@ -18,7 +18,7 @@ use crate::{
 };
 
 #[derive(Error, Debug)]
-pub enum HandshakeError {
+pub(crate) enum HandshakeError {
     #[error("data is sent before server replied with EncryptionResponse")]
     EarlyData,
 
@@ -57,7 +57,7 @@ impl ReportableError for HandshakeError {
     }
 }
 
-pub enum HandshakeData<S> {
+pub(crate) enum HandshakeData<S> {
     Startup(PqStream<Stream<S>>, StartupMessageParams),
     Cancel(CancelKeyData),
 }
@@ -67,7 +67,7 @@ pub enum HandshakeData<S> {
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
-pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     ctx: &RequestMonitoring,
     stream: S,
     mut tls: Option<&TlsConfig>,

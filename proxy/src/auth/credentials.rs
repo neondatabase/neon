@@ -16,7 +16,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
-pub enum ComputeUserInfoParseError {
+pub(crate) enum ComputeUserInfoParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
@@ -51,20 +51,20 @@ impl ReportableError for ComputeUserInfoParseError {
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComputeUserInfoMaybeEndpoint {
-    pub user: RoleName,
-    pub endpoint_id: Option<EndpointId>,
-    pub options: NeonOptions,
+pub(crate) struct ComputeUserInfoMaybeEndpoint {
+    pub(crate) user: RoleName,
+    pub(crate) endpoint_id: Option<EndpointId>,
+    pub(crate) options: NeonOptions,
 }
 
 impl ComputeUserInfoMaybeEndpoint {
     #[inline]
-    pub fn endpoint(&self) -> Option<&str> {
+    pub(crate) fn endpoint(&self) -> Option<&str> {
         self.endpoint_id.as_deref()
     }
 }
 
-pub fn endpoint_sni(
+pub(crate) fn endpoint_sni(
     sni: &str,
     common_names: &HashSet<String>,
 ) -> Result<Option<EndpointId>, ComputeUserInfoParseError> {
@@ -83,7 +83,7 @@ pub fn endpoint_sni(
 }
 
 impl ComputeUserInfoMaybeEndpoint {
-    pub fn parse(
+    pub(crate) fn parse(
         ctx: &RequestMonitoring,
         params: &StartupMessageParams,
         sni: Option<&str>,
@@ -173,12 +173,12 @@ impl ComputeUserInfoMaybeEndpoint {
     }
 }
 
-pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
+pub(crate) fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
     ip_list.is_empty() || ip_list.iter().any(|pattern| check_ip(peer_addr, pattern))
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum IpPattern {
+pub(crate) enum IpPattern {
     Subnet(ipnet::IpNet),
     Range(IpAddr, IpAddr),
     Single(IpAddr),

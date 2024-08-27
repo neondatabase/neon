@@ -13,7 +13,7 @@ use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
-pub enum LinkAuthError {
+pub(crate) enum LinkAuthError {
     #[error(transparent)]
     WaiterRegister(#[from] waiters::RegisterError),
 
@@ -52,7 +52,7 @@ fn hello_message(redirect_uri: &reqwest::Url, session_id: &str) -> String {
     )
 }
 
-pub fn new_psql_session_id() -> String {
+pub(crate) fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
 }
 
