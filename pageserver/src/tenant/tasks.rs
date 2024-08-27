@@ -582,6 +582,8 @@ impl Iteration {
             kind,
         } = self;
 
+        let mut fut = std::pin::pin!(fut);
+
         // Wrap `fut` into a future that logs a message every `period` so that we get a
         // very obvious breadcrumb in the logs _while_ a slow iteration is happening.
         let liveness_logger = async move {
@@ -589,7 +591,6 @@ impl Iteration {
                 warn!("checked_add overflow");
                 return fut.await;
             };
-            let mut fut = std::pin::pin!(fut);
             loop {
                 match tokio::time::timeout_at(next_warn_at.into(), &mut fut).await {
                     Ok(x) => return x,
