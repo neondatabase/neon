@@ -243,7 +243,7 @@ pub(crate) struct WakeCompute {
     pub(crate) aux: MetricsAuxInfo,
 }
 
-/// Async response which concludes the link auth flow.
+/// Async response which concludes the web auth flow.
 /// Also known as `kickResponse` in the console.
 #[derive(Debug, Deserialize)]
 pub(crate) struct KickSession<'a> {

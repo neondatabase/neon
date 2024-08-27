@@ -105,13 +105,13 @@ impl PoolingBackend {
         jwt: &str,
     ) -> Result<ComputeCredentials, AuthError> {
         match &self.config.auth_backend {
-            crate::auth::BackendType::Console(_, ()) => {
+            crate::auth::Backend::Console(_, ()) => {
                 Err(AuthError::auth_failed("JWT login is not yet supported"))
             }
-            crate::auth::BackendType::Link(_, ()) => Err(AuthError::auth_failed(
-                "JWT login over link proxy is not supported",
+            crate::auth::Backend::Web(_, ()) => Err(AuthError::auth_failed(
+                "JWT login over web auth proxy is not supported",
             )),
-            crate::auth::BackendType::Local(cache) => {
+            crate::auth::Backend::Local(cache) => {
                 cache
                     .jwks_cache
                     .check_jwt(

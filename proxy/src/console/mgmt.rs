@@ -25,7 +25,7 @@ pub(crate) fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), wai
 }
 
 /// Console management API listener task.
-/// It spawns console response handlers needed for the link auth.
+/// It spawns console response handlers needed for the web auth.
 pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("mgmt has shut down");

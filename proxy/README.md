@@ -6,7 +6,7 @@ Proxy binary accepts `--auth-backend` CLI option, which determines auth scheme a
   new SCRAM-based console API; uses SNI info to select the destination project (endpoint soon)
 * postgres
   uses postgres to select auth secrets of existing roles. Useful for local testing
-* link
+* web (or link)
   sends login link for all usernames
 
 Also proxy can expose following services to the external world:
