@@ -60,11 +60,14 @@ use clap::{Parser, ValueEnum};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Clone, Debug, ValueEnum)]
-enum AuthBackend {
+enum AuthBackendType {
     Console,
     #[cfg(feature = "testing")]
     Postgres,
-    Link,
+    // clap only shows the name, not the alias, in usage text.
+    // TODO: swap name/alias and deprecate "link"
+    #[value(name("link"), alias("web"))]
+    Web,
 }
 
 /// Neon proxy/router
@@ -77,8 +80,8 @@ struct ProxyCliArgs {
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
-    #[clap(value_enum, long, default_value_t = AuthBackend::Link)]
-    auth_backend: AuthBackend,
+    #[clap(value_enum, long, default_value_t = AuthBackendType::Web)]
+    auth_backend: AuthBackendType,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
     mgmt: String,
@@ -88,7 +91,7 @@ struct ProxyCliArgs {
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
     wss: Option<String>,
-    /// redirect unauthenticated users to the given uri in case of link auth
+    /// redirect unauthenticated users to the given uri in case of web auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
     /// cloud API endpoint for authenticating users
@@ -470,7 +473,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::BackendType::Console(api, _) = &config.auth_backend {
+    if let auth::Backend::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
@@ -575,7 +578,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     }
 
     let auth_backend = match &args.auth_backend {
-        AuthBackend::Console => {
+        AuthBackendType::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
@@ -624,18 +627,18 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 wake_compute_endpoint_rate_limiter,
             );
             let api = console::provider::ConsoleBackend::Console(api);
-            auth::BackendType::Console(MaybeOwned::Owned(api), ())
+            auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
         #[cfg(feature = "testing")]
-        AuthBackend::Postgres => {
+        AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = console::provider::mock::Api::new(url);
             let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::BackendType::Console(MaybeOwned::Owned(api), ())
+            auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
-        AuthBackend::Link => {
+        AuthBackendType::Web => {
             let url = args.uri.parse()?;
-            auth::BackendType::Link(MaybeOwned::Owned(url), ())
+            auth::Backend::Web(MaybeOwned::Owned(url), ())
         }
     };
 

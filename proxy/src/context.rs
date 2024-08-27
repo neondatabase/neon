@@ -72,7 +72,7 @@ struct RequestMonitoringInner {
 
 #[derive(Clone, Debug)]
 pub(crate) enum AuthMethod {
-    // aka link aka passwordless
+    // aka passwordless, fka link
     Web,
     ScramSha256,
     ScramSha256Plus,

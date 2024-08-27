@@ -1,7 +1,7 @@
 //! Client authentication mechanisms.
 
 pub mod backend;
-pub use backend::BackendType;
+pub use backend::Backend;
 
 mod credentials;
 pub(crate) use credentials::{
@@ -31,7 +31,7 @@ pub(crate) type Result<T> = std::result::Result<T, AuthError>;
 #[derive(Debug, Error)]
 pub(crate) enum AuthErrorImpl {
     #[error(transparent)]
-    Link(#[from] backend::LinkAuthError),
+    Web(#[from] backend::WebAuthError),
 
     #[error(transparent)]
     GetAuthInfo(#[from] console::errors::GetAuthInfoError),
@@ -114,7 +114,7 @@ impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
 impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
         match self.0.as_ref() {
-            AuthErrorImpl::Link(e) => e.to_string_client(),
+            AuthErrorImpl::Web(e) => e.to_string_client(),
             AuthErrorImpl::GetAuthInfo(e) => e.to_string_client(),
             AuthErrorImpl::Sasl(e) => e.to_string_client(),
             AuthErrorImpl::AuthFailed(_) => self.to_string(),
@@ -132,7 +132,7 @@ impl UserFacingError for AuthError {
 impl ReportableError for AuthError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self.0.as_ref() {
-            AuthErrorImpl::Link(e) => e.get_error_kind(),
+            AuthErrorImpl::Web(e) => e.get_error_kind(),
             AuthErrorImpl::GetAuthInfo(e) => e.get_error_kind(),
             AuthErrorImpl::Sasl(e) => e.get_error_kind(),
             AuthErrorImpl::AuthFailed(_) => crate::error::ErrorKind::User,
