@@ -43,12 +43,12 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
 #[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
-pub struct Ids {
-    pub endpoint_id: EndpointIdInt,
-    pub branch_id: BranchIdInt,
+pub(crate) struct Ids {
+    pub(crate) endpoint_id: EndpointIdInt,
+    pub(crate) branch_id: BranchIdInt,
 }
 
-pub trait MetricCounterRecorder {
+pub(crate) trait MetricCounterRecorder {
     /// Record that some bytes were sent from the proxy to the client
     fn record_egress(&self, bytes: u64);
     /// Record that some connections were opened
@@ -92,7 +92,7 @@ impl MetricCounterReporter for MetricBackupCounter {
 }
 
 #[derive(Debug)]
-pub struct MetricCounter {
+pub(crate) struct MetricCounter {
     transmitted: AtomicU64,
     opened_connections: AtomicUsize,
     backup: Arc<MetricBackupCounter>,
@@ -173,14 +173,14 @@ impl<C: MetricCounterReporter> Clearable for C {
 type FastHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 #[derive(Default)]
-pub struct Metrics {
+pub(crate) struct Metrics {
     endpoints: DashMap<Ids, Arc<MetricCounter>, FastHasher>,
     backup_endpoints: DashMap<Ids, Arc<MetricBackupCounter>, FastHasher>,
 }
 
 impl Metrics {
     /// Register a new byte metrics counter for this endpoint
-    pub fn register(&self, ids: Ids) -> Arc<MetricCounter> {
+    pub(crate) fn register(&self, ids: Ids) -> Arc<MetricCounter> {
         let backup = if let Some(entry) = self.backup_endpoints.get(&ids) {
             entry.clone()
         } else {
@@ -215,7 +215,7 @@ impl Metrics {
     }
 }
 
-pub static USAGE_METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
+pub(crate) static USAGE_METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
 
 pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infallible> {
     info!("metrics collector config: {config:?}");

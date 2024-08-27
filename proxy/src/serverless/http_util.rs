@@ -11,7 +11,7 @@ use serde::Serialize;
 use utils::http::error::ApiError;
 
 /// Like [`ApiError::into_response`]
-pub fn api_error_into_response(this: ApiError) -> Response<Full<Bytes>> {
+pub(crate) fn api_error_into_response(this: ApiError) -> Response<Full<Bytes>> {
     match this {
         ApiError::BadRequest(err) => HttpErrorBody::response_from_msg_and_status(
             format!("{err:#?}"), // use debug printing so that we give the cause
@@ -59,7 +59,7 @@ pub fn api_error_into_response(this: ApiError) -> Response<Full<Bytes>> {
 /// Same as [`utils::http::error::HttpErrorBody`]
 #[derive(Serialize)]
 struct HttpErrorBody {
-    pub msg: String,
+    pub(crate) msg: String,
 }
 
 impl HttpErrorBody {
@@ -80,7 +80,7 @@ impl HttpErrorBody {
 }
 
 /// Same as [`utils::http::json::json_response`]
-pub fn json_response<T: Serialize>(
+pub(crate) fn json_response<T: Serialize>(
     status: StatusCode,
     data: T,
 ) -> Result<Response<Full<Bytes>>, ApiError> {

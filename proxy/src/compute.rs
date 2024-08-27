@@ -23,7 +23,7 @@ use tracing::{error, info, warn};
 const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
 #[derive(Debug, Error)]
-pub enum ConnectionError {
+pub(crate) enum ConnectionError {
     /// This error doesn't seem to reveal any secrets; for instance,
     /// `tokio_postgres::error::Kind` doesn't contain ip addresses and such.
     #[error("{COULD_NOT_CONNECT}: {0}")]
@@ -86,22 +86,22 @@ impl ReportableError for ConnectionError {
 }
 
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
-pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
+pub(crate) type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 
 /// A config for establishing a connection to compute node.
 /// Eventually, `tokio_postgres` will be replaced with something better.
 /// Newtype allows us to implement methods on top of it.
 #[derive(Clone, Default)]
-pub struct ConnCfg(Box<tokio_postgres::Config>);
+pub(crate) struct ConnCfg(Box<tokio_postgres::Config>);
 
 /// Creation and initialization routines.
 impl ConnCfg {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Reuse password or auth keys from the other config.
-    pub fn reuse_password(&mut self, other: Self) {
+    pub(crate) fn reuse_password(&mut self, other: Self) {
         if let Some(password) = other.get_password() {
             self.password(password);
         }
@@ -111,7 +111,7 @@ impl ConnCfg {
         }
     }
 
-    pub fn get_host(&self) -> Result<Host, WakeComputeError> {
+    pub(crate) fn get_host(&self) -> Result<Host, WakeComputeError> {
         match self.0.get_hosts() {
             [tokio_postgres::config::Host::Tcp(s)] => Ok(s.into()),
             // we should not have multiple address or unix addresses.
@@ -122,15 +122,15 @@ impl ConnCfg {
     }
 
     /// Apply startup message params to the connection config.
-    pub fn set_startup_params(&mut self, params: &StartupMessageParams) {
+    pub(crate) fn set_startup_params(&mut self, params: &StartupMessageParams) {
         // Only set `user` if it's not present in the config.
-        // Link auth flow takes username from the console's response.
+        // Web auth flow takes username from the console's response.
         if let (None, Some(user)) = (self.get_user(), params.get("user")) {
             self.user(user);
         }
 
         // Only set `dbname` if it's not present in the config.
-        // Link auth flow takes dbname from the console's response.
+        // Web auth flow takes dbname from the console's response.
         if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
             self.dbname(dbname);
         }
@@ -255,25 +255,25 @@ impl ConnCfg {
     }
 }
 
-pub struct PostgresConnection {
+pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
-    pub stream: tokio_postgres::maybe_tls_stream::MaybeTlsStream<
+    pub(crate) stream: tokio_postgres::maybe_tls_stream::MaybeTlsStream<
         tokio::net::TcpStream,
         tokio_postgres_rustls::RustlsStream<tokio::net::TcpStream>,
     >,
     /// PostgreSQL connection parameters.
-    pub params: std::collections::HashMap<String, String>,
+    pub(crate) params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
-    pub cancel_closure: CancelClosure,
+    pub(crate) cancel_closure: CancelClosure,
     /// Labels for proxy's metrics.
-    pub aux: MetricsAuxInfo,
+    pub(crate) aux: MetricsAuxInfo,
 
     _guage: NumDbConnectionsGuard<'static>,
 }
 
 impl ConnCfg {
     /// Connect to a corresponding compute node.
-    pub async fn connect(
+    pub(crate) async fn connect(
         &self,
         ctx: &RequestMonitoring,
         allow_self_signed_compute: bool,

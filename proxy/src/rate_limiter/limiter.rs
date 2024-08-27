@@ -17,13 +17,13 @@ use tracing::info;
 
 use crate::intern::EndpointIdInt;
 
-pub struct GlobalRateLimiter {
+pub(crate) struct GlobalRateLimiter {
     data: Vec<RateBucket>,
     info: Vec<RateBucketInfo>,
 }
 
 impl GlobalRateLimiter {
-    pub fn new(info: Vec<RateBucketInfo>) -> Self {
+    pub(crate) fn new(info: Vec<RateBucketInfo>) -> Self {
         Self {
             data: vec![
                 RateBucket {
@@ -37,7 +37,7 @@ impl GlobalRateLimiter {
     }
 
     /// Check that number of connections is below `max_rps` rps.
-    pub fn check(&mut self) -> bool {
+    pub(crate) fn check(&mut self) -> bool {
         let now = Instant::now();
 
         let should_allow_request = self
@@ -96,9 +96,9 @@ impl RateBucket {
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct RateBucketInfo {
-    pub interval: Duration,
+    pub(crate) interval: Duration,
     // requests per interval
-    pub max_rpi: u32,
+    pub(crate) max_rpi: u32,
 }
 
 impl std::fmt::Display for RateBucketInfo {
@@ -192,7 +192,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
-    pub fn check(&self, key: K, n: u32) -> bool {
+    pub(crate) fn check(&self, key: K, n: u32) -> bool {
         // do a partial GC every 2k requests. This cleans up ~ 1/64th of the map.
         // worst case memory usage is about:
         //    = 2 * 2048 * 64 * (48B + 72B)
@@ -228,7 +228,7 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
     /// Clean the map. Simple strategy: remove all entries in a random shard.
     /// At worst, we'll double the effective max_rps during the cleanup.
     /// But that way deletion does not aquire mutex on each entry access.
-    pub fn do_gc(&self) {
+    pub(crate) fn do_gc(&self) {
         info!(
             "cleaning up bucket rate limiter, current size = {}",
             self.map.len()

@@ -48,7 +48,7 @@ impl Api {
         Self { endpoint }
     }
 
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         self.endpoint.as_str()
     }
 

@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 
 use super::connect_compute::ComputeConnectBackend;
 
-pub async fn wake_compute<B: ComputeConnectBackend>(
+pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
     ctx: &RequestMonitoring,
     api: &B,

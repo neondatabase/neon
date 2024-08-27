@@ -11,14 +11,14 @@ use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
 use crate::config::{CertResolver, RetryConfig};
-use crate::console::caches::NodeInfoCache;
 use crate::console::messages::{ConsoleError, Details, MetricsAuxInfo, Status};
-use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
+use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend, NodeInfoCache};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
-use crate::{http, sasl, scram, BranchId, EndpointId, ProjectId};
+use crate::{sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
+use http::StatusCode;
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
 use rustls::pki_types;
@@ -491,7 +491,7 @@ impl TestBackend for TestConnectMechanism {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
                 let err = console::errors::ApiError::Console(ConsoleError {
-                    http_status_code: http::StatusCode::BAD_REQUEST,
+                    http_status_code: StatusCode::BAD_REQUEST,
                     error: "TEST".into(),
                     status: None,
                 });
@@ -500,7 +500,7 @@ impl TestBackend for TestConnectMechanism {
             }
             ConnectAction::WakeRetry => {
                 let err = console::errors::ApiError::Console(ConsoleError {
-                    http_status_code: http::StatusCode::BAD_REQUEST,
+                    http_status_code: StatusCode::BAD_REQUEST,
                     error: "TEST".into(),
                     status: Some(Status {
                         code: "error".into(),
@@ -525,9 +525,6 @@ impl TestBackend for TestConnectMechanism {
     {
         unimplemented!("not used in tests")
     }
-    fn get_role_secret(&self) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError> {
-        unimplemented!("not used in tests")
-    }
 }
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {
@@ -547,8 +544,8 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> auth::BackendType<'static, ComputeCredentials, &()> {
-    let user_info = auth::BackendType::Console(
+) -> auth::Backend<'static, ComputeCredentials, &()> {
+    let user_info = auth::Backend::Console(
         MaybeOwned::Owned(ConsoleBackend::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
             info: ComputeUserInfo {

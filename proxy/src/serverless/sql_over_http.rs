@@ -110,7 +110,7 @@ where
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ConnInfoError {
+pub(crate) enum ConnInfoError {
     #[error("invalid header: {0}")]
     InvalidHeader(&'static HeaderName),
     #[error("invalid connection string: {0}")]
@@ -246,7 +246,7 @@ fn get_conn_info(
 }
 
 // TODO: return different http error codes
-pub async fn handle(
+pub(crate) async fn handle(
     config: &'static ProxyConfig,
     ctx: RequestMonitoring,
     request: Request<Incoming>,
@@ -359,7 +359,7 @@ pub async fn handle(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SqlOverHttpError {
+pub(crate) enum SqlOverHttpError {
     #[error("{0}")]
     ReadPayload(#[from] ReadPayloadError),
     #[error("{0}")]
@@ -413,7 +413,7 @@ impl UserFacingError for SqlOverHttpError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadPayloadError {
+pub(crate) enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
     Read(#[from] hyper1::Error),
     #[error("could not parse the HTTP request body: {0}")]
@@ -430,7 +430,7 @@ impl ReportableError for ReadPayloadError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SqlOverHttpCancel {
+pub(crate) enum SqlOverHttpCancel {
     #[error("query was cancelled")]
     Postgres,
     #[error("query was cancelled while stuck trying to connect to the database")]

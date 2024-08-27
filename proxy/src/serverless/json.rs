@@ -8,7 +8,7 @@ use tokio_postgres::Row;
 // Convert json non-string types to strings, so that they can be passed to Postgres
 // as parameters.
 //
-pub fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
+pub(crate) fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
     json.iter().map(json_value_to_pg_text).collect()
 }
 
@@ -61,7 +61,7 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum JsonConversionError {
+pub(crate) enum JsonConversionError {
     #[error("internal error compute returned invalid data: {0}")]
     AsTextError(tokio_postgres::Error),
     #[error("parse int error: {0}")]
@@ -77,7 +77,7 @@ pub enum JsonConversionError {
 //
 // Convert postgres row with text-encoded values to JSON object
 //
-pub fn pg_text_row_to_json(
+pub(crate) fn pg_text_row_to_json(
     row: &Row,
     columns: &[Type],
     raw_output: bool,
