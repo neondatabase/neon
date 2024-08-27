@@ -23,7 +23,7 @@ use std::{hash::Hash, sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tracing::info;
 
-pub mod errors {
+pub(crate) mod errors {
     use crate::{
         console::messages::{self, ConsoleError, Reason},
         error::{io_error, ErrorKind, ReportableError, UserFacingError},
@@ -34,11 +34,11 @@ pub mod errors {
     use super::ApiLockError;
 
     /// A go-to error message which doesn't leak any detail.
-    pub const REQUEST_FAILED: &str = "Console request failed";
+    pub(crate) const REQUEST_FAILED: &str = "Console request failed";
 
     /// Common console API error.
     #[derive(Debug, Error)]
-    pub enum ApiError {
+    pub(crate) enum ApiError {
         /// Error returned by the console itself.
         #[error("{REQUEST_FAILED} with {0}")]
         Console(ConsoleError),
@@ -50,7 +50,7 @@ pub mod errors {
 
     impl ApiError {
         /// Returns HTTP status code if it's the reason for failure.
-        pub fn get_reason(&self) -> messages::Reason {
+        pub(crate) fn get_reason(&self) -> messages::Reason {
             match self {
                 ApiError::Console(e) => e.get_reason(),
                 ApiError::Transport(_) => messages::Reason::Unknown,
@@ -146,7 +146,7 @@ pub mod errors {
     }
 
     #[derive(Debug, Error)]
-    pub enum GetAuthInfoError {
+    pub(crate) enum GetAuthInfoError {
         // We shouldn't include the actual secret here.
         #[error("Console responded with a malformed auth secret")]
         BadSecret,
@@ -183,7 +183,7 @@ pub mod errors {
     }
 
     #[derive(Debug, Error)]
-    pub enum WakeComputeError {
+    pub(crate) enum WakeComputeError {
         #[error("Console responded with a malformed compute address: {0}")]
         BadComputeAddress(Box<str>),
 
@@ -247,7 +247,7 @@ pub mod errors {
 
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum AuthSecret {
+pub(crate) enum AuthSecret {
     #[cfg(any(test, feature = "testing"))]
     /// Md5 hash of user's password.
     Md5([u8; 16]),
@@ -257,32 +257,32 @@ pub enum AuthSecret {
 }
 
 #[derive(Default)]
-pub struct AuthInfo {
-    pub secret: Option<AuthSecret>,
+pub(crate) struct AuthInfo {
+    pub(crate) secret: Option<AuthSecret>,
     /// List of IP addresses allowed for the autorization.
-    pub allowed_ips: Vec<IpPattern>,
+    pub(crate) allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
-    pub project_id: Option<ProjectIdInt>,
+    pub(crate) project_id: Option<ProjectIdInt>,
 }
 
 /// Info for establishing a connection to a compute node.
 /// This is what we get after auth succeeded, but not before!
 #[derive(Clone)]
-pub struct NodeInfo {
+pub(crate) struct NodeInfo {
     /// Compute node connection params.
     /// It's sad that we have to clone this, but this will improve
     /// once we migrate to a bespoke connection logic.
-    pub config: compute::ConnCfg,
+    pub(crate) config: compute::ConnCfg,
 
     /// Labels for proxy's metrics.
-    pub aux: MetricsAuxInfo,
+    pub(crate) aux: MetricsAuxInfo,
 
     /// Whether we should accept self-signed certificates (for testing)
-    pub allow_self_signed_compute: bool,
+    pub(crate) allow_self_signed_compute: bool,
 }
 
 impl NodeInfo {
-    pub async fn connect(
+    pub(crate) async fn connect(
         &self,
         ctx: &RequestMonitoring,
         timeout: Duration,
@@ -296,12 +296,12 @@ impl NodeInfo {
             )
             .await
     }
-    pub fn reuse_settings(&mut self, other: Self) {
+    pub(crate) fn reuse_settings(&mut self, other: Self) {
         self.allow_self_signed_compute = other.allow_self_signed_compute;
         self.config.reuse_password(other.config);
     }
 
-    pub fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
+    pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
         match keys {
             ComputeCredentialKeys::Password(password) => self.config.password(password),
             ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
@@ -310,10 +310,10 @@ impl NodeInfo {
     }
 }
 
-pub type NodeInfoCache = TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ConsoleError>>>;
-pub type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
-pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
-pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
+pub(crate) type NodeInfoCache = TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ConsoleError>>>;
+pub(crate) type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
+pub(crate) type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
+pub(crate) type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
@@ -350,6 +350,7 @@ pub enum ConsoleBackend {
     Postgres(mock::Api),
     /// Internal testing
     #[cfg(test)]
+    #[allow(private_interfaces)]
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
@@ -402,7 +403,7 @@ impl Api for ConsoleBackend {
 /// Various caches for [`console`](super).
 pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
-    pub node_info: NodeInfoCache,
+    pub(crate) node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
     pub project_info: Arc<ProjectInfoCacheImpl>,
     /// List of all valid endpoints.
@@ -439,7 +440,7 @@ pub struct ApiLocks<K> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ApiLockError {
+pub(crate) enum ApiLockError {
     #[error("timeout acquiring resource permit")]
     TimeoutError(#[from] tokio::time::error::Elapsed),
 }
@@ -471,7 +472,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         })
     }
 
-    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
+    pub(crate) async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
         if self.config.initial_limit == 0 {
             return Ok(WakeComputePermit {
                 permit: Token::disabled(),
@@ -531,18 +532,18 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
     }
 }
 
-pub struct WakeComputePermit {
+pub(crate) struct WakeComputePermit {
     permit: Token,
 }
 
 impl WakeComputePermit {
-    pub fn should_check_cache(&self) -> bool {
+    pub(crate) fn should_check_cache(&self) -> bool {
         !self.permit.is_disabled()
     }
-    pub fn release(self, outcome: Outcome) {
+    pub(crate) fn release(self, outcome: Outcome) {
         self.permit.release(outcome);
     }
-    pub fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
+    pub(crate) fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
         match res {
             Ok(_) => self.release(Outcome::Success),
             Err(_) => self.release(Outcome::Overload),

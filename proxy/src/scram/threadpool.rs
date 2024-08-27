@@ -68,7 +68,7 @@ impl ThreadPool {
         pool
     }
 
-    pub fn spawn_job(
+    pub(crate) fn spawn_job(
         &self,
         endpoint: EndpointIdInt,
         pbkdf2: Pbkdf2,

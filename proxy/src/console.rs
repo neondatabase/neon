@@ -10,7 +10,8 @@ pub(crate) use provider::{errors, Api, AuthSecret, CachedNodeInfo, NodeInfo};
 
 /// Various cache-related types.
 pub mod caches {
-    pub use super::provider::{ApiCaches, NodeInfoCache};
+    pub use super::provider::ApiCaches;
+    pub(crate) use super::provider::NodeInfoCache;
 }
 
 /// Various cache-related types.

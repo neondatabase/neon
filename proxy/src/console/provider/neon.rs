@@ -25,8 +25,8 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
-    pub locks: &'static ApiLocks<EndpointCacheKey>,
-    pub wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
+    pub(crate) locks: &'static ApiLocks<EndpointCacheKey>,
+    pub(crate) wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     jwt: String,
 }
 
@@ -51,7 +51,7 @@ impl Api {
         }
     }
 
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         self.endpoint.url().as_str()
     }
 

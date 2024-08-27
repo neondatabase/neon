@@ -25,8 +25,8 @@ use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-pub use reqwest_middleware::{ClientWithMiddleware, Error};
-pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
+pub(crate) use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
@@ -50,7 +50,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Instrument};
 use utils::http::error::ApiError;
 
-pub const SERVERLESS_DRIVER_SNI: &str = "api";
+pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -178,9 +178,9 @@ pub async fn task_main(
     Ok(())
 }
 
-pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + 'static {}
+pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + 'static {}
 impl<T: AsyncRead + AsyncWrite + Send + 'static> AsyncReadWrite for T {}
-pub type AsyncRW = Pin<Box<dyn AsyncReadWrite>>;
+pub(crate) type AsyncRW = Pin<Box<dyn AsyncReadWrite>>;
 
 #[async_trait]
 trait MaybeTlsAcceptor: Send + Sync + 'static {

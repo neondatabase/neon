@@ -16,9 +16,9 @@ use crate::{
 use super::jwt::{AuthRule, FetchAuthRules, JwkCache};
 
 pub struct LocalBackend {
-    pub jwks_cache: JwkCache,
-    pub postgres_addr: SocketAddr,
-    pub node_info: NodeInfo,
+    pub(crate) jwks_cache: JwkCache,
+    pub(crate) postgres_addr: SocketAddr,
+    pub(crate) node_info: NodeInfo,
 }
 
 impl LocalBackend {
@@ -47,7 +47,7 @@ impl LocalBackend {
 }
 
 #[derive(Clone, Copy)]
-pub struct StaticAuthRules;
+pub(crate) struct StaticAuthRules;
 
 pub static JWKS_ROLE_MAP: ArcSwapOption<JwksRoleSettings> = ArcSwapOption::const_empty();
 

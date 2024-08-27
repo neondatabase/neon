@@ -14,7 +14,7 @@ use super::copy_bidirectional::ErrorSource;
 
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
-pub async fn proxy_pass(
+pub(crate) async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: MetricsAuxInfo,
@@ -57,18 +57,18 @@ pub async fn proxy_pass(
     Ok(())
 }
 
-pub struct ProxyPassthrough<P, S> {
-    pub client: Stream<S>,
-    pub compute: PostgresConnection,
-    pub aux: MetricsAuxInfo,
+pub(crate) struct ProxyPassthrough<P, S> {
+    pub(crate) client: Stream<S>,
+    pub(crate) compute: PostgresConnection,
+    pub(crate) aux: MetricsAuxInfo,
 
-    pub req: NumConnectionRequestsGuard<'static>,
-    pub conn: NumClientConnectionsGuard<'static>,
-    pub cancel: cancellation::Session<P>,
+    pub(crate) req: NumConnectionRequestsGuard<'static>,
+    pub(crate) conn: NumClientConnectionsGuard<'static>,
+    pub(crate) cancel: cancellation::Session<P>,
 }
 
 impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
-    pub async fn proxy_pass(self) -> Result<(), ErrorSource> {
+    pub(crate) async fn proxy_pass(self) -> Result<(), ErrorSource> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
         if let Err(err) = self.compute.cancel_closure.try_cancel_query().await {
             tracing::error!(?err, "could not cancel the query in the database");

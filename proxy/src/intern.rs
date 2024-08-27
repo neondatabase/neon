@@ -29,10 +29,10 @@ impl<Id: InternId> std::fmt::Display for InternedString<Id> {
 }
 
 impl<Id: InternId> InternedString<Id> {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         Id::get_interner().inner.resolve(&self.inner)
     }
-    pub fn get(s: &str) -> Option<Self> {
+    pub(crate) fn get(s: &str) -> Option<Self> {
         Id::get_interner().get(s)
     }
 }
@@ -78,7 +78,7 @@ impl<Id: InternId> serde::Serialize for InternedString<Id> {
 }
 
 impl<Id: InternId> StringInterner<Id> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         StringInterner {
             inner: ThreadedRodeo::with_capacity_memory_limits_and_hasher(
                 Capacity::new(2500, NonZeroUsize::new(1 << 16).unwrap()),
@@ -90,26 +90,26 @@ impl<Id: InternId> StringInterner<Id> {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.inner.len()
     }
 
-    pub fn current_memory_usage(&self) -> usize {
+    pub(crate) fn current_memory_usage(&self) -> usize {
         self.inner.current_memory_usage()
     }
 
-    pub fn get_or_intern(&self, s: &str) -> InternedString<Id> {
+    pub(crate) fn get_or_intern(&self, s: &str) -> InternedString<Id> {
         InternedString {
             inner: self.inner.get_or_intern(s),
             _id: PhantomData,
         }
     }
 
-    pub fn get(&self, s: &str) -> Option<InternedString<Id>> {
+    pub(crate) fn get(&self, s: &str) -> Option<InternedString<Id>> {
         Some(InternedString {
             inner: self.inner.get(s)?,
             _id: PhantomData,
@@ -132,14 +132,14 @@ impl<Id: InternId> Default for StringInterner<Id> {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct RoleNameTag;
+pub(crate) struct RoleNameTag;
 impl InternId for RoleNameTag {
     fn get_interner() -> &'static StringInterner<Self> {
-        pub static ROLE_NAMES: OnceLock<StringInterner<RoleNameTag>> = OnceLock::new();
+        static ROLE_NAMES: OnceLock<StringInterner<RoleNameTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
-pub type RoleNameInt = InternedString<RoleNameTag>;
+pub(crate) type RoleNameInt = InternedString<RoleNameTag>;
 impl From<&RoleName> for RoleNameInt {
     fn from(value: &RoleName) -> Self {
         RoleNameTag::get_interner().get_or_intern(value)
@@ -150,7 +150,7 @@ impl From<&RoleName> for RoleNameInt {
 pub struct EndpointIdTag;
 impl InternId for EndpointIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
-        pub static ROLE_NAMES: OnceLock<StringInterner<EndpointIdTag>> = OnceLock::new();
+        static ROLE_NAMES: OnceLock<StringInterner<EndpointIdTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
@@ -170,7 +170,7 @@ impl From<EndpointId> for EndpointIdInt {
 pub struct BranchIdTag;
 impl InternId for BranchIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
-        pub static ROLE_NAMES: OnceLock<StringInterner<BranchIdTag>> = OnceLock::new();
+        static ROLE_NAMES: OnceLock<StringInterner<BranchIdTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
@@ -190,7 +190,7 @@ impl From<BranchId> for BranchIdInt {
 pub struct ProjectIdTag;
 impl InternId for ProjectIdTag {
     fn get_interner() -> &'static StringInterner<Self> {
-        pub static ROLE_NAMES: OnceLock<StringInterner<ProjectIdTag>> = OnceLock::new();
+        static ROLE_NAMES: OnceLock<StringInterner<ProjectIdTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
@@ -217,7 +217,7 @@ mod tests {
     struct MyId;
     impl InternId for MyId {
         fn get_interner() -> &'static StringInterner<Self> {
-            pub static ROLE_NAMES: OnceLock<StringInterner<MyId>> = OnceLock::new();
+            pub(crate) static ROLE_NAMES: OnceLock<StringInterner<MyId>> = OnceLock::new();
             ROLE_NAMES.get_or_init(Default::default)
         }
     }

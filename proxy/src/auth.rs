@@ -4,17 +4,17 @@ pub mod backend;
 pub use backend::BackendType;
 
 mod credentials;
-pub use credentials::{
+pub(crate) use credentials::{
     check_peer_addr_is_in_list, endpoint_sni, ComputeUserInfoMaybeEndpoint,
     ComputeUserInfoParseError, IpPattern,
 };
 
 mod password_hack;
-pub use password_hack::parse_endpoint_param;
+pub(crate) use password_hack::parse_endpoint_param;
 use password_hack::PasswordHackPayload;
 
 mod flow;
-pub use flow::*;
+pub(crate) use flow::*;
 use tokio::time::error::Elapsed;
 
 use crate::{
@@ -25,11 +25,11 @@ use std::{io, net::IpAddr};
 use thiserror::Error;
 
 /// Convenience wrapper for the authentication error.
-pub type Result<T> = std::result::Result<T, AuthError>;
+pub(crate) type Result<T> = std::result::Result<T, AuthError>;
 
 /// Common authentication error.
 #[derive(Debug, Error)]
-pub enum AuthErrorImpl {
+pub(crate) enum AuthErrorImpl {
     #[error(transparent)]
     Link(#[from] backend::LinkAuthError),
 
@@ -77,30 +77,30 @@ pub enum AuthErrorImpl {
 
 #[derive(Debug, Error)]
 #[error(transparent)]
-pub struct AuthError(Box<AuthErrorImpl>);
+pub(crate) struct AuthError(Box<AuthErrorImpl>);
 
 impl AuthError {
-    pub fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
+    pub(crate) fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
         AuthErrorImpl::BadAuthMethod(name.into()).into()
     }
 
-    pub fn auth_failed(user: impl Into<Box<str>>) -> Self {
+    pub(crate) fn auth_failed(user: impl Into<Box<str>>) -> Self {
         AuthErrorImpl::AuthFailed(user.into()).into()
     }
 
-    pub fn ip_address_not_allowed(ip: IpAddr) -> Self {
+    pub(crate) fn ip_address_not_allowed(ip: IpAddr) -> Self {
         AuthErrorImpl::IpAddressNotAllowed(ip).into()
     }
 
-    pub fn too_many_connections() -> Self {
+    pub(crate) fn too_many_connections() -> Self {
         AuthErrorImpl::TooManyConnections.into()
     }
 
-    pub fn is_auth_failed(&self) -> bool {
+    pub(crate) fn is_auth_failed(&self) -> bool {
         matches!(self.0.as_ref(), AuthErrorImpl::AuthFailed(_))
     }
 
-    pub fn user_timeout(elapsed: Elapsed) -> Self {
+    pub(crate) fn user_timeout(elapsed: Elapsed) -> Self {
         AuthErrorImpl::UserTimeout(elapsed).into()
     }
 }

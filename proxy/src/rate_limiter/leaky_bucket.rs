@@ -35,7 +35,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
     }
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
-    pub fn check(&self, key: K, n: u32) -> bool {
+    pub(crate) fn check(&self, key: K, n: u32) -> bool {
         let now = Instant::now();
 
         if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
@@ -74,7 +74,7 @@ pub struct LeakyBucketState {
 }
 
 impl LeakyBucketConfig {
-    pub fn new(rps: f64, max: f64) -> Self {
+    pub(crate) fn new(rps: f64, max: f64) -> Self {
         assert!(rps > 0.0, "rps must be positive");
         assert!(max > 0.0, "max must be positive");
         Self { rps, max }
@@ -82,7 +82,7 @@ impl LeakyBucketConfig {
 }
 
 impl LeakyBucketState {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             filled: 0.0,
             time: Instant::now(),
@@ -100,7 +100,7 @@ impl LeakyBucketState {
         self.filled == 0.0
     }
 
-    pub fn check(&mut self, info: &LeakyBucketConfig, now: Instant, n: f64) -> bool {
+    pub(crate) fn check(&mut self, info: &LeakyBucketConfig, now: Instant, n: f64) -> bool {
         self.update(info, now);
 
         if self.filled + n > info.max {
