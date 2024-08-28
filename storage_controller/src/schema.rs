@@ -25,6 +25,7 @@ diesel::table! {
         listen_http_port -> Int4,
         listen_pg_addr -> Varchar,
         listen_pg_port -> Int4,
+        availability_zone_id -> Nullable<Varchar>,
     }
 }
 

@@ -41,6 +41,8 @@ enum Command {
         listen_http_addr: String,
         #[arg(long)]
         listen_http_port: u16,
+        #[arg(long)]
+        availability_zone_id: String,
     },
 
     /// Modify a node's configuration in the storage controller
@@ -322,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
             listen_pg_port,
             listen_http_addr,
             listen_http_port,
+            availability_zone_id,
         } => {
             storcon_client
                 .dispatch::<_, ()>(
@@ -333,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_pg_port,
                         listen_http_addr,
                         listen_http_port,
+                        availability_zone_id: Some(availability_zone_id),
                     }),
                 )
                 .await?;

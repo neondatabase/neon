@@ -109,6 +109,9 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
     # controller's attempts to notify the endpoint).
     ".*reconciler.*neon_local notification hook failed.*",
     ".*reconciler.*neon_local error.*",
+    # Neon local does not provide pageserver with an AZ
+    # TODO: remove this once neon local does so
+    ".*registering without specific availability zone id.*",
 ]
 
 
