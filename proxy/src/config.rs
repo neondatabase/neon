@@ -1,5 +1,8 @@
 use crate::{
-    auth::{self, backend::AuthRateLimiter},
+    auth::{
+        self,
+        backend::{jwt::JwkCache, AuthRateLimiter},
+    },
     console::locks::ApiLocks,
     rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
     scram::threadpool::ThreadPool,
@@ -67,6 +70,7 @@ pub struct AuthenticationConfig {
     pub rate_limiter: AuthRateLimiter,
     pub rate_limit_ip_subnet: u8,
     pub ip_allowlist_check_enabled: bool,
+    pub jwks_cache: JwkCache,
 }
 
 impl TlsConfig {
