@@ -1227,10 +1227,10 @@ impl WalIngest {
     fn warn_on_ingest_lag(
         &mut self,
         conf: &crate::config::PageServerConf,
-        now: SystemTime,
         wal_timestmap: TimestampTz,
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
+        let now = SystemTime::now();
         match try_from_pg_timestamp(wal_timestmap) {
             Ok(ts) => {
                 match now.duration_since(ts) {
@@ -1281,11 +1281,7 @@ impl WalIngest {
         let mut rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut page_xids: Vec<TransactionId> = vec![parsed.xid];
 
-        let now = SystemTime::now();
-        let mut warn_on_ingest_lag = |xact_time| {
-            self.warn_on_ingest_lag(modification.tline.conf, now, xact_time);
-            xact_time
-        };
+        self.warn_on_ingest_lag(modification.tline.conf, parsed.xact_time);
 
         for subxact in &parsed.subxacts {
             let subxact_pageno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
@@ -1300,7 +1296,7 @@ impl WalIngest {
                     if is_commit {
                         NeonWalRecord::ClogSetCommitted {
                             xids: page_xids,
-                            timestamp: warn_on_ingest_lag(parsed.xact_time),
+                            timestamp: parsed.xact_time,
                         }
                     } else {
                         NeonWalRecord::ClogSetAborted { xids: page_xids }
@@ -1320,7 +1316,7 @@ impl WalIngest {
             if is_commit {
                 NeonWalRecord::ClogSetCommitted {
                     xids: page_xids,
-                    timestamp: warn_on_ingest_lag(parsed.xact_time),
+                    timestamp: parsed.xact_time,
                 }
             } else {
                 NeonWalRecord::ClogSetAborted { xids: page_xids }
