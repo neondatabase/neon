@@ -33,10 +33,10 @@ use utils::measured_stream::MeasuredReader;
 use nix::sys::signal::{kill, Signal};
 
 use remote_storage::{DownloadError, RemotePath};
-use utils::pid_file;
-use utils::pid_file::PidFileRead;
 
 use crate::checker::create_availability_check_data;
+use crate::config::notify_local_proxy;
+use crate::config::write_local_proxy_conf;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -889,6 +889,13 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
+        if let Some(ref local_proxy) = spec.local_proxy_config {
+            info!("configuring local-proxy");
+
+            write_local_proxy_conf("/etc/localproxy.json".as_ref(), local_proxy)?;
+            notify_local_proxy("/etc/localproxy.pid".as_ref())?;
+        }
+
         // Run migrations separately to not hold up cold starts
         thread::spawn(move || {
             let mut connstr = connstr.clone();
@@ -947,36 +954,8 @@ impl ComputeNode {
             // so that we don't block the main thread that starts Postgres.
             let local_proxy = local_proxy.clone();
             local_proxy_handle = Some(thread::spawn(move || -> Result<()> {
-                let config = serde_json::to_string_pretty(&local_proxy)
-                    .context("serializing local-proxy json")?;
-                std::fs::write("/etc/localproxy/config.json", config)
-                    .context("writing localproxy/config.json")?;
-
-                match pid_file::read(Utf8Path::new("/etc/localproxy/pid"))? {
-                    // if the file doesn't exist, or isn't locked, localproxy isn't running
-                    // and will naturally pick up our config later
-                    PidFileRead::NotExist | PidFileRead::NotHeldByAnyProcess(_) => {}
-                    PidFileRead::LockedByOtherProcess(pid) => {
-                        // From the pid_file docs:
-                        //
-                        // > 1. The other process might exit at any time, turning the given PID stale.
-                        // > 2. There is a small window in which `claim_for_current_process` has already
-                        // >    locked the file but not yet updates its contents. [`read`] will return
-                        // >    this variant here, but with the old file contents, i.e., a stale PID.
-                        // >
-                        // > The kernel is free to recycle PID once it has been `wait(2)`ed upon by
-                        // > its creator. Thus, acting upon a stale PID, e.g., by issuing a `kill`
-                        // > system call on it, bears the risk of killing an unrelated process.
-                        // > This is an inherent limitation of using pidfiles.
-                        // > The only race-free solution is to have a supervisor-process with a lifetime
-                        // > that exceeds that of all of its child-processes (e.g., `runit`, `supervisord`).
-                        //
-                        // This is an ok risk as we only send a SIGHUP which likely won't actually
-                        // kill the process, only reload config.
-                        nix::sys::signal::kill(pid, Signal::SIGHUP)
-                            .context("sending signal to local-proxy")?;
-                    }
-                }
+                write_local_proxy_conf("/etc/localproxy/config.json".as_ref(), &local_proxy)?;
+                notify_local_proxy(Utf8Path::new("/etc/localproxy/pid"))?;
 
                 Ok(())
             }));
