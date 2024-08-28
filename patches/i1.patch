@@ -12,6 +12,78 @@ index 68fd716d3e6..71ef6d60861 100644
  ANALYZE aggtest;
  SELECT avg(four) AS avg_1 FROM onek;
         avg_1        
+diff --git a/src/test/regress/expected/alter_generic.out b/src/test/regress/expected/alter_generic.out
+index ae54cb254f9..1ba5a9e9d6c 100644
+--- a/src/test/regress/expected/alter_generic.out
++++ b/src/test/regress/expected/alter_generic.out
+@@ -15,9 +15,9 @@ DROP ROLE IF EXISTS regress_alter_generic_user1;
+ DROP ROLE IF EXISTS regress_alter_generic_user2;
+ DROP ROLE IF EXISTS regress_alter_generic_user3;
+ RESET client_min_messages;
+-CREATE USER regress_alter_generic_user3;
+-CREATE USER regress_alter_generic_user2;
+-CREATE USER regress_alter_generic_user1 IN ROLE regress_alter_generic_user3;
++CREATE USER regress_alter_generic_user3 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_alter_generic_user2 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_alter_generic_user1 PASSWORD 'eib5tai9Oachootiex' IN ROLE regress_alter_generic_user3;
+ CREATE SCHEMA alt_nsp1;
+ CREATE SCHEMA alt_nsp2;
+ GRANT ALL ON SCHEMA alt_nsp1, alt_nsp2 TO public;
+@@ -370,7 +370,7 @@ ERROR:  STORAGE cannot be specified in ALTER OPERATOR FAMILY
+ DROP OPERATOR FAMILY alt_opf4 USING btree;
+ -- Should fail. Need to be SUPERUSER to do ALTER OPERATOR FAMILY .. ADD / DROP
+ BEGIN TRANSACTION;
+-CREATE ROLE regress_alter_generic_user5 NOSUPERUSER;
++CREATE ROLE regress_alter_generic_user5 PASSWORD 'eib5tai9Oachootiex' NOSUPERUSER;
+ CREATE OPERATOR FAMILY alt_opf5 USING btree;
+ SET ROLE regress_alter_generic_user5;
+ ALTER OPERATOR FAMILY alt_opf5 USING btree ADD OPERATOR 1 < (int4, int2), FUNCTION 1 btint42cmp(int4, int2);
+@@ -382,7 +382,7 @@ ERROR:  current transaction is aborted, commands ignored until end of transactio
+ ROLLBACK;
+ -- Should fail. Need rights to namespace for ALTER OPERATOR FAMILY .. ADD / DROP
+ BEGIN TRANSACTION;
+-CREATE ROLE regress_alter_generic_user6;
++CREATE ROLE regress_alter_generic_user6 PASSWORD 'eib5tai9Oachootiex';
+ CREATE SCHEMA alt_nsp6;
+ REVOKE ALL ON SCHEMA alt_nsp6 FROM regress_alter_generic_user6;
+ CREATE OPERATOR FAMILY alt_nsp6.alt_opf6 USING btree;
+diff --git a/src/test/regress/expected/alter_operator.out b/src/test/regress/expected/alter_operator.out
+index 71bd4842821..46f8dbd3ae6 100644
+--- a/src/test/regress/expected/alter_operator.out
++++ b/src/test/regress/expected/alter_operator.out
+@@ -127,7 +127,7 @@ ERROR:  operator attribute "Restrict" not recognized
+ --
+ -- Test permission check. Must be owner to ALTER OPERATOR.
+ --
+-CREATE USER regress_alter_op_user;
++CREATE USER regress_alter_op_user PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION regress_alter_op_user;
+ ALTER OPERATOR === (boolean, boolean) SET (RESTRICT = NONE);
+ ERROR:  must be owner of operator ===
+diff --git a/src/test/regress/expected/alter_table.out b/src/test/regress/expected/alter_table.out
+index 05351cb1a43..281c110ecf2 100644
+--- a/src/test/regress/expected/alter_table.out
++++ b/src/test/regress/expected/alter_table.out
+@@ -5,7 +5,7 @@
+ SET client_min_messages TO 'warning';
+ DROP ROLE IF EXISTS regress_alter_table_user1;
+ RESET client_min_messages;
+-CREATE USER regress_alter_table_user1;
++CREATE USER regress_alter_table_user1 PASSWORD 'eib5tai9Oachootiex';
+ --
+ -- add attribute
+ --
+@@ -3896,8 +3896,8 @@ DROP TABLE fail_part;
+ ALTER TABLE list_parted ATTACH PARTITION nonexistent FOR VALUES IN (1);
+ ERROR:  relation "nonexistent" does not exist
+ -- check ownership of the source table
+-CREATE ROLE regress_test_me;
+-CREATE ROLE regress_test_not_me;
++CREATE ROLE regress_test_me PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_test_not_me PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE not_owned_by_me (LIKE list_parted);
+ ALTER TABLE not_owned_by_me OWNER TO regress_test_not_me;
+ SET SESSION AUTHORIZATION regress_test_me;
 diff --git a/src/test/regress/expected/arrays.out b/src/test/regress/expected/arrays.out
 index 957498432d6..1c8d93ae035 100644
 --- a/src/test/regress/expected/arrays.out
@@ -52,8 +124,43 @@ index 93ed5e8cc00..54bd7d535c4 100644
  ANALYZE bt_i4_heap;
  ANALYZE bt_name_heap;
  ANALYZE bt_txt_heap;
+diff --git a/src/test/regress/expected/cluster.out b/src/test/regress/expected/cluster.out
+index 542c2e098c5..1e4e2142488 100644
+--- a/src/test/regress/expected/cluster.out
++++ b/src/test/regress/expected/cluster.out
+@@ -308,7 +308,7 @@ WHERE pg_class.oid=indexrelid
+ -- Verify that toast tables are clusterable
+ CLUSTER pg_toast.pg_toast_826 USING pg_toast_826_index;
+ -- Verify that clustering all tables does in fact cluster the right ones
+-CREATE USER regress_clstr_user;
++CREATE USER regress_clstr_user PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE clstr_1 (a INT PRIMARY KEY);
+ CREATE TABLE clstr_2 (a INT PRIMARY KEY);
+ CREATE TABLE clstr_3 (a INT PRIMARY KEY);
+@@ -497,7 +497,7 @@ DROP TABLE clstrpart;
+ CREATE TABLE ptnowner(i int unique) PARTITION BY LIST (i);
+ CREATE INDEX ptnowner_i_idx ON ptnowner(i);
+ CREATE TABLE ptnowner1 PARTITION OF ptnowner FOR VALUES IN (1);
+-CREATE ROLE regress_ptnowner;
++CREATE ROLE regress_ptnowner PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE ptnowner2 PARTITION OF ptnowner FOR VALUES IN (2);
+ ALTER TABLE ptnowner1 OWNER TO regress_ptnowner;
+ ALTER TABLE ptnowner OWNER TO regress_ptnowner;
+diff --git a/src/test/regress/expected/collate.icu.utf8.out b/src/test/regress/expected/collate.icu.utf8.out
+index 97bbe53b647..728e2a3e867 100644
+--- a/src/test/regress/expected/collate.icu.utf8.out
++++ b/src/test/regress/expected/collate.icu.utf8.out
+@@ -1016,7 +1016,7 @@ select * from collate_test1 where b ilike 'ABC';
+ 
+ reset enable_seqscan;
+ -- schema manipulation commands
+-CREATE ROLE regress_test_role;
++CREATE ROLE regress_test_role PASSWORD 'eib5tai9Oachootiex';
+ CREATE SCHEMA test_schema;
+ -- We need to do this this way to cope with varying names for encodings:
+ SET client_min_messages TO WARNING;
 diff --git a/src/test/regress/expected/constraints.out b/src/test/regress/expected/constraints.out
-index e6f6602d953..d839678e6c7 100644
+index e6f6602d953..77fea1291f4 100644
 --- a/src/test/regress/expected/constraints.out
 +++ b/src/test/regress/expected/constraints.out
 @@ -349,7 +349,8 @@ CREATE TABLE COPY_TBL (x INT, y TEXT, z INT,
@@ -76,8 +183,39 @@ index e6f6602d953..d839678e6c7 100644
  ERROR:  new row for relation "copy_tbl" violates check constraint "copy_con"
  DETAIL:  Failing row contains (7, check failed, 6).
  CONTEXT:  COPY copy_tbl, line 2: "7	check failed	6"
+@@ -756,7 +758,7 @@ DETAIL:  Key (f1)=(3) conflicts with key (f1)=(3).
+ DROP TABLE deferred_excl;
+ -- Comments
+ -- Setup a low-level role to enforce non-superuser checks.
+-CREATE ROLE regress_constraint_comments;
++CREATE ROLE regress_constraint_comments PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION regress_constraint_comments;
+ CREATE TABLE constraint_comments_tbl (a int CONSTRAINT the_constraint CHECK (a > 0));
+ CREATE DOMAIN constraint_comments_dom AS int CONSTRAINT the_constraint CHECK (value > 0);
+@@ -776,7 +778,7 @@ COMMENT ON CONSTRAINT the_constraint ON constraint_comments_tbl IS NULL;
+ COMMENT ON CONSTRAINT the_constraint ON DOMAIN constraint_comments_dom IS NULL;
+ -- unauthorized user
+ RESET SESSION AUTHORIZATION;
+-CREATE ROLE regress_constraint_comments_noaccess;
++CREATE ROLE regress_constraint_comments_noaccess PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION regress_constraint_comments_noaccess;
+ COMMENT ON CONSTRAINT the_constraint ON constraint_comments_tbl IS 'no, the comment';
+ ERROR:  must be owner of relation constraint_comments_tbl
+diff --git a/src/test/regress/expected/conversion.out b/src/test/regress/expected/conversion.out
+index 442e7aff2b2..d79eb7f5dfd 100644
+--- a/src/test/regress/expected/conversion.out
++++ b/src/test/regress/expected/conversion.out
+@@ -8,7 +8,7 @@
+ CREATE FUNCTION test_enc_conversion(bytea, name, name, bool, validlen OUT int, result OUT bytea)
+     AS :'regresslib', 'test_enc_conversion'
+     LANGUAGE C STRICT;
+-CREATE USER regress_conversion_user WITH NOCREATEDB NOCREATEROLE;
++CREATE USER regress_conversion_user WITH NOCREATEDB NOCREATEROLE PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION regress_conversion_user;
+ CREATE CONVERSION myconv FOR 'LATIN1' TO 'UTF8' FROM iso8859_1_to_utf8;
+ --
 diff --git a/src/test/regress/expected/copy.out b/src/test/regress/expected/copy.out
-index b48365ec981..13bee7a5ee4 100644
+index b48365ec981..a6ef910055b 100644
 --- a/src/test/regress/expected/copy.out
 +++ b/src/test/regress/expected/copy.out
 @@ -15,9 +15,11 @@ insert into copytest values('Unix',E'abc\ndef',2);
@@ -147,7 +285,7 @@ index b48365ec981..13bee7a5ee4 100644
  -- Ensure index entries were properly added during the copy.
  select * from parted_copytest where b = 1;
   a | b |  c   
-@@ -170,9 +179,10 @@ INFO:  progress: {"type": "PIPE", "command": "COPY FROM", "relname": "tab_progre
+@@ -170,9 +179,9 @@ INFO:  progress: {"type": "PIPE", "command": "COPY FROM", "relname": "tab_progre
  -- Generate COPY FROM report with FILE, with some excluded tuples.
  truncate tab_progress_reporting;
  \set filename :abs_srcdir '/data/emp.data'
@@ -157,11 +295,10 @@ index b48365ec981..13bee7a5ee4 100644
 +\set command '\\copy tab_progress_reporting from ' :'filename' 'where (salary < 2000)';
 +:command
 +INFO:  progress: {"type": "PIPE", "command": "COPY FROM", "relname": "tab_progress_reporting", "has_bytes_total": false, "tuples_excluded": 1, "tuples_processed": 2, "has_bytes_processed": true}
-+	
  drop trigger check_after_tab_progress_reporting on tab_progress_reporting;
  drop function notice_after_tab_progress_reporting();
  drop table tab_progress_reporting;
-@@ -281,7 +291,8 @@ CREATE TABLE parted_si_p_odd PARTITION OF parted_si FOR VALUES IN (1);
+@@ -281,7 +290,8 @@ CREATE TABLE parted_si_p_odd PARTITION OF parted_si FOR VALUES IN (1);
  -- https://postgr.es/m/18130-7a86a7356a75209d%40postgresql.org
  -- https://postgr.es/m/257696.1695670946%40sss.pgh.pa.us
  \set filename :abs_srcdir '/data/desc.data'
@@ -171,8 +308,36 @@ index b48365ec981..13bee7a5ee4 100644
  -- An earlier bug (see commit b1ecb9b3fcf) could end up using a buffer from
  -- the wrong partition. This test is *not* guaranteed to trigger that bug, but
  -- does so when shared_buffers is small enough.  To test if we encountered the
+diff --git a/src/test/regress/expected/copy2.out b/src/test/regress/expected/copy2.out
+index faf1a4d1b0c..d7c13007e24 100644
+--- a/src/test/regress/expected/copy2.out
++++ b/src/test/regress/expected/copy2.out
+@@ -553,8 +553,8 @@ select * from check_con_tbl;
+ (2 rows)
+ 
+ -- test with RLS enabled.
+-CREATE ROLE regress_rls_copy_user;
+-CREATE ROLE regress_rls_copy_user_colperms;
++CREATE ROLE regress_rls_copy_user PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_rls_copy_user_colperms PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE rls_t1 (a int, b int, c int);
+ COPY rls_t1 (a, b, c) from stdin;
+ CREATE POLICY p1 ON rls_t1 FOR SELECT USING (a % 2 = 0);
+diff --git a/src/test/regress/expected/create_function_sql.out b/src/test/regress/expected/create_function_sql.out
+index 50aca5940ff..87d4d33fd5c 100644
+--- a/src/test/regress/expected/create_function_sql.out
++++ b/src/test/regress/expected/create_function_sql.out
+@@ -4,7 +4,7 @@
+ -- Assorted tests using SQL-language functions
+ --
+ -- All objects made in this test are in temp_func_test schema
+-CREATE USER regress_unpriv_user;
++CREATE USER regress_unpriv_user PASSWORD 'eib5tai9Oachootiex';
+ CREATE SCHEMA temp_func_test;
+ GRANT ALL ON SCHEMA temp_func_test TO public;
+ SET search_path TO temp_func_test, public;
 diff --git a/src/test/regress/expected/create_index.out b/src/test/regress/expected/create_index.out
-index acfd9d1f4f7..7a230026ad7 100644
+index acfd9d1f4f7..118076d1161 100644
 --- a/src/test/regress/expected/create_index.out
 +++ b/src/test/regress/expected/create_index.out
 @@ -51,7 +51,8 @@ CREATE TABLE fast_emp4000 (
@@ -195,6 +360,218 @@ index acfd9d1f4f7..7a230026ad7 100644
  ANALYZE array_index_op_test;
  SELECT * FROM array_index_op_test WHERE i = '{NULL}' ORDER BY seqno;
   seqno |   i    |   t    
+@@ -2822,7 +2824,7 @@ END;
+ -- concurrently
+ REINDEX SCHEMA CONCURRENTLY schema_to_reindex;
+ -- Failure for unauthorized user
+-CREATE ROLE regress_reindexuser NOLOGIN;
++CREATE ROLE regress_reindexuser NOLOGIN PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION ROLE regress_reindexuser;
+ REINDEX SCHEMA schema_to_reindex;
+ ERROR:  must be owner of schema schema_to_reindex
+diff --git a/src/test/regress/expected/create_procedure.out b/src/test/regress/expected/create_procedure.out
+index 6ab09d7ec89..6fbff42b09a 100644
+--- a/src/test/regress/expected/create_procedure.out
++++ b/src/test/regress/expected/create_procedure.out
+@@ -370,7 +370,7 @@ ERROR:  cp_testfunc1(integer) is not a procedure
+ DROP PROCEDURE nonexistent();
+ ERROR:  procedure nonexistent() does not exist
+ -- privileges
+-CREATE USER regress_cp_user1;
++CREATE USER regress_cp_user1 PASSWORD 'eib5tai9Oachootiex';
+ GRANT INSERT ON cp_test TO regress_cp_user1;
+ REVOKE EXECUTE ON PROCEDURE ptest1(text) FROM PUBLIC;
+ SET ROLE regress_cp_user1;
+diff --git a/src/test/regress/expected/create_role.out b/src/test/regress/expected/create_role.out
+index 46d4f9efe99..b8151e9dc4a 100644
+--- a/src/test/regress/expected/create_role.out
++++ b/src/test/regress/expected/create_role.out
+@@ -1,28 +1,28 @@
+ -- ok, superuser can create users with any set of privileges
+-CREATE ROLE regress_role_super SUPERUSER;
+-CREATE ROLE regress_role_admin CREATEDB CREATEROLE REPLICATION BYPASSRLS;
++CREATE ROLE regress_role_super SUPERUSER PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_role_admin CREATEDB CREATEROLE REPLICATION BYPASSRLS PASSWORD 'eib5tai9Oachootiex';
+ GRANT CREATE ON DATABASE regression TO regress_role_admin WITH GRANT OPTION;
+-CREATE ROLE regress_role_limited_admin CREATEROLE;
+-CREATE ROLE regress_role_normal;
++CREATE ROLE regress_role_limited_admin CREATEROLE PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_role_normal PASSWORD 'eib5tai9Oachootiex';
+ -- fail, CREATEROLE user can't give away role attributes without having them
+ SET SESSION AUTHORIZATION regress_role_limited_admin;
+-CREATE ROLE regress_nosuch_superuser SUPERUSER;
++CREATE ROLE regress_nosuch_superuser SUPERUSER PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  permission denied to create role
+ DETAIL:  Only roles with the SUPERUSER attribute may create roles with the SUPERUSER attribute.
+-CREATE ROLE regress_nosuch_replication_bypassrls REPLICATION BYPASSRLS;
++CREATE ROLE regress_nosuch_replication_bypassrls REPLICATION BYPASSRLS PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  permission denied to create role
+ DETAIL:  Only roles with the REPLICATION attribute may create roles with the REPLICATION attribute.
+-CREATE ROLE regress_nosuch_replication REPLICATION;
++CREATE ROLE regress_nosuch_replication REPLICATION PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  permission denied to create role
+ DETAIL:  Only roles with the REPLICATION attribute may create roles with the REPLICATION attribute.
+-CREATE ROLE regress_nosuch_bypassrls BYPASSRLS;
++CREATE ROLE regress_nosuch_bypassrls BYPASSRLS PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  permission denied to create role
+ DETAIL:  Only roles with the BYPASSRLS attribute may create roles with the BYPASSRLS attribute.
+-CREATE ROLE regress_nosuch_createdb CREATEDB;
++CREATE ROLE regress_nosuch_createdb CREATEDB PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  permission denied to create role
+ DETAIL:  Only roles with the CREATEDB attribute may create roles with the CREATEDB attribute.
+ -- ok, can create a role without any special attributes
+-CREATE ROLE regress_role_limited;
++CREATE ROLE regress_role_limited PASSWORD 'eib5tai9Oachootiex';
+ -- fail, can't give it in any of the restricted attributes
+ ALTER ROLE regress_role_limited SUPERUSER;
+ ERROR:  permission denied to alter role
+@@ -39,10 +39,10 @@ DETAIL:  Only roles with the BYPASSRLS attribute may change the BYPASSRLS attrib
+ DROP ROLE regress_role_limited;
+ -- ok, can give away these role attributes if you have them
+ SET SESSION AUTHORIZATION regress_role_admin;
+-CREATE ROLE regress_replication_bypassrls REPLICATION BYPASSRLS;
+-CREATE ROLE regress_replication REPLICATION;
+-CREATE ROLE regress_bypassrls BYPASSRLS;
+-CREATE ROLE regress_createdb CREATEDB;
++CREATE ROLE regress_replication_bypassrls REPLICATION BYPASSRLS PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_replication REPLICATION PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_bypassrls BYPASSRLS PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_createdb CREATEDB PASSWORD 'eib5tai9Oachootiex';
+ -- ok, can toggle these role attributes off and on if you have them
+ ALTER ROLE regress_replication NOREPLICATION;
+ ALTER ROLE regress_replication REPLICATION;
+@@ -58,48 +58,48 @@ ALTER ROLE regress_createdb NOSUPERUSER;
+ ERROR:  permission denied to alter role
+ DETAIL:  Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.
+ -- ok, having CREATEROLE is enough to create users with these privileges
+-CREATE ROLE regress_createrole CREATEROLE NOINHERIT;
++CREATE ROLE regress_createrole CREATEROLE NOINHERIT PASSWORD 'eib5tai9Oachootiex';
+ GRANT CREATE ON DATABASE regression TO regress_createrole WITH GRANT OPTION;
+-CREATE ROLE regress_login LOGIN;
+-CREATE ROLE regress_inherit INHERIT;
+-CREATE ROLE regress_connection_limit CONNECTION LIMIT 5;
+-CREATE ROLE regress_encrypted_password ENCRYPTED PASSWORD 'foo';
+-CREATE ROLE regress_password_null PASSWORD NULL;
++CREATE ROLE regress_login LOGIN PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_inherit INHERIT PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_connection_limit CONNECTION LIMIT 5 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_encrypted_password ENCRYPTED PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_password_null PASSWORD 'eib5tai9Oachootiex';
+ -- ok, backwards compatible noise words should be ignored
+-CREATE ROLE regress_noiseword SYSID 12345;
++CREATE ROLE regress_noiseword SYSID 12345 PASSWORD 'eib5tai9Oachootiex';
+ NOTICE:  SYSID can no longer be specified
+ -- fail, cannot grant membership in superuser role
+-CREATE ROLE regress_nosuch_super IN ROLE regress_role_super;
++CREATE ROLE regress_nosuch_super IN ROLE regress_role_super PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  permission denied to grant role "regress_role_super"
+ DETAIL:  Only roles with the SUPERUSER attribute may grant roles with the SUPERUSER attribute.
+ -- fail, database owner cannot have members
+-CREATE ROLE regress_nosuch_dbowner IN ROLE pg_database_owner;
++CREATE ROLE regress_nosuch_dbowner IN ROLE pg_database_owner PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  role "pg_database_owner" cannot have explicit members
+ -- ok, can grant other users into a role
+ CREATE ROLE regress_inroles ROLE
+ 	regress_role_super, regress_createdb, regress_createrole, regress_login,
+-	regress_inherit, regress_connection_limit, regress_encrypted_password, regress_password_null;
++	regress_inherit, regress_connection_limit, regress_encrypted_password, regress_password_null PASSWORD 'eib5tai9Oachootiex';
+ -- fail, cannot grant a role into itself
+-CREATE ROLE regress_nosuch_recursive ROLE regress_nosuch_recursive;
++CREATE ROLE regress_nosuch_recursive ROLE regress_nosuch_recursive PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  role "regress_nosuch_recursive" is a member of role "regress_nosuch_recursive"
+ -- ok, can grant other users into a role with admin option
+ CREATE ROLE regress_adminroles ADMIN
+ 	regress_role_super, regress_createdb, regress_createrole, regress_login,
+-	regress_inherit, regress_connection_limit, regress_encrypted_password, regress_password_null;
++	regress_inherit, regress_connection_limit, regress_encrypted_password, regress_password_null PASSWORD 'eib5tai9Oachootiex';
+ -- fail, cannot grant a role into itself with admin option
+-CREATE ROLE regress_nosuch_admin_recursive ADMIN regress_nosuch_admin_recursive;
++CREATE ROLE regress_nosuch_admin_recursive ADMIN regress_nosuch_admin_recursive PASSWORD 'eib5tai9Oachootiex';
+ ERROR:  role "regress_nosuch_admin_recursive" is a member of role "regress_nosuch_admin_recursive"
+ -- fail, regress_createrole does not have CREATEDB privilege
+ SET SESSION AUTHORIZATION regress_createrole;
+ CREATE DATABASE regress_nosuch_db;
+ ERROR:  permission denied to create database
+ -- ok, regress_createrole can create new roles
+-CREATE ROLE regress_plainrole;
++CREATE ROLE regress_plainrole PASSWORD 'eib5tai9Oachootiex';
+ -- ok, roles with CREATEROLE can create new roles with it
+-CREATE ROLE regress_rolecreator CREATEROLE;
++CREATE ROLE regress_rolecreator CREATEROLE PASSWORD 'eib5tai9Oachootiex';
+ -- ok, roles with CREATEROLE can create new roles with different role
+ -- attributes, including CREATEROLE
+-CREATE ROLE regress_hasprivs CREATEROLE LOGIN INHERIT CONNECTION LIMIT 5;
++CREATE ROLE regress_hasprivs CREATEROLE LOGIN INHERIT CONNECTION LIMIT 5 PASSWORD 'eib5tai9Oachootiex';
+ -- ok, we should be able to modify a role we created
+ COMMENT ON ROLE regress_hasprivs IS 'some comment';
+ ALTER ROLE regress_hasprivs RENAME TO regress_tenant;
+@@ -141,7 +141,7 @@ ERROR:  permission denied to reassign objects
+ DETAIL:  Only roles with privileges of role "regress_tenant" may reassign objects owned by it.
+ -- ok, create a role with a value for createrole_self_grant
+ SET createrole_self_grant = 'set, inherit';
+-CREATE ROLE regress_tenant2;
++CREATE ROLE regress_tenant2 PASSWORD 'eib5tai9Oachootiex';
+ GRANT CREATE ON DATABASE regression TO regress_tenant2;
+ -- ok, regress_tenant2 can create objects within the database
+ SET SESSION AUTHORIZATION regress_tenant2;
+@@ -165,34 +165,34 @@ ALTER TABLE tenant2_table OWNER TO regress_tenant2;
+ ERROR:  must be able to SET ROLE "regress_tenant2"
+ DROP TABLE tenant2_table;
+ -- fail, CREATEROLE is not enough to create roles in privileged roles
+-CREATE ROLE regress_read_all_data IN ROLE pg_read_all_data;
++CREATE ROLE regress_read_all_data PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_read_all_data;
+ ERROR:  permission denied to grant role "pg_read_all_data"
+ DETAIL:  Only roles with the ADMIN option on role "pg_read_all_data" may grant this role.
+-CREATE ROLE regress_write_all_data IN ROLE pg_write_all_data;
++CREATE ROLE regress_write_all_data PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_write_all_data;
+ ERROR:  permission denied to grant role "pg_write_all_data"
+ DETAIL:  Only roles with the ADMIN option on role "pg_write_all_data" may grant this role.
+-CREATE ROLE regress_monitor IN ROLE pg_monitor;
++CREATE ROLE regress_monitor PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_monitor;
+ ERROR:  permission denied to grant role "pg_monitor"
+ DETAIL:  Only roles with the ADMIN option on role "pg_monitor" may grant this role.
+-CREATE ROLE regress_read_all_settings IN ROLE pg_read_all_settings;
++CREATE ROLE regress_read_all_settings PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_read_all_settings;
+ ERROR:  permission denied to grant role "pg_read_all_settings"
+ DETAIL:  Only roles with the ADMIN option on role "pg_read_all_settings" may grant this role.
+-CREATE ROLE regress_read_all_stats IN ROLE pg_read_all_stats;
++CREATE ROLE regress_read_all_stats PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_read_all_stats;
+ ERROR:  permission denied to grant role "pg_read_all_stats"
+ DETAIL:  Only roles with the ADMIN option on role "pg_read_all_stats" may grant this role.
+-CREATE ROLE regress_stat_scan_tables IN ROLE pg_stat_scan_tables;
++CREATE ROLE regress_stat_scan_tables PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_stat_scan_tables;
+ ERROR:  permission denied to grant role "pg_stat_scan_tables"
+ DETAIL:  Only roles with the ADMIN option on role "pg_stat_scan_tables" may grant this role.
+-CREATE ROLE regress_read_server_files IN ROLE pg_read_server_files;
++CREATE ROLE regress_read_server_files PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_read_server_files;
+ ERROR:  permission denied to grant role "pg_read_server_files"
+ DETAIL:  Only roles with the ADMIN option on role "pg_read_server_files" may grant this role.
+-CREATE ROLE regress_write_server_files IN ROLE pg_write_server_files;
++CREATE ROLE regress_write_server_files PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_write_server_files;
+ ERROR:  permission denied to grant role "pg_write_server_files"
+ DETAIL:  Only roles with the ADMIN option on role "pg_write_server_files" may grant this role.
+-CREATE ROLE regress_execute_server_program IN ROLE pg_execute_server_program;
++CREATE ROLE regress_execute_server_program PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_execute_server_program;
+ ERROR:  permission denied to grant role "pg_execute_server_program"
+ DETAIL:  Only roles with the ADMIN option on role "pg_execute_server_program" may grant this role.
+-CREATE ROLE regress_signal_backend IN ROLE pg_signal_backend;
++CREATE ROLE regress_signal_backend PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_signal_backend;
+ ERROR:  permission denied to grant role "pg_signal_backend"
+ DETAIL:  Only roles with the ADMIN option on role "pg_signal_backend" may grant this role.
+ -- fail, role still owns database objects
+diff --git a/src/test/regress/expected/create_schema.out b/src/test/regress/expected/create_schema.out
+index 93302a07efc..37c89b36e9f 100644
+--- a/src/test/regress/expected/create_schema.out
++++ b/src/test/regress/expected/create_schema.out
+@@ -2,7 +2,7 @@
+ -- CREATE_SCHEMA
+ --
+ -- Schema creation with elements.
+-CREATE ROLE regress_create_schema_role SUPERUSER;
++CREATE ROLE regress_create_schema_role SUPERUSER PASSWORD 'eib5tai9Oachootiex'; 
+ -- Cases where schema creation fails as objects are qualified with a schema
+ -- that does not match with what's expected.
+ -- This checks all the object types that include schema qualifications.
 diff --git a/src/test/regress/expected/create_view.out b/src/test/regress/expected/create_view.out
 index 61825ef7d4e..a2bff59d704 100644
 --- a/src/test/regress/expected/create_view.out
@@ -209,6 +586,131 @@ index 61825ef7d4e..a2bff59d704 100644
  ANALYZE real_city;
  SELECT *
     INTO TABLE ramp
+diff --git a/src/test/regress/expected/dependency.out b/src/test/regress/expected/dependency.out
+index 6d9498cdd18..e9473949e1b 100644
+--- a/src/test/regress/expected/dependency.out
++++ b/src/test/regress/expected/dependency.out
+@@ -1,10 +1,10 @@
+ --
+ -- DEPENDENCIES
+ --
+-CREATE USER regress_dep_user;
+-CREATE USER regress_dep_user2;
+-CREATE USER regress_dep_user3;
+-CREATE GROUP regress_dep_group;
++CREATE USER regress_dep_user PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_dep_user2 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_dep_user3 PASSWORD 'eib5tai9Oachootiex';
++CREATE GROUP regress_dep_group PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE deptest (f1 serial primary key, f2 text);
+ GRANT SELECT ON TABLE deptest TO GROUP regress_dep_group;
+ GRANT ALL ON TABLE deptest TO regress_dep_user, regress_dep_user2;
+@@ -41,9 +41,9 @@ ERROR:  role "regress_dep_user3" cannot be dropped because some objects depend o
+ DROP TABLE deptest;
+ DROP USER regress_dep_user3;
+ -- Test DROP OWNED
+-CREATE USER regress_dep_user0;
+-CREATE USER regress_dep_user1;
+-CREATE USER regress_dep_user2;
++CREATE USER regress_dep_user0 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_dep_user1 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_dep_user2 PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION regress_dep_user0;
+ -- permission denied
+ DROP OWNED BY regress_dep_user1;
+diff --git a/src/test/regress/expected/drop_if_exists.out b/src/test/regress/expected/drop_if_exists.out
+index 5e44c2c3cea..fdef75592e8 100644
+--- a/src/test/regress/expected/drop_if_exists.out
++++ b/src/test/regress/expected/drop_if_exists.out
+@@ -64,9 +64,9 @@ ERROR:  type "test_domain_exists" does not exist
+ ---
+ --- role/user/group
+ ---
+-CREATE USER regress_test_u1;
+-CREATE ROLE regress_test_r1;
+-CREATE GROUP regress_test_g1;
++CREATE USER regress_test_u1 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_test_r1 PASSWORD 'eib5tai9Oachootiex';
++CREATE GROUP regress_test_g1 PASSWORD 'eib5tai9Oachootiex';
+ DROP USER regress_test_u2;
+ ERROR:  role "regress_test_u2" does not exist
+ DROP USER IF EXISTS regress_test_u1, regress_test_u2;
+diff --git a/src/test/regress/expected/equivclass.out b/src/test/regress/expected/equivclass.out
+index 126f7047fed..a6c685787f3 100644
+--- a/src/test/regress/expected/equivclass.out
++++ b/src/test/regress/expected/equivclass.out
+@@ -384,7 +384,7 @@ set enable_nestloop = on;
+ set enable_mergejoin = off;
+ alter table ec1 enable row level security;
+ create policy p1 on ec1 using (f1 < '5'::int8alias1);
+-create user regress_user_ectest;
++create user regress_user_ectest PASSWORD 'eib5tai9Oachootiex';
+ grant select on ec0 to regress_user_ectest;
+ grant select on ec1 to regress_user_ectest;
+ -- without any RLS, we'll treat {a.ff, b.ff, 43} as an EquivalenceClass
+diff --git a/src/test/regress/expected/foreign_data.out b/src/test/regress/expected/foreign_data.out
+index 6ed50fdcfa0..047112b168d 100644
+--- a/src/test/regress/expected/foreign_data.out
++++ b/src/test/regress/expected/foreign_data.out
+@@ -14,13 +14,13 @@ CREATE FUNCTION test_fdw_handler()
+ SET client_min_messages TO 'warning';
+ DROP ROLE IF EXISTS regress_foreign_data_user, regress_test_role, regress_test_role2, regress_test_role_super, regress_test_indirect, regress_unprivileged_role;
+ RESET client_min_messages;
+-CREATE ROLE regress_foreign_data_user LOGIN SUPERUSER;
++CREATE ROLE regress_foreign_data_user LOGIN SUPERUSER PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION 'regress_foreign_data_user';
+-CREATE ROLE regress_test_role;
+-CREATE ROLE regress_test_role2;
+-CREATE ROLE regress_test_role_super SUPERUSER;
+-CREATE ROLE regress_test_indirect;
+-CREATE ROLE regress_unprivileged_role;
++CREATE ROLE regress_test_role PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_test_role2 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_test_role_super SUPERUSER PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_test_indirect PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_unprivileged_role PASSWORD 'eib5tai9Oachootiex';
+ CREATE FOREIGN DATA WRAPPER dummy;
+ COMMENT ON FOREIGN DATA WRAPPER dummy IS 'useless';
+ CREATE FOREIGN DATA WRAPPER postgresql VALIDATOR postgresql_fdw_validator;
+diff --git a/src/test/regress/expected/foreign_key.out b/src/test/regress/expected/foreign_key.out
+index 12e523c737b..78c6b207ab3 100644
+--- a/src/test/regress/expected/foreign_key.out
++++ b/src/test/regress/expected/foreign_key.out
+@@ -1968,7 +1968,7 @@ ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2
+   FOR VALUES IN (1600);
+ -- leave these tables around intentionally
+ -- test the case when the referenced table is owned by a different user
+-create role regress_other_partitioned_fk_owner;
++create role regress_other_partitioned_fk_owner PASSWORD 'eib5tai9Oachootiex';
+ grant references on fk_notpartitioned_pk to regress_other_partitioned_fk_owner;
+ set role regress_other_partitioned_fk_owner;
+ create table other_partitioned_fk(a int, b int) partition by list (a);
+diff --git a/src/test/regress/expected/generated.out b/src/test/regress/expected/generated.out
+index 0f623f71192..f6a898f406b 100644
+--- a/src/test/regress/expected/generated.out
++++ b/src/test/regress/expected/generated.out
+@@ -534,7 +534,7 @@ CREATE TABLE gtest10a (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) STOR
+ ALTER TABLE gtest10a DROP COLUMN b;
+ INSERT INTO gtest10a (a) VALUES (1);
+ -- privileges
+-CREATE USER regress_user11;
++CREATE USER regress_user11 PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE gtest11s (a int PRIMARY KEY, b int, c int GENERATED ALWAYS AS (b * 2) STORED);
+ INSERT INTO gtest11s VALUES (1, 10), (2, 20);
+ GRANT SELECT (a, c) ON gtest11s TO regress_user11;
+diff --git a/src/test/regress/expected/guc.out b/src/test/regress/expected/guc.out
+index 127c9532976..c269b569590 100644
+--- a/src/test/regress/expected/guc.out
++++ b/src/test/regress/expected/guc.out
+@@ -584,7 +584,7 @@ PREPARE foo AS SELECT 1;
+ LISTEN foo_event;
+ SET vacuum_cost_delay = 13;
+ CREATE TEMP TABLE tmp_foo (data text) ON COMMIT DELETE ROWS;
+-CREATE ROLE regress_guc_user;
++CREATE ROLE regress_guc_user PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION regress_guc_user;
+ -- look changes
+ SELECT pg_listening_channels();
 diff --git a/src/test/regress/expected/hash_index.out b/src/test/regress/expected/hash_index.out
 index a2036a15972..805d73b9d2e 100644
 --- a/src/test/regress/expected/hash_index.out
@@ -232,6 +734,54 @@ index a2036a15972..805d73b9d2e 100644
  -- the data in this file has a lot of duplicates in the index key
  -- fields, leading to long bucket chains and lots of table expansion.
  -- this is therefore a stress test of the bucket overflow code (unlike
+diff --git a/src/test/regress/expected/identity.out b/src/test/regress/expected/identity.out
+index cc7772349f2..3ee25f14ec3 100644
+--- a/src/test/regress/expected/identity.out
++++ b/src/test/regress/expected/identity.out
+@@ -520,7 +520,7 @@ ALTER TABLE itest7 ALTER COLUMN a SET GENERATED BY DEFAULT;
+ ALTER TABLE itest7 ALTER COLUMN a RESTART;
+ ALTER TABLE itest7 ALTER COLUMN a DROP IDENTITY;
+ -- privileges
+-CREATE USER regress_identity_user1;
++CREATE USER regress_identity_user1 PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE itest8 (a int GENERATED ALWAYS AS IDENTITY, b text);
+ GRANT SELECT, INSERT ON itest8 TO regress_identity_user1;
+ SET ROLE regress_identity_user1;
+diff --git a/src/test/regress/expected/inherit.out b/src/test/regress/expected/inherit.out
+index 4943429e9bf..e90daf60460 100644
+--- a/src/test/regress/expected/inherit.out
++++ b/src/test/regress/expected/inherit.out
+@@ -2606,7 +2606,7 @@ create index on permtest_parent (left(c, 3));
+ insert into permtest_parent
+   select 1, 'a', left(fipshash(i::text), 5) from generate_series(0, 100) i;
+ analyze permtest_parent;
+-create role regress_no_child_access;
++create role regress_no_child_access PASSWORD 'eib5tai9Oachootiex';
+ revoke all on permtest_grandchild from regress_no_child_access;
+ grant select on permtest_parent to regress_no_child_access;
+ set session authorization regress_no_child_access;
+diff --git a/src/test/regress/expected/insert.out b/src/test/regress/expected/insert.out
+index cf4b5221a8d..081004a9ad9 100644
+--- a/src/test/regress/expected/insert.out
++++ b/src/test/regress/expected/insert.out
+@@ -802,7 +802,7 @@ drop table mlparted5;
+ -- appropriate key description (or none) in various situations
+ create table key_desc (a int, b int) partition by list ((a+0));
+ create table key_desc_1 partition of key_desc for values in (1) partition by range (b);
+-create user regress_insert_other_user;
++create user regress_insert_other_user PASSWORD 'eib5tai9Oachootiex';
+ grant select (a) on key_desc_1 to regress_insert_other_user;
+ grant insert on key_desc to regress_insert_other_user;
+ set role regress_insert_other_user;
+@@ -914,7 +914,7 @@ DETAIL:  Failing row contains (2, hi there).
+ -- check that the message shows the appropriate column description in a
+ -- situation where the partitioned table is not the primary ModifyTable node
+ create table inserttest3 (f1 text default 'foo', f2 text default 'bar', f3 int);
+-create role regress_coldesc_role;
++create role regress_coldesc_role PASSWORD 'eib5tai9Oachootiex';
+ grant insert on inserttest3 to regress_coldesc_role;
+ grant insert on brtrigpartcon to regress_coldesc_role;
+ revoke select on brtrigpartcon from regress_coldesc_role;
 diff --git a/src/test/regress/expected/jsonb.out b/src/test/regress/expected/jsonb.out
 index f8a7dac9607..64dcaf171c5 100644
 --- a/src/test/regress/expected/jsonb.out
@@ -247,9 +797,18 @@ index f8a7dac9607..64dcaf171c5 100644
  SELECT '""'::jsonb;				-- OK.
   jsonb 
 diff --git a/src/test/regress/expected/largeobject.out b/src/test/regress/expected/largeobject.out
-index 4921dd79aee..8732c2cb67a 100644
+index 4921dd79aee..e2ac930cc27 100644
 --- a/src/test/regress/expected/largeobject.out
 +++ b/src/test/regress/expected/largeobject.out
+@@ -7,7 +7,7 @@
+ -- ensure consistent test output regardless of the default bytea format
+ SET bytea_output TO escape;
+ -- Test ALTER LARGE OBJECT OWNER
+-CREATE ROLE regress_lo_user;
++CREATE ROLE regress_lo_user PASSWORD 'eib5tai9Oachootiex';
+ SELECT lo_create(42);
+  lo_create 
+ -----------
 @@ -346,7 +346,8 @@ SELECT lo_unlink(loid) from lotest_stash_values;
  
  TRUNCATE lotest_stash_values;
@@ -275,6 +834,58 @@ index 4921dd79aee..8732c2cb67a 100644
  \lo_import :filename
  \set newloid :LASTOID
  -- just make sure \lo_export does not barf
+diff --git a/src/test/regress/expected/lock.out b/src/test/regress/expected/lock.out
+index ad137d3645d..eb812ddda63 100644
+--- a/src/test/regress/expected/lock.out
++++ b/src/test/regress/expected/lock.out
+@@ -16,7 +16,7 @@ CREATE VIEW lock_view3 AS SELECT * from lock_view2;
+ CREATE VIEW lock_view4 AS SELECT (select a from lock_tbl1a limit 1) from lock_tbl1;
+ CREATE VIEW lock_view5 AS SELECT * from lock_tbl1 where a in (select * from lock_tbl1a);
+ CREATE VIEW lock_view6 AS SELECT * from (select * from lock_tbl1) sub;
+-CREATE ROLE regress_rol_lock1;
++CREATE ROLE regress_rol_lock1 PASSWORD 'eib5tai9Oachootiex';
+ ALTER ROLE regress_rol_lock1 SET search_path = lock_schema1;
+ GRANT USAGE ON SCHEMA lock_schema1 TO regress_rol_lock1;
+ -- Try all valid lock options; also try omitting the optional TABLE keyword.
+diff --git a/src/test/regress/expected/matview.out b/src/test/regress/expected/matview.out
+index 67a50bde3d1..d454264a31e 100644
+--- a/src/test/regress/expected/matview.out
++++ b/src/test/regress/expected/matview.out
+@@ -549,7 +549,7 @@ SELECT * FROM mvtest_mv_v;
+ DROP TABLE mvtest_v CASCADE;
+ NOTICE:  drop cascades to materialized view mvtest_mv_v
+ -- make sure running as superuser works when MV owned by another role (bug #11208)
+-CREATE ROLE regress_user_mvtest;
++CREATE ROLE regress_user_mvtest PASSWORD 'eib5tai9Oachootiex';
+ SET ROLE regress_user_mvtest;
+ -- this test case also checks for ambiguity in the queries issued by
+ -- refresh_by_match_merge(), by choosing column names that intentionally
+@@ -615,7 +615,7 @@ HINT:  Use the REFRESH MATERIALIZED VIEW command.
+ ROLLBACK;
+ -- INSERT privileges if relation owner is not allowed to insert.
+ CREATE SCHEMA matview_schema;
+-CREATE USER regress_matview_user;
++CREATE USER regress_matview_user PASSWORD 'eib5tai9Oachootiex';
+ ALTER DEFAULT PRIVILEGES FOR ROLE regress_matview_user
+   REVOKE INSERT ON TABLES FROM regress_matview_user;
+ GRANT ALL ON SCHEMA matview_schema TO public;
+diff --git a/src/test/regress/expected/merge.out b/src/test/regress/expected/merge.out
+index bfdf59a2750..f3926d42017 100644
+--- a/src/test/regress/expected/merge.out
++++ b/src/test/regress/expected/merge.out
+@@ -1,9 +1,9 @@
+ --
+ -- MERGE
+ --
+-CREATE USER regress_merge_privs;
+-CREATE USER regress_merge_no_privs;
+-CREATE USER regress_merge_none;
++CREATE USER regress_merge_privs PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_merge_no_privs PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_merge_none PASSWORD 'eib5tai9Oachootiex';
+ DROP TABLE IF EXISTS target;
+ NOTICE:  table "target" does not exist, skipping
+ DROP TABLE IF EXISTS source;
 diff --git a/src/test/regress/expected/misc.out b/src/test/regress/expected/misc.out
 index 6e816c57f1f..6ef45b468e9 100644
 --- a/src/test/regress/expected/misc.out
@@ -307,6 +918,41 @@ index 6e816c57f1f..6ef45b468e9 100644
  SELECT * FROM stud_emp_copy;
   name  | age |  location  | salary | manager | gpa | percent 
  -------+-----+------------+--------+---------+-----+---------
+diff --git a/src/test/regress/expected/misc_functions.out b/src/test/regress/expected/misc_functions.out
+index c6699483708..8a8649caedc 100644
+--- a/src/test/regress/expected/misc_functions.out
++++ b/src/test/regress/expected/misc_functions.out
+@@ -297,7 +297,7 @@ SELECT pg_log_backend_memory_contexts(pid) FROM pg_stat_activity
+  t
+ (1 row)
+ 
+-CREATE ROLE regress_log_memory;
++CREATE ROLE regress_log_memory PASSWORD 'eib5tai9Oachootiex';
+ SELECT has_function_privilege('regress_log_memory',
+   'pg_log_backend_memory_contexts(integer)', 'EXECUTE'); -- no
+  has_function_privilege 
+@@ -483,7 +483,7 @@ select count(*) > 0 from
+ --
+ -- Test replication slot directory functions
+ --
+-CREATE ROLE regress_slot_dir_funcs;
++CREATE ROLE regress_slot_dir_funcs PASSWORD 'eib5tai9Oachootiex';
+ -- Not available by default.
+ SELECT has_function_privilege('regress_slot_dir_funcs',
+   'pg_ls_logicalsnapdir()', 'EXECUTE');
+diff --git a/src/test/regress/expected/object_address.out b/src/test/regress/expected/object_address.out
+index fc42d418bf1..8864b882e68 100644
+--- a/src/test/regress/expected/object_address.out
++++ b/src/test/regress/expected/object_address.out
+@@ -5,7 +5,7 @@
+ SET client_min_messages TO 'warning';
+ DROP ROLE IF EXISTS regress_addr_user;
+ RESET client_min_messages;
+-CREATE USER regress_addr_user;
++CREATE USER regress_addr_user PASSWORD 'eib5tai9Oachootiex';
+ -- Test generic object addressing/identification functions
+ CREATE SCHEMA addr_nsp;
+ SET search_path TO 'addr_nsp';
 diff --git a/src/test/regress/expected/password.out b/src/test/regress/expected/password.out
 index 84752317356..3d678d232b8 100644
 --- a/src/test/regress/expected/password.out
@@ -460,9 +1106,36 @@ index 84752317356..3d678d232b8 100644
  SELECT rolname, rolpassword
      FROM pg_authid
 diff --git a/src/test/regress/expected/psql.out b/src/test/regress/expected/psql.out
-index 7cd0c27cca8..e85353d2aa1 100644
+index 7cd0c27cca8..b9f9fb35b1e 100644
 --- a/src/test/regress/expected/psql.out
 +++ b/src/test/regress/expected/psql.out
+@@ -2857,7 +2857,7 @@ Type                | func
+ -- check conditional am display
+ \pset expanded off
+ CREATE SCHEMA tableam_display;
+-CREATE ROLE regress_display_role;
++CREATE ROLE regress_display_role PASSWORD 'eib5tai9Oachootiex';
+ ALTER SCHEMA tableam_display OWNER TO regress_display_role;
+ SET search_path TO tableam_display;
+ CREATE ACCESS METHOD heap_psql TYPE TABLE HANDLER heap_tableam_handler;
+@@ -4808,7 +4808,7 @@ last error message: division by zero
+ last error code: 22012
+ \unset FETCH_COUNT
+ create schema testpart;
+-create role regress_partitioning_role;
++create role regress_partitioning_role PASSWORD 'eib5tai9Oachootiex';
+ alter schema testpart owner to regress_partitioning_role;
+ set role to regress_partitioning_role;
+ -- run test inside own schema and hide other partitions
+@@ -5260,7 +5260,7 @@ reset work_mem;
+ 
+ -- check \df+
+ -- we have to use functions with a predictable owner name, so make a role
+-create role regress_psql_user superuser;
++create role regress_psql_user superuser PASSWORD 'eib5tai9Oachootiex';
+ begin;
+ set session authorization regress_psql_user;
+ create function psql_df_internal (float8)
 @@ -5544,11 +5544,14 @@ CREATE TEMPORARY TABLE reload_output(
    line text
  );
@@ -487,7 +1160,7 @@ index 7cd0c27cca8..e85353d2aa1 100644
  \set QUIET false
 -COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO :'g_out_file';
 +\set command '\\COPY (SELECT unique1 FROM onek ORDER BY unique1 LIMIT 10) TO ' :'g_out_file';
-+:command 
++:command
  -- DML command status
  UPDATE onek SET unique1 = unique1 WHERE false;
  \set QUIET true
@@ -529,10 +1202,124 @@ index 7cd0c27cca8..e85353d2aa1 100644
  SELECT line FROM reload_output ORDER BY lineno;
   line 
  ------
+@@ -6619,10 +6627,10 @@ cross-database references are not implemented: "no.such.database"."no.such.schem
+ \dX "no.such.database"."no.such.schema"."no.such.extended.statistics"
+ cross-database references are not implemented: "no.such.database"."no.such.schema"."no.such.extended.statistics"
+ -- check \drg and \du
+-CREATE ROLE regress_du_role0;
+-CREATE ROLE regress_du_role1;
+-CREATE ROLE regress_du_role2;
+-CREATE ROLE regress_du_admin;
++CREATE ROLE regress_du_role0 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_du_role1 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_du_role2 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_du_admin PASSWORD 'eib5tai9Oachootiex';
+ GRANT regress_du_role0 TO regress_du_admin WITH ADMIN TRUE;
+ GRANT regress_du_role1 TO regress_du_admin WITH ADMIN TRUE;
+ GRANT regress_du_role2 TO regress_du_admin WITH ADMIN TRUE;
+diff --git a/src/test/regress/expected/publication.out b/src/test/regress/expected/publication.out
+index 69dc6cfd859..b07fcd333d3 100644
+--- a/src/test/regress/expected/publication.out
++++ b/src/test/regress/expected/publication.out
+@@ -1,9 +1,9 @@
+ --
+ -- PUBLICATION
+ --
+-CREATE ROLE regress_publication_user LOGIN SUPERUSER;
+-CREATE ROLE regress_publication_user2;
+-CREATE ROLE regress_publication_user_dummy LOGIN NOSUPERUSER;
++CREATE ROLE regress_publication_user LOGIN SUPERUSER PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_publication_user2 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_publication_user_dummy LOGIN NOSUPERUSER PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION 'regress_publication_user';
+ -- suppress warning that depends on wal_level
+ SET client_min_messages = 'ERROR';
+@@ -1211,7 +1211,7 @@ ALTER PUBLICATION testpub2 ADD TABLE testpub_tbl1;  -- ok
+ DROP PUBLICATION testpub2;
+ DROP PUBLICATION testpub3;
+ SET ROLE regress_publication_user;
+-CREATE ROLE regress_publication_user3;
++CREATE ROLE regress_publication_user3 PASSWORD 'eib5tai9Oachootiex';
+ GRANT regress_publication_user2 TO regress_publication_user3;
+ SET client_min_messages = 'ERROR';
+ CREATE PUBLICATION testpub4 FOR TABLES IN SCHEMA pub_test;
+diff --git a/src/test/regress/expected/regproc.out b/src/test/regress/expected/regproc.out
+index a9420850b87..9221bd3ace0 100644
+--- a/src/test/regress/expected/regproc.out
++++ b/src/test/regress/expected/regproc.out
+@@ -2,7 +2,7 @@
+ -- regproc
+ --
+ /* If objects exist, return oids */
+-CREATE ROLE regress_regrole_test;
++CREATE ROLE regress_regrole_test PASSWORD 'eib5tai9Oachootiex';
+ -- without schemaname
+ SELECT regoper('||/');
+  regoper 
+diff --git a/src/test/regress/expected/rowsecurity.out b/src/test/regress/expected/rowsecurity.out
+index 97ca9bf72c5..268b4ace190 100644
+--- a/src/test/regress/expected/rowsecurity.out
++++ b/src/test/regress/expected/rowsecurity.out
+@@ -14,13 +14,13 @@ DROP ROLE IF EXISTS regress_rls_group2;
+ DROP SCHEMA IF EXISTS regress_rls_schema CASCADE;
+ RESET client_min_messages;
+ -- initial setup
+-CREATE USER regress_rls_alice NOLOGIN;
+-CREATE USER regress_rls_bob NOLOGIN;
+-CREATE USER regress_rls_carol NOLOGIN;
+-CREATE USER regress_rls_dave NOLOGIN;
+-CREATE USER regress_rls_exempt_user BYPASSRLS NOLOGIN;
+-CREATE ROLE regress_rls_group1 NOLOGIN;
+-CREATE ROLE regress_rls_group2 NOLOGIN;
++CREATE USER regress_rls_alice NOLOGIN PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_rls_bob NOLOGIN PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_rls_carol NOLOGIN PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_rls_dave NOLOGIN PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_rls_exempt_user BYPASSRLS NOLOGIN PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_rls_group1 NOLOGIN PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_rls_group2 NOLOGIN PASSWORD 'eib5tai9Oachootiex';
+ GRANT regress_rls_group1 TO regress_rls_bob;
+ GRANT regress_rls_group2 TO regress_rls_carol;
+ CREATE SCHEMA regress_rls_schema;
+@@ -4352,8 +4352,8 @@ SELECT count(*) = 0 FROM pg_depend
+ 
+ -- DROP OWNED BY testing
+ RESET SESSION AUTHORIZATION;
+-CREATE ROLE regress_rls_dob_role1;
+-CREATE ROLE regress_rls_dob_role2;
++CREATE ROLE regress_rls_dob_role1 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_rls_dob_role2 PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE dob_t1 (c1 int);
+ CREATE TABLE dob_t2 (c1 int) PARTITION BY RANGE (c1);
+ CREATE POLICY p1 ON dob_t1 TO regress_rls_dob_role1 USING (true);
+diff --git a/src/test/regress/expected/rules.out b/src/test/regress/expected/rules.out
+index 09a255649b4..34dcae28b13 100644
+--- a/src/test/regress/expected/rules.out
++++ b/src/test/regress/expected/rules.out
+@@ -3708,7 +3708,7 @@ DROP TABLE ruletest2;
+ -- Test non-SELECT rule on security invoker view.
+ -- Should use view owner's permissions.
+ --
+-CREATE USER regress_rule_user1;
++CREATE USER regress_rule_user1 PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE ruletest_t1 (x int);
+ CREATE TABLE ruletest_t2 (x int);
+ CREATE VIEW ruletest_v1 WITH (security_invoker=true) AS
 diff --git a/src/test/regress/expected/security_label.out b/src/test/regress/expected/security_label.out
-index a8e01a6220a..10c500d6a7d 100644
+index a8e01a6220a..88845a423aa 100644
 --- a/src/test/regress/expected/security_label.out
 +++ b/src/test/regress/expected/security_label.out
+@@ -6,8 +6,8 @@ SET client_min_messages TO 'warning';
+ DROP ROLE IF EXISTS regress_seclabel_user1;
+ DROP ROLE IF EXISTS regress_seclabel_user2;
+ RESET client_min_messages;
+-CREATE USER regress_seclabel_user1 WITH CREATEROLE;
+-CREATE USER regress_seclabel_user2;
++CREATE USER regress_seclabel_user1 WITH CREATEROLE PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_seclabel_user2 PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE seclabel_tbl1 (a int, b text);
+ CREATE TABLE seclabel_tbl2 (x int, y text);
+ CREATE VIEW seclabel_view1 AS SELECT * FROM seclabel_tbl2;
 @@ -19,21 +19,21 @@ ALTER TABLE seclabel_tbl2 OWNER TO regress_seclabel_user2;
  -- Test of SECURITY LABEL statement without a plugin
  --
@@ -561,6 +1348,32 @@ index a8e01a6220a..10c500d6a7d 100644
  -- clean up objects
  DROP FUNCTION seclabel_four();
  DROP DOMAIN seclabel_domain;
+diff --git a/src/test/regress/expected/select_into.out b/src/test/regress/expected/select_into.out
+index b79fe9a1c0e..c46f82dd2bf 100644
+--- a/src/test/regress/expected/select_into.out
++++ b/src/test/regress/expected/select_into.out
+@@ -15,7 +15,7 @@ DROP TABLE sitmp1;
+ -- SELECT INTO and INSERT permission, if owner is not allowed to insert.
+ --
+ CREATE SCHEMA selinto_schema;
+-CREATE USER regress_selinto_user;
++CREATE USER regress_selinto_user PASSWORD 'eib5tai9Oachootiex';
+ ALTER DEFAULT PRIVILEGES FOR ROLE regress_selinto_user
+ 	  REVOKE INSERT ON TABLES FROM regress_selinto_user;
+ GRANT ALL ON SCHEMA selinto_schema TO public;
+diff --git a/src/test/regress/expected/select_views.out b/src/test/regress/expected/select_views.out
+index 1aeed8452bd..34dcf88b4ab 100644
+--- a/src/test/regress/expected/select_views.out
++++ b/src/test/regress/expected/select_views.out
+@@ -1250,7 +1250,7 @@ SELECT * FROM toyemp WHERE name = 'sharon';
+ --
+ -- Test for Leaky view scenario
+ --
+-CREATE ROLE regress_alice;
++CREATE ROLE regress_alice PASSWORD 'eib5tai9Oachootiex';
+ CREATE FUNCTION f_leak (text)
+        RETURNS bool LANGUAGE 'plpgsql' COST 0.0000001
+        AS 'BEGIN RAISE NOTICE ''f_leak => %'', $1; RETURN true; END';
 diff --git a/src/test/regress/expected/stats.out b/src/test/regress/expected/stats.out
 index 94187e59cfb..97189594579 100644
 --- a/src/test/regress/expected/stats.out
@@ -599,6 +1412,56 @@ index 94187e59cfb..97189594579 100644
  (1 row)
  
  RESET temp_buffers;
+diff --git a/src/test/regress/expected/stats_ext.out b/src/test/regress/expected/stats_ext.out
+index b4c85613de5..f8d008eaa87 100644
+--- a/src/test/regress/expected/stats_ext.out
++++ b/src/test/regress/expected/stats_ext.out
+@@ -70,7 +70,7 @@ DROP TABLE ext_stats_test;
+ CREATE TABLE ab1 (a INTEGER, b INTEGER, c INTEGER);
+ CREATE STATISTICS IF NOT EXISTS ab1_a_b_stats ON a, b FROM ab1;
+ COMMENT ON STATISTICS ab1_a_b_stats IS 'new comment';
+-CREATE ROLE regress_stats_ext;
++CREATE ROLE regress_stats_ext PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION regress_stats_ext;
+ COMMENT ON STATISTICS ab1_a_b_stats IS 'changed comment';
+ ERROR:  must be owner of statistics object ab1_a_b_stats
+@@ -3214,7 +3214,7 @@ set search_path to public, stts_s1;
+  stts_s1 | stts_foo               | col1, col2 FROM stts_t3                                          | defined   | defined      | defined
+ (10 rows)
+ 
+-create role regress_stats_ext nosuperuser;
++create role regress_stats_ext nosuperuser PASSWORD 'eib5tai9Oachootiex';
+ set role regress_stats_ext;
+ \dX
+                                                        List of extended statistics
+@@ -3237,7 +3237,7 @@ drop schema stts_s1, stts_s2 cascade;
+ drop user regress_stats_ext;
+ reset search_path;
+ -- User with no access
+-CREATE USER regress_stats_user1;
++CREATE USER regress_stats_user1 PASSWORD 'eib5tai9Oachootiex';
+ GRANT USAGE ON SCHEMA tststats TO regress_stats_user1;
+ SET SESSION AUTHORIZATION regress_stats_user1;
+ SELECT * FROM tststats.priv_test_tbl; -- Permission denied
+diff --git a/src/test/regress/expected/subscription.out b/src/test/regress/expected/subscription.out
+index b15eddbff3c..fad8d15af56 100644
+--- a/src/test/regress/expected/subscription.out
++++ b/src/test/regress/expected/subscription.out
+@@ -1,10 +1,10 @@
+ --
+ -- SUBSCRIPTION
+ --
+-CREATE ROLE regress_subscription_user LOGIN SUPERUSER;
+-CREATE ROLE regress_subscription_user2;
+-CREATE ROLE regress_subscription_user3 IN ROLE pg_create_subscription;
+-CREATE ROLE regress_subscription_user_dummy LOGIN NOSUPERUSER;
++CREATE ROLE regress_subscription_user LOGIN SUPERUSER PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_subscription_user2 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_subscription_user3 PASSWORD 'eib5tai9Oachootiex' IN ROLE pg_create_subscription;
++CREATE ROLE regress_subscription_user_dummy LOGIN NOSUPERUSER PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION 'regress_subscription_user';
+ -- fail - no publications
+ CREATE SUBSCRIPTION regress_testsub CONNECTION 'foo';
 diff --git a/src/test/regress/expected/test_setup.out b/src/test/regress/expected/test_setup.out
 index 5d9e6bf12bc..c5fddfdca65 100644
 --- a/src/test/regress/expected/test_setup.out
@@ -691,6 +1554,60 @@ index cfa391ac512..73853735818 100644
  ANALYZE test_tsvector;
  -- test basic text search behavior without indexes, then with
  SELECT count(*) FROM test_tsvector WHERE a @@ 'wr|qh';
+diff --git a/src/test/regress/expected/updatable_views.out b/src/test/regress/expected/updatable_views.out
+index 1950e6f281f..887bab5e007 100644
+--- a/src/test/regress/expected/updatable_views.out
++++ b/src/test/regress/expected/updatable_views.out
+@@ -999,9 +999,9 @@ NOTICE:  drop cascades to 2 other objects
+ DETAIL:  drop cascades to view rw_view1
+ drop cascades to function rw_view1_aa(rw_view1)
+ -- permissions checks
+-CREATE USER regress_view_user1;
+-CREATE USER regress_view_user2;
+-CREATE USER regress_view_user3;
++CREATE USER regress_view_user1 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_view_user2 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_view_user3 PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION AUTHORIZATION regress_view_user1;
+ CREATE TABLE base_tbl(a int, b text, c float);
+ INSERT INTO base_tbl VALUES (1, 'Row 1', 1.0);
+@@ -3091,8 +3091,8 @@ DETAIL:  View columns that are not columns of their base relation are not updata
+ drop view uv_iocu_view;
+ drop table uv_iocu_tab;
+ -- ON CONFLICT DO UPDATE permissions checks
+-create user regress_view_user1;
+-create user regress_view_user2;
++create user regress_view_user1 PASSWORD 'eib5tai9Oachootiex';
++create user regress_view_user2 PASSWORD 'eib5tai9Oachootiex';
+ set session authorization regress_view_user1;
+ create table base_tbl(a int unique, b text, c float);
+ insert into base_tbl values (1,'xxx',1.0);
+diff --git a/src/test/regress/expected/update.out b/src/test/regress/expected/update.out
+index c809f88f546..2dd6a7da757 100644
+--- a/src/test/regress/expected/update.out
++++ b/src/test/regress/expected/update.out
+@@ -602,7 +602,7 @@ DROP FUNCTION func_parted_mod_b();
+ -- RLS policies with update-row-movement
+ -----------------------------------------
+ ALTER TABLE range_parted ENABLE ROW LEVEL SECURITY;
+-CREATE USER regress_range_parted_user;
++CREATE USER regress_range_parted_user PASSWORD 'eib5tai9Oachootiex';
+ GRANT ALL ON range_parted, mintab TO regress_range_parted_user;
+ CREATE POLICY seeall ON range_parted AS PERMISSIVE FOR SELECT USING (true);
+ CREATE POLICY policy_range_parted ON range_parted for UPDATE USING (true) WITH CHECK (c % 2 = 0);
+diff --git a/src/test/regress/expected/vacuum.out b/src/test/regress/expected/vacuum.out
+index 4def90b8057..211d61f8e7b 100644
+--- a/src/test/regress/expected/vacuum.out
++++ b/src/test/regress/expected/vacuum.out
+@@ -386,7 +386,7 @@ CREATE TABLE vacowned (a int);
+ CREATE TABLE vacowned_parted (a int) PARTITION BY LIST (a);
+ CREATE TABLE vacowned_part1 PARTITION OF vacowned_parted FOR VALUES IN (1);
+ CREATE TABLE vacowned_part2 PARTITION OF vacowned_parted FOR VALUES IN (2);
+-CREATE ROLE regress_vacuum;
++CREATE ROLE regress_vacuum PASSWORD 'eib5tai9Oachootiex';
+ SET ROLE regress_vacuum;
+ -- Simple table
+ VACUUM vacowned;
 diff --git a/src/test/regress/parallel_schedule b/src/test/regress/parallel_schedule
 index cf46fa33593..709602df283 100644
 --- a/src/test/regress/parallel_schedule
@@ -763,6 +1680,30 @@ index fd403701657..2143bf8198c 100644
  SET SESSION AUTHORIZATION regress_alter_op_user;
  
  ALTER OPERATOR === (boolean, boolean) SET (RESTRICT = NONE);
+diff --git a/src/test/regress/sql/alter_table.sql b/src/test/regress/sql/alter_table.sql
+index 58ea20ac3dc..84126101af8 100644
+--- a/src/test/regress/sql/alter_table.sql
++++ b/src/test/regress/sql/alter_table.sql
+@@ -7,7 +7,7 @@ SET client_min_messages TO 'warning';
+ DROP ROLE IF EXISTS regress_alter_table_user1;
+ RESET client_min_messages;
+ 
+-CREATE USER regress_alter_table_user1;
++CREATE USER regress_alter_table_user1 PASSWORD 'eib5tai9Oachootiex';
+ 
+ --
+ -- add attribute
+@@ -2397,8 +2397,8 @@ DROP TABLE fail_part;
+ ALTER TABLE list_parted ATTACH PARTITION nonexistent FOR VALUES IN (1);
+ 
+ -- check ownership of the source table
+-CREATE ROLE regress_test_me;
+-CREATE ROLE regress_test_not_me;
++CREATE ROLE regress_test_me PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_test_not_me PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE not_owned_by_me (LIKE list_parted);
+ ALTER TABLE not_owned_by_me OWNER TO regress_test_not_me;
+ SET SESSION AUTHORIZATION regress_test_me;
 diff --git a/src/test/regress/sql/arrays.sql b/src/test/regress/sql/arrays.sql
 index daf805c3827..35abfb841c7 100644
 --- a/src/test/regress/sql/arrays.sql
@@ -881,7 +1822,7 @@ index 5ffcd4ffc7b..9c1fa78a968 100644
  COMMENT ON CONSTRAINT the_constraint ON constraint_comments_tbl IS 'no, the comment';
  COMMENT ON CONSTRAINT the_constraint ON DOMAIN constraint_comments_dom IS 'no, another comment';
 diff --git a/src/test/regress/sql/conversion.sql b/src/test/regress/sql/conversion.sql
-index 9a65fca91fb..56ece8ea21e 100644
+index 9a65fca91fb..c0971fa0d7a 100644
 --- a/src/test/regress/sql/conversion.sql
 +++ b/src/test/regress/sql/conversion.sql
 @@ -12,7 +12,7 @@ CREATE FUNCTION test_enc_conversion(bytea, name, name, bool, validlen OUT int, r
@@ -889,7 +1830,7 @@ index 9a65fca91fb..56ece8ea21e 100644
      LANGUAGE C STRICT;
  
 -CREATE USER regress_conversion_user WITH NOCREATEDB NOCREATEROLE;
-+CREATE USER regress_conversion_user PASSWORD 'eib5tai9Oachootiex' WITH NOCREATEDB NOCREATEROLE;
++CREATE USER regress_conversion_user WITH NOCREATEDB NOCREATEROLE PASSWORD 'eib5tai9Oachootiex';
  SET SESSION AUTHORIZATION regress_conversion_user;
  CREATE CONVERSION myconv FOR 'LATIN1' TO 'UTF8' FROM iso8859_1_to_utf8;
  --
@@ -1347,6 +2288,19 @@ index aa147b14a90..89a97c5739c 100644
  
  CREATE FOREIGN DATA WRAPPER dummy;
  COMMENT ON FOREIGN DATA WRAPPER dummy IS 'useless';
+diff --git a/src/test/regress/sql/foreign_key.sql b/src/test/regress/sql/foreign_key.sql
+index 22e177f89b3..9bf31dd89c5 100644
+--- a/src/test/regress/sql/foreign_key.sql
++++ b/src/test/regress/sql/foreign_key.sql
+@@ -1418,7 +1418,7 @@ ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2
+ -- leave these tables around intentionally
+ 
+ -- test the case when the referenced table is owned by a different user
+-create role regress_other_partitioned_fk_owner;
++create role regress_other_partitioned_fk_owner PASSWORD 'eib5tai9Oachootiex';
+ grant references on fk_notpartitioned_pk to regress_other_partitioned_fk_owner;
+ set role regress_other_partitioned_fk_owner;
+ create table other_partitioned_fk(a int, b int) partition by list (a);
 diff --git a/src/test/regress/sql/generated.sql b/src/test/regress/sql/generated.sql
 index 298f6b3aa8b..b4870872133 100644
 --- a/src/test/regress/sql/generated.sql
@@ -1409,6 +2363,19 @@ index 91d2e443b4d..77de7957c33 100644
  CREATE TABLE itest8 (a int GENERATED ALWAYS AS IDENTITY, b text);
  GRANT SELECT, INSERT ON itest8 TO regress_identity_user1;
  SET ROLE regress_identity_user1;
+diff --git a/src/test/regress/sql/inherit.sql b/src/test/regress/sql/inherit.sql
+index fe699c54d56..9f2e8d01783 100644
+--- a/src/test/regress/sql/inherit.sql
++++ b/src/test/regress/sql/inherit.sql
+@@ -950,7 +950,7 @@ create index on permtest_parent (left(c, 3));
+ insert into permtest_parent
+   select 1, 'a', left(fipshash(i::text), 5) from generate_series(0, 100) i;
+ analyze permtest_parent;
+-create role regress_no_child_access;
++create role regress_no_child_access PASSWORD 'eib5tai9Oachootiex';
+ revoke all on permtest_grandchild from regress_no_child_access;
+ grant select on permtest_parent to regress_no_child_access;
+ set session authorization regress_no_child_access;
 diff --git a/src/test/regress/sql/insert.sql b/src/test/regress/sql/insert.sql
 index 2b086eeb6d7..a973be6aa51 100644
 --- a/src/test/regress/sql/insert.sql
@@ -1639,7 +2606,7 @@ index 53e86b0b6ce..f8bf0d1323f 100644
  CREATE ROLE regress_passwd5 PASSWORD 'md5e73a4b11df52a6068f8b39f90be36023';
  
 diff --git a/src/test/regress/sql/privileges.sql b/src/test/regress/sql/privileges.sql
-index 3f68cafcd1e..6897ded9526 100644
+index 3f68cafcd1e..db925c07f80 100644
 --- a/src/test/regress/sql/privileges.sql
 +++ b/src/test/regress/sql/privileges.sql
 @@ -24,18 +24,18 @@ RESET client_min_messages;
@@ -1690,6 +2657,17 @@ index 3f68cafcd1e..6897ded9526 100644
  
  GRANT pg_read_all_data TO regress_priv_user6;
  GRANT pg_write_all_data TO regress_priv_user7;
+@@ -130,8 +130,8 @@ DROP USER regress_priv_user10;
+ DROP USER regress_priv_user9;
+ DROP USER regress_priv_user8;
+ 
+-CREATE GROUP regress_priv_group1;
+-CREATE GROUP regress_priv_group2 WITH ADMIN regress_priv_user1 USER regress_priv_user2;
++CREATE GROUP regress_priv_group1 PASSWORD 'eib5tai9Oachootiex';
++CREATE GROUP regress_priv_group2 WITH ADMIN regress_priv_user1 PASSWORD 'eib5tai9Oachootiex' USER regress_priv_user2;
+ 
+ ALTER GROUP regress_priv_group1 ADD USER regress_priv_user4;
+ 
 @@ -1124,7 +1124,7 @@ SELECT has_table_privilege('regress_priv_user1', 'atest4', 'SELECT WITH GRANT OP
  
  -- security-restricted operations
@@ -1699,6 +2677,17 @@ index 3f68cafcd1e..6897ded9526 100644
  
  -- Check that index expressions and predicates are run as the table's owner
  
+@@ -1620,8 +1620,8 @@ DROP SCHEMA testns CASCADE;
+ -- Change owner of the schema & and rename of new schema owner
+ \c -
+ 
+-CREATE ROLE regress_schemauser1 superuser login;
+-CREATE ROLE regress_schemauser2 superuser login;
++CREATE ROLE regress_schemauser1 superuser login PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_schemauser2 superuser login PASSWORD 'eib5tai9Oachootiex';
+ 
+ SET SESSION ROLE regress_schemauser1;
+ CREATE SCHEMA testns;
 @@ -1715,7 +1715,7 @@ DROP USER regress_priv_user8; -- does not exist
  
  
@@ -1708,6 +2697,15 @@ index 3f68cafcd1e..6897ded9526 100644
  CREATE TABLE lock_table (a int);
  
  -- LOCK TABLE and SELECT permission
+@@ -1803,7 +1803,7 @@ DROP USER regress_locktable_user;
+ -- switch to superuser
+ \c -
+ 
+-CREATE ROLE regress_readallstats;
++CREATE ROLE regress_readallstats PASSWORD 'eib5tai9Oachootiex';
+ 
+ SELECT has_table_privilege('regress_readallstats','pg_backend_memory_contexts','SELECT'); -- no
+ SELECT has_table_privilege('regress_readallstats','pg_shmem_allocations','SELECT'); -- no
 @@ -1823,10 +1823,10 @@ RESET ROLE;
  DROP ROLE regress_readallstats;
  
@@ -1737,7 +2735,7 @@ index 3f68cafcd1e..6897ded9526 100644
  GRANT CREATE, USAGE ON SCHEMA regress_roleoption TO PUBLIC;
  GRANT regress_roleoption_donor TO regress_roleoption_protagonist WITH INHERIT TRUE, SET FALSE;
 diff --git a/src/test/regress/sql/psql.sql b/src/test/regress/sql/psql.sql
-index f3bc6cd07e8..627bea6f024 100644
+index f3bc6cd07e8..f32d37fd977 100644
 --- a/src/test/regress/sql/psql.sql
 +++ b/src/test/regress/sql/psql.sql
 @@ -496,7 +496,7 @@ select 1 where false;
@@ -1749,6 +2747,24 @@ index f3bc6cd07e8..627bea6f024 100644
  ALTER SCHEMA tableam_display OWNER TO regress_display_role;
  SET search_path TO tableam_display;
  CREATE ACCESS METHOD heap_psql TYPE TABLE HANDLER heap_tableam_handler;
+@@ -1174,7 +1174,7 @@ select 1/(15-unique2) from tenk1 order by unique2 limit 19;
+ \unset FETCH_COUNT
+ 
+ create schema testpart;
+-create role regress_partitioning_role;
++create role regress_partitioning_role PASSWORD 'eib5tai9Oachootiex';
+ 
+ alter schema testpart owner to regress_partitioning_role;
+ 
+@@ -1285,7 +1285,7 @@ reset work_mem;
+ 
+ -- check \df+
+ -- we have to use functions with a predictable owner name, so make a role
+-create role regress_psql_user superuser;
++create role regress_psql_user superuser PASSWORD 'eib5tai9Oachootiex';
+ begin;
+ set session authorization regress_psql_user;
+ 
 @@ -1431,11 +1431,14 @@ CREATE TEMPORARY TABLE reload_output(
  );
  
@@ -1912,7 +2928,7 @@ index c961b2d7303..35b69029b7d 100644
  ALTER ROLE regress_test_bypassrls WITH NOBYPASSRLS;
  SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
 diff --git a/src/test/regress/sql/rowsecurity.sql b/src/test/regress/sql/rowsecurity.sql
-index dec7340538c..c97446f47e4 100644
+index dec7340538c..2a579008096 100644
 --- a/src/test/regress/sql/rowsecurity.sql
 +++ b/src/test/regress/sql/rowsecurity.sql
 @@ -20,13 +20,13 @@ DROP SCHEMA IF EXISTS regress_rls_schema CASCADE;
@@ -1936,6 +2952,17 @@ index dec7340538c..c97446f47e4 100644
  
  GRANT regress_rls_group1 TO regress_rls_bob;
  GRANT regress_rls_group2 TO regress_rls_carol;
+@@ -2065,8 +2065,8 @@ SELECT count(*) = 0 FROM pg_depend
+ -- DROP OWNED BY testing
+ RESET SESSION AUTHORIZATION;
+ 
+-CREATE ROLE regress_rls_dob_role1;
+-CREATE ROLE regress_rls_dob_role2;
++CREATE ROLE regress_rls_dob_role1 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_rls_dob_role2 PASSWORD 'eib5tai9Oachootiex';
+ 
+ CREATE TABLE dob_t1 (c1 int);
+ CREATE TABLE dob_t2 (c1 int) PARTITION BY RANGE (c1);
 diff --git a/src/test/regress/sql/rules.sql b/src/test/regress/sql/rules.sql
 index 8b7e255dcd2..642bd26dee3 100644
 --- a/src/test/regress/sql/rules.sql
@@ -2004,7 +3031,7 @@ index 793f1415f6b..e871d79f87a 100644
  -- nextval
  BEGIN;
 diff --git a/src/test/regress/sql/stats_ext.sql b/src/test/regress/sql/stats_ext.sql
-index 1b80d3687b4..1686c405ab0 100644
+index 1b80d3687b4..d183353b197 100644
 --- a/src/test/regress/sql/stats_ext.sql
 +++ b/src/test/regress/sql/stats_ext.sql
 @@ -50,7 +50,7 @@ DROP TABLE ext_stats_test;
@@ -2016,6 +3043,15 @@ index 1b80d3687b4..1686c405ab0 100644
  SET SESSION AUTHORIZATION regress_stats_ext;
  COMMENT ON STATISTICS ab1_a_b_stats IS 'changed comment';
  DROP STATISTICS ab1_a_b_stats;
+@@ -1607,7 +1607,7 @@ drop statistics stts_t1_expr_expr_stat;
+ set search_path to public, stts_s1;
+ \dX
+ 
+-create role regress_stats_ext nosuperuser;
++create role regress_stats_ext nosuperuser PASSWORD 'eib5tai9Oachootiex';
+ set role regress_stats_ext;
+ \dX
+ reset role;
 @@ -1618,7 +1618,7 @@ drop user regress_stats_ext;
  reset search_path;
  
@@ -2133,7 +3169,7 @@ index db2e09be94c..f6c6c3e1801 100644
  ANALYZE test_tsvector;
  
 diff --git a/src/test/regress/sql/updatable_views.sql b/src/test/regress/sql/updatable_views.sql
-index eaee0b7e1d7..4a5dc447ff1 100644
+index eaee0b7e1d7..e06b5f743ee 100644
 --- a/src/test/regress/sql/updatable_views.sql
 +++ b/src/test/regress/sql/updatable_views.sql
 @@ -425,9 +425,9 @@ DROP TABLE base_tbl CASCADE;
@@ -2149,3 +3185,40 @@ index eaee0b7e1d7..4a5dc447ff1 100644
  
  SET SESSION AUTHORIZATION regress_view_user1;
  CREATE TABLE base_tbl(a int, b text, c float);
+@@ -1585,8 +1585,8 @@ drop view uv_iocu_view;
+ drop table uv_iocu_tab;
+ 
+ -- ON CONFLICT DO UPDATE permissions checks
+-create user regress_view_user1;
+-create user regress_view_user2;
++create user regress_view_user1 PASSWORD 'eib5tai9Oachootiex';
++create user regress_view_user2 PASSWORD 'eib5tai9Oachootiex';
+ 
+ set session authorization regress_view_user1;
+ create table base_tbl(a int unique, b text, c float);
+diff --git a/src/test/regress/sql/update.sql b/src/test/regress/sql/update.sql
+index 7a7bee77b92..ae5120e2eb5 100644
+--- a/src/test/regress/sql/update.sql
++++ b/src/test/regress/sql/update.sql
+@@ -339,7 +339,7 @@ DROP FUNCTION func_parted_mod_b();
+ -----------------------------------------
+ 
+ ALTER TABLE range_parted ENABLE ROW LEVEL SECURITY;
+-CREATE USER regress_range_parted_user;
++CREATE USER regress_range_parted_user PASSWORD 'eib5tai9Oachootiex';
+ GRANT ALL ON range_parted, mintab TO regress_range_parted_user;
+ CREATE POLICY seeall ON range_parted AS PERMISSIVE FOR SELECT USING (true);
+ CREATE POLICY policy_range_parted ON range_parted for UPDATE USING (true) WITH CHECK (c % 2 = 0);
+diff --git a/src/test/regress/sql/vacuum.sql b/src/test/regress/sql/vacuum.sql
+index 51d7b1fecc7..2c9b381cc49 100644
+--- a/src/test/regress/sql/vacuum.sql
++++ b/src/test/regress/sql/vacuum.sql
+@@ -306,7 +306,7 @@ CREATE TABLE vacowned (a int);
+ CREATE TABLE vacowned_parted (a int) PARTITION BY LIST (a);
+ CREATE TABLE vacowned_part1 PARTITION OF vacowned_parted FOR VALUES IN (1);
+ CREATE TABLE vacowned_part2 PARTITION OF vacowned_parted FOR VALUES IN (2);
+-CREATE ROLE regress_vacuum;
++CREATE ROLE regress_vacuum PASSWORD 'eib5tai9Oachootiex';
+ SET ROLE regress_vacuum;
+ -- Simple table
+ VACUUM vacowned;
