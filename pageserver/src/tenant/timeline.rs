@@ -69,7 +69,7 @@ use crate::{
         config::defaults::DEFAULT_PITR_INTERVAL,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::PersistentLayerDesc,
+        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
     },
     walredo,
 };
@@ -1907,6 +1907,8 @@ impl Timeline {
 
             true
         } else if projected_layer_size >= checkpoint_distance {
+            // NB: this check is relied upon by:
+            let _ = IndexEntry::validate_checkpoint_distance;
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 projected_lsn, layer_size, projected_layer_size
@@ -5702,7 +5704,7 @@ impl<'a> TimelineWriter<'a> {
             return Ok(());
         }
 
-        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch);
+        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch)?;
         let batch_max_lsn = serialized_batch.max_lsn;
         let buf_size: u64 = serialized_batch.raw.len() as u64;
 

@@ -65,7 +65,7 @@ use std::os::unix::fs::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tokio_epoll_uring::IoBufMut;
+use tokio_epoll_uring::IoBuf;
 use tracing::*;
 
 use utils::{
@@ -471,7 +471,7 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, anyhow::Result<()>)
     where
-        Buf: IoBufMut + Send,
+        Buf: IoBuf + Send,
     {
         assert!(
             self.lsn_range.start <= lsn,
@@ -678,7 +678,7 @@ impl DeltaLayerWriter {
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, anyhow::Result<()>)
     where
-        Buf: IoBufMut + Send,
+        Buf: IoBuf + Send,
     {
         self.inner
             .as_mut()

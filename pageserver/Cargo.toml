@@ -16,6 +16,7 @@ arc-swap.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
+bit_field.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 camino.workspace = true
@@ -52,6 +53,7 @@ rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
 scopeguard.workspace = true
+send-future.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error.workspace = true

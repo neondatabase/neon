@@ -31,6 +31,7 @@ use utils::{
 
 use crate::l0_flush::L0FlushConfig;
 use crate::tenant::config::TenantConfOpt;
+use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::timeline::compaction::CompactL0Phase1ValueAccess;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -1019,6 +1020,15 @@ impl PageServerConf {
         }
 
         conf.default_tenant_conf = t_conf.merge(TenantConf::default());
+
+        IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
+            .map_err(|msg| anyhow::anyhow!("{msg}"))
+            .with_context(|| {
+                format!(
+                    "effective checkpoint distance is unsupported: {}",
+                    conf.default_tenant_conf.checkpoint_distance
+                )
+            })?;
 
         Ok(conf)
     }

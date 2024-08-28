@@ -247,9 +247,10 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
 
     compaction_period_s = 10
 
+    checkpoint_distance = 1024**3
     tenant_conf = {
         # Large space + time thresholds: effectively disable these limits
-        "checkpoint_distance": f"{1024 ** 4}",
+        "checkpoint_distance": f"{checkpoint_distance}",
         "checkpoint_timeout": "3600s",
         "compaction_period": f"{compaction_period_s}s",
     }
@@ -269,7 +270,11 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
     for tenant, timeline, last_flush_lsn in last_flush_lsns:
         http_client = env.pageserver.http_client()
         initdb_lsn = Lsn(http_client.timeline_detail(tenant, timeline)["initdb_lsn"])
-        total_bytes_ingested += last_flush_lsn - initdb_lsn
+        this_timeline_ingested = last_flush_lsn - initdb_lsn
+        assert (
+            this_timeline_ingested < checkpoint_distance * 0.8
+        ), "this test is supposed to fill InMemoryLayer"
+        total_bytes_ingested += this_timeline_ingested
 
     log.info(f"Ingested {total_bytes_ingested} bytes since initdb (vs max dirty {max_dirty_data})")
     assert total_bytes_ingested > max_dirty_data
