@@ -105,7 +105,7 @@ fn acquire_lsn_lease_with_retry(
                 return Ok(res);
             }
             Ok(None) => {
-                bail!("Lsn lease is not granted");
+                bail!("Permanent error: lease could not be obtained, LSN is behind the GC cutoff");
             }
             Err(e) => {
                 warn!("Failed to acquire lsn lease: {e} (attempt {attempts}");
