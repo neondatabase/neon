@@ -1552,7 +1552,6 @@ pub(crate) static LIVE_CONNECTIONS: Lazy<IntCounterPairVec> = Lazy::new(|| {
 #[derive(Clone, Copy, enum_map::Enum, IntoStaticStr)]
 pub(crate) enum ComputeCommandKind {
     PageStreamV2,
-    PageStream,
     Basebackup,
     Fullbackup,
     LeaseLsn,
@@ -1799,6 +1798,14 @@ pub(crate) static SECONDARY_RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::n
         "pageserver_secondary_resident_physical_size",
         "The size of the layer files present in the pageserver's filesystem, for secondary locations.",
         &["tenant_id", "shard_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static NODE_UTILIZATION_SCORE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_utilization_score",
+        "The utilization score we report to the storage controller for scheduling, where 0 is empty, 1000000 is full, and anything above is considered overloaded",
     )
     .expect("failed to define a metric")
 });

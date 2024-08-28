@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
+use crate::models::PageserverUtilization;
 use crate::{
     models::{ShardParameters, TenantConfig},
     shard::{ShardStripeSize, TenantShardId},
@@ -140,23 +141,11 @@ pub struct TenantShardMigrateRequest {
     pub node_id: NodeId,
 }
 
-/// Utilisation score indicating how good a candidate a pageserver
-/// is for scheduling the next tenant. See [`crate::models::PageserverUtilization`].
-/// Lower values are better.
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Debug)]
-pub struct UtilizationScore(pub u64);
-
-impl UtilizationScore {
-    pub fn worst() -> Self {
-        UtilizationScore(u64::MAX)
-    }
-}
-
-#[derive(Serialize, Clone, Copy, Debug)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(into = "NodeAvailabilityWrapper")]
 pub enum NodeAvailability {
     // Normal, happy state
-    Active(UtilizationScore),
+    Active(PageserverUtilization),
     // Node is warming up, but we expect it to become available soon. Covers
     // the time span between the re-attach response being composed on the storage controller
     // and the first successful heartbeat after the processing of the re-attach response
@@ -195,7 +184,9 @@ impl From<NodeAvailabilityWrapper> for NodeAvailability {
         match val {
             // Assume the worst utilisation score to begin with. It will later be updated by
             // the heartbeats.
-            NodeAvailabilityWrapper::Active => NodeAvailability::Active(UtilizationScore::worst()),
+            NodeAvailabilityWrapper::Active => {
+                NodeAvailability::Active(PageserverUtilization::full())
+            }
             NodeAvailabilityWrapper::WarmingUp => NodeAvailability::WarmingUp(Instant::now()),
             NodeAvailabilityWrapper::Offline => NodeAvailability::Offline,
         }

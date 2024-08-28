@@ -2287,7 +2287,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             self.allowed_errors,
         )
 
-    def pageserver_api(self) -> PageserverHttpClient:
+    def pageserver_api(self, *args, **kwargs) -> PageserverHttpClient:
         """
         The storage controller implements a subset of the pageserver REST API, for mapping
         per-tenant actions into per-shard actions (e.g. timeline creation).  Tests should invoke those
@@ -2296,7 +2296,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         auth_token = None
         if self.auth_enabled:
             auth_token = self.env.auth_keys.generate_token(scope=TokenScope.PAGE_SERVER_API)
-        return PageserverHttpClient(self.port, lambda: True, auth_token)
+        return PageserverHttpClient(self.port, lambda: True, auth_token, *args, **kwargs)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
         resp = requests.request(method, *args, **kwargs)

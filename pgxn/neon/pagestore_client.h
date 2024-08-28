@@ -85,9 +85,8 @@ typedef enum {
  * can skip traversing through recent layers which we know to not contain any
  * versions for the requested page.
  *
- * These structs describe the V2 of these requests. The old V1 protocol contained
- * just one LSN and a boolean 'latest' flag. If the neon_protocol_version GUC is
- * set to 1, we will convert these to the V1 requests before sending.
+ * These structs describe the V2 of these requests. (The old now-defunct V1
+ * protocol contained just one LSN and a boolean 'latest' flag.)
  */
 typedef struct
 {

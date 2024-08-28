@@ -22,27 +22,27 @@ const MAX_RENEW: Duration = Duration::from_secs(3600);
 const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
 
 /// How to get the JWT auth rules
-pub trait FetchAuthRules: Clone + Send + Sync + 'static {
+pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
     fn fetch_auth_rules(
         &self,
         role_name: RoleName,
     ) -> impl Future<Output = anyhow::Result<Vec<AuthRule>>> + Send;
 }
 
-pub struct AuthRule {
-    pub id: String,
-    pub jwks_url: url::Url,
-    pub audience: Option<String>,
+pub(crate) struct AuthRule {
+    pub(crate) id: String,
+    pub(crate) jwks_url: url::Url,
+    pub(crate) audience: Option<String>,
 }
 
 #[derive(Default)]
-pub struct JwkCache {
+pub(crate) struct JwkCache {
     client: reqwest::Client,
 
     map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
 }
 
-pub struct JwkCacheEntry {
+pub(crate) struct JwkCacheEntry {
     /// Should refetch at least every hour to verify when old keys have been removed.
     /// Should refetch when new key IDs are seen only every 5 minutes or so
     last_retrieved: Instant,
@@ -75,7 +75,7 @@ impl KeySet {
     }
 }
 
-pub struct JwkCacheEntryLock {
+pub(crate) struct JwkCacheEntryLock {
     cached: ArcSwapOption<JwkCacheEntry>,
     lookup: tokio::sync::Semaphore,
 }
@@ -224,10 +224,10 @@ impl JwkCacheEntryLock {
         // where Signature = alg(<B64(Header)> || . || <B64(Payload)>);
 
         let (header_payload, signature) = jwt
-            .rsplit_once(".")
+            .rsplit_once('.')
             .context("Provided authentication token is not a valid JWT encoding")?;
         let (header, payload) = header_payload
-            .split_once(".")
+            .split_once('.')
             .context("Provided authentication token is not a valid JWT encoding")?;
 
         let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)
@@ -309,7 +309,7 @@ impl JwkCacheEntryLock {
 }
 
 impl JwkCache {
-    pub async fn check_jwt<F: FetchAuthRules>(
+    pub(crate) async fn check_jwt<F: FetchAuthRules>(
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
@@ -320,14 +320,11 @@ impl JwkCache {
         // try with just a read lock first
         let key = (endpoint, role_name.clone());
         let entry = self.map.get(&key).as_deref().map(Arc::clone);
-        let entry = match entry {
-            Some(entry) => entry,
-            None => {
-                // acquire a write lock after to insert.
-                let entry = self.map.entry(key).or_default();
-                Arc::clone(&*entry)
-            }
-        };
+        let entry = entry.unwrap_or_else(|| {
+            // acquire a write lock after to insert.
+            let entry = self.map.entry(key).or_default();
+            Arc::clone(&*entry)
+        });
 
         entry
             .check_jwt(ctx, jwt, &self.client, role_name, fetch)

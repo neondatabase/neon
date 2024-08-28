@@ -68,7 +68,7 @@ impl ThreadPool {
         pool
     }
 
-    pub fn spawn_job(
+    pub(crate) fn spawn_job(
         &self,
         endpoint: EndpointIdInt,
         pbkdf2: Pbkdf2,
@@ -222,12 +222,11 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
         }
 
         for i in 0.. {
-            let mut job = match worker
+            let Some(mut job) = worker
                 .pop()
                 .or_else(|| pool.steal(&mut rng, index, &worker))
-            {
-                Some(job) => job,
-                None => continue 'wait,
+            else {
+                continue 'wait;
             };
 
             pool.metrics

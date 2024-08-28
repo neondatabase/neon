@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
 /// Abstracts away all peculiarities of the libpq's protocol.
-pub struct SaslStream<'a, S> {
+pub(crate) struct SaslStream<'a, S> {
     /// The underlying stream.
     stream: &'a mut PqStream<S>,
     /// Current password message we received from client.
@@ -17,7 +17,7 @@ pub struct SaslStream<'a, S> {
 }
 
 impl<'a, S> SaslStream<'a, S> {
-    pub fn new(stream: &'a mut PqStream<S>, first: &'a str) -> Self {
+    pub(crate) fn new(stream: &'a mut PqStream<S>, first: &'a str) -> Self {
         Self {
             stream,
             current: bytes::Bytes::new(),
@@ -53,7 +53,7 @@ impl<S: AsyncWrite + Unpin> SaslStream<'_, S> {
 /// It's much easier to match on those two variants
 /// than to peek into a noisy protocol error type.
 #[must_use = "caller must explicitly check for success"]
-pub enum Outcome<R> {
+pub(crate) enum Outcome<R> {
     /// Authentication succeeded and produced some value.
     Success(R),
     /// Authentication failed (reason attached).
@@ -63,7 +63,7 @@ pub enum Outcome<R> {
 impl<S: AsyncRead + AsyncWrite + Unpin> SaslStream<'_, S> {
     /// Perform SASL message exchange according to the underlying algorithm
     /// until user is either authenticated or denied access.
-    pub async fn authenticate<M: Mechanism>(
+    pub(crate) async fn authenticate<M: Mechanism>(
         mut self,
         mut mechanism: M,
     ) -> super::Result<Outcome<M::Output>> {

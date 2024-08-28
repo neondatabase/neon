@@ -58,9 +58,9 @@ pub(crate) struct PasswordUpdate {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub(crate) struct CancelSession {
-    pub region_id: Option<String>,
-    pub cancel_key_data: CancelKeyData,
-    pub session_id: Uuid,
+    pub(crate) region_id: Option<String>,
+    pub(crate) cancel_key_data: CancelKeyData,
+    pub(crate) session_id: Uuid,
 }
 
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -89,7 +89,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> Clone for MessageHandler<C> {
 }
 
 impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
-    pub fn new(
+    pub(crate) fn new(
         cache: Arc<C>,
         cancellation_handler: Arc<CancellationHandler<()>>,
         region_id: String,
@@ -100,10 +100,10 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
             region_id,
         }
     }
-    pub async fn increment_active_listeners(&self) {
+    pub(crate) async fn increment_active_listeners(&self) {
         self.cache.increment_active_listeners().await;
     }
-    pub async fn decrement_active_listeners(&self) {
+    pub(crate) async fn decrement_active_listeners(&self) {
         self.cache.decrement_active_listeners().await;
     }
     #[tracing::instrument(skip(self, msg), fields(session_id = tracing::field::Empty))]
@@ -150,7 +150,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                     }
                 }
             }
-            _ => {
+            Notification::AllowedIpsUpdate { .. } | Notification::PasswordUpdate { .. } => {
                 invalidate_cache(self.cache.clone(), msg.clone());
                 if matches!(msg, Notification::AllowedIpsUpdate { .. }) {
                     Metrics::get()
