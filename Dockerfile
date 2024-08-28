@@ -1,4 +1,4 @@
-### Creates a storage Docker image with postgres, pageserver, safekeeper and proxy binaries.
+### Creates a storage Docker image with postgres, pageserver, safekeeper and proxy binaries.docker
 ### The image itself is mainly used as a container for the binaries and for starting e2e tests with custom parameters.
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
 ### inside this image in the real deployments.
@@ -87,6 +87,7 @@ RUN mkdir -p /data/.neon/ && \
        "pg_distrib_dir='/usr/local/'\n" \
        "listen_pg_addr='0.0.0.0:6400'\n" \
        "listen_http_addr='0.0.0.0:9898'\n" \
+       "availability_zone='local'\n" \
   > /data/.neon/pageserver.toml && \
   chown -R neon:neon /data/.neon
 
