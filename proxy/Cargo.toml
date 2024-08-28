@@ -48,6 +48,7 @@ itertools.workspace = true
 lasso = { workspace = true, features = ["multi-threaded"] }
 measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
+nix.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 parquet.workspace = true

@@ -164,12 +164,6 @@ async fn main() -> anyhow::Result<()> {
         16,
     ));
 
-    // write the process ID to a file so that compute-ctl can find our process later
-    // in order to trigger the appropriate SIGHUP on config change.
-    let pid = std::process::id();
-    info!("process running in PID {pid}");
-    std::fs::write(args.pid_path, format!("{pid}\n")).context("writing PID to file")?;
-
     let mut maintenance_tasks = JoinSet::new();
 
     let refresh_config_notify = Arc::new(Notify::new());

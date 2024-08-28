@@ -11,6 +11,7 @@ testing = []
 
 [dependencies]
 anyhow.workspace = true
+camino.workspace = true
 chrono.workspace = true
 cfg-if.workspace = true
 clap.workspace = true
