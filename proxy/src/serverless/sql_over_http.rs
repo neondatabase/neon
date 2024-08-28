@@ -576,7 +576,12 @@ async fn handle_inner(
                 }
                 AuthData::Jwt(jwt) => {
                     backend
-                        .authenticate_with_jwt(ctx, &conn_info.conn_info.user_info, jwt)
+                        .authenticate_with_jwt(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.conn_info.user_info,
+                            jwt,
+                        )
                         .await?
                 }
             };

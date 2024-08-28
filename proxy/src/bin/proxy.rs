@@ -8,6 +8,7 @@ use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_config::Region;
 use futures::future::Either;
 use proxy::auth;
+use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::AuthRateLimiter;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
@@ -689,6 +690,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
     let authentication_config = AuthenticationConfig {
+        jwks_cache: JwkCache::default(),
         thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,

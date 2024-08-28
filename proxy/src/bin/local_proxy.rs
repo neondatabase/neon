@@ -6,7 +6,10 @@ use compute_api::spec::LocalProxySpec;
 use dashmap::DashMap;
 use futures::future::Either;
 use proxy::{
-    auth::backend::local::{LocalBackend, JWKS_ROLE_MAP},
+    auth::backend::{
+        jwt::JwkCache,
+        local::{LocalBackend, JWKS_ROLE_MAP},
+    },
     cancellation::CancellationHandlerMain,
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
     console::{
@@ -267,6 +270,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
         allow_self_signed_compute: false,
         http_config,
         authentication_config: AuthenticationConfig {
+            jwks_cache: JwkCache::default(),
             thread_pool: ThreadPool::new(0),
             scram_protocol_timeout: Duration::from_secs(10),
             rate_limiter_enabled: false,
