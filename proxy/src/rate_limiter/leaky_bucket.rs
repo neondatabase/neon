@@ -47,7 +47,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
         let mut entry = self
             .map
             .entry(key)
-            .or_insert_with(|| LeakyBucketState::new(now));
+            .or_insert_with(|| LeakyBucketState { empty_at: now });
 
         entry.add_tokens(&self.config, now, n as f64).is_ok()
     }
@@ -108,17 +108,16 @@ mod tests {
         assert_eq!(config.cost, Duration::from_millis(2));
         assert_eq!(config.bucket_width, Duration::from_secs(4));
 
-        let mut bucket = LeakyBucketState::new(Instant::now());
+        let mut bucket = LeakyBucketState {
+            empty_at: Instant::now(),
+        };
 
         // should work for 2000 requests this second
         for _ in 0..2000 {
             bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
         }
         bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
-        assert_eq!(
-            bucket.end - Instant::now(),
-            config.bucket_width
-        );
+        assert_eq!(bucket.empty_at - Instant::now(), config.bucket_width);
 
         // in 1ms we should drain 0.5 tokens.
         // make sure we don't lose any tokens

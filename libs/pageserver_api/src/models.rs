@@ -7,7 +7,7 @@ pub use utilization::PageserverUtilization;
 use std::{
     collections::HashMap,
     io::{BufRead, Read},
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     str::FromStr,
     sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
@@ -486,11 +486,11 @@ pub struct EvictionPolicyLayerAccessThreshold {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ThrottleConfig {
     pub task_kinds: Vec<String>, // TaskKind
-    pub initial: usize,
+    pub initial: u32,
     #[serde(with = "humantime_serde")]
     pub refill_interval: Duration,
-    pub refill_amount: NonZeroUsize,
-    pub max: usize,
+    pub refill_amount: NonZeroU32,
+    pub max: u32,
     pub fair: bool,
 }
 
@@ -501,7 +501,7 @@ impl ThrottleConfig {
             // other values don't matter with emtpy `task_kinds`.
             initial: 0,
             refill_interval: Duration::from_millis(1),
-            refill_amount: NonZeroUsize::new(1).unwrap(),
+            refill_amount: NonZeroU32::new(1).unwrap(),
             max: 1,
             fair: true,
         }

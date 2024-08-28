@@ -1,42 +1,74 @@
+//! This module implements the Generic Cell Rate Algorithm for a simplified
+//! version of the Leaky Bucket rate limiting system.
+//!
+//! # Leaky Bucket
+//!
+//! If the bucket is full, no new requests are allowed and are throttled/errored.
+//! If the bucket is partially full/empty, new requests are added to the bucket in
+//! terms of "tokens".
+//!
+//! Over time, tokens are removed from the bucket, naturally allowing new requests at a steady rate.
+//!
+//! The bucket size tunes the burst support. The drain rate tunes the steady-rate requests per second.
+//!
+//! # GCRA (<https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm>)
+//!
+//! GCRA is a continuous rate leaky-bucket impl that stores minimal state and requires
+//! no background jobs to drain tokens, as the design utilises timestamps to drain automatically over time.
+//!
+//! We store an "empty_at" timestamp as the only state. As time progresses, we will naturally approach
+//! the empty state. The full-bucket state is calculated from `empty_at - config.bucket_width`.
+
 use std::{sync::Mutex, time::Duration};
 
 use tokio::{sync::Notify, time::Instant};
 
 pub struct LeakyBucketConfig {
-    /// "time cost" of a single request unit.
-    /// should loosely represent how long it takes to handle a request unit in active resource time.
+    /// This is the "time cost" of a single request unit.
+    /// Should loosely represent how long it takes to handle a request unit in active resource time.
+    /// Loosely speaking this is the inverse of the steady-rate requests-per-second
     pub cost: Duration,
 
     /// total size of the bucket
     pub bucket_width: Duration,
 }
 
+impl LeakyBucketConfig {
+    pub fn new(rps: f64, bucket_size: f64) -> Self {
+        let cost = Duration::from_secs_f64(rps.recip());
+        let bucket_width = cost.mul_f64(bucket_size);
+        Self { cost, bucket_width }
+    }
+}
+
 pub struct LeakyBucketState {
-    /// Bucket is represented by `start..end` where `end = epoch + end` and `start = end - config.bucket_width`.
+    /// Bucket is represented by `available_at..empty_at` where `available_at = empty_at - config.bucket_width`.
     ///
-    /// At any given time, `end - now` represents the number of tokens in the bucket, multiplied by the "time_cost".
-    /// Adding `n` tokens to the bucket is done by moving `end` forward by `n * config.time_cost`.
-    /// If `now < start`, the bucket is considered filled and cannot accept any more tokens.
+    /// At any given time, `empty_at - now` represents the number of tokens in the bucket, multiplied by the "time_cost".
+    /// Adding `n` tokens to the bucket is done by moving `empty_at` forward by `n * config.time_cost`.
+    /// If `now < available_at`, the bucket is considered filled and cannot accept any more tokens.
     /// Draining the bucket will happen naturally as `now` moves forward.
     ///
     /// Let `n` be some "time cost" for the request,
-    /// If now is after end, the bucket is empty and the end is reset to now,
+    /// If now is after empty_at, the bucket is empty and the empty_at is reset to now,
     /// If now is within the `bucket window + n`, we are within time budget.
     /// If now is before the `bucket window + n`, we have run out of budget.
     ///
     /// This is inspired by the generic cell rate algorithm (GCRA) and works
     /// exactly the same as a leaky-bucket.
-    pub end: Instant,
+    pub empty_at: Instant,
 }
 
 impl LeakyBucketState {
-    pub fn new(now: Instant) -> Self {
-        Self { end: now }
+    pub fn with_initial_tokens(config: &LeakyBucketConfig, initial_tokens: f64) -> Self {
+        LeakyBucketState {
+            empty_at: Instant::now() + config.cost.mul_f64(initial_tokens),
+        }
     }
 
     pub fn bucket_is_empty(&self, now: Instant) -> bool {
         // if self.end is after now, the bucket is not empty
-        self.end <= now
+        self.empty_at <= now
     }
 
     /// Immediately adds tokens to the bucket, if there is space.
@@ -61,30 +93,31 @@ impl LeakyBucketState {
         // invariant: started <= now
         debug_assert!(started <= now);
 
-        // If the bucket was empty when we started our search, bump the end up accordingly.
-        let mut end = self.end;
-        if end < started {
-            end = started;
+        // If the bucket was empty when we started our search,
+        // we should update the `empty_at` value accordingly.
+        // this prevents us from having negative tokens in the bucket.
+        let mut empty_at = self.empty_at;
+        if empty_at < started {
+            empty_at = started;
         }
 
         let n = config.cost.mul_f64(n);
-        let end_plus_n = end + n;
-        let start_plus_n = end_plus_n.checked_sub(config.bucket_width);
+        let new_empty_at = empty_at + n;
+        let available_at = new_empty_at.checked_sub(config.bucket_width);
 
-        //       start          end
-        //       |     start+n  |     end+n
-        //       |   /          |   /
-        // ------{o-[---------o-}--]----o----
-        //   now1 ^      now2 ^         ^ now3
+        //                     empty_at
+        //        available_at  |   new_empty_at
+        //           /          |   /
+        // -------o-[---------o-|--]---------
+        //   now1 ^      now2 ^
         //
         // at now1, the bucket would be completely filled if we add n tokens.
         // at now2, the bucket would be partially filled if we add n tokens.
-        // at now3, the bucket would start completely empty before we add n tokens.
 
-        match start_plus_n {
-            Some(start_plus_n) if now < start_plus_n => Err(start_plus_n),
+        match available_at {
+            Some(available_at) if now < available_at => Err(available_at),
             _ => {
-                self.end = end_plus_n;
+                self.empty_at = new_empty_at;
                 Ok(())
             }
         }
@@ -107,6 +140,21 @@ impl Drop for Requeue<'_> {
 }
 
 impl RateLimiter {
+    pub fn with_initial_tokens(config: LeakyBucketConfig, initial_tokens: f64) -> Self {
+        RateLimiter {
+            state: Mutex::new(LeakyBucketState::with_initial_tokens(
+                &config,
+                initial_tokens,
+            )),
+            config,
+            queue: {
+                let queue = Notify::new();
+                queue.notify_one();
+                queue
+            },
+        }
+    }
+
     pub fn steady_rps(&self) -> f64 {
         self.config.cost.as_secs_f64().recip()
     }
@@ -161,7 +209,9 @@ mod tests {
             bucket_width: Duration::from_millis(1000),
         };
 
-        let mut state = LeakyBucketState::new(Instant::now());
+        let mut state = LeakyBucketState {
+            empty_at: Instant::now(),
+        };
 
         // supports burst
         {

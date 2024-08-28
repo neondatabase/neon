@@ -9,9 +9,8 @@ use std::{
 
 use arc_swap::ArcSwap;
 use enumset::EnumSet;
-use tokio::sync::Notify;
 use tracing::{error, warn};
-use utils::leaky_bucket::{LeakyBucketConfig, LeakyBucketState, RateLimiter};
+use utils::leaky_bucket::{LeakyBucketConfig, RateLimiter};
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
@@ -95,27 +94,16 @@ where
             })
             .collect();
 
-        // how frequently we drain a single token on average
-        let time_cost = refill_interval / refill_amount.get() as u32;
-        let bucket_width = time_cost * (max as u32);
+        // steady rate, we expect `refill_amount` requests per `refill_interval`.
+        // dividing gives us the rps.
+        let rps = f64::from(refill_amount.get()) / refill_interval.as_secs_f64();
+        let config = LeakyBucketConfig::new(rps, f64::from(max));
 
         // initial tracks how many tokens are available to put in the bucket
         // we want how many tokens are currently in the bucket
-        let initial_tokens = (max - initial) as u32;
-        let end = time_cost * initial_tokens;
+        let initial_tokens = max - initial;
 
-        let rate_limiter = RateLimiter {
-            config: LeakyBucketConfig {
-                cost: time_cost,
-                bucket_width,
-            },
-            state: Mutex::new(LeakyBucketState::new(tokio::time::Instant::now() + end)),
-            queue: {
-                let queue = Notify::new();
-                queue.notify_one();
-                queue
-            },
-        };
+        let rate_limiter = RateLimiter::with_initial_tokens(config, f64::from(initial_tokens));
 
         Inner {
             task_kinds,
