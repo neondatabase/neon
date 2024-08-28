@@ -509,7 +509,7 @@ pub enum TimelineArchivalError {
     #[error("Timeout")]
     Timeout,
 
-    #[error("HasArchivedParent")]
+    #[error("parent is archived: {}", .0)]
     HasArchivedParent(TimelineId),
 
     #[error("HasUnarchivedChildren")]
