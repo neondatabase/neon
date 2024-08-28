@@ -1264,7 +1264,7 @@ impl Service {
                     123,
                     "".to_string(),
                     123,
-                    None,
+                    "test_az".to_string(),
                 );
 
                 scheduler.node_upsert(&node);
@@ -4788,15 +4788,8 @@ impl Service {
         )
         .await;
 
-        if register_req.availability_zone_id.is_none() {
-            tracing::warn!(
-                "Node {} registering without specific availability zone id",
-                register_req.node_id
-            );
-        }
-
         enum RegistrationStatus {
-            Matched(Node),
+            Matched,
             Mismatched,
             New,
         }
@@ -4805,7 +4798,7 @@ impl Service {
             let locked = self.inner.read().unwrap();
             if let Some(node) = locked.nodes.get(&register_req.node_id) {
                 if node.registration_match(&register_req) {
-                    RegistrationStatus::Matched(node.clone())
+                    RegistrationStatus::Matched
                 } else {
                     RegistrationStatus::Mismatched
                 }
@@ -4815,40 +4808,11 @@ impl Service {
         };
 
         match registration_status {
-            RegistrationStatus::Matched(node) => {
+            RegistrationStatus::Matched => {
                 tracing::info!(
                     "Node {} re-registered with matching address",
                     register_req.node_id
                 );
-
-                if node.get_availability_zone_id().is_none() {
-                    if let Some(az_id) = register_req.availability_zone_id.clone() {
-                        tracing::info!("Extracting availability zone id from registration request for node {}: {}",
-                                       register_req.node_id, az_id);
-
-                        // Persist to the database and update in memory state. See comment below
-                        // on ordering.
-                        self.persistence
-                            .set_node_availability_zone_id(register_req.node_id, az_id)
-                            .await?;
-                        let node_with_az = Node::new(
-                            register_req.node_id,
-                            register_req.listen_http_addr,
-                            register_req.listen_http_port,
-                            register_req.listen_pg_addr,
-                            register_req.listen_pg_port,
-                            register_req.availability_zone_id,
-                        );
-
-                        let mut locked = self.inner.write().unwrap();
-                        let mut new_nodes = (*locked.nodes).clone();
-
-                        locked.scheduler.node_upsert(&node_with_az);
-                        new_nodes.insert(register_req.node_id, node_with_az);
-
-                        locked.nodes = Arc::new(new_nodes);
-                    }
-                }
 
                 return Ok(());
             }
