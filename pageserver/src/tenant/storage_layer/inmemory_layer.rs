@@ -652,17 +652,12 @@ impl InMemoryLayer {
 
         let SerializedBatch {
             raw,
-            offsets,
-            max_lsn,
+            mut offsets,
+            max_lsn: _,
         } = serialized_batch;
 
         // Add the base_offset to the batch's index entries which are relative to the batch start.
         for offset in &mut offsets {
-            let SerializedBatchOffset {
-                key,
-                lsn,
-                index_entry,
-            } = offset;
             let IndexEntryUnpacked {
                 will_init,
                 len,
@@ -677,10 +672,10 @@ impl InMemoryLayer {
         }
 
         // Write the batch to the file
-        inner.file.write_raw(&serialized_batch.raw, ctx).await?;
+        inner.file.write_raw(&raw, ctx).await?;
         let new_size = inner.file.len();
         let expected_new_len = base_offset
-            .checked_add(serialized_batch.raw.len().into_u64())
+            .checked_add(raw.len().into_u64())
             // write_raw would error if we were to overflow u64.
             // also IndexEntry and higher levels in
             //the code don't allow the file to grow that large
