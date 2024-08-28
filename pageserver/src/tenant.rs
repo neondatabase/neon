@@ -1372,15 +1372,13 @@ impl Tenant {
             };
 
             if state == TimelineArchivalState::Unarchived {
-                let ancestor_id = timeline.get_ancestor_timeline_id();
+                let ancestor_timeline = timeline.get_ancestor_timeline();
 
-                if let Some(ancestor_id) = ancestor_id {
-                    let Some(ancestor_timeline) = timelines.get(&ancestor_id) else {
-                        error!("Couldn't find ancestor timeline {ancestor_id:?}");
-                        return Err(TimelineArchivalError::NotFound);
-                    };
+                if let Some(ancestor_timeline) = ancestor_timeline {
                     if ancestor_timeline.is_archived() == Some(true) {
-                        return Err(TimelineArchivalError::HasArchivedParent(ancestor_id));
+                        return Err(TimelineArchivalError::HasArchivedParent(
+                            ancestor_timeline.timeline_id,
+                        ));
                     }
                 }
             }
