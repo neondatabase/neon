@@ -8,9 +8,9 @@ pub(crate) use limit_algorithm::aimd::Aimd;
 pub(crate) use limit_algorithm::{
     DynamicLimiter, Outcome, RateLimitAlgorithm, RateLimiterConfig, Token,
 };
-pub(crate) use limiter::GlobalRateLimiter;
-
-pub use leaky_bucket::{
-    EndpointRateLimiter, LeakyBucketConfig, LeakyBucketRateLimiter, LeakyBucketState,
+pub use limiter::{
+    BucketRateLimiter, GlobalRateLimiter, RateBucketInfo,
+    WakeComputeRateLimiter,
 };
-pub use limiter::{BucketRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
+
+use leaky_bucket::EndpointRateLimiter;

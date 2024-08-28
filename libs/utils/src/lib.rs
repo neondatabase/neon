@@ -71,6 +71,7 @@ pub mod postgres_client;
 
 pub mod tracing_span_assert;
 
+pub mod leaky_bucket;
 pub mod rate_limit;
 
 /// Simple once-barrier and a guard which keeps barrier awaiting.

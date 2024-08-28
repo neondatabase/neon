@@ -1,6 +1,7 @@
 use std::{
     hash::Hash,
     sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 
 use ahash::RandomState;
@@ -8,6 +9,7 @@ use dashmap::DashMap;
 use rand::{thread_rng, Rng};
 use tokio::time::Instant;
 use tracing::info;
+use utils::leaky_bucket::LeakyBucketState;
 
 use crate::intern::EndpointIdInt;
 
@@ -16,7 +18,7 @@ pub type EndpointRateLimiter = LeakyBucketRateLimiter<EndpointIdInt>;
 
 pub struct LeakyBucketRateLimiter<Key> {
     map: DashMap<Key, LeakyBucketState, RandomState>,
-    config: LeakyBucketConfig,
+    config: utils::leaky_bucket::LeakyBucketConfig,
     access_count: AtomicUsize,
 }
 
@@ -29,7 +31,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
     pub fn new_with_shards(config: LeakyBucketConfig, shards: usize) -> Self {
         Self {
             map: DashMap::with_hasher_and_shard_amount(RandomState::new(), shards),
-            config,
+            config: config.into(),
             access_count: AtomicUsize::new(0),
         }
     }
@@ -42,12 +44,12 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
             self.do_gc(now);
         }
 
-        let mut entry = self.map.entry(key).or_insert_with(|| LeakyBucketState {
-            time: now,
-            filled: 0.0,
-        });
+        let mut entry = self
+            .map
+            .entry(key)
+            .or_insert_with(|| LeakyBucketState::new(now - self.config.epoch));
 
-        entry.check(&self.config, now, n as f64)
+        entry.add_tokens(&self.config, now, n as f64).is_ok()
     }
 
     fn do_gc(&self, now: Instant) {
@@ -59,7 +61,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
         let shard = thread_rng().gen_range(0..n);
         self.map.shards()[shard]
             .write()
-            .retain(|_, value| !value.get_mut().update(&self.config, now));
+            .retain(|_, value| !value.get().bucket_is_empty(&self.config, now));
     }
 }
 
@@ -68,12 +70,6 @@ pub struct LeakyBucketConfig {
     pub max: f64,
 }
 
-pub struct LeakyBucketState {
-    filled: f64,
-    time: Instant,
-}
-
-#[cfg(test)]
 impl LeakyBucketConfig {
     pub(crate) fn new(rps: f64, max: f64) -> Self {
         assert!(rps > 0.0, "rps must be positive");
@@ -82,40 +78,17 @@ impl LeakyBucketConfig {
     }
 }
 
-impl LeakyBucketState {
-    pub(crate) fn new() -> Self {
-        Self {
-            filled: 0.0,
-            time: Instant::now(),
+impl From<LeakyBucketConfig> for utils::leaky_bucket::LeakyBucketConfig {
+    fn from(config: LeakyBucketConfig) -> Self {
+        // seconds_per_request = 1/(request_per_second)
+        let spr = config.rps.recip();
+        let bucket_width = Duration::from_secs_f64(config.max * spr);
+        utils::leaky_bucket::LeakyBucketConfig {
+            epoch: Instant::now(),
+            cost: Duration::from_secs_f64(spr),
+            bucket_width,
+            drain_interval: Duration::ZERO,
         }
-    }
-
-    /// updates the timer and returns true if the bucket is empty
-    fn update(&mut self, info: &LeakyBucketConfig, now: Instant) -> bool {
-        let drain = now.duration_since(self.time);
-        let drain = drain.as_secs_f64() * info.rps;
-
-        self.filled = (self.filled - drain).clamp(0.0, info.max);
-        self.time = now;
-
-        self.filled == 0.0
-    }
-
-    pub(crate) fn check(&mut self, info: &LeakyBucketConfig, now: Instant, n: f64) -> bool {
-        self.update(info, now);
-
-        if self.filled + n > info.max {
-            return false;
-        }
-        self.filled += n;
-
-        true
-    }
-}
-
-impl Default for LeakyBucketState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -125,48 +98,56 @@ mod tests {
     use std::time::Duration;
 
     use tokio::time::Instant;
+    use utils::leaky_bucket::LeakyBucketState;
 
-    use super::{LeakyBucketConfig, LeakyBucketState};
+    use super::LeakyBucketConfig;
 
     #[tokio::test(start_paused = true)]
     async fn check() {
-        let info = LeakyBucketConfig::new(500.0, 2000.0);
-        let mut bucket = LeakyBucketState::new();
+        let config: utils::leaky_bucket::LeakyBucketConfig =
+            LeakyBucketConfig::new(500.0, 2000.0).into();
+        assert_eq!(config.cost, Duration::from_millis(2));
+        assert_eq!(config.bucket_width, Duration::from_secs(4));
+
+        let mut bucket = LeakyBucketState::new(Instant::now() - config.epoch);
 
         // should work for 2000 requests this second
         for _ in 0..2000 {
-            assert!(bucket.check(&info, Instant::now(), 1.0));
+            bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
         }
-        assert!(!bucket.check(&info, Instant::now(), 1.0));
-        assert_eq!(bucket.filled, 2000.0);
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
+        assert_eq!(
+            bucket.end - (Instant::now() - config.epoch),
+            config.bucket_width
+        );
 
         // in 1ms we should drain 0.5 tokens.
         // make sure we don't lose any tokens
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(!bucket.check(&info, Instant::now(), 1.0));
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(bucket.check(&info, Instant::now(), 1.0));
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
 
         // in 10ms we should drain 5 tokens
         tokio::time::advance(Duration::from_millis(10)).await;
         for _ in 0..5 {
-            assert!(bucket.check(&info, Instant::now(), 1.0));
+            bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
         }
-        assert!(!bucket.check(&info, Instant::now(), 1.0));
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
 
         // in 10s we should drain 5000 tokens
         // but cap is only 2000
         tokio::time::advance(Duration::from_secs(10)).await;
         for _ in 0..2000 {
-            assert!(bucket.check(&info, Instant::now(), 1.0));
+            bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
         }
-        assert!(!bucket.check(&info, Instant::now(), 1.0));
+        bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
 
         // should sustain 500rps
         for _ in 0..2000 {
             tokio::time::advance(Duration::from_millis(10)).await;
             for _ in 0..5 {
-                assert!(bucket.check(&info, Instant::now(), 1.0));
+                bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
             }
         }
     }
