@@ -250,6 +250,9 @@ walproposer-lib-clean:
 		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
 
+.PHONY: neon-pg
+neon-pg: postgres neon-pg-ext
+
 .PHONY: neon-pg-ext
 neon-pg-ext: \
 	neon-pg-ext-v14 \
