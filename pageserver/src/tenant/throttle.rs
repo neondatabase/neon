@@ -107,7 +107,6 @@ where
         let rate_limiter = RateLimiter {
             config: LeakyBucketConfig {
                 epoch: tokio::time::Instant::now(),
-                drain_interval: refill_interval,
                 cost: time_cost,
                 bucket_width,
             },

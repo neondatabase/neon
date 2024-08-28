@@ -7,35 +7,12 @@ pub struct LeakyBucketConfig {
     /// We track all times as durations since this epoch so we can round down.
     pub epoch: Instant,
 
-    /// How frequently we drain the bucket.
-    /// If equal to 0, we drain continuously over time.
-    /// If greater than 0, we drain at fixed intervals.
-    pub drain_interval: Duration,
-
     /// "time cost" of a single request unit.
     /// should loosely represent how long it takes to handle a request unit in active resource time.
     pub cost: Duration,
 
     /// total size of the bucket
     pub bucket_width: Duration,
-}
-
-impl LeakyBucketConfig {
-    fn prev_multiple_of_drain(&self, mut dur: Duration) -> Duration {
-        if self.drain_interval > Duration::ZERO {
-            let n = dur.div_duration_f64(self.drain_interval).floor();
-            dur = self.drain_interval.mul_f64(n);
-        }
-        dur
-    }
-
-    fn next_multiple_of_drain(&self, mut dur: Duration) -> Duration {
-        if self.drain_interval > Duration::ZERO {
-            let n = dur.div_duration_f64(self.drain_interval).ceil();
-            dur = self.drain_interval.mul_f64(n);
-        }
-        dur
-    }
 }
 
 pub struct LeakyBucketState {
@@ -63,7 +40,7 @@ impl LeakyBucketState {
 
     pub fn bucket_is_empty(&self, config: &LeakyBucketConfig, now: Instant) -> bool {
         // if self.end is after now, the bucket is not empty
-        self.end <= config.prev_multiple_of_drain(now - config.epoch)
+        self.end <= now - config.epoch
     }
 
     /// Immediately adds tokens to the bucket, if there is space.
@@ -85,9 +62,8 @@ impl LeakyBucketState {
     ) -> Result<(), Instant> {
         let now = Instant::now();
 
-        // round down to the last time we would have drained the bucket.
-        let now = config.prev_multiple_of_drain(now - config.epoch);
-        let started = config.prev_multiple_of_drain(started - config.epoch);
+        let now = now - config.epoch;
+        let started = started - config.epoch;
 
         // invariant: started <= now
         debug_assert!(started <= now);
@@ -116,7 +92,7 @@ impl LeakyBucketState {
             self.end = end_plus_n;
             Ok(())
         } else {
-            let ready_at = config.next_multiple_of_drain(start_plus_n);
+            let ready_at = start_plus_n;
             Err(config.epoch + ready_at)
         }
     }
@@ -187,8 +163,6 @@ mod tests {
     async fn check() {
         let config = LeakyBucketConfig {
             epoch: Instant::now(),
-            // drain the bucket every 0.5 seconds.
-            drain_interval: Duration::from_millis(500),
             // average 100rps
             cost: Duration::from_millis(10),
             // burst up to 100 requests
