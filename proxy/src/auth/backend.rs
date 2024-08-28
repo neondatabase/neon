@@ -85,7 +85,7 @@ pub trait TestBackend: Send + Sync + 'static {
 impl std::fmt::Display for BackendType<'_, (), ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Console(api, _) => match &**api {
+            Self::Console(api, ()) => match &**api {
                 ConsoleBackend::Console(endpoint) => {
                     fmt.debug_tuple("Console").field(&endpoint.url()).finish()
                 }
@@ -96,7 +96,7 @@ impl std::fmt::Display for BackendType<'_, (), ()> {
                 #[cfg(test)]
                 ConsoleBackend::Test(_) => fmt.debug_tuple("Test").finish(),
             },
-            Self::Link(url, _) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+            Self::Link(url, ()) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
     }
@@ -324,21 +324,20 @@ async fn auth_quirks(
     };
     let (cached_entry, secret) = cached_secret.take_value();
 
-    let secret = match secret {
-        Some(secret) => config.check_rate_limit(
+    let secret = if let Some(secret) = secret {
+        config.check_rate_limit(
             ctx,
             config,
             secret,
             &info.endpoint,
             unauthenticated_password.is_some() || allow_cleartext,
-        )?,
-        None => {
-            // If we don't have an authentication secret, we mock one to
-            // prevent malicious probing (possible due to missing protocol steps).
-            // This mocked secret will never lead to successful authentication.
-            info!("authentication info not found, mocking it");
-            AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
-        }
+        )?
+    } else {
+        // If we don't have an authentication secret, we mock one to
+        // prevent malicious probing (possible due to missing protocol steps).
+        // This mocked secret will never lead to successful authentication.
+        info!("authentication info not found, mocking it");
+        AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
     };
 
     match authenticate_with_secret(
@@ -409,7 +408,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
     pub fn get_endpoint(&self) -> Option<EndpointId> {
         match self {
             Self::Console(_, user_info) => user_info.endpoint_id.clone(),
-            Self::Link(_, _) => Some("link".into()),
+            Self::Link(_, ()) => Some("link".into()),
             Self::Local(_) => Some("local".into()),
         }
     }
@@ -418,7 +417,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
     pub fn get_user(&self) -> &str {
         match self {
             Self::Console(_, user_info) => &user_info.user,
-            Self::Link(_, _) => "link",
+            Self::Link(_, ()) => "link",
             Self::Local(_) => "local",
         }
     }
@@ -454,7 +453,7 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
                 BackendType::Console(api, credentials)
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Self::Link(url, _) => {
+            Self::Link(url, ()) => {
                 info!("performing link authentication");
 
                 let info = link::authenticate(ctx, &url, client).await?;
@@ -478,7 +477,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         match self {
             Self::Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
-            Self::Link(_, _) => Ok(Cached::new_uncached(None)),
+            Self::Link(_, ()) => Ok(Cached::new_uncached(None)),
             Self::Local(_) => Ok(Cached::new_uncached(None)),
         }
     }
@@ -489,7 +488,7 @@ impl BackendType<'_, ComputeUserInfo, &()> {
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         match self {
             Self::Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
-            Self::Link(_, _) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
+            Self::Link(_, ()) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
             Self::Local(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
     }
@@ -525,7 +524,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
         match self {
             Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Self::Link(_, _) => unreachable!("link auth flow doesn't support waking the compute"),
+            Self::Link(_, ()) => unreachable!("link auth flow doesn't support waking the compute"),
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
@@ -533,7 +532,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
     fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
             Self::Console(_, creds) => &creds.keys,
-            Self::Link(_, _) => &ComputeCredentialKeys::None,
+            Self::Link(_, ()) => &ComputeCredentialKeys::None,
             Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }

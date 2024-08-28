@@ -31,7 +31,7 @@ pub struct Waiters<T>(pub(self) Mutex<HashMap<String, oneshot::Sender<T>>>);
 
 impl<T> Default for Waiters<T> {
     fn default() -> Self {
-        Waiters(Default::default())
+        Waiters(Mutex::default())
     }
 }
 

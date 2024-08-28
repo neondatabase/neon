@@ -716,10 +716,6 @@ struct ImageLayerWriterInner {
 }
 
 impl ImageLayerWriterInner {
-    fn size(&self) -> u64 {
-        self.tree.borrow_writer().size() + self.blob_writer.size()
-    }
-
     ///
     /// Start building a new image layer.
     ///
@@ -854,13 +850,19 @@ impl ImageLayerWriterInner {
             res?;
         }
 
+        let final_key_range = if let Some(end_key) = end_key {
+            self.key_range.start..end_key
+        } else {
+            self.key_range.clone()
+        };
+
         // Fill in the summary on blk 0
         let summary = Summary {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
             tenant_id: self.tenant_shard_id.tenant_id,
             timeline_id: self.timeline_id,
-            key_range: self.key_range.clone(),
+            key_range: final_key_range.clone(),
             lsn: self.lsn,
             index_start_blk,
             index_root_blk,
@@ -881,11 +883,7 @@ impl ImageLayerWriterInner {
         let desc = PersistentLayerDesc::new_img(
             self.tenant_shard_id,
             self.timeline_id,
-            if let Some(end_key) = end_key {
-                self.key_range.start..end_key
-            } else {
-                self.key_range.clone()
-            },
+            final_key_range,
             self.lsn,
             metadata.len(),
         );
@@ -974,14 +972,12 @@ impl ImageLayerWriter {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
-    #[cfg(test)]
     /// Estimated size of the image layer.
     pub(crate) fn estimated_size(&self) -> u64 {
         let inner = self.inner.as_ref().unwrap();
         inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
     }
 
-    #[cfg(test)]
     pub(crate) fn num_keys(&self) -> usize {
         self.inner.as_ref().unwrap().num_keys
     }
@@ -997,7 +993,6 @@ impl ImageLayerWriter {
         self.inner.take().unwrap().finish(timeline, ctx, None).await
     }
 
-    #[cfg(test)]
     /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
     pub(super) async fn finish_with_end_key(
         mut self,
@@ -1010,10 +1005,6 @@ impl ImageLayerWriter {
             .unwrap()
             .finish(timeline, ctx, Some(end_key))
             .await
-    }
-
-    pub(crate) fn size(&self) -> u64 {
-        self.inner.as_ref().unwrap().size()
     }
 }
 
