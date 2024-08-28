@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use enumset::EnumSet;
 use tokio::sync::Notify;
 use tracing::{error, warn};
-use utils::leaky_bucket::{LeakyBucketConfig, LeakyBucketState};
+use utils::leaky_bucket::{LeakyBucketConfig, LeakyBucketState, RateLimiter};
 
 use crate::{context::RequestContext, task_mgr::TaskKind};
 
@@ -78,7 +78,7 @@ where
             refill_interval,
             refill_amount,
             max,
-            fair,
+            fair: _,
         } = config;
         let task_kinds: EnumSet<TaskKind> = task_kinds
             .iter()
@@ -112,11 +112,11 @@ where
                 bucket_width,
             },
             state: Mutex::new(LeakyBucketState::new(end)),
-            queue: fair.then(|| {
+            queue: {
                 let queue = Notify::new();
                 queue.notify_one();
                 queue
-            }),
+            },
         };
 
         Inner {
@@ -181,59 +181,6 @@ where
             Some(wait_time)
         } else {
             None
-        }
-    }
-}
-
-struct RateLimiter {
-    config: LeakyBucketConfig,
-    state: Mutex<LeakyBucketState>,
-
-    /// if this rate limiter is fair,
-    /// provide a queue to provide this fair ordering.
-    queue: Option<Notify>,
-}
-
-impl RateLimiter {
-    fn steady_rps(&self) -> f64 {
-        self.config.cost.as_secs_f64().recip()
-    }
-
-    /// returns true if we did throttle
-    async fn acquire(&self, count: usize) -> bool {
-        let mut throttled = false;
-
-        let start = tokio::time::Instant::now();
-
-        // wait until we are the first in the queue
-        if let Some(queue) = &self.queue {
-            let mut notified = std::pin::pin!(queue.notified());
-            if !notified.as_mut().enable() {
-                throttled = true;
-                notified.await;
-            }
-        }
-
-        // notify the next waiter in the queue when we are done.
-        scopeguard::defer! {
-            if let Some(queue) = &self.queue {
-                queue.notify_one();
-            }
-        };
-
-        loop {
-            let res = self
-                .state
-                .lock()
-                .unwrap()
-                .add_tokens(&self.config, start, count as f64);
-            match res {
-                Ok(()) => return throttled,
-                Err(ready_at) => {
-                    throttled = true;
-                    tokio::time::sleep_until(ready_at).await;
-                }
-            }
         }
     }
 }

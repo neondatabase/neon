@@ -1,6 +1,6 @@
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
-use tokio::time::Instant;
+use tokio::{sync::Notify, time::Instant};
 
 pub struct LeakyBucketConfig {
     /// Leaky buckets can drain at a fixed interval rate.
@@ -118,6 +118,59 @@ impl LeakyBucketState {
         } else {
             let ready_at = config.next_multiple_of_drain(start_plus_n);
             Err(config.epoch + ready_at)
+        }
+    }
+}
+
+pub struct RateLimiter {
+    pub config: LeakyBucketConfig,
+    pub state: Mutex<LeakyBucketState>,
+    /// a queue to provide this fair ordering.
+    pub queue: Notify,
+}
+
+struct Requeue<'a>(&'a Notify);
+
+impl Drop for Requeue<'_> {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+impl RateLimiter {
+    pub fn steady_rps(&self) -> f64 {
+        self.config.cost.as_secs_f64().recip()
+    }
+
+    /// returns true if we did throttle
+    pub async fn acquire(&self, count: usize) -> bool {
+        let mut throttled = false;
+
+        let start = tokio::time::Instant::now();
+
+        // wait until we are the first in the queue
+        let mut notified = std::pin::pin!(self.queue.notified());
+        if !notified.as_mut().enable() {
+            throttled = true;
+            notified.await;
+        }
+
+        // notify the next waiter in the queue when we are done.
+        let _guard = Requeue(&self.queue);
+
+        loop {
+            let res = self
+                .state
+                .lock()
+                .unwrap()
+                .add_tokens(&self.config, start, count as f64);
+            match res {
+                Ok(()) => return throttled,
+                Err(ready_at) => {
+                    throttled = true;
+                    tokio::time::sleep_until(ready_at).await;
+                }
+            }
         }
     }
 }
