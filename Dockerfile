@@ -22,7 +22,7 @@ COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
 
 ENV BUILD_TYPE=release
 RUN set -e \
-    && mold -run make -j $(nproc) -s postgres neon-pg \
+    && mold -run make -j $(nproc) -s neon-pg \
     && rm -rf pg_install/build \
     && tar -C pg_install -czf /home/nonroot/postgres_install.tar.gz .
 
