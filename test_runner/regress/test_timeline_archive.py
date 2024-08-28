@@ -94,3 +94,29 @@ def test_timeline_archive(neon_simple_env: NeonEnv):
         timeline_id=parent_timeline_id,
         state=TimelineArchivalState.ARCHIVED,
     )
+
+    # Test that the leaf can't be unarchived
+    with pytest.raises(
+        PageserverApiException,
+        match="Cannot unarchive timeline which has archived ancestor",
+    ) as exc:
+        assert timeline_path.exists()
+
+        ps_http.timeline_archival_config(
+            tenant_id=env.initial_tenant,
+            timeline_id=leaf_timeline_id,
+            state=TimelineArchivalState.UNARCHIVED,
+        )
+
+    # Unarchive works for the leaf if the parent gets unarchived first
+    ps_http.timeline_archival_config(
+        tenant_id=env.initial_tenant,
+        timeline_id=parent_timeline_id,
+        state=TimelineArchivalState.UNARCHIVED,
+    )
+
+    ps_http.timeline_archival_config(
+        tenant_id=env.initial_tenant,
+        timeline_id=leaf_timeline_id,
+        state=TimelineArchivalState.UNARCHIVED,
+    )

@@ -509,6 +509,9 @@ pub enum TimelineArchivalError {
     #[error("Timeout")]
     Timeout,
 
+    #[error("HasArchivedParent")]
+    HasArchivedParent(TimelineId),
+
     #[error("HasUnarchivedChildren")]
     HasUnarchivedChildren(Vec<TimelineId>),
 
@@ -524,6 +527,7 @@ impl Debug for TimelineArchivalError {
         match self {
             Self::NotFound => write!(f, "NotFound"),
             Self::Timeout => write!(f, "Timeout"),
+            Self::HasArchivedParent(p) => f.debug_tuple("HasArchivedParent").field(p).finish(),
             Self::HasUnarchivedChildren(c) => {
                 f.debug_tuple("HasUnarchivedChildren").field(c).finish()
             }
@@ -1363,10 +1367,23 @@ impl Tenant {
         let timeline = {
             let timelines = self.timelines.lock().unwrap();
 
-            let timeline = match timelines.get(&timeline_id) {
-                Some(t) => t,
-                None => return Err(TimelineArchivalError::NotFound),
+            let Some(timeline) = timelines.get(&timeline_id) else {
+                return Err(TimelineArchivalError::NotFound);
             };
+
+            if state == TimelineArchivalState::Unarchived {
+                let ancestor_id = timeline.get_ancestor_timeline_id();
+
+                if let Some(ancestor_id) = ancestor_id {
+                    let Some(ancestor_timeline) = timelines.get(&ancestor_id) else {
+                        error!("Couldn't find ancestor timeline {ancestor_id:?}");
+                        return Err(TimelineArchivalError::NotFound);
+                    };
+                    if ancestor_timeline.is_archived() == Some(true) {
+                        return Err(TimelineArchivalError::HasArchivedParent(ancestor_id));
+                    }
+                }
+            }
 
             // Ensure that there are no non-archived child timelines
             let children: Vec<TimelineId> = timelines
