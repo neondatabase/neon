@@ -11,7 +11,12 @@ import pytest
 import toml
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, flush_ep_to_pageserver
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PgBin,
+    flush_ep_to_pageserver,
+)
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
@@ -296,7 +301,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     pg_version = env.pg_version
 
     # Stop endpoint while we recreate timeline
-    ep.stop()
+    flush_ep_to_pageserver(env, ep, tenant_id, timeline_id)
 
     try:
         pageserver_http.timeline_preserve_initdb_archive(tenant_id, timeline_id)
@@ -343,6 +348,11 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
 
     assert not dump_from_wal_differs, "dump from WAL differs"
     assert not initial_dump_differs, "initial dump differs"
+
+    flush_ep_to_pageserver(env, ep, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(
+        tenant_id, timeline_id, compact=False, wait_until_uploaded=True
+    )
 
 
 def dump_differs(

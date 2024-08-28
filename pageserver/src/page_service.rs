@@ -557,7 +557,7 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend<IO>,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        protocol_version: PagestreamProtocolVersion,
+        _protocol_version: PagestreamProtocolVersion,
         ctx: RequestContext,
     ) -> Result<(), QueryError>
     where
@@ -601,8 +601,7 @@ impl PageServerHandler {
             fail::fail_point!("ps::handle-pagerequest-message");
 
             // parse request
-            let neon_fe_msg =
-                PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
+            let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
             // invoke handler function
             let (handler_result, span) = match neon_fe_msg {
@@ -1285,35 +1284,6 @@ where
                 tenant_id,
                 timeline_id,
                 PagestreamProtocolVersion::V2,
-                ctx,
-            )
-            .await?;
-        } else if let Some(params) = parts.strip_prefix(&["pagestream"]) {
-            if params.len() != 2 {
-                return Err(QueryError::Other(anyhow::anyhow!(
-                    "invalid param number for pagestream command"
-                )));
-            }
-            let tenant_id = TenantId::from_str(params[0])
-                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
-            let timeline_id = TimelineId::from_str(params[1])
-                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
-
-            tracing::Span::current()
-                .record("tenant_id", field::display(tenant_id))
-                .record("timeline_id", field::display(timeline_id));
-
-            self.check_permission(Some(tenant_id))?;
-
-            COMPUTE_COMMANDS_COUNTERS
-                .for_command(ComputeCommandKind::PageStream)
-                .inc();
-
-            self.handle_pagerequests(
-                pgb,
-                tenant_id,
-                timeline_id,
-                PagestreamProtocolVersion::V1,
                 ctx,
             )
             .await?;

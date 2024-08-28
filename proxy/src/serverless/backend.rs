@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use tracing::{field::display, info};
 
 use crate::{
-    auth::{backend::ComputeCredentials, check_peer_addr_is_in_list, AuthError},
+    auth::{
+        backend::{local::StaticAuthRules, ComputeCredentials, ComputeUserInfo},
+        check_peer_addr_is_in_list, AuthError,
+    },
     compute,
     config::{AuthenticationConfig, ProxyConfig},
     console::{
@@ -24,30 +27,35 @@ use crate::{
     Host,
 };
 
-use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
+use super::conn_pool::{poll_client, AuthData, Client, ConnInfo, GlobalConnPool};
 
-pub struct PoolingBackend {
-    pub pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
-    pub config: &'static ProxyConfig,
-    pub endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+pub(crate) struct PoolingBackend {
+    pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pub(crate) config: &'static ProxyConfig,
+    pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
 impl PoolingBackend {
-    pub async fn authenticate(
+    pub(crate) async fn authenticate_with_password(
         &self,
         ctx: &RequestMonitoring,
         config: &AuthenticationConfig,
-        conn_info: &ConnInfo,
+        user_info: &ComputeUserInfo,
+        password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
-        let user_info = conn_info.user_info.clone();
-        let backend = self.config.auth_backend.as_ref().map(|_| user_info.clone());
+        let user_info = user_info.clone();
+        let backend = self
+            .config
+            .auth_backend
+            .as_ref()
+            .map(|()| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
         if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
         }
         if !self
             .endpoint_rate_limiter
-            .check(conn_info.user_info.endpoint.clone().into(), 1)
+            .check(user_info.endpoint.clone().into(), 1)
         {
             return Err(AuthError::too_many_connections());
         }
@@ -70,14 +78,10 @@ impl PoolingBackend {
                 return Err(AuthError::auth_failed(&*user_info.user));
             }
         };
-        let ep = EndpointIdInt::from(&conn_info.user_info.endpoint);
-        let auth_outcome = crate::auth::validate_password_and_exchange(
-            &config.thread_pool,
-            ep,
-            &conn_info.password,
-            secret,
-        )
-        .await?;
+        let ep = EndpointIdInt::from(&user_info.endpoint);
+        let auth_outcome =
+            crate::auth::validate_password_and_exchange(&config.thread_pool, ep, password, secret)
+                .await?;
         let res = match auth_outcome {
             crate::sasl::Outcome::Success(key) => {
                 info!("user successfully authenticated");
@@ -85,7 +89,7 @@ impl PoolingBackend {
             }
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
-                Err(AuthError::auth_failed(&*conn_info.user_info.user))
+                Err(AuthError::auth_failed(&*user_info.user))
             }
         };
         res.map(|key| ComputeCredentials {
@@ -94,23 +98,56 @@ impl PoolingBackend {
         })
     }
 
+    pub(crate) async fn authenticate_with_jwt(
+        &self,
+        ctx: &RequestMonitoring,
+        user_info: &ComputeUserInfo,
+        jwt: &str,
+    ) -> Result<ComputeCredentials, AuthError> {
+        match &self.config.auth_backend {
+            crate::auth::Backend::Console(_, ()) => {
+                Err(AuthError::auth_failed("JWT login is not yet supported"))
+            }
+            crate::auth::Backend::Web(_, ()) => Err(AuthError::auth_failed(
+                "JWT login over web auth proxy is not supported",
+            )),
+            crate::auth::Backend::Local(cache) => {
+                cache
+                    .jwks_cache
+                    .check_jwt(
+                        ctx,
+                        user_info.endpoint.clone(),
+                        user_info.user.clone(),
+                        &StaticAuthRules,
+                        jwt,
+                    )
+                    .await
+                    .map_err(|e| AuthError::auth_failed(e.to_string()))?;
+                Ok(ComputeCredentials {
+                    info: user_info.clone(),
+                    keys: crate::auth::backend::ComputeCredentialKeys::None,
+                })
+            }
+        }
+    }
+
     // Wake up the destination if needed. Code here is a bit involved because
     // we reuse the code from the usual proxy and we need to prepare few structures
     // that this code expects.
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
-    pub async fn connect_to_compute(
+    pub(crate) async fn connect_to_compute(
         &self,
         ctx: &RequestMonitoring,
         conn_info: ConnInfo,
         keys: ComputeCredentials,
         force_new: bool,
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
-        let maybe_client = if !force_new {
-            info!("pool: looking for an existing connection");
-            self.pool.get(ctx, &conn_info)?
-        } else {
+        let maybe_client = if force_new {
             info!("pool: pool is disabled");
             None
+        } else {
+            info!("pool: looking for an existing connection");
+            self.pool.get(ctx, &conn_info)?
         };
 
         if let Some(client) = maybe_client {
@@ -119,7 +156,7 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.config.auth_backend.as_ref().map(|_| keys);
+        let backend = self.config.auth_backend.as_ref().map(|()| keys);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
@@ -138,7 +175,7 @@ impl PoolingBackend {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum HttpConnError {
+pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
     #[error("could not connection to compute")]
@@ -232,9 +269,15 @@ impl ConnectMechanism for TokioMechanism {
         let mut config = (*node_info.config).clone();
         let config = config
             .user(&self.conn_info.user_info.user)
-            .password(&*self.conn_info.password)
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
+
+        match &self.conn_info.auth {
+            AuthData::Jwt(_) => {}
+            AuthData::Password(pw) => {
+                config.password(pw);
+            }
+        }
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(tokio_postgres::NoTls).await;

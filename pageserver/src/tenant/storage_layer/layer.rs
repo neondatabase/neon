@@ -35,6 +35,8 @@ mod tests;
 #[cfg(test)]
 mod failpoints;
 
+pub const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
+
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
 ///
@@ -1296,7 +1298,10 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
-                l0: crate::tenant::layer_map::LayerMap::is_l0(&self.layer_desc().key_range),
+                l0: crate::tenant::layer_map::LayerMap::is_l0(
+                    &self.layer_desc().key_range,
+                    self.layer_desc().is_delta,
+                ),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
