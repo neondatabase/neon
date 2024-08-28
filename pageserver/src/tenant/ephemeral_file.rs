@@ -21,7 +21,6 @@ pub struct EphemeralFile {
 }
 
 mod page_caching;
-pub(crate) use page_caching::PrewarmOnWrite as PrewarmPageCacheOnWrite;
 mod zero_padded_read_write;
 
 impl EphemeralFile {
@@ -29,6 +28,7 @@ impl EphemeralFile {
         conf: &PageServerConf,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
+        gate_guard: utils::sync::gate::GateGuard,
         ctx: &RequestContext,
     ) -> Result<EphemeralFile, io::Error> {
         static NEXT_FILENAME: AtomicU64 = AtomicU64::new(1);
@@ -54,7 +54,7 @@ impl EphemeralFile {
         Ok(EphemeralFile {
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
-            rw: page_caching::RW::new(file, conf.l0_flush.prewarm_on_write()),
+            rw: page_caching::RW::new(file, gate_guard),
         })
     }
 
@@ -79,6 +79,8 @@ impl EphemeralFile {
         self.rw.read_blk(blknum, ctx).await
     }
 
+    #[cfg(test)]
+    // This is a test helper: outside of tests, we are always written to via a pre-serialized batch.
     pub(crate) async fn write_blob(
         &mut self,
         srcbuf: &[u8],
@@ -86,17 +88,30 @@ impl EphemeralFile {
     ) -> Result<u64, io::Error> {
         let pos = self.rw.bytes_written();
 
-        // Write the length field
-        if srcbuf.len() < 0x80 {
-            // short one-byte length header
-            let len_buf = [srcbuf.len() as u8];
+        let mut len_bytes = std::io::Cursor::new(Vec::new());
+        crate::tenant::storage_layer::inmemory_layer::SerializedBatch::write_blob_length(
+            srcbuf.len(),
+            &mut len_bytes,
+        );
+        let len_bytes = len_bytes.into_inner();
 
-            self.rw.write_all_borrowed(&len_buf, ctx).await?;
-        } else {
-            let mut len_buf = u32::to_be_bytes(srcbuf.len() as u32);
-            len_buf[0] |= 0x80;
-            self.rw.write_all_borrowed(&len_buf, ctx).await?;
-        }
+        // Write the length field
+        self.rw.write_all_borrowed(&len_bytes, ctx).await?;
+
+        // Write the payload
+        self.rw.write_all_borrowed(srcbuf, ctx).await?;
+
+        Ok(pos)
+    }
+
+    /// Returns the offset at which the first byte of the input was written, for use
+    /// in constructing indices over the written value.
+    pub(crate) async fn write_raw(
+        &mut self,
+        srcbuf: &[u8],
+        ctx: &RequestContext,
+    ) -> Result<u64, io::Error> {
+        let pos = self.rw.bytes_written();
 
         // Write the payload
         self.rw.write_all_borrowed(srcbuf, ctx).await?;
@@ -161,7 +176,11 @@ mod tests {
     async fn test_ephemeral_blobs() -> Result<(), io::Error> {
         let (conf, tenant_id, timeline_id, ctx) = harness("ephemeral_blobs")?;
 
-        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, &ctx).await?;
+        let gate = utils::sync::gate::Gate::default();
+
+        let entered = gate.enter().unwrap();
+
+        let mut file = EphemeralFile::create(conf, tenant_id, timeline_id, entered, &ctx).await?;
 
         let pos_foo = file.write_blob(b"foo", &ctx).await?;
         assert_eq!(
@@ -214,5 +233,39 @@ mod tests {
         assert_eq!(result, large_data);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn ephemeral_file_holds_gate_open() {
+        const FOREVER: std::time::Duration = std::time::Duration::from_secs(5);
+
+        let (conf, tenant_id, timeline_id, ctx) =
+            harness("ephemeral_file_holds_gate_open").unwrap();
+
+        let gate = utils::sync::gate::Gate::default();
+
+        let file = EphemeralFile::create(conf, tenant_id, timeline_id, gate.enter().unwrap(), &ctx)
+            .await
+            .unwrap();
+
+        let mut closing = tokio::task::spawn(async move {
+            gate.close().await;
+        });
+
+        // gate is entered until the ephemeral file is dropped
+        // do not start paused tokio-epoll-uring has a sleep loop
+        tokio::time::pause();
+        tokio::time::timeout(FOREVER, &mut closing)
+            .await
+            .expect_err("closing cannot complete before dropping");
+
+        // this is a requirement of the reset_tenant functionality: we have to be able to restart a
+        // tenant fast, and for that, we need all tenant_dir operations be guarded by entering a gate
+        drop(file);
+
+        tokio::time::timeout(FOREVER, &mut closing)
+            .await
+            .expect("closing completes right away")
+            .expect("closing does not panic");
     }
 }

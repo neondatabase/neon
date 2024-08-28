@@ -7,6 +7,7 @@ use futures::future::try_join;
 use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
+use http::header::AUTHORIZATION;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper1::body::Body;
@@ -34,6 +35,7 @@ use tracing::error;
 use tracing::info;
 use typed_json::json;
 use url::Url;
+use urlencoding;
 use utils::http::error::ApiError;
 
 use crate::auth::backend::ComputeUserInfo;
@@ -55,6 +57,7 @@ use crate::DbName;
 use crate::RoleName;
 
 use super::backend::PoolingBackend;
+use super::conn_pool::AuthData;
 use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
 use super::http_util::json_response;
@@ -87,6 +90,7 @@ enum Payload {
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
+static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
@@ -106,9 +110,9 @@ where
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ConnInfoError {
+pub(crate) enum ConnInfoError {
     #[error("invalid header: {0}")]
-    InvalidHeader(&'static str),
+    InvalidHeader(&'static HeaderName),
     #[error("invalid connection string: {0}")]
     UrlParseError(#[from] url::ParseError),
     #[error("incorrect scheme")]
@@ -144,18 +148,18 @@ impl UserFacingError for ConnInfoError {
 }
 
 fn get_conn_info(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     headers: &HeaderMap,
-    tls: &TlsConfig,
+    tls: Option<&TlsConfig>,
 ) -> Result<ConnInfo, ConnInfoError> {
     // HTTP only uses cleartext (for now and likely always)
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     let connection_string = headers
-        .get("Neon-Connection-String")
-        .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
+        .get(&CONN_STRING)
+        .ok_or(ConnInfoError::InvalidHeader(&CONN_STRING))?
         .to_str()
-        .map_err(|_| ConnInfoError::InvalidHeader("Neon-Connection-String"))?;
+        .map_err(|_| ConnInfoError::InvalidHeader(&CONN_STRING))?;
 
     let connection_url = Url::parse(connection_string)?;
 
@@ -168,7 +172,8 @@ fn get_conn_info(
         .path_segments()
         .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname: DbName = url_path.next().ok_or(ConnInfoError::InvalidDbName)?.into();
+    let dbname: DbName =
+        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
     ctx.set_dbname(dbname.clone());
 
     let username = RoleName::from(urlencoding::decode(connection_url.username())?);
@@ -177,17 +182,40 @@ fn get_conn_info(
     }
     ctx.set_user(username.clone());
 
-    let password = connection_url
-        .password()
-        .ok_or(ConnInfoError::MissingPassword)?;
-    let password = urlencoding::decode_binary(password.as_bytes());
+    let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
+        let auth = auth
+            .to_str()
+            .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
+        AuthData::Jwt(
+            auth.strip_prefix("Bearer ")
+                .ok_or(ConnInfoError::MissingPassword)?
+                .into(),
+        )
+    } else if let Some(pass) = connection_url.password() {
+        AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
+            std::borrow::Cow::Borrowed(b) => b.into(),
+            std::borrow::Cow::Owned(b) => b.into(),
+        })
+    } else {
+        return Err(ConnInfoError::MissingPassword);
+    };
 
-    let hostname = connection_url
-        .host_str()
-        .ok_or(ConnInfoError::MissingHostname)?;
-
-    let endpoint =
-        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?;
+    let endpoint = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => {
+            if let Some(tls) = tls {
+                endpoint_sni(hostname, &tls.common_names)?
+                    .ok_or(ConnInfoError::MalformedEndpoint)?
+            } else {
+                hostname
+                    .split_once('.')
+                    .map_or(hostname, |(prefix, _)| prefix)
+                    .into()
+            }
+        }
+        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
+            return Err(ConnInfoError::MissingHostname)
+        }
+    };
     ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
@@ -203,7 +231,6 @@ fn get_conn_info(
             options = Some(NeonOptions::parse_options_raw(&value));
         }
     }
-    ctx.set_db_options(params.freeze());
 
     let user_info = ComputeUserInfo {
         endpoint,
@@ -214,22 +241,19 @@ fn get_conn_info(
     Ok(ConnInfo {
         user_info,
         dbname,
-        password: match password {
-            std::borrow::Cow::Borrowed(b) => b.into(),
-            std::borrow::Cow::Owned(b) => b.into(),
-        },
+        auth,
     })
 }
 
 // TODO: return different http error codes
-pub async fn handle(
+pub(crate) async fn handle(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, ApiError> {
-    let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
+    let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
         Ok(r) => {
@@ -335,7 +359,7 @@ pub async fn handle(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SqlOverHttpError {
+pub(crate) enum SqlOverHttpError {
     #[error("{0}")]
     ReadPayload(#[from] ReadPayloadError),
     #[error("{0}")]
@@ -389,7 +413,7 @@ impl UserFacingError for SqlOverHttpError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadPayloadError {
+pub(crate) enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
     Read(#[from] hyper1::Error),
     #[error("could not parse the HTTP request body: {0}")]
@@ -406,7 +430,7 @@ impl ReportableError for ReadPayloadError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SqlOverHttpCancel {
+pub(crate) enum SqlOverHttpCancel {
     #[error("query was cancelled")]
     Postgres,
     #[error("query was cancelled while stuck trying to connect to the database")]
@@ -482,13 +506,16 @@ fn map_isolation_level_to_headers(level: IsolationLevel) -> Option<HeaderValue> 
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
-    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
+    let _requeset_gauge = Metrics::get()
+        .proxy
+        .connection_requests
+        .guard(ctx.protocol());
     info!(
-        protocol = %ctx.protocol,
+        protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
 
@@ -498,7 +525,7 @@ async fn handle_inner(
     let headers = request.headers();
 
     // TLS config should be there.
-    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
+    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref())?;
     info!(user = conn_info.user_info.user.as_str(), "credentials");
 
     // Allow connection pooling only if explicitly requested
@@ -536,15 +563,30 @@ async fn handle_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let keys = backend
-                .authenticate(ctx, &config.authentication_config, &conn_info)
-                .await?;
+            let keys = match &conn_info.auth {
+                AuthData::Password(pw) => {
+                    backend
+                        .authenticate_with_password(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.user_info,
+                            pw,
+                        )
+                        .await?
+                }
+                AuthData::Jwt(jwt) => {
+                    backend
+                        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
+                        .await?
+                }
+            };
+
             let client = backend
                 .connect_to_compute(ctx, conn_info, keys, !allow_pool)
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
-            ctx.latency_timer.success();
+            ctx.success();
             Ok::<_, HttpConnError>(client)
         }
         .map_err(SqlOverHttpError::from),

@@ -112,7 +112,7 @@ md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
 memoffset = "0.8"
-nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
+nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
@@ -125,7 +125,7 @@ parquet = { version = "51.0.0", default-features = false, features = ["zstd"] }
 parquet_derive = "51.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
-procfs = "0.14"
+procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
@@ -183,6 +183,7 @@ tracing = "0.1"
 tracing-error = "0.2.0"
 tracing-opentelemetry = "0.21.0"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+try-lock = "0.2.5"
 twox-hash = { version = "1.6.3", default-features = false }
 typed-json = "0.1"
 url = "2.2"

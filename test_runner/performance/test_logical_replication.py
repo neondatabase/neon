@@ -100,24 +100,32 @@ def test_subscriber_lag(
     pub_connstr = benchmark_project_pub.connstr
     sub_connstr = benchmark_project_sub.connstr
 
-    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
-    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=sub_env)
+    if benchmark_project_pub.is_new:
+        pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
+    if benchmark_project_sub.is_new:
+        pg_bin.run_capture(["pgbench", "-i", "-s100"], env=sub_env)
 
     pub_conn = psycopg2.connect(pub_connstr)
     sub_conn = psycopg2.connect(sub_connstr)
     pub_conn.autocommit = True
     sub_conn.autocommit = True
     with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
-        if benchmark_project_pub.is_new:
-            pub_cur.execute("create publication pub1 for table pgbench_accounts, pgbench_history")
+        pub_cur.execute("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'pub1'")
+        pub_exists = len(pub_cur.fetchall()) != 0
 
-        if benchmark_project_sub.is_new:
+        if not pub_exists:
+            pub_cur.execute("CREATE PUBLICATION pub1 FOR TABLE pgbench_accounts, pgbench_history")
+
+        sub_cur.execute("SELECT 1 FROM pg_catalog.pg_subscription WHERE subname = 'sub1'")
+        sub_exists = len(sub_cur.fetchall()) != 0
+        if not sub_exists:
             sub_cur.execute("truncate table pgbench_accounts")
             sub_cur.execute("truncate table pgbench_history")
 
-            sub_cur.execute(f"create subscription sub1 connection '{pub_connstr}' publication pub1")
+            sub_cur.execute(f"CREATE SUBSCRIPTION sub1 CONNECTION '{pub_connstr}' PUBLICATION pub1")
 
         initial_sync_lag = measure_logical_replication_lag(sub_cur, pub_cur)
+
     pub_conn.close()
     sub_conn.close()
 
@@ -195,10 +203,15 @@ def test_publisher_restart(
     pub_conn.autocommit = True
     sub_conn.autocommit = True
     with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
-        if benchmark_project_pub.is_new:
+        pub_cur.execute("SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'pub1'")
+        pub_exists = len(pub_cur.fetchall()) != 0
+
+        if not pub_exists:
             pub_cur.execute("create publication pub1 for table pgbench_accounts, pgbench_history")
 
-        if benchmark_project_sub.is_new:
+        sub_cur.execute("SELECT 1 FROM pg_catalog.pg_subscription WHERE subname = 'sub1'")
+        sub_exists = len(sub_cur.fetchall()) != 0
+        if not sub_exists:
             sub_cur.execute("truncate table pgbench_accounts")
             sub_cur.execute("truncate table pgbench_history")
 
@@ -249,3 +262,86 @@ def test_publisher_restart(
             sub_workload.terminate()
     finally:
         pub_workload.terminate()
+
+
+@pytest.mark.remote_cluster
+@pytest.mark.timeout(2 * 60 * 60)
+def test_snap_files(
+    pg_bin: PgBin,
+    benchmark_project_pub: NeonApiEndpoint,
+    zenbenchmark: NeonBenchmarker,
+):
+    """
+    Creates a node with a replication slot. Generates pgbench into the replication slot,
+    then runs pgbench inserts while generating large numbers of snapfiles. Then restarts
+    the node and tries to peek the replication changes.
+    """
+    test_duration_min = 60
+    test_interval_min = 5
+    pgbench_duration = f"-T{test_duration_min * 60 * 2}"
+
+    env = benchmark_project_pub.pgbench_env
+    connstr = benchmark_project_pub.connstr
+
+    with psycopg2.connect(connstr) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'neondb_owner'")
+            is_super = cur.fetchall()[0][0]
+            assert is_super, "This benchmark won't work if we don't have superuser"
+
+    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=env)
+
+    conn = psycopg2.connect(connstr)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("ALTER SYSTEM SET neon.logical_replication_max_snap_files = -1")
+
+    with psycopg2.connect(connstr) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_reload_conf()")
+
+    with psycopg2.connect(connstr) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DO $$
+                    BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_replication_slots
+                        WHERE slot_name = 'slotter'
+                    ) THEN
+                        PERFORM pg_drop_replication_slot('slotter');
+                    END IF;
+                END $$;
+            """
+            )
+            cur.execute("SELECT pg_create_logical_replication_slot('slotter', 'test_decoding')")
+
+    workload = pg_bin.run_nonblocking(["pgbench", "-c10", pgbench_duration, "-Mprepared"], env=env)
+    try:
+        start = time.time()
+        prev_measurement = time.time()
+        while time.time() - start < test_duration_min * 60:
+            with psycopg2.connect(connstr) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT count(*) FROM (SELECT pg_log_standby_snapshot() FROM generate_series(1, 10000) g) s"
+                    )
+                    check_pgbench_still_running(workload)
+                    cur.execute(
+                        "SELECT pg_replication_slot_advance('slotter', pg_current_wal_lsn())"
+                    )
+
+            # Measure storage
+            if time.time() - prev_measurement > test_interval_min * 60:
+                storage = benchmark_project_pub.get_synthetic_storage_size()
+                zenbenchmark.record("storage", storage, "B", MetricReport.LOWER_IS_BETTER)
+                prev_measurement = time.time()
+            time.sleep(test_interval_min * 60 / 3)
+
+    finally:
+        workload.terminate()

@@ -27,7 +27,7 @@ use tracing::warn;
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
     /// implements [`AsyncRead`] and [`AsyncWrite`].
-    pub struct WebSocketRw<S> {
+    pub(crate) struct WebSocketRw<S> {
         #[pin]
         stream: WebSocketServer<S>,
         recv: Bytes,
@@ -36,7 +36,7 @@ pin_project! {
 }
 
 impl<S> WebSocketRw<S> {
-    pub fn new(stream: WebSocketServer<S>) -> Self {
+    pub(crate) fn new(stream: WebSocketServer<S>) -> Self {
         Self {
             stream,
             recv: Bytes::new(),
@@ -127,9 +127,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
     }
 }
 
-pub async fn serve_websocket(
+pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -145,7 +145,7 @@ pub async fn serve_websocket(
 
     let res = Box::pin(handle_client(
         config,
-        &mut ctx,
+        &ctx,
         cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },

@@ -23,10 +23,10 @@ use std::{hash::Hash, sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tracing::info;
 
-pub mod errors {
+pub(crate) mod errors {
     use crate::{
         console::messages::{self, ConsoleError, Reason},
-        error::{io_error, ReportableError, UserFacingError},
+        error::{io_error, ErrorKind, ReportableError, UserFacingError},
         proxy::retry::CouldRetry,
     };
     use thiserror::Error;
@@ -34,11 +34,11 @@ pub mod errors {
     use super::ApiLockError;
 
     /// A go-to error message which doesn't leak any detail.
-    pub const REQUEST_FAILED: &str = "Console request failed";
+    pub(crate) const REQUEST_FAILED: &str = "Console request failed";
 
     /// Common console API error.
     #[derive(Debug, Error)]
-    pub enum ApiError {
+    pub(crate) enum ApiError {
         /// Error returned by the console itself.
         #[error("{REQUEST_FAILED} with {0}")]
         Console(ConsoleError),
@@ -50,22 +50,20 @@ pub mod errors {
 
     impl ApiError {
         /// Returns HTTP status code if it's the reason for failure.
-        pub fn get_reason(&self) -> messages::Reason {
-            use ApiError::*;
+        pub(crate) fn get_reason(&self) -> messages::Reason {
             match self {
-                Console(e) => e.get_reason(),
-                _ => messages::Reason::Unknown,
+                ApiError::Console(e) => e.get_reason(),
+                ApiError::Transport(_) => messages::Reason::Unknown,
             }
         }
     }
 
     impl UserFacingError for ApiError {
         fn to_string_client(&self) -> String {
-            use ApiError::*;
             match self {
                 // To minimize risks, only select errors are forwarded to users.
-                Console(c) => c.get_user_facing_message(),
-                _ => REQUEST_FAILED.to_owned(),
+                ApiError::Console(c) => c.get_user_facing_message(),
+                ApiError::Transport(_) => REQUEST_FAILED.to_owned(),
             }
         }
     }
@@ -73,57 +71,53 @@ pub mod errors {
     impl ReportableError for ApiError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                ApiError::Console(e) => {
-                    use crate::error::ErrorKind::*;
-                    match e.get_reason() {
-                        Reason::RoleProtected => User,
-                        Reason::ResourceNotFound => User,
-                        Reason::ProjectNotFound => User,
-                        Reason::EndpointNotFound => User,
-                        Reason::BranchNotFound => User,
-                        Reason::RateLimitExceeded => ServiceRateLimit,
-                        Reason::NonDefaultBranchComputeTimeExceeded => User,
-                        Reason::ActiveTimeQuotaExceeded => User,
-                        Reason::ComputeTimeQuotaExceeded => User,
-                        Reason::WrittenDataQuotaExceeded => User,
-                        Reason::DataTransferQuotaExceeded => User,
-                        Reason::LogicalSizeQuotaExceeded => User,
-                        Reason::ConcurrencyLimitReached => ControlPlane,
-                        Reason::LockAlreadyTaken => ControlPlane,
-                        Reason::RunningOperations => ControlPlane,
-                        Reason::Unknown => match &e {
-                            ConsoleError {
-                                http_status_code:
-                                    http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
-                                ..
-                            } => crate::error::ErrorKind::User,
-                            ConsoleError {
-                                http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
-                                error,
-                                ..
-                            } if error.contains(
-                                "compute time quota of non-primary branches is exceeded",
-                            ) =>
-                            {
-                                crate::error::ErrorKind::User
-                            }
-                            ConsoleError {
-                                http_status_code: http::StatusCode::LOCKED,
-                                error,
-                                ..
-                            } if error.contains("quota exceeded")
-                                || error.contains("the limit for current plan reached") =>
-                            {
-                                crate::error::ErrorKind::User
-                            }
-                            ConsoleError {
-                                http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
-                                ..
-                            } => crate::error::ErrorKind::ServiceRateLimit,
-                            ConsoleError { .. } => crate::error::ErrorKind::ControlPlane,
-                        },
-                    }
-                }
+                ApiError::Console(e) => match e.get_reason() {
+                    Reason::RoleProtected => ErrorKind::User,
+                    Reason::ResourceNotFound => ErrorKind::User,
+                    Reason::ProjectNotFound => ErrorKind::User,
+                    Reason::EndpointNotFound => ErrorKind::User,
+                    Reason::BranchNotFound => ErrorKind::User,
+                    Reason::RateLimitExceeded => ErrorKind::ServiceRateLimit,
+                    Reason::NonDefaultBranchComputeTimeExceeded => ErrorKind::User,
+                    Reason::ActiveTimeQuotaExceeded => ErrorKind::User,
+                    Reason::ComputeTimeQuotaExceeded => ErrorKind::User,
+                    Reason::WrittenDataQuotaExceeded => ErrorKind::User,
+                    Reason::DataTransferQuotaExceeded => ErrorKind::User,
+                    Reason::LogicalSizeQuotaExceeded => ErrorKind::User,
+                    Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
+                    Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
+                    Reason::RunningOperations => ErrorKind::ControlPlane,
+                    Reason::Unknown => match &e {
+                        ConsoleError {
+                            http_status_code:
+                                http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
+                            ..
+                        } => crate::error::ErrorKind::User,
+                        ConsoleError {
+                            http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
+                            error,
+                            ..
+                        } if error
+                            .contains("compute time quota of non-primary branches is exceeded") =>
+                        {
+                            crate::error::ErrorKind::User
+                        }
+                        ConsoleError {
+                            http_status_code: http::StatusCode::LOCKED,
+                            error,
+                            ..
+                        } if error.contains("quota exceeded")
+                            || error.contains("the limit for current plan reached") =>
+                        {
+                            crate::error::ErrorKind::User
+                        }
+                        ConsoleError {
+                            http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
+                            ..
+                        } => crate::error::ErrorKind::ServiceRateLimit,
+                        ConsoleError { .. } => crate::error::ErrorKind::ControlPlane,
+                    },
+                },
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
@@ -152,7 +146,7 @@ pub mod errors {
     }
 
     #[derive(Debug, Error)]
-    pub enum GetAuthInfoError {
+    pub(crate) enum GetAuthInfoError {
         // We shouldn't include the actual secret here.
         #[error("Console responded with a malformed auth secret")]
         BadSecret,
@@ -170,12 +164,11 @@ pub mod errors {
 
     impl UserFacingError for GetAuthInfoError {
         fn to_string_client(&self) -> String {
-            use GetAuthInfoError::*;
             match self {
                 // We absolutely should not leak any secrets!
-                BadSecret => REQUEST_FAILED.to_owned(),
+                Self::BadSecret => REQUEST_FAILED.to_owned(),
                 // However, API might return a meaningful error.
-                ApiError(e) => e.to_string_client(),
+                Self::ApiError(e) => e.to_string_client(),
             }
         }
     }
@@ -183,14 +176,14 @@ pub mod errors {
     impl ReportableError for GetAuthInfoError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                GetAuthInfoError::BadSecret => crate::error::ErrorKind::ControlPlane,
-                GetAuthInfoError::ApiError(_) => crate::error::ErrorKind::ControlPlane,
+                Self::BadSecret => crate::error::ErrorKind::ControlPlane,
+                Self::ApiError(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
     }
 
     #[derive(Debug, Error)]
-    pub enum WakeComputeError {
+    pub(crate) enum WakeComputeError {
         #[error("Console responded with a malformed compute address: {0}")]
         BadComputeAddress(Box<str>),
 
@@ -213,17 +206,16 @@ pub mod errors {
 
     impl UserFacingError for WakeComputeError {
         fn to_string_client(&self) -> String {
-            use WakeComputeError::*;
             match self {
                 // We shouldn't show user the address even if it's broken.
                 // Besides, user is unlikely to care about this detail.
-                BadComputeAddress(_) => REQUEST_FAILED.to_owned(),
+                Self::BadComputeAddress(_) => REQUEST_FAILED.to_owned(),
                 // However, API might return a meaningful error.
-                ApiError(e) => e.to_string_client(),
+                Self::ApiError(e) => e.to_string_client(),
 
-                TooManyConnections => self.to_string(),
+                Self::TooManyConnections => self.to_string(),
 
-                TooManyConnectionAttempts(_) => {
+                Self::TooManyConnectionAttempts(_) => {
                     "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
                 }
             }
@@ -233,10 +225,10 @@ pub mod errors {
     impl ReportableError for WakeComputeError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
-                WakeComputeError::ApiError(e) => e.get_error_kind(),
-                WakeComputeError::TooManyConnections => crate::error::ErrorKind::RateLimit,
-                WakeComputeError::TooManyConnectionAttempts(e) => e.get_error_kind(),
+                Self::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
+                Self::ApiError(e) => e.get_error_kind(),
+                Self::TooManyConnections => crate::error::ErrorKind::RateLimit,
+                Self::TooManyConnectionAttempts(e) => e.get_error_kind(),
             }
         }
     }
@@ -244,10 +236,10 @@ pub mod errors {
     impl CouldRetry for WakeComputeError {
         fn could_retry(&self) -> bool {
             match self {
-                WakeComputeError::BadComputeAddress(_) => false,
-                WakeComputeError::ApiError(e) => e.could_retry(),
-                WakeComputeError::TooManyConnections => false,
-                WakeComputeError::TooManyConnectionAttempts(_) => false,
+                Self::BadComputeAddress(_) => false,
+                Self::ApiError(e) => e.could_retry(),
+                Self::TooManyConnections => false,
+                Self::TooManyConnectionAttempts(_) => false,
             }
         }
     }
@@ -255,7 +247,7 @@ pub mod errors {
 
 /// Auth secret which is managed by the cloud.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum AuthSecret {
+pub(crate) enum AuthSecret {
     #[cfg(any(test, feature = "testing"))]
     /// Md5 hash of user's password.
     Md5([u8; 16]),
@@ -265,34 +257,34 @@ pub enum AuthSecret {
 }
 
 #[derive(Default)]
-pub struct AuthInfo {
-    pub secret: Option<AuthSecret>,
+pub(crate) struct AuthInfo {
+    pub(crate) secret: Option<AuthSecret>,
     /// List of IP addresses allowed for the autorization.
-    pub allowed_ips: Vec<IpPattern>,
+    pub(crate) allowed_ips: Vec<IpPattern>,
     /// Project ID. This is used for cache invalidation.
-    pub project_id: Option<ProjectIdInt>,
+    pub(crate) project_id: Option<ProjectIdInt>,
 }
 
 /// Info for establishing a connection to a compute node.
 /// This is what we get after auth succeeded, but not before!
 #[derive(Clone)]
-pub struct NodeInfo {
+pub(crate) struct NodeInfo {
     /// Compute node connection params.
     /// It's sad that we have to clone this, but this will improve
     /// once we migrate to a bespoke connection logic.
-    pub config: compute::ConnCfg,
+    pub(crate) config: compute::ConnCfg,
 
     /// Labels for proxy's metrics.
-    pub aux: MetricsAuxInfo,
+    pub(crate) aux: MetricsAuxInfo,
 
     /// Whether we should accept self-signed certificates (for testing)
-    pub allow_self_signed_compute: bool,
+    pub(crate) allow_self_signed_compute: bool,
 }
 
 impl NodeInfo {
-    pub async fn connect(
+    pub(crate) async fn connect(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         timeout: Duration,
     ) -> Result<compute::PostgresConnection, compute::ConnectionError> {
         self.config
@@ -304,23 +296,24 @@ impl NodeInfo {
             )
             .await
     }
-    pub fn reuse_settings(&mut self, other: Self) {
+    pub(crate) fn reuse_settings(&mut self, other: Self) {
         self.allow_self_signed_compute = other.allow_self_signed_compute;
         self.config.reuse_password(other.config);
     }
 
-    pub fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
+    pub(crate) fn set_keys(&mut self, keys: &ComputeCredentialKeys) {
         match keys {
             ComputeCredentialKeys::Password(password) => self.config.password(password),
             ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
+            ComputeCredentialKeys::None => &mut self.config,
         };
     }
 }
 
-pub type NodeInfoCache = TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ConsoleError>>>;
-pub type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
-pub type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
-pub type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
+pub(crate) type NodeInfoCache = TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ConsoleError>>>;
+pub(crate) type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
+pub(crate) type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
+pub(crate) type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
@@ -330,20 +323,20 @@ pub(crate) trait Api {
     /// We still have to mock the scram to avoid leaking information that user doesn't exist.
     async fn get_role_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError>;
 
     async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
@@ -357,53 +350,52 @@ pub enum ConsoleBackend {
     Postgres(mock::Api),
     /// Internal testing
     #[cfg(test)]
+    #[allow(private_interfaces)]
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
 impl Api for ConsoleBackend {
     async fn get_role_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
-        use ConsoleBackend::*;
         match self {
-            Console(api) => api.get_role_secret(ctx, user_info).await,
+            Self::Console(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Postgres(api) => api.get_role_secret(ctx, user_info).await,
+            Self::Postgres(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(test)]
-            Test(_) => unreachable!("this function should never be called in the test backend"),
+            Self::Test(_) => {
+                unreachable!("this function should never be called in the test backend")
+            }
         }
     }
 
     async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
-        use ConsoleBackend::*;
         match self {
-            Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(test)]
-            Test(api) => api.get_allowed_ips_and_secret(),
+            Self::Test(api) => api.get_allowed_ips_and_secret(),
         }
     }
 
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
-        use ConsoleBackend::*;
-
         match self {
-            Console(api) => api.wake_compute(ctx, user_info).await,
+            Self::Console(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Postgres(api) => api.wake_compute(ctx, user_info).await,
+            Self::Postgres(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(test)]
-            Test(api) => api.wake_compute(),
+            Self::Test(api) => api.wake_compute(),
         }
     }
 }
@@ -411,7 +403,7 @@ impl Api for ConsoleBackend {
 /// Various caches for [`console`](super).
 pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
-    pub node_info: NodeInfoCache,
+    pub(crate) node_info: NodeInfoCache,
     /// Cache which stores project_id -> endpoint_ids mapping.
     pub project_info: Arc<ProjectInfoCacheImpl>,
     /// List of all valid endpoints.
@@ -448,7 +440,7 @@ pub struct ApiLocks<K> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ApiLockError {
+pub(crate) enum ApiLockError {
     #[error("timeout acquiring resource permit")]
     TimeoutError(#[from] tokio::time::error::Elapsed),
 }
@@ -480,7 +472,7 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
         })
     }
 
-    pub async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
+    pub(crate) async fn get_permit(&self, key: &K) -> Result<WakeComputePermit, ApiLockError> {
         if self.config.initial_limit == 0 {
             return Ok(WakeComputePermit {
                 permit: Token::disabled(),
@@ -540,18 +532,18 @@ impl<K: Hash + Eq + Clone> ApiLocks<K> {
     }
 }
 
-pub struct WakeComputePermit {
+pub(crate) struct WakeComputePermit {
     permit: Token,
 }
 
 impl WakeComputePermit {
-    pub fn should_check_cache(&self) -> bool {
+    pub(crate) fn should_check_cache(&self) -> bool {
         !self.permit.is_disabled()
     }
-    pub fn release(self, outcome: Outcome) {
-        self.permit.release(outcome)
+    pub(crate) fn release(self, outcome: Outcome) {
+        self.permit.release(outcome);
     }
-    pub fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
+    pub(crate) fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
         match res {
             Ok(_) => self.release(Outcome::Success),
             Err(_) => self.release(Outcome::Overload),

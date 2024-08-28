@@ -109,7 +109,7 @@ impl RedisPublisherClient {
         let _: () = self.client.publish(PROXY_CHANNEL_NAME, payload).await?;
         Ok(())
     }
-    pub async fn try_connect(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn try_connect(&mut self) -> anyhow::Result<()> {
         match self.client.connect().await {
             Ok(()) => {}
             Err(e) => {

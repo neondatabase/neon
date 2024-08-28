@@ -1,9 +1,10 @@
+import concurrent.futures
 import json
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -16,26 +17,31 @@ from fixtures.neon_fixtures import (
     PageserverSchedulingPolicy,
     PgBin,
     StorageControllerApiException,
+    StorageControllerLeadershipStatus,
     TokenScope,
+    last_flush_lsn_upload,
 )
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
     enable_remote_storage_versioning,
     list_prefix,
+    many_small_layers_tenant_config,
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
+from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
+from fixtures.storage_controller_proxy import StorageControllerProxy
 from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
 from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
 from pytest_httpserver import HTTPServer
+from urllib3 import Retry
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
@@ -649,7 +655,7 @@ def test_storage_controller_s3_time_travel_recovery(
         tenant_id,
         shard_count=2,
         shard_stripe_size=8192,
-        tenant_config=MANY_SMALL_LAYERS_TENANT_CONFIG,
+        tenant_config=many_small_layers_tenant_config(),
     )
 
     # Check that the consistency check passes
@@ -1597,6 +1603,8 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
 
     # Perform a graceful rolling restart
     for ps in env.pageservers:
+        env.storage_controller.warm_up_all_secondaries()
+
         env.storage_controller.retryable_node_operation(
             lambda ps_id: env.storage_controller.node_drain(ps_id), ps.id, max_attempts=3, backoff=2
         )
@@ -1645,6 +1653,115 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
     assert_shard_counts_balanced(env, shard_counts, total_shards)
 
 
+def test_skip_drain_on_secondary_lag(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    """
+    Artificially make a tenant shard's secondary location lag behind the primary
+    and check that storage controller driven node drains skip the lagging tenant shard.
+    Finally, validate that the tenant shard is migrated when a new drain request comes
+    in and it's no longer lagging.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.storage_controller_config = {
+        "max_secondary_lag_bytes": 1 * 1024 * 1024,
+    }
+
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tid, timeline_id = env.neon_cli.create_tenant(placement_policy='{"Attached":1}')
+
+    # Give things a chance to settle.
+    env.storage_controller.reconcile_until_idle(timeout_secs=30)
+
+    locations = env.storage_controller.locate(tid)
+    assert len(locations) == 1
+    primary: int = locations[0]["node_id"]
+    not_primary = [ps.id for ps in env.pageservers if ps.id != primary]
+    assert len(not_primary) == 1
+    secondary = not_primary[0]
+
+    log.info(f"Paused secondary downloads on {secondary}")
+    env.get_pageserver(secondary).http_client().configure_failpoints(
+        ("secondary-layer-download-pausable", "pause")
+    )
+
+    log.info(f"Ingesting some data for {tid}")
+
+    with env.endpoints.create_start("main", tenant_id=tid) as endpoint:
+        run_pg_bench_small(pg_bin, endpoint.connstr())
+        endpoint.safe_psql("CREATE TABLE created_foo(id integer);")
+        last_flush_lsn_upload(env, endpoint, tid, timeline_id)
+
+    log.info(f"Uploading heatmap from {primary} and requesting download from {secondary}")
+
+    env.get_pageserver(primary).http_client().tenant_heatmap_upload(tid)
+    env.get_pageserver(secondary).http_client().tenant_secondary_download(tid, wait_ms=100)
+
+    def secondary_is_lagging():
+        resp = env.get_pageserver(secondary).http_client().tenant_secondary_status(tid)
+        lag = resp["bytes_total"] - resp["bytes_downloaded"]
+
+        if lag <= 1 * 1024 * 1024:
+            raise Exception(f"Secondary lag not big enough: {lag}")
+
+    log.info(f"Looking for lag to develop on the secondary {secondary}")
+    wait_until(10, 1, secondary_is_lagging)
+
+    log.info(f"Starting drain of primary {primary} with laggy secondary {secondary}")
+    env.storage_controller.retryable_node_operation(
+        lambda ps_id: env.storage_controller.node_drain(ps_id), primary, max_attempts=3, backoff=2
+    )
+
+    env.storage_controller.poll_node_status(
+        primary,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
+        max_attempts=6,
+        backoff=5,
+    )
+
+    locations = env.storage_controller.locate(tid)
+    assert len(locations) == 1
+    assert locations[0]["node_id"] == primary
+
+    log.info(f"Unpausing secondary downloads on {secondary}")
+    env.get_pageserver(secondary).http_client().configure_failpoints(
+        ("secondary-layer-download-pausable", "off")
+    )
+    env.get_pageserver(secondary).http_client().tenant_secondary_download(tid, wait_ms=100)
+
+    log.info(f"Waiting for lag to reduce on {secondary}")
+
+    def lag_is_acceptable():
+        resp = env.get_pageserver(secondary).http_client().tenant_secondary_status(tid)
+        lag = resp["bytes_total"] - resp["bytes_downloaded"]
+
+        if lag > 1 * 1024 * 1024:
+            raise Exception(f"Secondary lag not big enough: {lag}")
+
+    wait_until(10, 1, lag_is_acceptable)
+
+    env.storage_controller.node_configure(primary, {"scheduling": "Active"})
+
+    log.info(f"Starting drain of primary {primary} with non-laggy secondary {secondary}")
+
+    env.storage_controller.retryable_node_operation(
+        lambda ps_id: env.storage_controller.node_drain(ps_id), primary, max_attempts=3, backoff=2
+    )
+
+    env.storage_controller.poll_node_status(
+        primary,
+        PageserverAvailability.ACTIVE,
+        PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
+        max_attempts=6,
+        backoff=5,
+    )
+
+    locations = env.storage_controller.locate(tid)
+    assert len(locations) == 1
+    assert locations[0]["node_id"] == secondary
+
+
 def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
@@ -1671,6 +1788,7 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
 
     ps_id_to_drain = env.pageservers[0].id
 
+    env.storage_controller.warm_up_all_secondaries()
     env.storage_controller.retryable_node_operation(
         lambda ps_id: env.storage_controller.node_drain(ps_id),
         ps_id_to_drain,
@@ -1785,6 +1903,126 @@ def test_storage_controller_node_deletion(
     env.storage_controller.consistency_check()
 
 
+@pytest.mark.parametrize("shard_count", [None, 2])
+def test_storage_controller_metadata_health(
+    neon_env_builder: NeonEnvBuilder,
+    shard_count: Optional[int],
+):
+    """
+    Create three tenants A, B, C.
+
+    Phase 1:
+    - A: Post healthy status.
+    - B: Post unhealthy status.
+    - C: No updates.
+
+    Phase 2:
+    - B: Post healthy status.
+    - C: Post healthy status.
+
+    Phase 3:
+    - A: Post unhealthy status.
+
+    Phase 4:
+    - Delete tenant A, metadata health status should be deleted as well.
+    """
+
+    def update_and_query_metadata_health(
+        env: NeonEnv,
+        healthy: List[TenantShardId],
+        unhealthy: List[TenantShardId],
+        outdated_duration: str = "1h",
+    ) -> Tuple[Set[str], Set[str]]:
+        """
+        Update metadata health. Then list tenant shards with unhealthy and
+        outdated metadata health status.
+        """
+        if healthy or unhealthy:
+            env.storage_controller.metadata_health_update(healthy, unhealthy)
+        result = env.storage_controller.metadata_health_list_unhealthy()
+        unhealthy_res = set(result["unhealthy_tenant_shards"])
+        result = env.storage_controller.metadata_health_list_outdated(outdated_duration)
+        outdated_res = set(record["tenant_shard_id"] for record in result["health_records"])
+
+        return unhealthy_res, outdated_res
+
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_start()
+
+    # Mock tenant (`initial_tenant``) with healthy scrubber scan result
+    tenant_a_shard_ids = (
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(env.initial_tenant, 0, 0)]
+    )
+
+    # Mock tenant with unhealthy scrubber scan result
+    tenant_b, _ = env.neon_cli.create_tenant(shard_count=shard_count)
+    tenant_b_shard_ids = (
+        env.storage_controller.tenant_shard_split(tenant_b, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(tenant_b, 0, 0)]
+    )
+
+    # Mock tenant that never gets a health update from scrubber
+    tenant_c, _ = env.neon_cli.create_tenant(shard_count=shard_count)
+
+    tenant_c_shard_ids = (
+        env.storage_controller.tenant_shard_split(tenant_c, shard_count=shard_count)
+        if shard_count is not None
+        else [TenantShardId(tenant_c, 0, 0)]
+    )
+
+    # Metadata health table also updated as tenant shards are created.
+    assert env.storage_controller.metadata_health_is_healthy()
+
+    # post "fake" updates to storage controller db
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=tenant_a_shard_ids, unhealthy=tenant_b_shard_ids
+    )
+
+    log.info(f"After Phase 1: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == len(tenant_b_shard_ids)
+    for t in tenant_b_shard_ids:
+        assert str(t) in unhealthy
+    assert len(outdated) == 0
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=tenant_b_shard_ids + tenant_c_shard_ids, unhealthy=[]
+    )
+
+    log.info(f"After Phase 2: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == 0
+    assert len(outdated) == 0
+
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=[], unhealthy=tenant_a_shard_ids
+    )
+
+    log.info(f"After Phase 3: {unhealthy=}, {outdated=}")
+    assert len(unhealthy) == len(tenant_a_shard_ids)
+    for t in tenant_a_shard_ids:
+        assert str(t) in unhealthy
+    assert len(outdated) == 0
+
+    # Phase 4: Delete A
+    env.storage_controller.pageserver_api().tenant_delete(env.initial_tenant)
+
+    # A's unhealthy metadata health status should be deleted as well.
+    assert env.storage_controller.metadata_health_is_healthy()
+
+    # All shards from B and C are not fresh if set outdated duration to 0 seconds.
+    unhealthy, outdated = update_and_query_metadata_health(
+        env, healthy=[], unhealthy=tenant_a_shard_ids, outdated_duration="0s"
+    )
+    assert len(unhealthy) == 0
+    for t in tenant_b_shard_ids + tenant_c_shard_ids:
+        assert str(t) in outdated
+
+
 def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     """
     Test the `/control/v1/step_down` storage controller API. Upon receiving such
@@ -1858,3 +2096,237 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
         )
         == 0
     )
+
+
+# This is a copy of NeonEnv.start which injects the instance id and port
+# into the call to NeonStorageController.start
+def start_env(env: NeonEnv, storage_controller_port: int):
+    timeout_in_seconds = 30
+
+    # Storage controller starts first, so that pageserver /re-attach calls don't
+    # bounce through retries on startup
+    env.storage_controller.start(timeout_in_seconds, 1, storage_controller_port)
+
+    # Wait for storage controller readiness to prevent unnecessary post start-up
+    # reconcile.
+    env.storage_controller.wait_until_ready()
+
+    # Start up broker, pageserver and all safekeepers
+    futs = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=2 + len(env.pageservers) + len(env.safekeepers)
+    ) as executor:
+        futs.append(
+            executor.submit(lambda: env.broker.try_start() or None)
+        )  # The `or None` is for the linter
+
+        for pageserver in env.pageservers:
+            futs.append(
+                executor.submit(
+                    lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)
+                )
+            )
+
+        for safekeeper in env.safekeepers:
+            futs.append(
+                executor.submit(
+                    lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)
+                )
+            )
+
+    for f in futs:
+        f.result()
+
+
+@pytest.mark.parametrize("step_down_times_out", [False, True])
+def test_storage_controller_leadership_transfer(
+    neon_env_builder: NeonEnvBuilder,
+    storage_controller_proxy: StorageControllerProxy,
+    port_distributor: PortDistributor,
+    step_down_times_out: bool,
+):
+    neon_env_builder.auth_enabled = True
+
+    neon_env_builder.num_pageservers = 3
+
+    neon_env_builder.storage_controller_config = {
+        "database_url": f"127.0.0.1:{port_distributor.get_port()}",
+        "start_as_candidate": True,
+    }
+
+    neon_env_builder.storage_controller_port_override = storage_controller_proxy.port()
+
+    storage_controller_1_port = port_distributor.get_port()
+    storage_controller_2_port = port_distributor.get_port()
+
+    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+
+    env = neon_env_builder.init_configs()
+    start_env(env, storage_controller_1_port)
+
+    assert (
+        env.storage_controller.get_leadership_status() == StorageControllerLeadershipStatus.LEADER
+    )
+    leader = env.storage_controller.get_leader()
+    assert leader["address"] == f"http://127.0.0.1:{storage_controller_1_port}/"
+
+    if step_down_times_out:
+        env.storage_controller.configure_failpoints(
+            ("sleep-on-step-down-handling", "return(10000)")
+        )
+        env.storage_controller.allowed_errors.append(".*request was dropped before completing.*")
+
+    tenant_count = 2
+    shard_count = 4
+    tenants = set(TenantId.generate() for _ in range(0, tenant_count))
+
+    for tid in tenants:
+        env.storage_controller.tenant_create(
+            tid, shard_count=shard_count, placement_policy={"Attached": 1}
+        )
+    env.storage_controller.reconcile_until_idle()
+
+    env.storage_controller.start(
+        timeout_in_seconds=30, instance_id=2, base_port=storage_controller_2_port
+    )
+
+    if not step_down_times_out:
+
+        def previous_stepped_down():
+            assert (
+                env.storage_controller.get_leadership_status()
+                == StorageControllerLeadershipStatus.STEPPED_DOWN
+            )
+
+        wait_until(5, 1, previous_stepped_down)
+
+    storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_2_port}")
+
+    def new_becomes_leader():
+        assert (
+            env.storage_controller.get_leadership_status()
+            == StorageControllerLeadershipStatus.LEADER
+        )
+
+    wait_until(15, 1, new_becomes_leader)
+    leader = env.storage_controller.get_leader()
+    assert leader["address"] == f"http://127.0.0.1:{storage_controller_2_port}/"
+
+    env.storage_controller.wait_until_ready()
+    env.storage_controller.consistency_check()
+
+    if step_down_times_out:
+        env.storage_controller.allowed_errors.extend(
+            [
+                ".*Leader.*did not respond to step-down request.*",
+                ".*Send step down request failed.*",
+                ".*Send step down request still failed.*",
+            ]
+        )
+
+
+def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvBuilder):
+    # single unsharded tenant, two locations
+    neon_env_builder.num_pageservers = 2
+
+    env = neon_env_builder.init_start()
+
+    env.storage_controller.tenant_policy_update(env.initial_tenant, {"placement": {"Attached": 1}})
+    env.storage_controller.reconcile_until_idle()
+
+    attached_id = int(env.storage_controller.locate(env.initial_tenant)[0]["node_id"])
+    attached = next((ps for ps in env.pageservers if ps.id == attached_id))
+
+    def attached_is_draining():
+        details = env.storage_controller.node_status(attached.id)
+        assert details["scheduling"] == "Draining"
+
+    env.storage_controller.configure_failpoints(("sleepy-drain-loop", "return(10000)"))
+    env.storage_controller.node_drain(attached.id)
+
+    wait_until(10, 0.5, attached_is_draining)
+
+    attached.restart()
+
+    # we are unable to reconfigure node while the operation is still ongoing
+    with pytest.raises(
+        StorageControllerApiException,
+        match="Precondition failed: Ongoing background operation forbids configuring: drain.*",
+    ):
+        env.storage_controller.node_configure(attached.id, {"scheduling": "Pause"})
+    with pytest.raises(
+        StorageControllerApiException,
+        match="Precondition failed: Ongoing background operation forbids configuring: drain.*",
+    ):
+        env.storage_controller.node_configure(attached.id, {"availability": "Offline"})
+
+    env.storage_controller.cancel_node_drain(attached.id)
+
+    def reconfigure_node_again():
+        env.storage_controller.node_configure(attached.id, {"scheduling": "Pause"})
+
+    # allow for small delay between actually having cancelled and being able reconfigure again
+    wait_until(4, 0.5, reconfigure_node_again)
+
+
+def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder):
+    """
+    The storage controller is meant to handle the case where a timeline CRUD operation races
+    with a generation-incrementing change to the tenant: this should trigger a retry so that
+    the operation lands on the highest-generation'd tenant location.
+    """
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+    tenant_id = TenantId.generate()
+    env.storage_controller.tenant_create(tenant_id)
+
+    # Set up a failpoint so that a timeline creation will be very slow
+    failpoint = "timeline-creation-after-uninit"
+    for ps in env.pageservers:
+        ps.http_client().configure_failpoints((failpoint, "sleep(10000)"))
+
+    # Start a timeline creation in the background
+    create_timeline_id = TimelineId.generate()
+    futs = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=2 + len(env.pageservers) + len(env.safekeepers)
+    ) as executor:
+        futs.append(
+            executor.submit(
+                env.storage_controller.pageserver_api(
+                    retries=Retry(
+                        status=0,
+                        connect=0,  # Disable retries: we want to see the 503
+                    )
+                ).timeline_create,
+                PgVersion.NOT_SET,
+                tenant_id,
+                create_timeline_id,
+            )
+        )
+
+        def has_hit_failpoint():
+            assert any(
+                ps.log_contains(f"at failpoint {failpoint}") is not None for ps in env.pageservers
+            )
+
+        wait_until(10, 1, has_hit_failpoint)
+
+        # Migrate the tenant while the timeline creation is in progress: this migration will complete once it
+        # can detach from the old pageserver, which will happen once the failpoint completes.
+        env.storage_controller.tenant_shard_migrate(
+            TenantShardId(tenant_id, 0, 0), env.pageservers[1].id
+        )
+
+        with pytest.raises(PageserverApiException, match="Tenant attachment changed, please retry"):
+            futs[0].result(timeout=20)
+
+    # Timeline creation should work when there isn't a concurrent migration, even though it's
+    # slow (our failpoint is still enabled)
+    env.storage_controller.pageserver_api(
+        retries=Retry(
+            status=0,
+            connect=0,  # Disable retries: we want to see the 503
+        )
+    ).timeline_create(PgVersion.NOT_SET, tenant_id, create_timeline_id)

@@ -14,6 +14,7 @@ import textwrap
 import threading
 import time
 import uuid
+from collections import defaultdict
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,7 +24,7 @@ from functools import cached_property, partial
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import quote, urlparse
 
 import asyncpg
@@ -60,12 +61,11 @@ from fixtures.pageserver.common_types import IndexPartDump, LayerName, parse_lay
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
-    wait_for_upload,
-    wait_for_upload_queue_empty,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
+    LocalFsStorage,
     MockS3Server,
     RemoteStorage,
     RemoteStorageKind,
@@ -387,7 +387,7 @@ class PgProtocol:
         return self.safe_psql_many([query], **kwargs)[0]
 
     def safe_psql_many(
-        self, queries: List[str], log_query=True, **kwargs: Any
+        self, queries: Iterable[str], log_query=True, **kwargs: Any
     ) -> List[List[Tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
@@ -449,6 +449,7 @@ class TokenScope(str, Enum):
     GENERATIONS_API = "generations_api"
     SAFEKEEPER_DATA = "safekeeperdata"
     TENANT = "tenant"
+    SCRUBBER = "scrubber"
 
 
 class NeonEnvBuilder:
@@ -494,6 +495,7 @@ class NeonEnvBuilder:
         pageserver_aux_file_policy: Optional[AuxFileStore] = None,
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
+        storage_controller_port_override: Optional[int] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -545,6 +547,8 @@ class NeonEnvBuilder:
         self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
         self.safekeeper_extra_opts = safekeeper_extra_opts
+
+        self.storage_controller_port_override = storage_controller_port_override
 
         assert test_name.startswith(
             "test_"
@@ -961,7 +965,7 @@ class NeonEnvBuilder:
         if self.env:
             log.info("Cleaning up all storage and compute nodes")
             self.env.stop(
-                immediate=True,
+                immediate=False,
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
                 ps_assert_metric_no_errors=(exc_type is None),
@@ -977,7 +981,10 @@ class NeonEnvBuilder:
                 and self.enable_scrub_on_exit
             ):
                 try:
-                    self.env.storage_scrubber.scan_metadata()
+                    healthy, _ = self.env.storage_scrubber.scan_metadata()
+                    if not healthy:
+                        e = Exception("Remote storage metadata corrupted")
+                        cleanup_error = e
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -1048,6 +1055,7 @@ class NeonEnv:
     """
 
     BASE_PAGESERVER_ID = 1
+    storage_controller: NeonStorageController | NeonProxiedStorageController
 
     def __init__(self, config: NeonEnvBuilder):
         self.repo_dir = config.repo_dir
@@ -1078,26 +1086,40 @@ class NeonEnv:
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
-        # Find two adjacent ports for storage controller and its postgres DB.  This
-        # loop would eventually throw from get_port() if we run out of ports (extremely
-        # unlikely): usually we find two adjacent free ports on the first iteration.
-        while True:
-            self.storage_controller_port = self.port_distributor.get_port()
-            storage_controller_pg_port = self.port_distributor.get_port()
-            if storage_controller_pg_port == self.storage_controller_port + 1:
-                break
-
         # The URL for the pageserver to use as its control_plane_api config
-        self.control_plane_api: str = f"http://127.0.0.1:{self.storage_controller_port}/upcall/v1"
-        # The base URL of the storage controller
-        self.storage_controller_api: str = f"http://127.0.0.1:{self.storage_controller_port}"
+        if config.storage_controller_port_override is not None:
+            log.info(
+                f"Using storage controller api override {config.storage_controller_port_override}"
+            )
+
+            self.storage_controller_port = config.storage_controller_port_override
+            self.storage_controller = NeonProxiedStorageController(
+                self, config.storage_controller_port_override, config.auth_enabled
+            )
+        else:
+            # Find two adjacent ports for storage controller and its postgres DB.  This
+            # loop would eventually throw from get_port() if we run out of ports (extremely
+            # unlikely): usually we find two adjacent free ports on the first iteration.
+            while True:
+                storage_controller_port = self.port_distributor.get_port()
+                storage_controller_pg_port = self.port_distributor.get_port()
+                if storage_controller_pg_port == storage_controller_port + 1:
+                    break
+
+            self.storage_controller_port = storage_controller_port
+            self.storage_controller = NeonStorageController(
+                self, storage_controller_port, config.auth_enabled
+            )
+
+            log.info(
+                f"Using generated control_plane_api: {self.storage_controller.upcall_api_endpoint()}"
+            )
+
+        self.storage_controller_api: str = self.storage_controller.api_root()
+        self.control_plane_api: str = self.storage_controller.upcall_api_endpoint()
 
         # For testing this with a fake HTTP server, enable passing through a URL from config
         self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
-
-        self.storage_controller: NeonStorageController = NeonStorageController(
-            self, config.auth_enabled
-        )
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
@@ -1138,7 +1160,6 @@ class NeonEnv:
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
-                "image_compression": "zstd",
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -1246,20 +1267,56 @@ class NeonEnv:
     def stop(self, immediate=False, ps_assert_metric_no_errors=False, fail_on_endpoint_errors=True):
         """
         After this method returns, there should be no child processes running.
+
+        Unless of course, some stopping failed, in that case, all remaining child processes are leaked.
         """
-        self.endpoints.stop_all(fail_on_endpoint_errors)
+
+        # the commonly failing components have special try-except behavior,
+        # trying to get us to actually shutdown all processes over easier error
+        # reporting.
+
+        raise_later = None
+        try:
+            self.endpoints.stop_all(fail_on_endpoint_errors)
+        except Exception as e:
+            raise_later = e
 
         # Stop storage controller before pageservers: we don't want it to spuriously
         # detect a pageserver "failure" during test teardown
         self.storage_controller.stop(immediate=immediate)
 
+        stop_later = []
+        metric_errors = []
+
         for sk in self.safekeepers:
             sk.stop(immediate=immediate)
         for pageserver in self.pageservers:
             if ps_assert_metric_no_errors:
-                pageserver.assert_no_metric_errors()
-            pageserver.stop(immediate=immediate)
+                try:
+                    pageserver.assert_no_metric_errors()
+                except Exception as e:
+                    metric_errors.append(e)
+                    log.error(f"metric validation failed on {pageserver.id}: {e}")
+            try:
+                pageserver.stop(immediate=immediate)
+            except RuntimeError:
+                stop_later.append(pageserver)
         self.broker.stop(immediate=immediate)
+
+        # TODO: for nice logging we need python 3.11 ExceptionGroup
+        for ps in stop_later:
+            ps.stop(immediate=True)
+
+        if raise_later is not None:
+            raise raise_later
+
+        for error in metric_errors:
+            raise error
+
+        if len(stop_later) > 0:
+            raise RuntimeError(
+                f"{len(stop_later)} out of {len(self.pageservers)} pageservers failed to stop gracefully"
+            )
 
     @property
     def pageserver(self) -> NeonPageserver:
@@ -1441,6 +1498,7 @@ def neon_env_builder(
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
+    record_property: Callable[[str, object], None],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1480,9 +1538,7 @@ def neon_env_builder(
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,
         # like `test_output_dir` fixture for attaching all database files to Allure report.
-        request.node.user_properties.append(
-            ("preserve_database_files", builder.preserve_database_files)
-        )
+        record_property("preserve_database_files", builder.preserve_database_files)
 
 
 @dataclass
@@ -1828,16 +1884,24 @@ class NeonCli(AbstractNeonCli):
     def storage_controller_start(
         self,
         timeout_in_seconds: Optional[int] = None,
+        instance_id: Optional[int] = None,
+        base_port: Optional[int] = None,
     ):
         cmd = ["storage_controller", "start"]
         if timeout_in_seconds is not None:
             cmd.append(f"--start-timeout={timeout_in_seconds}s")
+        if instance_id is not None:
+            cmd.append(f"--instance-id={instance_id}")
+        if base_port is not None:
+            cmd.append(f"--base-port={base_port}")
         return self.raw_cli(cmd)
 
-    def storage_controller_stop(self, immediate: bool):
+    def storage_controller_stop(self, immediate: bool, instance_id: Optional[int] = None):
         cmd = ["storage_controller", "stop"]
         if immediate:
             cmd.extend(["-m", "immediate"])
+        if instance_id is not None:
+            cmd.append(f"--instance-id={instance_id}")
         return self.raw_cli(cmd)
 
     def pageserver_start(
@@ -1943,11 +2007,15 @@ class NeonCli(AbstractNeonCli):
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple=False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
             "start",
         ]
+        extra_env_vars = {}
+        if basebackup_request_tries is not None:
+            extra_env_vars["NEON_COMPUTE_TESTING_BASEBACKUP_TRIES"] = str(basebackup_request_tries)
         if remote_ext_config is not None:
             args.extend(["--remote-ext-config", remote_ext_config])
 
@@ -1960,7 +2028,7 @@ class NeonCli(AbstractNeonCli):
         if allow_multiple:
             args.extend(["--allow-multiple"])
 
-        res = self.raw_cli(args)
+        res = self.raw_cli(args, extra_env_vars)
         res.check_returncode()
         return res
 
@@ -2144,17 +2212,30 @@ class PageserverSchedulingPolicy(str, Enum):
     PAUSE_FOR_RESTART = "PauseForRestart"
 
 
+class StorageControllerLeadershipStatus(str, Enum):
+    LEADER = "leader"
+    STEPPED_DOWN = "stepped_down"
+    CANDIDATE = "candidate"
+
+
 class NeonStorageController(MetricsGetter, LogUtils):
-    def __init__(self, env: NeonEnv, auth_enabled: bool):
+    def __init__(self, env: NeonEnv, port: int, auth_enabled: bool):
         self.env = env
+        self.port: int = port
+        self.api: str = f"http://127.0.0.1:{port}"
         self.running = False
         self.auth_enabled = auth_enabled
         self.allowed_errors: list[str] = DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS
-        self.logfile = self.workdir / "storage_controller.log"
+        self.logfile = self.env.repo_dir / "storage_controller_1" / "storage_controller.log"
 
-    def start(self, timeout_in_seconds: Optional[int] = None):
+    def start(
+        self,
+        timeout_in_seconds: Optional[int] = None,
+        instance_id: Optional[int] = None,
+        base_port: Optional[int] = None,
+    ):
         assert not self.running
-        self.env.neon_cli.storage_controller_start(timeout_in_seconds)
+        self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
         self.running = True
         return self
 
@@ -2163,6 +2244,12 @@ class NeonStorageController(MetricsGetter, LogUtils):
             self.env.neon_cli.storage_controller_stop(immediate)
             self.running = False
         return self
+
+    def upcall_api_endpoint(self) -> str:
+        return f"{self.api}/upcall/v1"
+
+    def api_root(self) -> str:
+        return self.api
 
     @staticmethod
     def retryable_node_operation(op, ps_id, max_attempts, backoff):
@@ -2192,10 +2279,12 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def assert_no_errors(self):
         assert_no_errors(
-            self.env.repo_dir / "storage_controller.log", "storage_controller", self.allowed_errors
+            self.logfile,
+            "storage_controller",
+            self.allowed_errors,
         )
 
-    def pageserver_api(self) -> PageserverHttpClient:
+    def pageserver_api(self, *args, **kwargs) -> PageserverHttpClient:
         """
         The storage controller implements a subset of the pageserver REST API, for mapping
         per-tenant actions into per-shard actions (e.g. timeline creation).  Tests should invoke those
@@ -2204,7 +2293,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         auth_token = None
         if self.auth_enabled:
             auth_token = self.env.auth_keys.generate_token(scope=TokenScope.PAGE_SERVER_API)
-        return PageserverHttpClient(self.env.storage_controller_port, lambda: True, auth_token)
+        return PageserverHttpClient(self.port, lambda: True, auth_token, *args, **kwargs)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
         resp = requests.request(method, *args, **kwargs)
@@ -2221,13 +2310,13 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return headers
 
     def get_metrics(self) -> Metrics:
-        res = self.request("GET", f"{self.env.storage_controller_api}/metrics")
+        res = self.request("GET", f"{self.api}/metrics")
         return parse_metrics(res.text)
 
     def ready(self) -> bool:
         status = None
         try:
-            resp = self.request("GET", f"{self.env.storage_controller_api}/ready")
+            resp = self.request("GET", f"{self.api}/ready")
             status = resp.status_code
         except StorageControllerApiException as e:
             status = e.status_code
@@ -2260,7 +2349,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/attach-hook",
+            f"{self.api}/debug/v1/attach-hook",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2271,7 +2360,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def attach_hook_drop(self, tenant_shard_id: Union[TenantId, TenantShardId]):
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/attach-hook",
+            f"{self.api}/debug/v1/attach-hook",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": None},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2282,7 +2371,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         response = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/inspect",
+            f"{self.api}/debug/v1/inspect",
             json={"tenant_shard_id": str(tenant_shard_id)},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2305,7 +2394,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_register({body})")
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/control/v1/node",
+            f"{self.api}/control/v1/node",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2314,7 +2403,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_delete({node_id})")
         self.request(
             "DELETE",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            f"{self.api}/control/v1/node/{node_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2322,7 +2411,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_drain({node_id})")
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            f"{self.api}/control/v1/node/{node_id}/drain",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2330,7 +2419,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"cancel_node_drain({node_id})")
         self.request(
             "DELETE",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/drain",
+            f"{self.api}/control/v1/node/{node_id}/drain",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2338,7 +2427,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"node_fill({node_id})")
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            f"{self.api}/control/v1/node/{node_id}/fill",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2346,14 +2435,22 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"cancel_node_fill({node_id})")
         self.request(
             "DELETE",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/fill",
+            f"{self.api}/control/v1/node/{node_id}/fill",
             headers=self.headers(TokenScope.ADMIN),
         )
 
     def node_status(self, node_id):
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}",
+            f"{self.api}/control/v1/node/{node_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def get_leader(self):
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/leader",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2361,7 +2458,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def node_list(self):
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/node",
+            f"{self.api}/control/v1/node",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2369,7 +2466,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def tenant_list(self):
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/debug/v1/tenant",
+            f"{self.api}/debug/v1/tenant",
             headers=self.headers(TokenScope.ADMIN),
         )
         return response.json()
@@ -2379,7 +2476,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         body["node_id"] = node_id
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/node/{node_id}/config",
+            f"{self.api}/control/v1/node/{node_id}/config",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2414,7 +2511,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/v1/tenant",
+            f"{self.api}/v1/tenant",
             json=body,
             headers=self.headers(TokenScope.PAGE_SERVER_API),
         )
@@ -2427,7 +2524,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/locate",
+            f"{self.api}/debug/v1/tenant/{tenant_id}/locate",
             headers=self.headers(TokenScope.ADMIN),
         )
         body = response.json()
@@ -2440,7 +2537,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         response = self.request(
             "GET",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}",
+            f"{self.api}/control/v1/tenant/{tenant_id}",
             headers=self.headers(TokenScope.ADMIN),
         )
         response.raise_for_status()
@@ -2451,7 +2548,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     ) -> list[TenantShardId]:
         response = self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/shard_split",
+            f"{self.api}/control/v1/tenant/{tenant_id}/shard_split",
             json={"new_shard_count": shard_count, "new_stripe_size": shard_stripe_size},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2463,7 +2560,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def tenant_shard_migrate(self, tenant_shard_id: TenantShardId, dest_ps_id: int):
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_shard_id}/migrate",
+            f"{self.api}/control/v1/tenant/{tenant_shard_id}/migrate",
             json={"tenant_shard_id": str(tenant_shard_id), "node_id": dest_ps_id},
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2474,7 +2571,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"tenant_policy_update({tenant_id}, {body})")
         self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/tenant/{tenant_id}/policy",
+            f"{self.api}/control/v1/tenant/{tenant_id}/policy",
             json=body,
             headers=self.headers(TokenScope.ADMIN),
         )
@@ -2482,14 +2579,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def tenant_import(self, tenant_id: TenantId):
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/tenant/{tenant_id}/import",
+            f"{self.api}/debug/v1/tenant/{tenant_id}/import",
             headers=self.headers(TokenScope.ADMIN),
         )
 
     def reconcile_all(self):
         r = self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/reconcile_all",
+            f"{self.api}/debug/v1/reconcile_all",
             headers=self.headers(TokenScope.ADMIN),
         )
         r.raise_for_status()
@@ -2522,7 +2619,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         """
         self.request(
             "POST",
-            f"{self.env.storage_controller_api}/debug/v1/consistency_check",
+            f"{self.api}/debug/v1/consistency_check",
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info("storage controller passed consistency check")
@@ -2587,11 +2684,56 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
                 time.sleep(backoff)
 
+    def metadata_health_update(self, healthy: List[TenantShardId], unhealthy: List[TenantShardId]):
+        body: Dict[str, Any] = {
+            "healthy_tenant_shards": [str(t) for t in healthy],
+            "unhealthy_tenant_shards": [str(t) for t in unhealthy],
+        }
+
+        self.request(
+            "POST",
+            f"{self.api}/control/v1/metadata_health/update",
+            json=body,
+            headers=self.headers(TokenScope.SCRUBBER),
+        )
+
+    def metadata_health_list_unhealthy(self):
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/metadata_health/unhealthy",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def metadata_health_list_outdated(self, duration: str):
+        body: Dict[str, Any] = {"not_scrubbed_for": duration}
+
+        response = self.request(
+            "POST",
+            f"{self.api}/control/v1/metadata_health/outdated",
+            json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def metadata_health_is_healthy(self, outdated_duration: str = "1h") -> bool:
+        """Metadata is healthy if there is no unhealthy or outdated health records."""
+
+        unhealthy = self.metadata_health_list_unhealthy()
+        outdated = self.metadata_health_list_outdated(outdated_duration)
+
+        healthy = (
+            len(unhealthy["unhealthy_tenant_shards"]) == 0 and len(outdated["health_records"]) == 0
+        )
+        if not healthy:
+            log.info(f"{unhealthy=}, {outdated=}")
+        return healthy
+
     def step_down(self):
         log.info("Asking storage controller to step down")
         response = self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/control/v1/step_down",
+            f"{self.api}/control/v1/step_down",
             headers=self.headers(TokenScope.ADMIN),
         )
 
@@ -2608,16 +2750,91 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         res = self.request(
             "PUT",
-            f"{self.env.storage_controller_api}/debug/v1/failpoints",
+            f"{self.api}/debug/v1/failpoints",
             json=[{"name": name, "actions": actions} for name, actions in pairs],
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info(f"Got failpoints request response code {res.status_code}")
         res.raise_for_status()
 
-    @property
-    def workdir(self) -> Path:
-        return self.env.repo_dir
+    def get_tenants_placement(self) -> defaultdict[str, Dict[str, Any]]:
+        """
+        Get the intent and observed placements of all tenants known to the storage controller.
+        """
+        tenants = self.tenant_list()
+
+        tenant_placement: defaultdict[str, Dict[str, Any]] = defaultdict(
+            lambda: {
+                "observed": {"attached": None, "secondary": []},
+                "intent": {"attached": None, "secondary": []},
+            }
+        )
+
+        for t in tenants:
+            for node_id, loc_state in t["observed"]["locations"].items():
+                if (
+                    loc_state is not None
+                    and "conf" in loc_state
+                    and loc_state["conf"] is not None
+                    and loc_state["conf"]["mode"]
+                    in set(["AttachedSingle", "AttachedMulti", "AttachedStale"])
+                ):
+                    tenant_placement[t["tenant_shard_id"]]["observed"]["attached"] = int(node_id)
+
+                if (
+                    loc_state is not None
+                    and "conf" in loc_state
+                    and loc_state["conf"] is not None
+                    and loc_state["conf"]["mode"] == "Secondary"
+                ):
+                    tenant_placement[t["tenant_shard_id"]]["observed"]["secondary"].append(
+                        int(node_id)
+                    )
+
+            if "attached" in t["intent"]:
+                tenant_placement[t["tenant_shard_id"]]["intent"]["attached"] = t["intent"][
+                    "attached"
+                ]
+
+            if "secondary" in t["intent"]:
+                tenant_placement[t["tenant_shard_id"]]["intent"]["secondary"] += t["intent"][
+                    "secondary"
+                ]
+
+        return tenant_placement
+
+    def warm_up_all_secondaries(self):
+        log.info("Warming up all secondary locations")
+
+        tenant_placement = self.get_tenants_placement()
+        for tid, placement in tenant_placement.items():
+            assert placement["observed"]["attached"] is not None
+            primary_id = placement["observed"]["attached"]
+
+            assert len(placement["observed"]["secondary"]) == 1
+            secondary_id = placement["observed"]["secondary"][0]
+
+            parsed_tid = TenantShardId.parse(tid)
+            self.env.get_pageserver(primary_id).http_client().tenant_heatmap_upload(parsed_tid)
+            self.env.get_pageserver(secondary_id).http_client().tenant_secondary_download(
+                parsed_tid, wait_ms=250
+            )
+
+    def get_leadership_status(self) -> StorageControllerLeadershipStatus:
+        metric_values = {}
+        for status in StorageControllerLeadershipStatus:
+            metric_value = self.get_metric_value(
+                "storage_controller_leadership_status", filter={"status": status}
+            )
+            metric_values[status] = metric_value
+
+        assert list(metric_values.values()).count(1) == 1
+
+        for status, metric_value in metric_values.items():
+            if metric_value == 1:
+                return status
+
+        raise AssertionError("unreachable")
 
     def __enter__(self) -> "NeonStorageController":
         return self
@@ -2629,6 +2846,59 @@ class NeonStorageController(MetricsGetter, LogUtils):
         tb: Optional[TracebackType],
     ):
         self.stop(immediate=True)
+
+
+class NeonProxiedStorageController(NeonStorageController):
+    def __init__(self, env: NeonEnv, proxy_port: int, auth_enabled: bool):
+        super(NeonProxiedStorageController, self).__init__(env, proxy_port, auth_enabled)
+        self.instances: dict[int, dict[str, Any]] = {}
+
+    def start(
+        self,
+        timeout_in_seconds: Optional[int] = None,
+        instance_id: Optional[int] = None,
+        base_port: Optional[int] = None,
+    ):
+        assert instance_id is not None and base_port is not None
+
+        self.env.neon_cli.storage_controller_start(timeout_in_seconds, instance_id, base_port)
+        self.instances[instance_id] = {"running": True}
+
+        self.running = True
+        return self
+
+    def stop_instance(
+        self, immediate: bool = False, instance_id: Optional[int] = None
+    ) -> "NeonStorageController":
+        assert instance_id in self.instances
+        if self.instances[instance_id]["running"]:
+            self.env.neon_cli.storage_controller_stop(immediate, instance_id)
+            self.instances[instance_id]["running"] = False
+
+        self.running = any(meta["running"] for meta in self.instances.values())
+        return self
+
+    def stop(self, immediate: bool = False) -> "NeonStorageController":
+        for iid, details in self.instances.items():
+            if details["running"]:
+                self.env.neon_cli.storage_controller_stop(immediate, iid)
+                self.instances[iid]["running"] = False
+
+        self.running = False
+        return self
+
+    def assert_no_errors(self):
+        for instance_id in self.instances.keys():
+            assert_no_errors(
+                self.env.repo_dir / f"storage_controller_{instance_id}" / "storage_controller.log",
+                "storage_controller",
+                self.allowed_errors,
+            )
+
+    def log_contains(
+        self, pattern: str, offset: None | LogCursor = None
+    ) -> Optional[Tuple[str, LogCursor]]:
+        raise NotImplementedError()
 
 
 @dataclass
@@ -3767,6 +4037,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: Optional[int] = None,
         safekeepers: Optional[List[int]] = None,
         allow_multiple: bool = False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "Endpoint":
         """
         Start the Postgres instance.
@@ -3788,6 +4059,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            basebackup_request_tries=basebackup_request_tries,
         )
         self._running.release(1)
 
@@ -3934,6 +4206,7 @@ class Endpoint(PgProtocol, LogUtils):
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple=False,
+        basebackup_request_tries: Optional[int] = None,
     ) -> "Endpoint":
         """
         Create an endpoint, apply config, and start Postgres.
@@ -3954,6 +4227,7 @@ class Endpoint(PgProtocol, LogUtils):
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            basebackup_request_tries=basebackup_request_tries,
         )
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
@@ -3978,6 +4252,17 @@ class Endpoint(PgProtocol, LogUtils):
         assert self.pgdata_dir is not None  # please mypy
         return get_dir_size(os.path.join(self.pgdata_dir, "pg_wal")) / 1024 / 1024
 
+    def clear_shared_buffers(self, cursor: Optional[Any] = None):
+        """
+        Best-effort way to clear postgres buffers. Pinned buffers will not be 'cleared.'
+
+        Might also clear LFC.
+        """
+        if cursor is not None:
+            cursor.execute("select clear_buffer_cache()")
+        else:
+            self.safe_psql("select clear_buffer_cache()")
+
 
 class EndpointFactory:
     """An object representing multiple compute endpoints."""
@@ -3997,6 +4282,7 @@ class EndpointFactory:
         config_lines: Optional[List[str]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
+        basebackup_request_tries: Optional[int] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -4015,6 +4301,7 @@ class EndpointFactory:
             lsn=lsn,
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
+            basebackup_request_tries=basebackup_request_tries,
         )
 
     def create(
@@ -4256,14 +4543,32 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
+    def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
+        tline_path = (
+            self.env.repo_dir
+            / "local_fs_remote_storage"
+            / "safekeeper"
+            / str(tenant_id)
+            / str(timeline_id)
+        )
+        assert isinstance(self.env.safekeepers_remote_storage, LocalFsStorage)
+        return self._list_segments_in_dir(
+            tline_path, lambda name: ".metadata" not in name and ".___temp" not in name
+        )
+
     def list_segments(self, tenant_id, timeline_id) -> List[str]:
         """
         Get list of segment names of the given timeline.
         """
         tli_dir = self.timeline_dir(tenant_id, timeline_id)
+        return self._list_segments_in_dir(
+            tli_dir, lambda name: not name.startswith("safekeeper.control")
+        )
+
+    def _list_segments_in_dir(self, path: Path, keep_filter: Callable[[str], bool]) -> list[str]:
         segments = []
-        for _, _, filenames in os.walk(tli_dir):
-            segments.extend([f for f in filenames if not f.startswith("safekeeper.control")])
+        for _, _, filenames in os.walk(path):
+            segments.extend([f for f in filenames if keep_filter(f)])
         segments.sort()
         return segments
 
@@ -4332,10 +4637,11 @@ class StorageScrubber:
 
         base_args = [
             str(self.env.neon_binpath / "storage_scrubber"),
-            f"--controller-api={self.env.storage_controller_api}",
+            f"--controller-api={self.env.storage_controller.api_root()}",
         ]
         args = base_args + args
 
+        log.info(f"Invoking scrubber command {args} with env: {env}")
         (output_path, stdout, status_code) = subprocess_capture(
             self.log_dir,
             args,
@@ -4356,13 +4662,19 @@ class StorageScrubber:
         assert stdout is not None
         return stdout
 
-    def scan_metadata(self) -> Any:
-        stdout = self.scrubber_cli(
-            ["scan-metadata", "--node-kind", "pageserver", "--json"], timeout=30
-        )
+    def scan_metadata(self, post_to_storage_controller: bool = False) -> Tuple[bool, Any]:
+        """
+        Returns the health status and the metadata summary.
+        """
+        args = ["scan-metadata", "--node-kind", "pageserver", "--json"]
+        if post_to_storage_controller:
+            args.append("--post")
+        stdout = self.scrubber_cli(args, timeout=30)
 
         try:
-            return json.loads(stdout)
+            summary = json.loads(stdout)
+            healthy = not summary["with_errors"] and not summary["with_warnings"]
+            return healthy, summary
         except:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
             log.error(stdout)
@@ -4482,6 +4794,13 @@ def test_output_dir(
     test_dir.mkdir()
 
     yield test_dir
+
+    # Allure artifacts creation might involve the creation of `.tar.zst` archives,
+    # which aren't going to be used if Allure results collection is not enabled
+    # (i.e. --alluredir is not set).
+    # Skip `allure_attach_from_dir` in this case
+    if not request.config.getoption("--alluredir"):
+        return
 
     preserve_database_files = False
     for k, v in request.node.user_properties:
@@ -4758,7 +5077,7 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -> Lsn:
+def logical_replication_sync(subscriber: PgProtocol, publisher: PgProtocol) -> Lsn:
     """Wait logical replication subscriber to sync with publisher."""
     publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     while True:
@@ -5026,9 +5345,7 @@ def last_flush_lsn_upload(
     for tenant_shard_id, pageserver in shards:
         ps_http = pageserver.http_client(auth_token=auth_token)
         wait_for_last_record_lsn(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
-        # force a checkpoint to trigger upload
-        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id)
-        wait_for_upload(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
+        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id, wait_until_uploaded=True)
     return last_flush_lsn
 
 
@@ -5113,9 +5430,5 @@ def generate_uploads_and_deletions(
         # ensures that the pageserver is in a fully idle state: there will be no more
         # background ingest, no more uploads pending, and therefore no non-determinism
         # in subsequent actions like pageserver restarts.
-        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id)
-        # Finish uploads
-        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
-        # Finish all remote writes (including deletions)
-        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
+        flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)

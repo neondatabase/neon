@@ -252,7 +252,7 @@ impl Drop for HttpEndpointPoolsGuard<'_> {
 }
 
 impl HttpEndpointPools {
-    pub fn guard(&self) -> HttpEndpointPoolsGuard {
+    pub fn guard(&self) -> HttpEndpointPoolsGuard<'_> {
         self.http_pool_endpoints_registered_total.inc();
         HttpEndpointPoolsGuard {
             dec: &self.http_pool_endpoints_unregistered_total,
@@ -370,6 +370,7 @@ pub struct CancellationRequest {
     pub kind: CancellationOutcome,
 }
 
+#[derive(Clone, Copy)]
 pub enum Waiting {
     Cplane,
     Client,
@@ -398,12 +399,6 @@ pub struct LatencyTimer {
     outcome: ConnectOutcome,
 }
 
-pub struct LatencyTimerPause<'a> {
-    timer: &'a mut LatencyTimer,
-    start: time::Instant,
-    waiting_for: Waiting,
-}
-
 impl LatencyTimer {
     pub fn new(protocol: Protocol) -> Self {
         Self {
@@ -417,11 +412,13 @@ impl LatencyTimer {
         }
     }
 
-    pub fn pause(&mut self, waiting_for: Waiting) -> LatencyTimerPause<'_> {
-        LatencyTimerPause {
-            timer: self,
-            start: Instant::now(),
-            waiting_for,
+    pub fn unpause(&mut self, start: Instant, waiting_for: Waiting) {
+        let dur = start.elapsed();
+        match waiting_for {
+            Waiting::Cplane => self.accumulated.cplane += dur,
+            Waiting::Client => self.accumulated.client += dur,
+            Waiting::Compute => self.accumulated.compute += dur,
+            Waiting::RetryTimeout => self.accumulated.retry += dur,
         }
     }
 
@@ -435,18 +432,6 @@ impl LatencyTimer {
 
         // success
         self.outcome = ConnectOutcome::Success;
-    }
-}
-
-impl Drop for LatencyTimerPause<'_> {
-    fn drop(&mut self) {
-        let dur = self.start.elapsed();
-        match self.waiting_for {
-            Waiting::Cplane => self.timer.accumulated.cplane += dur,
-            Waiting::Client => self.timer.accumulated.client += dur,
-            Waiting::Compute => self.timer.accumulated.compute += dur,
-            Waiting::RetryTimeout => self.timer.accumulated.retry += dur,
-        }
     }
 }
 

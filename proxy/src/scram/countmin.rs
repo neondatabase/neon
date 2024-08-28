@@ -2,7 +2,7 @@ use std::hash::Hash;
 
 /// estimator of hash jobs per second.
 /// <https://en.wikipedia.org/wiki/Count%E2%80%93min_sketch>
-pub struct CountMinSketch {
+pub(crate) struct CountMinSketch {
     // one for each depth
     hashers: Vec<ahash::RandomState>,
     width: usize,
@@ -20,7 +20,7 @@ impl CountMinSketch {
     /// actual <= estimate
     /// estimate <= actual + ε * N with probability 1 - δ
     /// where N is the cardinality of the stream
-    pub fn with_params(epsilon: f64, delta: f64) -> Self {
+    pub(crate) fn with_params(epsilon: f64, delta: f64) -> Self {
         CountMinSketch::new(
             (std::f64::consts::E / epsilon).ceil() as usize,
             (1.0_f64 / delta).ln().ceil() as usize,
@@ -49,7 +49,7 @@ impl CountMinSketch {
         }
     }
 
-    pub fn inc_and_return<T: Hash>(&mut self, t: &T, x: u32) -> u32 {
+    pub(crate) fn inc_and_return<T: Hash>(&mut self, t: &T, x: u32) -> u32 {
         let mut min = u32::MAX;
         for row in 0..self.depth {
             let col = (self.hashers[row].hash_one(t) as usize) % self.width;
@@ -61,7 +61,7 @@ impl CountMinSketch {
         min
     }
 
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.buckets.clear();
         self.buckets.resize(self.width * self.depth, 0);
     }
@@ -97,8 +97,6 @@ mod tests {
 
         // q% of counts will be within p of the actual value
         let mut sketch = CountMinSketch::with_params(p / N as f64, 1.0 - q);
-
-        dbg!(sketch.buckets.len());
 
         // insert a bunch of entries in a random order
         let mut ids2 = ids.clone();

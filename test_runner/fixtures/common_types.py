@@ -1,7 +1,8 @@
 import random
 from dataclasses import dataclass
+from enum import Enum
 from functools import total_ordering
-from typing import Any, Type, TypeVar, Union
+from typing import Any, Dict, Type, TypeVar, Union
 
 T = TypeVar("T", bound="Id")
 
@@ -147,6 +148,19 @@ class TimelineId(Id):
         return self.id.hex()
 
 
+@dataclass
+class TenantTimelineId:
+    tenant_id: TenantId
+    timeline_id: TimelineId
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> "TenantTimelineId":
+        return TenantTimelineId(
+            tenant_id=TenantId(d["tenant_id"]),
+            timeline_id=TimelineId(d["timeline_id"]),
+        )
+
+
 # Workaround for compat with python 3.9, which does not have `typing.Self`
 TTenantShardId = TypeVar("TTenantShardId", bound="TenantShardId")
 
@@ -200,3 +214,9 @@ class TenantShardId:
 
     def __hash__(self) -> int:
         return hash(self._tuple())
+
+
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class TimelineArchivalState(str, Enum):
+    ARCHIVED = "Archived"
+    UNARCHIVED = "Unarchived"

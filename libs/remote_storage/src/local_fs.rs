@@ -368,6 +368,7 @@ impl RemoteStorage for LocalFs {
                             key: k.clone(),
                             // LocalFs is just for testing, so just specify a dummy time
                             last_modified: SystemTime::now(),
+                            size: 0,
                         })
                     }
                 })
@@ -411,6 +412,7 @@ impl RemoteStorage for LocalFs {
                             key: RemotePath::from_string(&relative_key).unwrap(),
                             // LocalFs is just for testing
                             last_modified: SystemTime::now(),
+                            size: 0,
                         });
                     }
                 }
@@ -441,6 +443,20 @@ impl RemoteStorage for LocalFs {
             res = timeout => res,
             res = cancelled => res,
         }
+    }
+
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        _cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        let target_file_path = key.with_base(&self.storage_root);
+        let metadata = file_metadata(&target_file_path).await?;
+        Ok(ListingObject {
+            key: key.clone(),
+            last_modified: metadata.modified()?,
+            size: metadata.len(),
+        })
     }
 
     async fn upload(

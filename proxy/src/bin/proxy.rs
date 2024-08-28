@@ -5,6 +5,7 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
+use aws_config::Region;
 use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::AuthRateLimiter;
@@ -59,11 +60,14 @@ use clap::{Parser, ValueEnum};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Clone, Debug, ValueEnum)]
-enum AuthBackend {
+enum AuthBackendType {
     Console,
     #[cfg(feature = "testing")]
     Postgres,
-    Link,
+    // clap only shows the name, not the alias, in usage text.
+    // TODO: swap name/alias and deprecate "link"
+    #[value(name("link"), alias("web"))]
+    Web,
 }
 
 /// Neon proxy/router
@@ -76,8 +80,8 @@ struct ProxyCliArgs {
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
-    #[clap(value_enum, long, default_value_t = AuthBackend::Link)]
-    auth_backend: AuthBackend,
+    #[clap(value_enum, long, default_value_t = AuthBackendType::Web)]
+    auth_backend: AuthBackendType,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
     mgmt: String,
@@ -87,7 +91,7 @@ struct ProxyCliArgs {
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
     wss: Option<String>,
-    /// redirect unauthenticated users to the given uri in case of link auth
+    /// redirect unauthenticated users to the given uri in case of web auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
     /// cloud API endpoint for authenticating users
@@ -147,7 +151,7 @@ struct ProxyCliArgs {
     disable_dynamic_rate_limiter: bool,
     /// Endpoint rate limiter max number of requests per second.
     ///
-    /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
+    /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
@@ -172,9 +176,6 @@ struct ProxyCliArgs {
     /// cache for `role_secret` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     role_secret_cache: String,
-    /// disable ip check for http requests. If it is too time consuming, it could be turned off.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    disable_ip_check_for_http: bool,
     /// redis url for notifications (if empty, redis_host:port will be used for both notifications and streaming connections)
     #[clap(long)]
     redis_notifications: Option<String>,
@@ -290,9 +291,10 @@ async fn main() -> anyhow::Result<()> {
     let config = build_config(&args)?;
 
     info!("Authentication backend: {}", config.auth_backend);
-    info!("Using region: {}", config.aws_region);
+    info!("Using region: {}", args.aws_region);
 
-    let region_provider = RegionProviderChain::default_provider().or_else(&*config.aws_region); // Replace with your Redis region if needed
+    let region_provider =
+        RegionProviderChain::default_provider().or_else(Region::new(args.aws_region.clone()));
     let provider_conf =
         ProviderConfig::without_region().with_region(region_provider.region().await);
     let aws_credentials_provider = {
@@ -318,7 +320,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
         elasticache::AWSIRSAConfig::new(
-            config.aws_region.clone(),
+            args.aws_region.clone(),
             args.redis_cluster_name,
             args.redis_user_id,
         ),
@@ -376,11 +378,14 @@ async fn main() -> anyhow::Result<()> {
 
     let cancel_map = CancelMap::default();
 
+    let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
+    RateBucketInfo::validate(redis_rps_limit)?;
+
     let redis_publisher = match &regional_redis_client {
         Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
             redis_publisher.clone(),
             args.region.clone(),
-            &config.redis_rps_limit,
+            redis_rps_limit,
         )?))),
         None => None,
     };
@@ -445,7 +450,10 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
+    maintenance_tasks.spawn(proxy::handle_signals(
+        cancellation_token.clone(),
+        || async { Ok(()) },
+    ));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
@@ -465,7 +473,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::BackendType::Console(api, _) = &config.auth_backend {
+    if let auth::Backend::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
@@ -570,7 +578,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     }
 
     let auth_backend = match &args.auth_backend {
-        AuthBackend::Console => {
+        AuthBackendType::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
@@ -619,18 +627,18 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 wake_compute_endpoint_rate_limiter,
             );
             let api = console::provider::ConsoleBackend::Console(api);
-            auth::BackendType::Console(MaybeOwned::Owned(api), ())
+            auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
         #[cfg(feature = "testing")]
-        AuthBackend::Postgres => {
+        AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = console::provider::mock::Api::new(url);
             let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::BackendType::Console(MaybeOwned::Owned(api), ())
+            auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
-        AuthBackend::Link => {
+        AuthBackendType::Web => {
             let url = args.uri.parse()?;
-            auth::BackendType::Link(MaybeOwned::Owned(url), ())
+            auth::Backend::Web(MaybeOwned::Owned(url), ())
         }
     };
 
@@ -656,7 +664,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     )?;
 
     let http_config = HttpConfig {
-        request_timeout: args.sql_over_http.sql_over_http_timeout,
+        accept_websockets: true,
         pool_options: GlobalConnPoolOptions {
             max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
             gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
@@ -676,9 +684,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
-    let mut redis_rps_limit = args.redis_rps_limit.clone();
-    RateBucketInfo::validate(&mut redis_rps_limit)?;
-
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
@@ -687,11 +692,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         http_config,
         authentication_config,
         require_client_ip: args.require_client_ip,
-        disable_ip_check_for_http: args.disable_ip_check_for_http,
-        redis_rps_limit,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
-        aws_region: args.aws_region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute_retry_config: config::RetryConfig::parse(

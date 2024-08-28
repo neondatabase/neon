@@ -25,8 +25,8 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
-    pub locks: &'static ApiLocks<EndpointCacheKey>,
-    pub wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
+    pub(crate) locks: &'static ApiLocks<EndpointCacheKey>,
+    pub(crate) wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     jwt: String,
 }
 
@@ -38,9 +38,9 @@ impl Api {
         locks: &'static ApiLocks<EndpointCacheKey>,
         wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     ) -> Self {
-        let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
+        let jwt = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
             Ok(v) => v,
-            Err(_) => "".to_string(),
+            Err(_) => String::new(),
         };
         Self {
             endpoint,
@@ -51,13 +51,13 @@ impl Api {
         }
     }
 
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         self.endpoint.url().as_str()
     }
 
     async fn do_get_auth_info(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
         if !self
@@ -69,7 +69,7 @@ impl Api {
             info!("endpoint is not valid, skipping the request");
             return Ok(AuthInfo::default());
         }
-        let request_id = ctx.session_id.to_string();
+        let request_id = ctx.session_id().to_string();
         let application_name = ctx.console_application_name();
         async {
             let request = self
@@ -77,7 +77,7 @@ impl Api {
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", ctx.session_id)])
+                .query(&[("session_id", ctx.session_id())])
                 .query(&[
                     ("application_name", application_name.as_str()),
                     ("project", user_info.endpoint.as_str()),
@@ -87,7 +87,7 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
-            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
+            let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
@@ -96,10 +96,10 @@ impl Api {
                 // Error 404 is special: it's ok not to have a secret.
                 // TODO(anna): retry
                 Err(e) => {
-                    if e.get_reason().is_not_found() {
-                        return Ok(AuthInfo::default());
+                    return if e.get_reason().is_not_found() {
+                        Ok(AuthInfo::default())
                     } else {
-                        return Err(e.into());
+                        Err(e.into())
                     }
                 }
             };
@@ -130,10 +130,10 @@ impl Api {
 
     async fn do_wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
-        let request_id = ctx.session_id.to_string();
+        let request_id = ctx.session_id().to_string();
         let application_name = ctx.console_application_name();
         async {
             let mut request_builder = self
@@ -141,7 +141,7 @@ impl Api {
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", ctx.session_id)])
+                .query(&[("session_id", ctx.session_id())])
                 .query(&[
                     ("application_name", application_name.as_str()),
                     ("project", user_info.endpoint.as_str()),
@@ -156,7 +156,7 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
-            let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Cplane);
+            let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
@@ -192,7 +192,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         let normalized_ep = &user_info.endpoint.normalize();
@@ -226,7 +226,7 @@ impl super::Api for Api {
 
     async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         let normalized_ep = &user_info.endpoint.normalize();
@@ -268,7 +268,7 @@ impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key = user_info.endpoint_cache_key();

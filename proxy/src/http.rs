@@ -6,9 +6,15 @@ pub mod health_server;
 
 use std::time::Duration;
 
-pub use reqwest::{Request, Response, StatusCode};
-pub use reqwest_middleware::{ClientWithMiddleware, Error};
-pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use anyhow::bail;
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use hyper1::body::Body;
+use serde::de::DeserializeOwned;
+
+pub(crate) use reqwest::{Request, Response};
+pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
+pub(crate) use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 
 use crate::{
     metrics::{ConsoleRequest, Metrics},
@@ -29,7 +35,7 @@ pub fn new_client() -> ClientWithMiddleware {
         .build()
 }
 
-pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
+pub(crate) fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
     let timeout_client = reqwest::ClientBuilder::new()
         .timeout(default_timout)
         .build()
@@ -71,20 +77,20 @@ impl Endpoint {
     }
 
     #[inline(always)]
-    pub fn url(&self) -> &ApiUrl {
+    pub(crate) fn url(&self) -> &ApiUrl {
         &self.endpoint
     }
 
     /// Return a [builder](RequestBuilder) for a `GET` request,
     /// appending a single `path` segment to the base endpoint URL.
-    pub fn get(&self, path: &str) -> RequestBuilder {
+    pub(crate) fn get(&self, path: &str) -> RequestBuilder {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push(path);
         self.client.get(url.into_inner())
     }
 
     /// Execute a [request](reqwest::Request).
-    pub async fn execute(&self, request: Request) -> Result<Response, Error> {
+    pub(crate) async fn execute(&self, request: Request) -> Result<Response, Error> {
         let _timer = Metrics::get()
             .proxy
             .console_request_latency
@@ -94,6 +100,33 @@ impl Endpoint {
 
         self.client.execute(request).await
     }
+}
+
+pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
+    mut b: impl Body<Data = Bytes, Error = reqwest::Error> + Unpin,
+    limit: usize,
+) -> anyhow::Result<D> {
+    // We could use `b.limited().collect().await.to_bytes()` here
+    // but this ends up being slightly more efficient as far as I can tell.
+
+    // check the lower bound of the size hint.
+    // in reqwest, this value is influenced by the Content-Length header.
+    let lower_bound = match usize::try_from(b.size_hint().lower()) {
+        Ok(bound) if bound <= limit => bound,
+        _ => bail!("Content length exceeds limit of {limit} bytes"),
+    };
+    let mut bytes = Vec::with_capacity(lower_bound);
+
+    while let Some(frame) = b.frame().await.transpose()? {
+        if let Ok(data) = frame.into_data() {
+            if bytes.len() + data.len() > limit {
+                bail!("Content length exceeds limit of {limit} bytes")
+            }
+            bytes.extend_from_slice(&data);
+        }
+    }
+
+    Ok(serde_json::from_slice::<D>(&bytes)?)
 }
 
 #[cfg(test)]

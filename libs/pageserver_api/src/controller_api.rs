@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::str::FromStr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Request/response types for the storage controller
 /// API (`/control/v1` prefix).  Implemented by the server
@@ -7,6 +8,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
+use crate::models::PageserverUtilization;
 use crate::{
     models::{ShardParameters, TenantConfig},
     shard::{ShardStripeSize, TenantShardId},
@@ -139,23 +141,11 @@ pub struct TenantShardMigrateRequest {
     pub node_id: NodeId,
 }
 
-/// Utilisation score indicating how good a candidate a pageserver
-/// is for scheduling the next tenant. See [`crate::models::PageserverUtilization`].
-/// Lower values are better.
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Debug)]
-pub struct UtilizationScore(pub u64);
-
-impl UtilizationScore {
-    pub fn worst() -> Self {
-        UtilizationScore(u64::MAX)
-    }
-}
-
-#[derive(Serialize, Clone, Copy, Debug)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(into = "NodeAvailabilityWrapper")]
 pub enum NodeAvailability {
     // Normal, happy state
-    Active(UtilizationScore),
+    Active(PageserverUtilization),
     // Node is warming up, but we expect it to become available soon. Covers
     // the time span between the re-attach response being composed on the storage controller
     // and the first successful heartbeat after the processing of the re-attach response
@@ -194,7 +184,9 @@ impl From<NodeAvailabilityWrapper> for NodeAvailability {
         match val {
             // Assume the worst utilisation score to begin with. It will later be updated by
             // the heartbeats.
-            NodeAvailabilityWrapper::Active => NodeAvailability::Active(UtilizationScore::worst()),
+            NodeAvailabilityWrapper::Active => {
+                NodeAvailability::Active(PageserverUtilization::full())
+            }
             NodeAvailabilityWrapper::WarmingUp => NodeAvailability::WarmingUp(Instant::now()),
             NodeAvailabilityWrapper::Offline => NodeAvailability::Offline,
         }
@@ -293,6 +285,39 @@ pub enum PlacementPolicy {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantShardMigrateResponse {}
+
+/// Metadata health record posted from scrubber.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthRecord {
+    pub tenant_shard_id: TenantShardId,
+    pub healthy: bool,
+    pub last_scrubbed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthUpdateRequest {
+    pub healthy_tenant_shards: HashSet<TenantShardId>,
+    pub unhealthy_tenant_shards: HashSet<TenantShardId>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthUpdateResponse {}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthListUnhealthyResponse {
+    pub unhealthy_tenant_shards: Vec<TenantShardId>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthListOutdatedRequest {
+    #[serde(with = "humantime_serde")]
+    pub not_scrubbed_for: Duration,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MetadataHealthListOutdatedResponse {
+    pub health_records: Vec<MetadataHealthRecord>,
+}
 
 #[cfg(test)]
 mod test {

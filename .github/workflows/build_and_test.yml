@@ -48,7 +48,7 @@ jobs:
 
   tag:
     needs: [ check-permissions ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -90,7 +90,7 @@ jobs:
 
   check-codestyle-python:
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -101,9 +101,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: false
-          fetch-depth: 1
 
       - name: Cache poetry deps
         uses: actions/cache@v4
@@ -142,7 +139,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
 #      Disabled for now
 #      - name: Restore cargo deps cache
@@ -202,8 +198,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [ x64 ]
-        build-type: [ debug, release ]
+        arch: [ x64, arm64 ]
+        # Do not build or run tests in debug for release branches
+        build-type: ${{ fromJson((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
         include:
           - build-type: release
             arch: arm64
@@ -213,6 +210,8 @@ jobs:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
+      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
+      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16"]' || '["v16"]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -221,7 +220,7 @@ jobs:
     outputs:
       json: ${{ steps.get-benchmark-durations.outputs.json }}
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -254,7 +253,7 @@ jobs:
   benchmarks:
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     needs: [ check-permissions, build-and-test-locally, build-build-tools-image, get-benchmarks-durations ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -281,6 +280,7 @@ jobs:
           save_perf_report: ${{ github.ref_name == 'main' }}
           extra_params: --splits 5 --group ${{ matrix.pytest_split_group }}
           benchmark_durations: ${{ needs.get-benchmarks-durations.outputs.json }}
+          pg_version: v16
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -299,19 +299,18 @@ jobs:
       with:
         channel-id: C060CNA47S9 # on-call-staging-storage-stream
         slack-message: |
-          Benchmarks failed on main: ${{ github.event.head_commit.url }}
-
-          Allure report: ${{ needs.create-test-report.outputs.report-url }}
+          Benchmarks failed on main <${{ github.event.head_commit.url }}|${{ github.sha }}>
+          <${{ needs.create-test-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   create-test-report:
-    needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image ]
+    needs: [ check-permissions, build-and-test-locally, coverage-report, build-build-tools-image, benchmarks ]
     if: ${{ !cancelled() && contains(fromJSON('["skipped", "success"]'), needs.check-permissions.result) }}
     outputs:
       report-url: ${{ steps.create-allure-report.outputs.report-url }}
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -358,7 +357,7 @@ jobs:
 
   coverage-report:
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
       credentials:
@@ -472,7 +471,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -481,12 +480,7 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
-      # The default value is ~/.docker
-      - name: Set custom docker config directory
-        run: |
-          mkdir -p .docker-custom
-          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+      - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/setup-buildx-action@v3
         with:
           cache-binary: false
@@ -505,7 +499,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          # ARM-specific flags are recommended for Graviton ≥ 2, these flags are also supported by Ampere Altra (Azure)
+          # https://github.com/aws/aws-graviton-getting-started/blob/57dc813626d0266f1cc12ef83474745bb1f31fb4/rust.md
           build-args: |
+            ADDITIONAL_RUSTFLAGS=${{ matrix.arch == 'arm64' && '-Ctarget-feature=+lse -Ctarget-cpu=neoverse-n1' || '' }}
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
@@ -517,11 +514,6 @@ jobs:
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0},mode=max', matrix.arch) || '' }}
           tags: |
             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
-
-      - name: Remove custom docker config directory
-        if: always()
-        run: |
-          rm -rf .docker-custom
 
   neon-image:
     needs: [ neon-image-arch, tag ]
@@ -558,7 +550,7 @@ jobs:
         version: [ v14, v15, v16 ]
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
       - name: Checkout
@@ -567,12 +559,7 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
-      # The default value is ~/.docker
-      - name: Set custom docker config directory
-        run: |
-          mkdir -p .docker-custom
-          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+      - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/setup-buildx-action@v3
         with:
           cache-binary: false
@@ -655,11 +642,6 @@ jobs:
           tags: |
             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
-      - name: Remove custom docker config directory
-        if: always()
-        run: |
-          rm -rf .docker-custom
-
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
     runs-on: ubuntu-22.04
@@ -713,7 +695,7 @@ jobs:
 
   vm-compute-node-image:
     needs: [ check-permissions, tag, compute-node-image ]
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, large ]
     strategy:
       fail-fast: false
       matrix:
@@ -732,13 +714,7 @@ jobs:
           curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
-      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
-      # The default value is ~/.docker
-      - name: Set custom docker config directory
-        run: |
-          mkdir -p .docker-custom
-          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-
+      - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
@@ -761,11 +737,6 @@ jobs:
         run: |
           docker push neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
-      - name: Remove custom docker config directory
-        if: always()
-        run: |
-          rm -rf .docker-custom
-
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image ]
     strategy:
@@ -773,7 +744,7 @@ jobs:
       matrix:
         arch: [ x64, arm64 ]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "gen3", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
       - name: Checkout
@@ -781,13 +752,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
-      # The default value is ~/.docker
-      - name: Set custom docker config directory
-        run: |
-          mkdir -p .docker-custom
-          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
-
+      - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
@@ -827,12 +792,10 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml logs || 0
           docker compose -f ./docker-compose/docker-compose.yml down
 
-      - name: Remove custom docker config directory
-        if: always()
-        run: |
-          rm -rf .docker-custom
-
   promote-images:
+    permissions:
+      contents: read  # This is required for actions/checkout
+      id-token: write # This is required for Azure Login to work.
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
@@ -857,6 +820,28 @@ jobs:
           for version in ${VERSIONS}; do
             docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
+          done
+
+      - name: Azure login
+        if: github.ref_name == 'main'
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        if: github.ref_name == 'main'
+        run: |
+          az acr login --name=neoneastus2
+
+      - name: Copy docker images to ACR-dev
+        if: github.ref_name == 'main'
+        run: |
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+            docker buildx imagetools create \
+              -t neoneastus2.azurecr.io/neondatabase/${image}:${{ needs.tag.outputs.build-tag }} \
+                                        neondatabase/${image}:${{ needs.tag.outputs.build-tag }}
           done
 
       - name: Add latest tag to images
@@ -974,7 +959,7 @@ jobs:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
     if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
       - name: Fix git ownership
@@ -994,7 +979,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: false
           fetch-depth: 0
 
       - name: Trigger deploy workflow
@@ -1002,10 +986,10 @@ jobs:
           GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
             gh workflow --repo neondatabase/azure run deploy.yml -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=false \
               -f deployProxy=false \
               -f deployStorage=true \
@@ -1015,14 +999,14 @@ jobs:
               -f dockerTag=${{needs.tag.outputs.build-tag}} \
               -f deployPreprodRegion=true
 
-            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-prod.yml --ref main \
               -f deployStorage=true \
               -f deployStorageBroker=true \
               -f deployStorageController=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
-            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=true \
               -f deployProxy=true \
               -f deployStorage=false \
@@ -1032,7 +1016,7 @@ jobs:
               -f dockerTag=${{needs.tag.outputs.build-tag}} \
               -f deployPreprodRegion=true
 
-            gh workflow --repo neondatabase/aws run deploy-proxy-prod.yml --ref main \
+            gh workflow --repo neondatabase/infra run deploy-proxy-prod.yml --ref main \
               -f deployPgSniRouter=true \
               -f deployProxy=true \
               -f branch=main \
@@ -1075,7 +1059,7 @@ jobs:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally ]
     if: github.ref_name == 'release'
 
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: [ self-hosted, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -1131,10 +1115,12 @@ jobs:
     # Format `needs` differently to make the list more readable.
     # Usually we do `needs: [...]`
     needs:
+      - build-and-test-locally
       - check-codestyle-python
       - check-codestyle-rust
-      - build-and-test-locally
+      - promote-images
       - test-images
+      - trigger-custom-extensions-build-and-wait
     runs-on: ubuntu-22.04
     steps:
       # The list of possible results:

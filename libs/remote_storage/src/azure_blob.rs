@@ -355,7 +355,8 @@ impl RemoteStorage for AzureBlobStorage {
                     .blobs()
                     .map(|k| ListingObject{
                         key: self.name_to_relative_path(&k.name),
-                        last_modified: k.properties.last_modified.into()
+                        last_modified: k.properties.last_modified.into(),
+                        size: k.properties.content_length,
                     }
                     );
 
@@ -380,6 +381,48 @@ impl RemoteStorage for AzureBlobStorage {
                 }
             }
         }
+    }
+
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        let kind = RequestKind::Head;
+        let _permit = self.permit(kind, cancel).await?;
+
+        let started_at = start_measuring_requests(kind);
+
+        let blob_client = self.client.blob_client(self.relative_path_to_name(key));
+        let properties_future = blob_client.get_properties().into_future();
+
+        let properties_future = tokio::time::timeout(self.timeout, properties_future);
+
+        let res = tokio::select! {
+            res = properties_future => res,
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
+
+        if let Ok(inner) = &res {
+            // do not incl. timeouts as errors in metrics but cancellations
+            let started_at = ScopeGuard::into_inner(started_at);
+            crate::metrics::BUCKET_METRICS
+                .req_seconds
+                .observe_elapsed(kind, inner, started_at);
+        }
+
+        let data = match res {
+            Ok(Ok(data)) => Ok(data),
+            Ok(Err(sdk)) => Err(to_download_error(sdk)),
+            Err(_timeout) => Err(DownloadError::Timeout),
+        }?;
+
+        let properties = data.blob.properties;
+        Ok(ListingObject {
+            key: key.to_owned(),
+            last_modified: SystemTime::from(properties.last_modified),
+            size: properties.content_length,
+        })
     }
 
     async fn upload(

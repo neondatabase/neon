@@ -22,6 +22,11 @@ pub struct Key {
     pub field6: u32,
 }
 
+/// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
+/// a struct of fields.
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd)]
+pub struct CompactKey(i128);
+
 /// The storage key size.
 pub const KEY_SIZE: usize = 18;
 
@@ -107,7 +112,10 @@ impl Key {
     /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
-        assert!(self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
+        assert!(
+            self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222,
+            "invalid key: {self}",
+        );
         (((self.field1 & 0x7F) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)
@@ -125,6 +133,14 @@ impl Key {
             field5: (x >> 32) as u8,
             field6: x as u32,
         }
+    }
+
+    pub fn to_compact(&self) -> CompactKey {
+        CompactKey(self.to_i128())
+    }
+
+    pub fn from_compact(k: CompactKey) -> Self {
+        Self::from_i128(k.0)
     }
 
     pub const fn next(&self) -> Key {
@@ -196,6 +212,13 @@ impl fmt::Display for Key {
     }
 }
 
+impl fmt::Display for CompactKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let k = Key::from_compact(*self);
+        k.fmt(f)
+    }
+}
+
 impl Key {
     pub const MIN: Key = Key {
         field1: u8::MIN,
@@ -212,6 +235,15 @@ impl Key {
         field4: u32::MAX,
         field5: u8::MAX,
         field6: u32::MAX,
+    };
+    /// A key slightly smaller than [`Key::MAX`] for use in layer key ranges to avoid them to be confused with L0 layers
+    pub const NON_L0_MAX: Key = Key {
+        field1: u8::MAX,
+        field2: u32::MAX,
+        field3: u32::MAX,
+        field4: u32::MAX,
+        field5: u8::MAX,
+        field6: u32::MAX - 1,
     };
 
     pub fn from_hex(s: &str) -> Result<Self> {

@@ -42,7 +42,11 @@ class PgCompare(ABC):
         pass
 
     @abstractmethod
-    def flush(self):
+    def flush(self, compact: bool = False, gc: bool = False):
+        pass
+
+    @abstractmethod
+    def compact(self):
         pass
 
     @abstractmethod
@@ -98,7 +102,6 @@ class NeonCompare(PgCompare):
         zenbenchmark: NeonBenchmarker,
         neon_simple_env: NeonEnv,
         pg_bin: PgBin,
-        branch_name: str,
     ):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
@@ -106,16 +109,11 @@ class NeonCompare(PgCompare):
         self.pageserver_http_client = self.env.pageserver.http_client()
 
         # note that neon_simple_env now uses LOCAL_FS remote storage
-
-        # Create tenant
-        tenant_conf: Dict[str, str] = {}
-        self.tenant, _ = self.env.neon_cli.create_tenant(conf=tenant_conf)
-
-        # Create timeline
-        self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
+        self.tenant = self.env.initial_tenant
+        self.timeline = self.env.initial_timeline
 
         # Start pg
-        self._pg = self.env.endpoints.create_start(branch_name, "main", self.tenant)
+        self._pg = self.env.endpoints.create_start("main", "main", self.tenant)
 
     @property
     def pg(self) -> PgProtocol:
@@ -129,13 +127,16 @@ class NeonCompare(PgCompare):
     def pg_bin(self) -> PgBin:
         return self._pg_bin
 
-    def flush(self):
+    def flush(self, compact: bool = True, gc: bool = True):
         wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
+        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline, compact=compact)
+        if gc:
+            self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 
     def compact(self):
-        self.pageserver_http_client.timeline_compact(self.tenant, self.timeline)
+        self.pageserver_http_client.timeline_compact(
+            self.tenant, self.timeline, wait_until_uploaded=True
+        )
 
     def report_peak_memory_use(self):
         self.zenbenchmark.record(
@@ -215,8 +216,11 @@ class VanillaCompare(PgCompare):
     def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
-    def flush(self):
+    def flush(self, compact: bool = False, gc: bool = False):
         self.cur.execute("checkpoint")
+
+    def compact(self):
+        pass
 
     def report_peak_memory_use(self):
         pass  # TODO find something
@@ -266,6 +270,9 @@ class RemoteCompare(PgCompare):
         # TODO: flush the remote pageserver
         pass
 
+    def compact(self):
+        pass
+
     def report_peak_memory_use(self):
         # TODO: get memory usage from remote pageserver
         pass
@@ -284,13 +291,11 @@ class RemoteCompare(PgCompare):
 
 @pytest.fixture(scope="function")
 def neon_compare(
-    request: FixtureRequest,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     neon_simple_env: NeonEnv,
 ) -> NeonCompare:
-    branch_name = request.node.name
-    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
+    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin)
 
 
 @pytest.fixture(scope="function")

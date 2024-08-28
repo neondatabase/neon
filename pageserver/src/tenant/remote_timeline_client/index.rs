@@ -60,6 +60,9 @@ pub struct IndexPart {
     #[serde(default)]
     pub(crate) lineage: Lineage,
 
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) gc_blocking: Option<GcBlocking>,
+
     /// Describes the kind of aux files stored in the timeline.
     ///
     /// The value is modified during file ingestion when the latest wanted value communicated via tenant config is applied if it is acceptable.
@@ -85,10 +88,11 @@ impl IndexPart {
     /// - 6: last_aux_file_policy is added.
     /// - 7: metadata_bytes is no longer written, but still read
     /// - 8: added `archived_at`
-    const LATEST_VERSION: usize = 8;
+    /// - 9: +gc_blocking
+    const LATEST_VERSION: usize = 9;
 
     // Versions we may see when reading from a bucket.
-    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8];
+    pub const KNOWN_VERSIONS: &'static [usize] = &[1, 2, 3, 4, 5, 6, 7, 8, 9];
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
@@ -101,6 +105,7 @@ impl IndexPart {
             deleted_at: None,
             archived_at: None,
             lineage: Default::default(),
+            gc_blocking: None,
             last_aux_file_policy: None,
         }
     }
@@ -211,26 +216,47 @@ fn is_false(b: &bool) -> bool {
 impl Lineage {
     const REMEMBER_AT_MOST: usize = 100;
 
-    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
+    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) -> bool {
         if self.reparenting_history.last() == Some(old_ancestor) {
             // do not re-record it
-            return;
-        }
+            false
+        } else {
+            #[cfg(feature = "testing")]
+            {
+                let existing = self
+                    .reparenting_history
+                    .iter()
+                    .position(|x| x == old_ancestor);
+                assert_eq!(
+                    existing, None,
+                    "we cannot reparent onto and off and onto the same timeline twice"
+                );
+            }
+            let drop_oldest = self.reparenting_history.len() + 1 >= Self::REMEMBER_AT_MOST;
 
-        let drop_oldest = self.reparenting_history.len() + 1 >= Self::REMEMBER_AT_MOST;
-
-        self.reparenting_history_truncated |= drop_oldest;
-        if drop_oldest {
-            self.reparenting_history.remove(0);
+            self.reparenting_history_truncated |= drop_oldest;
+            if drop_oldest {
+                self.reparenting_history.remove(0);
+            }
+            self.reparenting_history.push(*old_ancestor);
+            true
         }
-        self.reparenting_history.push(*old_ancestor);
     }
 
-    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) {
-        assert!(self.original_ancestor.is_none());
-
-        self.original_ancestor =
-            Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
+    /// Returns true if anything changed.
+    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) -> bool {
+        if let Some((id, lsn, _)) = self.original_ancestor {
+            assert_eq!(
+                &(id, lsn),
+                branchpoint,
+                "detaching attempt has to be for the same ancestor we are already detached from"
+            );
+            false
+        } else {
+            self.original_ancestor =
+                Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
+            true
+        }
     }
 
     /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed
@@ -242,12 +268,76 @@ impl Lineage {
             .is_some_and(|(_, ancestor_lsn, _)| ancestor_lsn == lsn)
     }
 
-    pub(crate) fn is_detached_from_original_ancestor(&self) -> bool {
+    /// Returns true if the timeline originally had an ancestor, and no longer has one.
+    pub(crate) fn is_detached_from_ancestor(&self) -> bool {
         self.original_ancestor.is_some()
+    }
+
+    /// Returns original ancestor timeline id and lsn that this timeline has been detached from.
+    pub(crate) fn detached_previous_ancestor(&self) -> Option<(TimelineId, Lsn)> {
+        self.original_ancestor.map(|(id, lsn, _)| (id, lsn))
     }
 
     pub(crate) fn is_reparented(&self) -> bool {
         !self.reparenting_history.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GcBlocking {
+    pub(crate) started_at: NaiveDateTime,
+    pub(crate) reasons: enumset::EnumSet<GcBlockingReason>,
+}
+
+#[derive(Debug, enumset::EnumSetType, serde::Serialize, serde::Deserialize)]
+#[enumset(serialize_repr = "list")]
+pub(crate) enum GcBlockingReason {
+    Manual,
+    DetachAncestor,
+}
+
+impl GcBlocking {
+    pub(super) fn started_now_for(reason: GcBlockingReason) -> Self {
+        GcBlocking {
+            started_at: chrono::Utc::now().naive_utc(),
+            reasons: enumset::EnumSet::only(reason),
+        }
+    }
+
+    /// Returns true if the given reason is one of the reasons why the gc is blocked.
+    pub(crate) fn blocked_by(&self, reason: GcBlockingReason) -> bool {
+        self.reasons.contains(reason)
+    }
+
+    /// Returns a version of self with the given reason.
+    pub(super) fn with_reason(&self, reason: GcBlockingReason) -> Self {
+        assert!(!self.blocked_by(reason));
+        let mut reasons = self.reasons;
+        reasons.insert(reason);
+
+        Self {
+            started_at: self.started_at,
+            reasons,
+        }
+    }
+
+    /// Returns a version of self without the given reason. Assumption is that if
+    /// there are no more reasons, we can unblock the gc by returning `None`.
+    pub(super) fn without_reason(&self, reason: GcBlockingReason) -> Option<Self> {
+        assert!(self.blocked_by(reason));
+
+        if self.reasons.len() == 1 {
+            None
+        } else {
+            let mut reasons = self.reasons;
+            assert!(reasons.remove(reason));
+            assert!(!reasons.is_empty());
+
+            Some(Self {
+                started_at: self.started_at,
+                reasons,
+            })
+        }
     }
 }
 
@@ -292,6 +382,7 @@ mod tests {
             deleted_at: None,
             archived_at: None,
             lineage: Lineage::default(),
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -335,6 +426,7 @@ mod tests {
             deleted_at: None,
             archived_at: None,
             lineage: Lineage::default(),
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -379,6 +471,7 @@ mod tests {
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             archived_at: None,
             lineage: Lineage::default(),
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -426,6 +519,7 @@ mod tests {
             deleted_at: None,
             archived_at: None,
             lineage: Lineage::default(),
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -468,6 +562,7 @@ mod tests {
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             archived_at: None,
             lineage: Lineage::default(),
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -513,6 +608,7 @@ mod tests {
                 reparenting_history: vec![TimelineId::from_str("e1bfd8c633d713d279e6fcd2bcc15b6d").unwrap()],
                 original_ancestor: Some((TimelineId::from_str("e2bfd8c633d713d279e6fcd2bcc15b6d").unwrap(), Lsn::from_str("0/15A7618").unwrap(), parse_naive_datetime("2024-05-07T18:52:36.322426563"))),
             },
+            gc_blocking: None,
             last_aux_file_policy: None,
         };
 
@@ -563,6 +659,7 @@ mod tests {
                 reparenting_history: vec![TimelineId::from_str("e1bfd8c633d713d279e6fcd2bcc15b6d").unwrap()],
                 original_ancestor: Some((TimelineId::from_str("e2bfd8c633d713d279e6fcd2bcc15b6d").unwrap(), Lsn::from_str("0/15A7618").unwrap(), parse_naive_datetime("2024-05-07T18:52:36.322426563"))),
             },
+            gc_blocking: None,
             last_aux_file_policy: Some(AuxFilePolicy::V2),
         };
 
@@ -618,6 +715,7 @@ mod tests {
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             archived_at: None,
             lineage: Default::default(),
+            gc_blocking: None,
             last_aux_file_policy: Default::default(),
         };
 
@@ -674,7 +772,70 @@ mod tests {
             deleted_at: Some(parse_naive_datetime("2023-07-31T09:00:00.123000000")),
             archived_at: Some(parse_naive_datetime("2023-04-29T09:00:00.123000000")),
             lineage: Default::default(),
+            gc_blocking: None,
             last_aux_file_policy: Default::default(),
+        };
+
+        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        assert_eq!(part, expected);
+    }
+
+    #[test]
+    fn v9_indexpart_is_parsed() {
+        let example = r#"{
+            "version": 9,
+            "layer_metadata":{
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000 },
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001 }
+            },
+            "disk_consistent_lsn":"0/16960E8",
+            "metadata": {
+                "disk_consistent_lsn": "0/16960E8",
+                "prev_record_lsn": "0/1696070",
+                "ancestor_timeline": "e45a7f37d3ee2ff17dc14bf4f4e3f52e",
+                "ancestor_lsn": "0/0",
+                "latest_gc_cutoff_lsn": "0/1696070",
+                "initdb_lsn": "0/1696070",
+                "pg_version": 14
+            },
+            "gc_blocking": {
+                "started_at": "2024-07-19T09:00:00.123",
+                "reasons": ["DetachAncestor"]
+            }
+        }"#;
+
+        let expected = IndexPart {
+            version: 9,
+            layer_metadata: HashMap::from([
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), LayerFileMetadata {
+                    file_size: 25600000,
+                    generation: Generation::none(),
+                    shard: ShardIndex::unsharded()
+                }),
+                ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), LayerFileMetadata {
+                    file_size: 9007199254741001,
+                    generation: Generation::none(),
+                    shard: ShardIndex::unsharded()
+                })
+            ]),
+            disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
+            metadata: TimelineMetadata::new(
+                Lsn::from_str("0/16960E8").unwrap(),
+                Some(Lsn::from_str("0/1696070").unwrap()),
+                Some(TimelineId::from_str("e45a7f37d3ee2ff17dc14bf4f4e3f52e").unwrap()),
+                Lsn::INVALID,
+                Lsn::from_str("0/1696070").unwrap(),
+                Lsn::from_str("0/1696070").unwrap(),
+                14,
+            ).with_recalculated_checksum().unwrap(),
+            deleted_at: None,
+            lineage: Default::default(),
+            gc_blocking: Some(GcBlocking {
+                started_at: parse_naive_datetime("2024-07-19T09:00:00.123000000"),
+                reasons: enumset::EnumSet::from_iter([GcBlockingReason::DetachAncestor]),
+            }),
+            last_aux_file_policy: Default::default(),
+            archived_at: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();

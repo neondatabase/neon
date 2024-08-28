@@ -1,8 +1,14 @@
+mod leaky_bucket;
 mod limit_algorithm;
 mod limiter;
-pub use limit_algorithm::{
-    aimd::Aimd, DynamicLimiter, Outcome, RateLimitAlgorithm, RateLimiterConfig, Token,
+
+#[cfg(test)]
+pub(crate) use limit_algorithm::aimd::Aimd;
+
+pub(crate) use limit_algorithm::{
+    DynamicLimiter, Outcome, RateLimitAlgorithm, RateLimiterConfig, Token,
 };
-pub use limiter::{BucketRateLimiter, GlobalRateLimiter, RateBucketInfo, WakeComputeRateLimiter};
-mod leaky_bucket;
+pub(crate) use limiter::GlobalRateLimiter;
+
 pub use leaky_bucket::{EndpointRateLimiter, LeakyBucketConfig, LeakyBucketRateLimiter};
+pub use limiter::{BucketRateLimiter, RateBucketInfo, WakeComputeRateLimiter};

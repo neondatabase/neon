@@ -2,11 +2,13 @@
 
 pub mod delta_layer;
 pub mod image_layer;
-pub(crate) mod inmemory_layer;
+pub mod inmemory_layer;
 pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
+
+pub mod split_writer;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Value;
@@ -432,39 +434,18 @@ impl ReadableLayer {
     }
 }
 
-/// Return value from [`Layer::get_value_reconstruct_data`]
-#[derive(Clone, Copy, Debug)]
-pub enum ValueReconstructResult {
-    /// Got all the data needed to reconstruct the requested page
-    Complete,
-    /// This layer didn't contain all the required data, the caller should look up
-    /// the predecessor layer at the returned LSN and collect more data from there.
-    Continue,
-
-    /// This layer didn't contain data needed to reconstruct the page version at
-    /// the returned LSN. This is usually considered an error, but might be OK
-    /// in some circumstances.
-    Missing,
-}
-
 /// Layers contain a hint indicating whether they are likely to be used for reads.  This is a hint rather
 /// than an authoritative value, so that we do not have to update it synchronously when changing the visibility
 /// of layers (for example when creating a branch that makes some previously covered layers visible).  It should
 /// be used for cache management but not for correctness-critical checks.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LayerVisibilityHint {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayerVisibilityHint {
     /// A Visible layer might be read while serving a read, because there is not an image layer between it
     /// and a readable LSN (the tip of the branch or a child's branch point)
     Visible,
     /// A Covered layer probably won't be read right now, but _can_ be read in future if someone creates
     /// a branch or ephemeral endpoint at an LSN below the layer that covers this.
-    #[allow(unused)]
     Covered,
-    /// Calculating layer visibilty requires I/O, so until this has happened layers are loaded
-    /// in this state.  Note that newly written layers may be called Visible immediately, this uninitialized
-    /// state is for when existing layers are constructed while loading a timeline.
-    #[default]
-    Uninitialized,
 }
 
 pub(crate) struct LayerAccessStats(std::sync::atomic::AtomicU64);
@@ -557,19 +538,25 @@ impl LayerAccessStats {
         self.record_residence_event_at(SystemTime::now())
     }
 
-    pub(crate) fn record_access_at(&self, now: SystemTime) {
+    fn record_access_at(&self, now: SystemTime) -> bool {
         let (mut mask, mut value) = Self::to_low_res_timestamp(Self::ATIME_SHIFT, now);
 
         // A layer which is accessed must be visible.
         mask |= 0x1 << Self::VISIBILITY_SHIFT;
         value |= 0x1 << Self::VISIBILITY_SHIFT;
 
-        self.write_bits(mask, value);
+        let old_bits = self.write_bits(mask, value);
+        !matches!(
+            self.decode_visibility(old_bits),
+            LayerVisibilityHint::Visible
+        )
     }
 
-    pub(crate) fn record_access(&self, ctx: &RequestContext) {
+    /// Returns true if we modified the layer's visibility to set it to Visible implicitly
+    /// as a result of this access
+    pub(crate) fn record_access(&self, ctx: &RequestContext) -> bool {
         if ctx.access_stats_behavior() == AccessStatsBehavior::Skip {
-            return;
+            return false;
         }
 
         self.record_access_at(SystemTime::now())
@@ -626,22 +613,29 @@ impl LayerAccessStats {
         }
     }
 
-    pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) {
-        let value = match visibility {
-            LayerVisibilityHint::Visible => 0x1 << Self::VISIBILITY_SHIFT,
-            LayerVisibilityHint::Covered | LayerVisibilityHint::Uninitialized => 0x0,
-        };
-
-        self.write_bits(0x1 << Self::VISIBILITY_SHIFT, value);
-    }
-
-    pub(crate) fn visibility(&self) -> LayerVisibilityHint {
-        let read = self.0.load(std::sync::atomic::Ordering::Relaxed);
-        match (read >> Self::VISIBILITY_SHIFT) & 0x1 {
+    /// Helper for extracting the visibility hint from the literal value of our inner u64
+    fn decode_visibility(&self, bits: u64) -> LayerVisibilityHint {
+        match (bits >> Self::VISIBILITY_SHIFT) & 0x1 {
             1 => LayerVisibilityHint::Visible,
             0 => LayerVisibilityHint::Covered,
             _ => unreachable!(),
         }
+    }
+
+    /// Returns the old value which has been replaced
+    pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) -> LayerVisibilityHint {
+        let value = match visibility {
+            LayerVisibilityHint::Visible => 0x1 << Self::VISIBILITY_SHIFT,
+            LayerVisibilityHint::Covered => 0x0,
+        };
+
+        let old_bits = self.write_bits(0x1 << Self::VISIBILITY_SHIFT, value);
+        self.decode_visibility(old_bits)
+    }
+
+    pub(crate) fn visibility(&self) -> LayerVisibilityHint {
+        let read = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        self.decode_visibility(read)
     }
 }
 

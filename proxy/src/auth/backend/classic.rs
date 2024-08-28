@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
 pub(super) async fn authenticate(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     creds: ComputeUserInfo,
     client: &mut PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     config: &'static AuthenticationConfig,
@@ -27,7 +27,7 @@ pub(super) async fn authenticate(
         }
         AuthSecret::Scram(secret) => {
             info!("auth endpoint chooses SCRAM");
-            let scram = auth::Scram(&secret, &mut *ctx);
+            let scram = auth::Scram(&secret, ctx);
 
             let auth_outcome = tokio::time::timeout(
                 config.scram_protocol_timeout,

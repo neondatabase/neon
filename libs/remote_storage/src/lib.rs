@@ -144,15 +144,17 @@ impl RemotePath {
 ///
 /// The WithDelimiter mode will populate `prefixes` and `keys` in the result.  The
 /// NoDelimiter mode will only populate `keys`.
+#[derive(Copy, Clone)]
 pub enum ListingMode {
     WithDelimiter,
     NoDelimiter,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ListingObject {
     pub key: RemotePath,
     pub last_modified: SystemTime,
+    pub size: u64,
 }
 
 #[derive(Default)]
@@ -194,7 +196,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
-    ) -> impl Stream<Item = Result<Listing, DownloadError>>;
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + Send;
 
     async fn list(
         &self,
@@ -212,6 +214,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
         }
         Ok(combined)
     }
+
+    /// Obtain metadata information about an object.
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     ///
@@ -351,13 +360,27 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         mode: ListingMode,
         max_keys: Option<NonZeroU32>,
         cancel: &'a CancellationToken,
-    ) -> impl Stream<Item = Result<Listing, DownloadError>> + 'a {
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + 'a + Send {
         match self {
             Self::LocalFs(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel))
-                as Pin<Box<dyn Stream<Item = Result<Listing, DownloadError>>>>,
+                as Pin<Box<dyn Stream<Item = Result<Listing, DownloadError>> + Send>>,
             Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+        }
+    }
+
+    // See [`RemoteStorage::head_object`].
+    pub async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.head_object(key, cancel).await,
+            Self::AwsS3(s) => s.head_object(key, cancel).await,
+            Self::AzureBlob(s) => s.head_object(key, cancel).await,
+            Self::Unreliable(s) => s.head_object(key, cancel).await,
         }
     }
 
@@ -596,6 +619,7 @@ impl ConcurrencyLimiter {
             RequestKind::Delete => &self.write,
             RequestKind::Copy => &self.write,
             RequestKind::TimeTravel => &self.write,
+            RequestKind::Head => &self.read,
         }
     }
 

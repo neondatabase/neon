@@ -10,7 +10,11 @@ use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use metrics::{BuildInfo, NeonMetrics};
-use pageserver_api::controller_api::TenantCreateRequest;
+use pageserver_api::controller_api::{
+    MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
+    MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
+    TenantCreateRequest,
+};
 use pageserver_api::models::{
     TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
@@ -496,7 +500,7 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
         StatusCode::OK,
         state
             .service
-            .node_configure(
+            .external_node_configure(
                 config_req.node_id,
                 config_req.availability.map(NodeAvailability::from),
                 config_req.scheduling,
@@ -514,6 +518,19 @@ async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let node_status = state.service.get_node(node_id).await?;
 
     json_response(StatusCode::OK, node_status)
+}
+
+async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let leader = state.service.get_leader().await.map_err(|err| {
+        ApiError::InternalServerError(anyhow::anyhow!(
+            "Failed to read leader from database: {err}"
+        ))
+    })?;
+
+    json_response(StatusCode::OK, leader)
 }
 
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -558,6 +575,51 @@ async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, A
     state.service.cancel_node_fill(node_id).await?;
 
     json_response(StatusCode::ACCEPTED, ())
+}
+
+async fn handle_metadata_health_update(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Scrubber)?;
+
+    let update_req = json_request::<MetadataHealthUpdateRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    state.service.metadata_health_update(update_req).await?;
+
+    json_response(StatusCode::OK, MetadataHealthUpdateResponse {})
+}
+
+async fn handle_metadata_health_list_unhealthy(
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let unhealthy_tenant_shards = state.service.metadata_health_list_unhealthy().await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListUnhealthyResponse {
+            unhealthy_tenant_shards,
+        },
+    )
+}
+
+async fn handle_metadata_health_list_outdated(
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let list_outdated_req = json_request::<MetadataHealthListOutdatedRequest>(&mut req).await?;
+    let state = get_state(&req);
+    let health_records = state
+        .service
+        .metadata_health_list_outdated(list_outdated_req.not_scrubbed_for)
+        .await?;
+
+    json_response(
+        StatusCode::OK,
+        MetadataHealthListOutdatedResponse { health_records },
+    )
 }
 
 async fn handle_tenant_shard_split(
@@ -967,6 +1029,9 @@ pub fn make_router(
         .get("/control/v1/node/:node_id", |r| {
             named_request_span(r, handle_node_status, RequestName("control_v1_node_status"))
         })
+        .get("/control/v1/leader", |r| {
+            named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))
+        })
         .put("/control/v1/node/:node_id/drain", |r| {
             named_request_span(r, handle_node_drain, RequestName("control_v1_node_drain"))
         })
@@ -987,7 +1052,28 @@ pub fn make_router(
                 RequestName("control_v1_cancel_node_fill"),
             )
         })
-        // TODO(vlad): endpoint for cancelling drain and fill
+        // Metadata health operations
+        .post("/control/v1/metadata_health/update", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_update,
+                RequestName("control_v1_metadata_health_update"),
+            )
+        })
+        .get("/control/v1/metadata_health/unhealthy", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list_unhealthy,
+                RequestName("control_v1_metadata_health_list_unhealthy"),
+            )
+        })
+        .post("/control/v1/metadata_health/outdated", |r| {
+            named_request_span(
+                r,
+                handle_metadata_health_list_outdated,
+                RequestName("control_v1_metadata_health_list_outdated"),
+            )
+        })
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(

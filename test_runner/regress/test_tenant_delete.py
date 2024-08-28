@@ -9,9 +9,9 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
-    MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
+    many_small_layers_tenant_config,
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
@@ -76,7 +76,7 @@ def test_tenant_delete_smoke(
 
     env.neon_cli.create_tenant(
         tenant_id=tenant_id,
-        conf=MANY_SMALL_LAYERS_TENANT_CONFIG,
+        conf=many_small_layers_tenant_config(),
     )
 
     # Default tenant and the one we created
@@ -127,6 +127,8 @@ def test_tenant_delete_smoke(
     # Deletion updates the tenant count: the one default tenant remains
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "inprogress"}) == 0
+
+    env.pageserver.stop()
 
 
 def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonEnvBuilder):
@@ -200,11 +202,10 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
         if deletion is not None:
             deletion.join()
 
+    env.pageserver.stop()
 
-def test_tenant_delete_races_timeline_creation(
-    neon_env_builder: NeonEnvBuilder,
-    pg_bin: PgBin,
-):
+
+def test_tenant_delete_races_timeline_creation(neon_env_builder: NeonEnvBuilder):
     """
     Validate that timeline creation executed in parallel with deletion works correctly.
 
@@ -214,7 +215,7 @@ def test_tenant_delete_races_timeline_creation(
     # (and there is no way to reconstruct the used remote storage kind)
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env = neon_env_builder.init_start(initial_tenant_conf=many_small_layers_tenant_config())
     ps_http = env.pageserver.http_client()
     tenant_id = env.initial_tenant
 
@@ -318,6 +319,8 @@ def test_tenant_delete_races_timeline_creation(
     # We deleted our only tenant, and the scrubber fails if it detects nothing
     neon_env_builder.disable_scrub_on_exit()
 
+    env.pageserver.stop()
+
 
 def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder):
     """
@@ -327,7 +330,7 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
 
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env = neon_env_builder.init_start(initial_tenant_conf=many_small_layers_tenant_config())
 
     ps_http = env.pageserver.http_client()
     # create a tenant separate from the main tenant so that we have one remaining
@@ -341,13 +344,13 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
     wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
     env.stop()
 
-    result = env.storage_scrubber.scan_metadata()
-    assert result["with_warnings"] == []
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
 
     env.start()
     ps_http = env.pageserver.http_client()
     ps_http.tenant_delete(tenant_id)
     env.stop()
 
-    env.storage_scrubber.scan_metadata()
-    assert result["with_warnings"] == []
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy

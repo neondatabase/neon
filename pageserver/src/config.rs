@@ -29,11 +29,12 @@ use utils::{
     logging::LogFormat,
 };
 
+use crate::l0_flush::L0FlushConfig;
+use crate::tenant::config::TenantConfOpt;
+use crate::tenant::timeline::compaction::CompactL0Phase1ValueAccess;
 use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
-use crate::tenant::{config::TenantConfOpt, timeline::GetImpl};
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
-use crate::{l0_flush::L0FlushConfig, tenant::timeline::GetVectoredImpl};
 use crate::{tenant::config::TenantConf, virtual_file};
 use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
@@ -49,7 +50,6 @@ pub mod defaults {
         DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
         DEFAULT_PG_LISTEN_PORT,
     };
-    use pageserver_api::models::ImageCompressionAlgorithm;
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
@@ -89,8 +89,7 @@ pub mod defaults {
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
-    pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
-        ImageCompressionAlgorithm::Disabled;
+    pub const DEFAULT_IMAGE_COMPRESSION: &str = "zstd(1)";
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
 
@@ -132,13 +131,7 @@ pub mod defaults {
 
 #virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
 
-#get_vectored_impl = '{DEFAULT_GET_VECTORED_IMPL}'
-
-#get_impl = '{DEFAULT_GET_IMPL}'
-
 #max_vectored_read_bytes = '{DEFAULT_MAX_VECTORED_READ_BYTES}'
-
-#validate_vectored_get = '{DEFAULT_VALIDATE_VECTORED_GET}'
 
 [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -277,13 +270,7 @@ pub struct PageServerConf {
 
     pub virtual_file_io_engine: virtual_file::IoEngineKind,
 
-    pub get_vectored_impl: GetVectoredImpl,
-
-    pub get_impl: GetImpl,
-
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
-
-    pub validate_vectored_get: bool,
 
     pub image_compression: ImageCompressionAlgorithm,
 
@@ -295,6 +282,13 @@ pub struct PageServerConf {
     pub ephemeral_bytes_per_memory_kb: usize,
 
     pub l0_flush: L0FlushConfig,
+
+    /// This flag is temporary and will be removed after gradual rollout.
+    /// See <https://github.com/neondatabase/neon/issues/8184>.
+    pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
+
+    /// Direct IO settings
+    pub virtual_file_direct_io: virtual_file::DirectIoMode,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -356,8 +350,6 @@ struct PageServerConfigBuilder {
     auth_validation_public_key_path: BuilderValue<Option<Utf8PathBuf>>,
     remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
 
-    id: BuilderValue<NodeId>,
-
     broker_endpoint: BuilderValue<Uri>,
     broker_keepalive_interval: BuilderValue<Duration>,
 
@@ -390,27 +382,22 @@ struct PageServerConfigBuilder {
 
     virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
 
-    get_vectored_impl: BuilderValue<GetVectoredImpl>,
-
-    get_impl: BuilderValue<GetImpl>,
-
     max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
-
-    validate_vectored_get: BuilderValue<bool>,
 
     image_compression: BuilderValue<ImageCompressionAlgorithm>,
 
     ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
 
     l0_flush: BuilderValue<L0FlushConfig>,
+
+    compact_level0_phase1_value_access: BuilderValue<CompactL0Phase1ValueAccess>,
+
+    virtual_file_direct_io: BuilderValue<virtual_file::DirectIoMode>,
 }
 
 impl PageServerConfigBuilder {
-    fn new(node_id: NodeId) -> Self {
-        let mut this = Self::default();
-        this.id(node_id);
-
-        this
+    fn new() -> Self {
+        Self::default()
     }
 
     #[inline(always)]
@@ -438,7 +425,6 @@ impl PageServerConfigBuilder {
             pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
-            id: NotSet,
             broker_endpoint: Set(storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint")),
@@ -487,15 +473,14 @@ impl PageServerConfigBuilder {
 
             virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
 
-            get_vectored_impl: Set(DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
-            get_impl: Set(DEFAULT_GET_IMPL.parse().unwrap()),
             max_vectored_read_bytes: Set(MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
-            image_compression: Set(DEFAULT_IMAGE_COMPRESSION),
-            validate_vectored_get: Set(DEFAULT_VALIDATE_VECTORED_GET),
+            image_compression: Set(DEFAULT_IMAGE_COMPRESSION.parse().unwrap()),
             ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: Set(L0FlushConfig::default()),
+            compact_level0_phase1_value_access: Set(CompactL0Phase1ValueAccess::default()),
+            virtual_file_direct_io: Set(virtual_file::DirectIoMode::default()),
         }
     }
 }
@@ -566,10 +551,6 @@ impl PageServerConfigBuilder {
 
     pub fn broker_keepalive_interval(&mut self, broker_keepalive_interval: Duration) {
         self.broker_keepalive_interval = BuilderValue::Set(broker_keepalive_interval)
-    }
-
-    pub fn id(&mut self, node_id: NodeId) {
-        self.id = BuilderValue::Set(node_id)
     }
 
     pub fn log_format(&mut self, log_format: LogFormat) {
@@ -655,20 +636,8 @@ impl PageServerConfigBuilder {
         self.virtual_file_io_engine = BuilderValue::Set(value);
     }
 
-    pub fn get_vectored_impl(&mut self, value: GetVectoredImpl) {
-        self.get_vectored_impl = BuilderValue::Set(value);
-    }
-
-    pub fn get_impl(&mut self, value: GetImpl) {
-        self.get_impl = BuilderValue::Set(value);
-    }
-
     pub fn get_max_vectored_read_bytes(&mut self, value: MaxVectoredReadBytes) {
         self.max_vectored_read_bytes = BuilderValue::Set(value);
-    }
-
-    pub fn get_validate_vectored_get(&mut self, value: bool) {
-        self.validate_vectored_get = BuilderValue::Set(value);
     }
 
     pub fn get_image_compression(&mut self, value: ImageCompressionAlgorithm) {
@@ -683,7 +652,15 @@ impl PageServerConfigBuilder {
         self.l0_flush = BuilderValue::Set(value);
     }
 
-    pub fn build(self) -> anyhow::Result<PageServerConf> {
+    pub fn compact_level0_phase1_value_access(&mut self, value: CompactL0Phase1ValueAccess) {
+        self.compact_level0_phase1_value_access = BuilderValue::Set(value);
+    }
+
+    pub fn virtual_file_direct_io(&mut self, value: virtual_file::DirectIoMode) {
+        self.virtual_file_direct_io = BuilderValue::Set(value);
+    }
+
+    pub fn build(self, id: NodeId) -> anyhow::Result<PageServerConf> {
         let default = Self::default_values();
 
         macro_rules! conf {
@@ -716,7 +693,6 @@ impl PageServerConfigBuilder {
                 pg_auth_type,
                 auth_validation_public_key_path,
                 remote_storage_config,
-                id,
                 broker_endpoint,
                 broker_keepalive_interval,
                 log_format,
@@ -734,16 +710,16 @@ impl PageServerConfigBuilder {
                 heatmap_upload_concurrency,
                 secondary_download_concurrency,
                 ingest_batch_size,
-                get_vectored_impl,
-                get_impl,
                 max_vectored_read_bytes,
-                validate_vectored_get,
                 image_compression,
                 ephemeral_bytes_per_memory_kb,
                 l0_flush,
+                compact_level0_phase1_value_access,
+                virtual_file_direct_io,
             }
             CUSTOM LOGIC
             {
+                id: id,
                 // TenantConf is handled separately
                 default_tenant_conf: TenantConf::default(),
                 concurrent_tenant_warmup: ConfigurableSemaphore::new({
@@ -893,7 +869,7 @@ impl PageServerConf {
         toml: &Document,
         workdir: &Utf8Path,
     ) -> anyhow::Result<Self> {
-        let mut builder = PageServerConfigBuilder::new(node_id);
+        let mut builder = PageServerConfigBuilder::new();
         builder.workdir(workdir.to_owned());
 
         let mut t_conf = TenantConfOpt::default();
@@ -924,8 +900,6 @@ impl PageServerConf {
                 "tenant_config" => {
                     t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
                 }
-                "id" => {}, // Ignoring `id` field in pageserver.toml - using identity.toml as the source of truth
-                            // Logging is not set up yet, so we can't do it.
                 "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
                 "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
                 "log_format" => builder.log_format(
@@ -990,20 +964,11 @@ impl PageServerConf {
                 "virtual_file_io_engine" => {
                     builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
                 }
-                "get_vectored_impl" => {
-                    builder.get_vectored_impl(parse_toml_from_str("get_vectored_impl", item)?)
-                }
-                "get_impl" => {
-                    builder.get_impl(parse_toml_from_str("get_impl", item)?)
-                }
                 "max_vectored_read_bytes" => {
                     let bytes = parse_toml_u64("max_vectored_read_bytes", item)? as usize;
                     builder.get_max_vectored_read_bytes(
                         MaxVectoredReadBytes(
                             NonZeroUsize::new(bytes).expect("Max byte size of vectored read must be greater than 0")))
-                }
-                "validate_vectored_get" => {
-                    builder.get_validate_vectored_get(parse_toml_bool("validate_vectored_get", item)?)
                 }
                 "image_compression" => {
                     builder.get_image_compression(parse_toml_from_str("image_compression", item)?)
@@ -1014,11 +979,17 @@ impl PageServerConf {
                 "l0_flush" => {
                     builder.l0_flush(utils::toml_edit_ext::deserialize_item(item).context("l0_flush")?)
                 }
+                "compact_level0_phase1_value_access" => {
+                    builder.compact_level0_phase1_value_access(utils::toml_edit_ext::deserialize_item(item).context("compact_level0_phase1_value_access")?)
+                }
+                "virtual_file_direct_io" => {
+                    builder.virtual_file_direct_io(utils::toml_edit_ext::deserialize_item(item).context("virtual_file_direct_io")?)
+                }
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
 
-        let mut conf = builder.build().context("invalid config")?;
+        let mut conf = builder.build(node_id).context("invalid config")?;
 
         if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
@@ -1088,16 +1059,15 @@ impl PageServerConf {
             secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
             ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
             virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-            get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-            get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
             max_vectored_read_bytes: MaxVectoredReadBytes(
                 NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                     .expect("Invalid default constant"),
             ),
-            image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
-            validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+            image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
             ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             l0_flush: L0FlushConfig::default(),
+            compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+            virtual_file_direct_io: virtual_file::DirectIoMode::default(),
         }
     }
 }
@@ -1255,7 +1225,6 @@ max_file_descriptors = 333
 
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'zzzz'
-id = 10
 
 metric_collection_interval = '222 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
@@ -1272,9 +1241,8 @@ background_task_maximum_delay = '334 s'
         let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
         let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
         // we have to create dummy values to overcome the validation errors
-        let config_string = format!(
-            "pg_distrib_dir='{pg_distrib_dir}'\nid=10\nbroker_endpoint = '{broker_endpoint}'",
-        );
+        let config_string =
+            format!("pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",);
         let toml = config_string.parse()?;
 
         let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
@@ -1331,16 +1299,15 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
-                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
+                compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1405,16 +1372,15 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: 100,
                 virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
-                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
+                compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
             },
             "Should be able to parse all basic config values correctly"
         );
@@ -1579,7 +1545,6 @@ broker_endpoint = '{broker_endpoint}'
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [disk_usage_based_eviction]
 max_usage_pct = 80
@@ -1649,7 +1614,6 @@ threshold = "20m"
             r#"pg_distrib_dir = "{pg_distrib_dir}"
 metric_collection_endpoint = "http://sample.url"
 metric_collection_interval = "10min"
-id = 222
 
 [tenant_config]
 evictions_low_residence_duration_metric_threshold = "20m"

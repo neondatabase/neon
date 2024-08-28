@@ -24,7 +24,7 @@ use super::delta_layer::{self, DeltaEntry};
 use super::image_layer::{self};
 use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
-    PersistentLayerDesc, ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
+    LayerVisibilityHint, PersistentLayerDesc, ValuesReconstructState,
 };
 
 use utils::generation::Generation;
@@ -34,6 +34,8 @@ mod tests;
 
 #[cfg(test)]
 mod failpoints;
+
+pub const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
 
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
@@ -246,7 +248,7 @@ impl Layer {
                 &timeline.generation,
             );
 
-            let layer = LayerInner::new(
+            LayerInner::new(
                 conf,
                 timeline,
                 local_path,
@@ -254,14 +256,7 @@ impl Layer {
                 Some(inner),
                 timeline.generation,
                 timeline.get_shard_index(),
-            );
-
-            // Newly created layers are marked visible by default: the usual case is that they were created to be read.
-            layer
-                .access_stats
-                .set_visibility(super::LayerVisibilityHint::Visible);
-
-            layer
+            )
         }));
 
         let downloaded = resident.expect("just initialized");
@@ -307,42 +302,6 @@ impl Layer {
         self.0.delete_on_drop();
     }
 
-    /// Return data needed to reconstruct given page at LSN.
-    ///
-    /// It is up to the caller to collect more data from the previous layer and
-    /// perform WAL redo, if necessary.
-    ///
-    /// # Cancellation-Safety
-    ///
-    /// This method is cancellation-safe.
-    pub(crate) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        use anyhow::ensure;
-
-        let layer = self.0.get_or_maybe_download(true, Some(ctx)).await?;
-        self.0.access_stats.record_access(ctx);
-
-        if self.layer_desc().is_delta {
-            ensure!(lsn_range.start >= self.layer_desc().lsn_range.start);
-            ensure!(self.layer_desc().key_range.contains(&key));
-        } else {
-            ensure!(self.layer_desc().key_range.contains(&key));
-            ensure!(lsn_range.start >= self.layer_desc().image_layer_lsn());
-            ensure!(lsn_range.end >= self.layer_desc().image_layer_lsn());
-        }
-
-        layer
-            .get_value_reconstruct_data(key, lsn_range, reconstruct_data, &self.0, ctx)
-            .instrument(tracing::debug_span!("get_value_reconstruct_data", layer=%self))
-            .await
-            .with_context(|| format!("get_value_reconstruct_data for layer {self}"))
-    }
-
     pub(crate) async fn get_values_reconstruct_data(
         &self,
         keyspace: KeySpace,
@@ -355,11 +314,13 @@ impl Layer {
             .get_or_maybe_download(true, Some(ctx))
             .await
             .map_err(|err| match err {
-                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
+                DownloadError::TimelineShutdown | DownloadError::DownloadCancelled => {
+                    GetVectoredError::Cancelled
+                }
                 other => GetVectoredError::Other(anyhow::anyhow!(other)),
             })?;
 
-        self.0.access_stats.record_access(ctx);
+        self.record_access(ctx);
 
         layer
             .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
@@ -439,16 +400,16 @@ impl Layer {
         self.0.info(reset)
     }
 
-    pub(crate) fn access_stats(&self) -> &LayerAccessStats {
-        &self.0.access_stats
+    pub(crate) fn latest_activity(&self) -> SystemTime {
+        self.0.access_stats.latest_activity()
+    }
+
+    pub(crate) fn visibility(&self) -> LayerVisibilityHint {
+        self.0.access_stats.visibility()
     }
 
     pub(crate) fn local_path(&self) -> &Utf8Path {
         &self.0.path
-    }
-
-    pub(crate) fn debug_str(&self) -> &Arc<str> {
-        &self.0.debug_str
     }
 
     pub(crate) fn metadata(&self) -> LayerFileMetadata {
@@ -493,13 +454,57 @@ impl Layer {
             }
         }
     }
+
+    fn record_access(&self, ctx: &RequestContext) {
+        if self.0.access_stats.record_access(ctx) {
+            // Visibility was modified to Visible
+            tracing::info!(
+                "Layer {} became visible as a result of access",
+                self.0.desc.key()
+            );
+            if let Some(tl) = self.0.timeline.upgrade() {
+                tl.metrics
+                    .visible_physical_size_gauge
+                    .add(self.0.desc.file_size)
+            }
+        }
+    }
+
+    pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) {
+        let old_visibility = self.0.access_stats.set_visibility(visibility.clone());
+        use LayerVisibilityHint::*;
+        match (old_visibility, visibility) {
+            (Visible, Covered) => {
+                // Subtract this layer's contribution to the visible size metric
+                if let Some(tl) = self.0.timeline.upgrade() {
+                    debug_assert!(
+                        tl.metrics.visible_physical_size_gauge.get() >= self.0.desc.file_size
+                    );
+                    tl.metrics
+                        .visible_physical_size_gauge
+                        .sub(self.0.desc.file_size)
+                }
+            }
+            (Covered, Visible) => {
+                // Add this layer's contribution to the visible size metric
+                if let Some(tl) = self.0.timeline.upgrade() {
+                    tl.metrics
+                        .visible_physical_size_gauge
+                        .add(self.0.desc.file_size)
+                }
+            }
+            (Covered, Covered) | (Visible, Visible) => {
+                // no change
+            }
+        }
+    }
 }
 
 /// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
 ///
 /// However when we want something evicted, we cannot evict it right away as there might be current
 /// reads happening on it. For example: it has been searched from [`LayerMap::search`] but not yet
-/// read with [`Layer::get_value_reconstruct_data`].
+/// read with [`Layer::get_values_reconstruct_data`].
 ///
 /// [`LayerMap::search`]: crate::tenant::layer_map::LayerMap::search
 #[derive(Debug)]
@@ -579,9 +584,6 @@ struct LayerInner {
 
     /// Full path to the file; unclear if this should exist anymore.
     path: Utf8PathBuf,
-
-    /// String representation of the layer, used for traversal id.
-    debug_str: Arc<str>,
 
     desc: PersistentLayerDesc,
 
@@ -693,6 +695,16 @@ impl Drop for LayerInner {
                 timeline.metrics.layer_count_image.dec();
                 timeline.metrics.layer_size_image.sub(self.desc.file_size);
             }
+
+            if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
+                debug_assert!(
+                    timeline.metrics.visible_physical_size_gauge.get() >= self.desc.file_size
+                );
+                timeline
+                    .metrics
+                    .visible_physical_size_gauge
+                    .sub(self.desc.file_size);
+            }
         }
 
         if !*self.wanted_deleted.get_mut() {
@@ -801,11 +813,14 @@ impl LayerInner {
             timeline.metrics.layer_size_image.add(desc.file_size);
         }
 
+        // New layers are visible by default. This metric is later updated on drop or in set_visibility
+        timeline
+            .metrics
+            .visible_physical_size_gauge
+            .add(desc.file_size);
+
         LayerInner {
             conf,
-            debug_str: {
-                format!("timelines/{}/{}", timeline.timeline_id, desc.layer_name()).into()
-            },
             path: local_path,
             desc,
             timeline: Arc::downgrade(timeline),
@@ -1283,7 +1298,10 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
-                l0: crate::tenant::layer_map::LayerMap::is_l0(&self.layer_desc().key_range),
+                l0: crate::tenant::layer_map::LayerMap::is_l0(
+                    &self.layer_desc().key_range,
+                    self.layer_desc().is_delta,
+                ),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
@@ -1601,6 +1619,12 @@ pub(crate) enum DownloadError {
     Failpoint(failpoints::FailpointKind),
 }
 
+impl DownloadError {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self, DownloadError::DownloadCancelled)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum NeedsDownload {
     NotFound,
@@ -1726,28 +1750,6 @@ impl DownloadedLayer {
             .map_err(|e| anyhow::anyhow!("layer load failed earlier: {e}"))
     }
 
-    async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        owner: &Arc<LayerInner>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        use LayerKind::*;
-
-        match self.get(owner, ctx).await? {
-            Delta(d) => {
-                d.get_value_reconstruct_data(key, lsn_range, reconstruct_data, ctx)
-                    .await
-            }
-            Image(i) => {
-                i.get_value_reconstruct_data(key, reconstruct_data, ctx)
-                    .await
-            }
-        }
-    }
-
     async fn get_values_reconstruct_data(
         &self,
         keyspace: KeySpace,
@@ -1846,7 +1848,7 @@ impl ResidentLayer {
                 // this is valid because the DownloadedLayer::kind is a OnceCell, not a
                 // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
                 // while it's being held.
-                owner.access_stats.record_access(ctx);
+                self.owner.record_access(ctx);
 
                 delta_layer::DeltaLayerInner::load_keys(d, ctx)
                     .await
@@ -1859,8 +1861,8 @@ impl ResidentLayer {
     /// Read all they keys in this layer which match the ShardIdentity, and write them all to
     /// the provided writer.  Return the number of keys written.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all, fields(layer=%self))]
-    pub(crate) async fn filter<'a>(
-        &'a self,
+    pub(crate) async fn filter(
+        &self,
         shard_identity: &ShardIdentity,
         writer: &mut ImageLayerWriter,
         ctx: &RequestContext,

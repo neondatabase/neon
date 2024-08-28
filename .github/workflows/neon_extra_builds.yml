@@ -56,7 +56,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Install macOS postgres dependencies
         run: brew install flex bison openssl protobuf icu4c pkg-config
@@ -149,8 +148,6 @@ jobs:
 
     env:
       BUILD_TYPE: release
-      # remove the cachepot wrapper and build without crate caches
-      RUSTC_WRAPPER: ""
       # build with incremental compilation produce partial results
       # so do not attempt to cache this build, also disable the incremental compilation
       CARGO_INCREMENTAL: 0
@@ -160,7 +157,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers

@@ -25,17 +25,14 @@ use x509_parser::oid_registry;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
-    pub auth_backend: auth::BackendType<'static, (), ()>,
+    pub auth_backend: auth::Backend<'static, (), ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
     pub require_client_ip: bool,
-    pub disable_ip_check_for_http: bool,
-    pub redis_rps_limit: Vec<RateBucketInfo>,
     pub region: String,
     pub handshake_timeout: Duration,
-    pub aws_region: String,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute_retry_config: RetryConfig,
@@ -55,7 +52,7 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub request_timeout: tokio::time::Duration,
+    pub accept_websockets: bool,
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,
@@ -159,7 +156,7 @@ pub enum TlsServerEndPoint {
 }
 
 impl TlsServerEndPoint {
-    pub fn new(cert: &CertificateDer) -> anyhow::Result<Self> {
+    pub fn new(cert: &CertificateDer<'_>) -> anyhow::Result<Self> {
         let sha256_oids = [
             // I'm explicitly not adding MD5 or SHA1 here... They're bad.
             oid_registry::OID_SIG_ECDSA_WITH_SHA256,
@@ -250,7 +247,7 @@ impl CertResolver {
 
         let common_name = pem.subject().to_string();
 
-        // We only use non-wildcard certificates in link proxy so it seems okay to treat them the same as
+        // We only use non-wildcard certificates in web auth proxy so it seems okay to treat them the same as
         // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
         // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
         // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
@@ -282,7 +279,7 @@ impl CertResolver {
 impl rustls::server::ResolvesServerCert for CertResolver {
     fn resolve(
         &self,
-        client_hello: rustls::server::ClientHello,
+        client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         self.resolve(client_hello.server_name()).map(|x| x.0)
     }
@@ -321,7 +318,7 @@ impl CertResolver {
             // a) Instead of multi-cert approach use single cert with extra
             //    domains listed in Subject Alternative Name (SAN).
             // b) Deploy separate proxy instances for extra domains.
-            self.default.as_ref().cloned()
+            self.default.clone()
         }
     }
 }
@@ -563,7 +560,7 @@ impl RetryConfig {
             match key {
                 "num_retries" => num_retries = Some(value.parse()?),
                 "base_retry_wait_duration" => {
-                    base_retry_wait_duration = Some(humantime::parse_duration(value)?)
+                    base_retry_wait_duration = Some(humantime::parse_duration(value)?);
                 }
                 "retry_wait_exponent_base" => retry_wait_exponent_base = Some(value.parse()?),
                 unknown => bail!("unknown key: {unknown}"),

@@ -38,7 +38,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tar.workspace = true
 tokio-util.workspace = true
-toml_edit.workspace = true
+toml_edit = { workspace = true, features = ["serde"] }
 tracing.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["json", "registry"] }
@@ -53,7 +53,6 @@ walkdir.workspace = true
 pq_proto.workspace = true
 postgres_connection.workspace = true
 metrics.workspace = true
-workspace_hack.workspace = true
 
 const_format.workspace = true
 
@@ -70,6 +69,7 @@ criterion.workspace = true
 hex-literal.workspace = true
 camino-tempfile.workspace = true
 serde_assert.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "benchmarks"
