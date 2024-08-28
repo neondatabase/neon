@@ -31,7 +31,7 @@ use crate::{
     safekeeper::Term,
     timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
-    wal_backup::{self, remote_timeline_path},
+    wal_backup::{self},
     SafeKeeperConf,
 };
 
@@ -388,13 +388,7 @@ pub async fn main_task(
     let wal_seg_size = tli.get_wal_seg_size().await;
 
     let local_prefix = tli.get_timeline_dir();
-    let remote_timeline_path = match remote_timeline_path(&tli.ttid) {
-        Ok(path) => path,
-        Err(e) => {
-            error!("failed to create remote path: {:?}", e);
-            return None;
-        }
-    };
+    let remote_timeline_path = tli.remote_path.clone();
 
     let mut backup = PartialBackup {
         wal_seg_size,

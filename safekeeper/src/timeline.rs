@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
+use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
@@ -36,7 +37,7 @@ use crate::state::{EvictionState, TimelineMemState, TimelinePersistentState, Tim
 use crate::timeline_guard::ResidenceGuard;
 use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
-use crate::wal_backup::{self};
+use crate::wal_backup::{self, remote_timeline_path};
 use crate::wal_backup_partial::PartialRemoteSegment;
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
@@ -469,6 +470,7 @@ impl From<TimelineError> for ApiError {
 /// It also holds SharedState and provides mutually exclusive access to it.
 pub struct Timeline {
     pub ttid: TenantTimelineId,
+    pub remote_path: RemotePath,
 
     /// Used to broadcast commit_lsn updates to all background jobs.
     commit_lsn_watch_tx: watch::Sender<Lsn>,
@@ -519,8 +521,10 @@ impl Timeline {
         let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
 
         let walreceivers = WalReceivers::new();
+        let remote_path = remote_timeline_path(&ttid)?;
         Ok(Timeline {
             ttid,
+            remote_path,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
             term_flush_lsn_watch_tx,
@@ -557,8 +561,10 @@ impl Timeline {
             TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
 
         let walreceivers = WalReceivers::new();
+        let remote_path = remote_timeline_path(&ttid)?;
         Ok(Timeline {
             ttid,
+            remote_path,
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
             term_flush_lsn_watch_tx,
