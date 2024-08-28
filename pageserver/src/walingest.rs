@@ -59,9 +59,13 @@ pub struct WalIngest {
     shard: ShardIdentity,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
-    warn_lag_ratelimit: RateLimit,
-    warn_future_lsn_ratelimit: RateLimit,
-    warn_timestamp_invalid_ratelimit: RateLimit,
+    warn_ingest_lag: WarnIngestLag,
+}
+
+struct WarnIngestLag {
+    lag_msg_ratelimit: RateLimit,
+    future_lsn_msg_ratelimit: RateLimit,
+    timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
 impl WalIngest {
@@ -80,9 +84,11 @@ impl WalIngest {
             shard: *timeline.get_shard_identity(),
             checkpoint,
             checkpoint_modified: false,
-            warn_lag_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
-            warn_future_lsn_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
-            warn_timestamp_invalid_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+            warn_ingest_lag: WarnIngestLag {
+                lag_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+                future_lsn_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+                timestamp_invalid_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+            },
         })
     }
 
@@ -1231,12 +1237,13 @@ impl WalIngest {
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         let now = SystemTime::now();
+        let rate_limits = &mut self.warn_ingest_lag;
         match try_from_pg_timestamp(wal_timestmap) {
             Ok(ts) => {
                 match now.duration_since(ts) {
                     Ok(lag) => {
                         if lag > conf.wait_lsn_timeout {
-                            self.warn_lag_ratelimit.call2(|rate_limit_stats| {
+                            rate_limits.lag_msg_ratelimit.call2(|rate_limit_stats| {
                                 let lag = humantime::format_duration(lag);
                                 warn!(%rate_limit_stats, %lag, "ingesting record with timestamp lagging more than wait_lsn_timeout");
                             })
@@ -1249,7 +1256,7 @@ impl WalIngest {
                         const IGNORED_DRIFT: Duration = Duration::from_millis(100);
                         if delta_t > IGNORED_DRIFT {
                             let delta_t = humantime::format_duration(delta_t);
-                            self.warn_future_lsn_ratelimit.call2(|rate_limit_stats| {
+                            rate_limits.future_lsn_msg_ratelimit.call2(|rate_limit_stats| {
                                 warn!(%rate_limit_stats, %delta_t, "ingesting record with timestamp from future");
                             })
                         }
@@ -1258,7 +1265,7 @@ impl WalIngest {
 
             }
             Err(error) => {
-                self.warn_timestamp_invalid_ratelimit.call2(|rate_limit_stats| {
+                rate_limits.timestamp_invalid_msg_ratelimit.call2(|rate_limit_stats| {
                     warn!(%rate_limit_stats, %error, "ingesting record with invalid timestamp, cannot calculate lag and will fail find-lsn-for-timestamp type queries");
                 })
             }
