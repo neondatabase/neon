@@ -1791,9 +1791,9 @@ impl<'a> DatadirModification<'a> {
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
-            if !key.is_i128_representable() {
+            if !key.is_valid_key_on_write_path() {
                 bail!(
-                    "the request contains data not supported by pageserver at TimelineWriter::put"
+                    "the request contains data not supported by pageserver at TimelineWriter::put: {}", key
                 );
             }
             let mut write_batch = Vec::new();
@@ -1848,8 +1848,8 @@ impl<'a> DatadirModification<'a> {
                 .drain()
                 .flat_map(|(key, values)| {
                     values.into_iter().map(move |(lsn, val_ser_size, value)| {
-                        if !key.is_i128_representable() {
-                            bail!("the request contains data not supported by pageserver at TimelineWriter::put");
+                        if !key.is_valid_key_on_write_path() {
+                            bail!("the request contains data not supported by pageserver at TimelineWriter::put: {}", key);
                         }
                         Ok((key.to_compact(), lsn, val_ser_size, value))
                     })
