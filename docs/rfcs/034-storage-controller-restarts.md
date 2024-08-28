@@ -132,11 +132,12 @@ Note that no row will exist in the `leaders` table for the first graceful restar
 
 Summary of proposed new start-up sequence:
 1. Call `/step_down`
-2. Load state from database
-3. Load observed state returned in step (1) into memory
-4. Do initial heartbeat round (may be moved after 5)
-5. Mark self as leader by updating the database
-6. Reschedule and reconcile everything
+2. Perform any pending database migrations
+3. Load state from database
+4. Load observed state returned in step (1) into memory
+5. Do initial heartbeat round (may be moved after 5)
+7. Mark self as leader by updating the database
+8. Reschedule and reconcile everything
 
 Some things to note from the steps above:
 * The storage controller makes no changes to the cluster state before step (5) (i.e. no location config
@@ -145,6 +146,8 @@ calls to the pageserver and no compute notifications)
 if the transactions overlap.
 * Before loading the observed state at step (3), cross-validate against the database. If validation fails,
 fall back to asking the pageservers about their current locations.
+* Database migrations should only run **after** the previous instance steps down (or the step down times out).
+
 
 [1] The API call might fail because there's no storage controller running (i.e. [restart](#storage-controller-crash-or-restart)),
 so we don't want to extend the unavailability period by much. We still want to retry since that's not the common case.
