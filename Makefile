@@ -81,7 +81,7 @@ all: neon postgres neon-pg-ext
 #
 # The 'postgres_ffi' depends on the Postgres headers.
 .PHONY: neon
-neon: postgres-headers walproposer-lib cargo-target-dir
+neon: postgres-headers postgres walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 .PHONY: cargo-target-dir
@@ -222,7 +222,7 @@ neon-pg-clean-ext-%:
 # they depend on openssl and other libraries that are not included in our
 # Rust build.
 .PHONY: walproposer-lib
-walproposer-lib: neon-pg-ext-v17
+walproposer-lib: postgres-v17 neon-pg-ext-v17
 	+@echo "Compiling walproposer-lib"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
