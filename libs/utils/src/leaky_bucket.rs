@@ -3,10 +3,6 @@ use std::{sync::Mutex, time::Duration};
 use tokio::{sync::Notify, time::Instant};
 
 pub struct LeakyBucketConfig {
-    /// Leaky buckets can drain at a fixed interval rate.
-    /// We track all times as durations since this epoch so we can round down.
-    pub epoch: Instant,
-
     /// "time cost" of a single request unit.
     /// should loosely represent how long it takes to handle a request unit in active resource time.
     pub cost: Duration,
@@ -30,17 +26,17 @@ pub struct LeakyBucketState {
     ///
     /// This is inspired by the generic cell rate algorithm (GCRA) and works
     /// exactly the same as a leaky-bucket.
-    pub end: Duration,
+    pub end: Instant,
 }
 
 impl LeakyBucketState {
-    pub fn new(now: Duration) -> Self {
+    pub fn new(now: Instant) -> Self {
         Self { end: now }
     }
 
-    pub fn bucket_is_empty(&self, config: &LeakyBucketConfig, now: Instant) -> bool {
+    pub fn bucket_is_empty(&self, now: Instant) -> bool {
         // if self.end is after now, the bucket is not empty
-        self.end <= now - config.epoch
+        self.end <= now
     }
 
     /// Immediately adds tokens to the bucket, if there is space.
@@ -62,9 +58,6 @@ impl LeakyBucketState {
     ) -> Result<(), Instant> {
         let now = Instant::now();
 
-        let now = now - config.epoch;
-        let started = started - config.epoch;
-
         // invariant: started <= now
         debug_assert!(started <= now);
 
@@ -76,7 +69,7 @@ impl LeakyBucketState {
 
         let n = config.cost.mul_f64(n);
         let end_plus_n = end + n;
-        let start_plus_n = end_plus_n.saturating_sub(config.bucket_width);
+        let start_plus_n = end_plus_n.checked_sub(config.bucket_width);
 
         //       start          end
         //       |     start+n  |     end+n
@@ -88,12 +81,12 @@ impl LeakyBucketState {
         // at now2, the bucket would be partially filled if we add n tokens.
         // at now3, the bucket would start completely empty before we add n tokens.
 
-        if start_plus_n <= now {
-            self.end = end_plus_n;
-            Ok(())
-        } else {
-            let ready_at = start_plus_n;
-            Err(config.epoch + ready_at)
+        match start_plus_n {
+            Some(start_plus_n) if now < start_plus_n => Err(start_plus_n),
+            _ => {
+                self.end = end_plus_n;
+                Ok(())
+            }
         }
     }
 }
@@ -162,14 +155,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn check() {
         let config = LeakyBucketConfig {
-            epoch: Instant::now(),
             // average 100rps
             cost: Duration::from_millis(10),
             // burst up to 100 requests
             bucket_width: Duration::from_millis(1000),
         };
 
-        let mut state = LeakyBucketState::new(Instant::now() - config.epoch);
+        let mut state = LeakyBucketState::new(Instant::now());
 
         // supports burst
         {
@@ -178,30 +170,14 @@ mod tests {
                 state.add_tokens(&config, Instant::now(), 1.0).unwrap();
             }
             let ready = state.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
-            assert_eq!(ready - Instant::now(), Duration::from_millis(500));
-        }
-
-        // quantized refill
-        {
-            // after 499ms we should not drain any tokens.
-            tokio::time::advance(Duration::from_millis(499)).await;
-            let ready = state.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
-            assert_eq!(ready - Instant::now(), Duration::from_millis(1));
-
-            // after 500ms we should have drained 50 tokens.
-            tokio::time::advance(Duration::from_millis(1)).await;
-            for _ in 0..50 {
-                state.add_tokens(&config, Instant::now(), 1.0).unwrap();
-            }
-            let ready = state.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
-            assert_eq!(ready - Instant::now(), Duration::from_millis(500));
+            assert_eq!(ready - Instant::now(), Duration::from_millis(10));
         }
 
         // doesn't overfill
         {
             // after 1s we should have an empty bucket again.
             tokio::time::advance(Duration::from_secs(1)).await;
-            assert!(state.bucket_is_empty(&config, Instant::now()));
+            assert!(state.bucket_is_empty(Instant::now()));
 
             // after 1s more, we should not over count the tokens and allow more than 200 requests.
             tokio::time::advance(Duration::from_secs(1)).await;
@@ -209,7 +185,7 @@ mod tests {
                 state.add_tokens(&config, Instant::now(), 1.0).unwrap();
             }
             let ready = state.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
-            assert_eq!(ready - Instant::now(), Duration::from_millis(500));
+            assert_eq!(ready - Instant::now(), Duration::from_millis(10));
         }
 
         // supports sustained rate over a long period
@@ -228,7 +204,7 @@ mod tests {
         {
             // start the bucket completely empty
             tokio::time::advance(Duration::from_secs(5)).await;
-            assert!(state.bucket_is_empty(&config, Instant::now()));
+            assert!(state.bucket_is_empty(Instant::now()));
 
             // requesting 200 tokens of space should take 200*cost = 2s
             // but we already have 1s available, so we wait 1s from start.
@@ -246,7 +222,7 @@ mod tests {
 
             // bucket should be completely full now
             let ready = state.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
-            assert_eq!(ready - Instant::now(), Duration::from_millis(500));
+            assert_eq!(ready - Instant::now(), Duration::from_millis(10));
         }
     }
 }

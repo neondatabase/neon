@@ -106,11 +106,10 @@ where
 
         let rate_limiter = RateLimiter {
             config: LeakyBucketConfig {
-                epoch: tokio::time::Instant::now(),
                 cost: time_cost,
                 bucket_width,
             },
-            state: Mutex::new(LeakyBucketState::new(end)),
+            state: Mutex::new(LeakyBucketState::new(tokio::time::Instant::now() + end)),
             queue: {
                 let queue = Notify::new();
                 queue.notify_one();

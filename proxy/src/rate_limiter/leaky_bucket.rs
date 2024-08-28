@@ -47,7 +47,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
         let mut entry = self
             .map
             .entry(key)
-            .or_insert_with(|| LeakyBucketState::new(now - self.config.epoch));
+            .or_insert_with(|| LeakyBucketState::new(now));
 
         entry.add_tokens(&self.config, now, n as f64).is_ok()
     }
@@ -61,7 +61,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
         let shard = thread_rng().gen_range(0..n);
         self.map.shards()[shard]
             .write()
-            .retain(|_, value| !value.get().bucket_is_empty(&self.config, now));
+            .retain(|_, value| !value.get().bucket_is_empty(now));
     }
 }
 
@@ -85,10 +85,8 @@ impl From<LeakyBucketConfig> for utils::leaky_bucket::LeakyBucketConfig {
         let spr = config.rps.recip();
         let bucket_width = Duration::from_secs_f64(config.max * spr);
         utils::leaky_bucket::LeakyBucketConfig {
-            epoch: Instant::now(),
             cost: Duration::from_secs_f64(spr),
             bucket_width,
-            drain_interval: Duration::ZERO,
         }
     }
 }
@@ -110,7 +108,7 @@ mod tests {
         assert_eq!(config.cost, Duration::from_millis(2));
         assert_eq!(config.bucket_width, Duration::from_secs(4));
 
-        let mut bucket = LeakyBucketState::new(Instant::now() - config.epoch);
+        let mut bucket = LeakyBucketState::new(Instant::now());
 
         // should work for 2000 requests this second
         for _ in 0..2000 {
@@ -118,7 +116,7 @@ mod tests {
         }
         bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
         assert_eq!(
-            bucket.end - (Instant::now() - config.epoch),
+            bucket.end - Instant::now(),
             config.bucket_width
         );
 
