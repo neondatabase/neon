@@ -722,13 +722,8 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		/* Approximate working set for the blocks assumed in this entry */
 		for (int i = 0; i < blocks_in_chunk; i++)
 		{
-			/*
-			 * Here, "hash" only needs the block offset into the chunk to be
-			 * block-specific, so let's use the cheaper hash-combine option,
-			 * rather than re-hashing the whole block.
-			 */
-			addSHLL(&lfc_ctl->wss_estimation,
-					hash_combine(hash, i));
+			tag.blockNum = blkno + i;
+			addSHLL(&lfc_ctl->wss_estimation, hash_bytes((uint8_t const*)&tag, sizeof(tag)));
 		}
 
 		if (entry == NULL)
@@ -762,7 +757,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			 */
 			if (entry->bitmap[(chunk_offs + i) / 32] & (1 << ((chunk_offs + i) % 32)))
 			{
-				mask[(buf_offset + i) / 32] |= 1 << ((buf_offset + i) % 32);
+				BITMAP_SET(mask, buf_offset + i);
 				iteration_hits++;
 			}
 			else
