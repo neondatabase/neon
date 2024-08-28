@@ -156,11 +156,6 @@ mod timestamp_conversions {
         }
     }
 
-    /// TODO: this function should be deprecated, likely malicious input could cause the .unwrap() to panic.
-    pub fn from_pg_timestamp(time: TimestampTz) -> SystemTime {
-        try_from_pg_timestamp(time).unwrap()
-    }
-
     pub fn try_from_pg_timestamp(time: TimestampTz) -> anyhow::Result<SystemTime> {
         let time: u64 = time
             .try_into()
@@ -172,7 +167,7 @@ mod timestamp_conversions {
     }
 }
 
-pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp, try_from_pg_timestamp};
+pub use timestamp_conversions::{to_pg_timestamp, try_from_pg_timestamp};
 
 // Returns (aligned) end_lsn of the last record in data_dir with WAL segments.
 // start_lsn must point to some previously known record boundary (beginning of
@@ -552,14 +547,14 @@ mod tests {
     #[test]
     fn test_ts_conversion() {
         let now = SystemTime::now();
-        let round_trip = from_pg_timestamp(to_pg_timestamp(now));
+        let round_trip = try_from_pg_timestamp(to_pg_timestamp(now)).unwrap();
 
         let now_since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let round_trip_since = round_trip.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         assert_eq!(now_since.as_micros(), round_trip_since.as_micros());
 
         let now_pg = get_current_timestamp();
-        let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
+        let round_trip_pg = to_pg_timestamp(try_from_pg_timestamp(now_pg).unwrap());
 
         assert_eq!(now_pg, round_trip_pg);
     }

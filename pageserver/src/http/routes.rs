@@ -871,7 +871,10 @@ async fn get_timestamp_of_lsn_handler(
 
     match result {
         Some(time) => {
-            let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
+            let time = format_rfc3339(
+                postgres_ffi::try_from_pg_timestamp(time).map_err(ApiError::InternalServerError)?,
+            )
+            .to_string();
             json_response(StatusCode::OK, time)
         }
         None => Err(ApiError::NotFound(
