@@ -33,7 +33,7 @@ pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
         let _entered = span.entered();
         if let Err(e) = lsn_lease_bg_task(compute, tenant_id, timeline_id, lsn) {
             // TODO: might need stronger error feedback than logging an warning.
-            warn!("Request failed: {e}");
+            warn!("Exited with error: {e}");
         }
     });
 }
