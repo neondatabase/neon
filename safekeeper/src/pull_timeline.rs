@@ -183,10 +183,10 @@ impl WalResidentTimeline {
                 "Replacing uploaded partial segment in in-mem control file: {replace:?}"
             );
 
-            let remote_timeline_path = wal_backup::remote_timeline_path(&self.tli.ttid)?;
+            let remote_timeline_path = &self.tli.remote_path;
             wal_backup::copy_partial_segment(
-                &replace.previous.remote_path(&remote_timeline_path),
-                &replace.current.remote_path(&remote_timeline_path),
+                &replace.previous.remote_path(remote_timeline_path),
+                &replace.current.remote_path(remote_timeline_path),
             )
             .await?;
         }

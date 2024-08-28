@@ -167,7 +167,7 @@ async fn redownload_partial_segment(
     partial: &PartialRemoteSegment,
 ) -> anyhow::Result<()> {
     let tmp_file = mgr.tli.timeline_dir().join("remote_partial.tmp");
-    let remote_segfile = remote_segment_path(mgr, partial)?;
+    let remote_segfile = remote_segment_path(mgr, partial);
 
     debug!(
         "redownloading partial segment: {} -> {}",
@@ -252,7 +252,7 @@ async fn do_validation(
         );
     }
 
-    let remote_segfile = remote_segment_path(mgr, partial)?;
+    let remote_segfile = remote_segment_path(mgr, partial);
     let mut remote_reader: std::pin::Pin<Box<dyn AsyncRead + Send + Sync>> =
         wal_backup::read_object(&remote_segfile, 0).await?;
 
@@ -279,12 +279,8 @@ fn local_segment_path(mgr: &Manager, partial: &PartialRemoteSegment) -> Utf8Path
     local_partial_segfile
 }
 
-fn remote_segment_path(
-    mgr: &Manager,
-    partial: &PartialRemoteSegment,
-) -> anyhow::Result<RemotePath> {
-    let remote_timeline_path = wal_backup::remote_timeline_path(&mgr.tli.ttid)?;
-    Ok(partial.remote_path(&remote_timeline_path))
+fn remote_segment_path(mgr: &Manager, partial: &PartialRemoteSegment) -> RemotePath {
+    partial.remote_path(&mgr.tli.remote_path)
 }
 
 /// Compare first `n` bytes of two readers. If the bytes differ, return an error.
