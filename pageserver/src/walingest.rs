@@ -2365,6 +2365,9 @@ mod tests {
         let _endpoint = Lsn::from_hex("1FFFF98").unwrap();
 
         let harness = TenantHarness::create("test_ingest_real_wal").await.unwrap();
+        let span = harness
+            .span()
+            .in_scope(|| info_span!("timeline_span", timeline_id=%TIMELINE_ID));
         let (tenant, ctx) = harness.load().await;
 
         let remote_initdb_path =
@@ -2416,6 +2419,7 @@ mod tests {
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .instrument(span.clone())
                     .await
                     .unwrap();
             }
