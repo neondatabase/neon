@@ -1164,6 +1164,8 @@ class NeonEnv:
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
+                # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
+                "availability_zone": "us-east-2a",
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -1192,11 +1194,7 @@ class NeonEnv:
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
-                NeonPageserver(
-                    self,
-                    ps_id,
-                    port=pageserver_port,
-                )
+                NeonPageserver(self, ps_id, port=pageserver_port, az_id=ps_cfg["availability_zone"])
             )
             cfg["pageservers"].append(ps_cfg)
 
@@ -2400,6 +2398,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "listen_http_port": node.service_port.http,
             "listen_pg_addr": "localhost",
             "listen_pg_port": node.service_port.pg,
+            "availability_zone_id": node.az_id,
         }
         log.info(f"node_register({body})")
         self.request(
@@ -2923,10 +2922,11 @@ class NeonPageserver(PgProtocol, LogUtils):
 
     TEMP_FILE_SUFFIX = "___temp"
 
-    def __init__(self, env: NeonEnv, id: int, port: PageserverPort):
+    def __init__(self, env: NeonEnv, id: int, port: PageserverPort, az_id: str):
         super().__init__(host="localhost", port=port.pg, user="cloud_admin")
         self.env = env
         self.id = id
+        self.az_id = az_id
         self.running = False
         self.service_port = port
         self.version = env.get_binary_version("pageserver")
