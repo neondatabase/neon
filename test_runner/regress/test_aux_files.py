@@ -1,5 +1,6 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    AuxFileStore,
     NeonEnvBuilder,
     logical_replication_sync,
 )
@@ -14,7 +15,7 @@ def test_aux_v2_config_switch(neon_env_builder: NeonEnvBuilder, vanilla_pg):
     timeline_id = env.initial_timeline
 
     tenant_config = client.tenant_config(tenant_id).effective_config
-    tenant_config["switch_aux_file_policy"] = "V2"
+    tenant_config["switch_aux_file_policy"] = AuxFileStore.V2
     client.set_tenant_config(tenant_id, tenant_config)
     # aux file v2 is enabled on the write path, so for now, it should be unset (or null)
     assert (
@@ -49,7 +50,10 @@ def test_aux_v2_config_switch(neon_env_builder: NeonEnvBuilder, vanilla_pg):
 
     with env.pageserver.http_client() as client:
         # aux file v2 flag should be enabled at this point
-        assert client.timeline_detail(tenant_id, timeline_id)["last_aux_file_policy"] == "V2"
+        assert (
+            client.timeline_detail(tenant_id, timeline_id)["last_aux_file_policy"]
+            == AuxFileStore.V2
+        )
     with env.pageserver.http_client() as client:
         tenant_config = client.tenant_config(tenant_id).effective_config
         tenant_config["switch_aux_file_policy"] = "V1"
@@ -59,7 +63,7 @@ def test_aux_v2_config_switch(neon_env_builder: NeonEnvBuilder, vanilla_pg):
             client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)[
                 "last_aux_file_policy"
             ]
-            == "V2"
+            == AuxFileStore.V2
         )
     env.pageserver.restart()
     with env.pageserver.http_client() as client:
@@ -68,5 +72,5 @@ def test_aux_v2_config_switch(neon_env_builder: NeonEnvBuilder, vanilla_pg):
             client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)[
                 "last_aux_file_policy"
             ]
-            == "V2"
+            == AuxFileStore.V2
         )

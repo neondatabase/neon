@@ -11,7 +11,7 @@
 use anyhow::bail;
 pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
 use pageserver_api::models::AuxFilePolicy;
-use pageserver_api::models::CompactionAlgorithm;
+use pageserver_api::models::CompactionAlgorithmSettings;
 use pageserver_api::models::EvictionPolicy;
 use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
@@ -280,7 +280,7 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub compaction_algorithm: Option<CompactionAlgorithm>,
+    pub compaction_algorithm: Option<CompactionAlgorithmSettings>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -371,7 +371,9 @@ impl TenantConfOpt {
                 .unwrap_or(global_conf.compaction_threshold),
             compaction_algorithm: self
                 .compaction_algorithm
-                .unwrap_or(global_conf.compaction_algorithm),
+                .as_ref()
+                .unwrap_or(&global_conf.compaction_algorithm)
+                .clone(),
             gc_horizon: self.gc_horizon.unwrap_or(global_conf.gc_horizon),
             gc_period: self.gc_period.unwrap_or(global_conf.gc_period),
             image_creation_threshold: self

@@ -24,9 +24,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, DownloadRemoteLayersTaskInfo,
-        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
-        LsnLease, TimelineState,
+        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
+        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
+        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -1667,7 +1667,7 @@ impl Timeline {
             return Ok(());
         }
 
-        match self.get_compaction_algorithm() {
+        match self.get_compaction_algorithm_settings().kind {
             CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
         }
@@ -2063,12 +2063,14 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
     }
 
-    fn get_compaction_algorithm(&self) -> CompactionAlgorithm {
+    fn get_compaction_algorithm_settings(&self) -> CompactionAlgorithmSettings {
         let tenant_conf = &self.tenant_conf.load();
         tenant_conf
             .tenant_conf
             .compaction_algorithm
-            .unwrap_or(self.conf.default_tenant_conf.compaction_algorithm)
+            .as_ref()
+            .unwrap_or(&self.conf.default_tenant_conf.compaction_algorithm)
+            .clone()
     }
 
     fn get_eviction_policy(&self) -> EvictionPolicy {
@@ -4572,6 +4574,14 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Vec<TimelineId>, anyhow::Error> {
         detach_ancestor::complete(self, tenant, prepared, ctx).await
+    }
+
+    /// Switch aux file policy and schedule upload to the index part.
+    pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
+        self.last_aux_file_policy.store(Some(policy));
+        self.remote_client
+            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
+        Ok(())
     }
 }
 

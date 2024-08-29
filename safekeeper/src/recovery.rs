@@ -37,17 +37,11 @@ use crate::{
 #[instrument(name = "recovery task", skip_all, fields(ttid = %tli.ttid))]
 pub async fn recovery_main(tli: Arc<Timeline>, conf: SafeKeeperConf) {
     info!("started");
-    let mut cancellation_rx = match tli.get_cancellation_rx() {
-        Ok(rx) => rx,
-        Err(_) => {
-            info!("timeline canceled during task start");
-            return;
-        }
-    };
 
+    let cancel = tli.cancel.clone();
     select! {
         _ = recovery_main_loop(tli, conf) => { unreachable!() }
-        _ = cancellation_rx.changed() => {
+        _ = cancel.cancelled() => {
             info!("stopped");
         }
     }

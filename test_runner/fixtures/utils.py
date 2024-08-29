@@ -4,10 +4,13 @@ import json
 import os
 import re
 import subprocess
+import tarfile
 import threading
 import time
+from hashlib import sha256
 from pathlib import Path
 from typing import (
+    IO,
     TYPE_CHECKING,
     Any,
     Callable,
@@ -15,8 +18,10 @@ from typing import (
     Iterable,
     List,
     Optional,
+    Set,
     Tuple,
     TypeVar,
+    Union,
 )
 from urllib.parse import urlencode
 
@@ -490,12 +495,57 @@ def assert_no_errors(log_file, service, allowed_errors):
 
 @enum.unique
 class AuxFileStore(str, enum.Enum):
-    V1 = "V1"
-    V2 = "V2"
-    CrossValidation = "CrossValidation"
+    V1 = "v1"
+    V2 = "v2"
+    CrossValidation = "cross-validation"
 
     def __repr__(self) -> str:
         return f"'aux-{self.value}'"
 
     def __str__(self) -> str:
         return f"'aux-{self.value}'"
+
+
+def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str]):
+    """
+    This is essentially:
+
+    lines=$(comm -3 \
+        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        | wc -l)
+    [ "$lines" = "0" ]
+
+    But in a more mac friendly fashion.
+    """
+    started_at = time.time()
+
+    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
+        assert reader is not None
+        digest = sha256(usedforsecurity=False)
+        while True:
+            buf = reader.read(64 * 1024)
+            if not buf:
+                break
+            digest.update(buf)
+        return digest.digest()
+
+    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
+        with tarfile.open(p) as f:
+            matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
+            ret = list(
+                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
+            )
+            ret.sort(key=lambda t: t[0])
+            return ret
+
+    left_list, right_list = map(build_hash_list, [left, right])
+
+    try:
+        assert len(left_list) == len(right_list)
+
+        for left_tuple, right_tuple in zip(left_list, right_list):
+            assert left_tuple == right_tuple
+    finally:
+        elapsed = time.time() - started_at
+        log.info(f"assert_pageserver_backups_equal completed in {elapsed}s")

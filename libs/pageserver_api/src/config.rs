@@ -230,7 +230,7 @@ pub struct TenantConfigToml {
     pub compaction_period: Duration,
     // Level0 delta layer threshold for compaction.
     pub compaction_threshold: usize,
-    pub compaction_algorithm: crate::models::CompactionAlgorithm,
+    pub compaction_algorithm: crate::models::CompactionAlgorithmSettings,
     // Determines how much history is retained, to allow
     // branching and read replicas at an older point in time.
     // The unit is #of bytes of WAL.
@@ -473,7 +473,9 @@ impl Default for TenantConfigToml {
             compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
                 .expect("cannot parse default compaction period"),
             compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
-            compaction_algorithm: DEFAULT_COMPACTION_ALGORITHM,
+            compaction_algorithm: crate::models::CompactionAlgorithmSettings {
+                kind: DEFAULT_COMPACTION_ALGORITHM,
+            },
             gc_horizon: DEFAULT_GC_HORIZON,
             gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
                 .expect("cannot parse default gc period"),

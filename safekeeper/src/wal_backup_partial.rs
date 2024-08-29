@@ -277,14 +277,6 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
 
-    let mut cancellation_rx = match tli.get_cancellation_rx() {
-        Ok(rx) => rx,
-        Err(_) => {
-            info!("timeline canceled during task start");
-            return;
-        }
-    };
-
     // sleep for random time to avoid thundering herd
     {
         let randf64 = rand::thread_rng().gen_range(0.0..1.0);
@@ -327,7 +319,7 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
                 && flush_lsn_rx.borrow().term == seg.term
             {
                 tokio::select! {
-                    _ = cancellation_rx.changed() => {
+                    _ = backup.tli.cancel.cancelled() => {
                         info!("timeline canceled");
                         return;
                     }
@@ -340,7 +332,7 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
         // if we don't have any data and zero LSNs, wait for something
         while flush_lsn_rx.borrow().lsn == Lsn(0) {
             tokio::select! {
-                _ = cancellation_rx.changed() => {
+                _ = backup.tli.cancel.cancelled() => {
                     info!("timeline canceled");
                     return;
                 }
@@ -357,7 +349,7 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
         // waiting until timeout expires OR segno changes
         'inner: loop {
             tokio::select! {
-                _ = cancellation_rx.changed() => {
+                _ = backup.tli.cancel.cancelled() => {
                     info!("timeline canceled");
                     return;
                 }

@@ -162,7 +162,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
         "compaction_algorithm": {
-            "kind": "Tiered",
+            "kind": "tiered",
         },
         "eviction_policy": {
             "kind": "LayerAccessThreshold",
@@ -190,7 +190,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "trace_read_requests": True,
         "walreceiver_connect_timeout": "13m",
         "image_layer_creation_check_threshold": 1,
-        "switch_aux_file_policy": "CrossValidation",
+        "switch_aux_file_policy": "cross-validation",
     }
 
     ps_http = env.pageserver.http_client()

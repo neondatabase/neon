@@ -1,11 +1,11 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
 use measured::{
-    label::StaticLabelSet,
+    label::{FixedCardinalitySet, LabelName, LabelSet, LabelValue, StaticLabelSet},
     metric::{histogram::Thresholds, name::MetricName},
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
-    MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
+    LabelGroup, MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
@@ -14,26 +14,36 @@ use tokio::time::{self, Instant};
 use crate::console::messages::ColdStartInfo;
 
 #[derive(MetricGroup)]
+#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
 pub struct Metrics {
     #[metric(namespace = "proxy")]
+    #[metric(init = ProxyMetrics::new(thread_pool))]
     pub proxy: ProxyMetrics,
 
     #[metric(namespace = "wake_compute_lock")]
     pub wake_compute_lock: ApiLockMetrics,
 }
 
+static SELF: OnceLock<Metrics> = OnceLock::new();
 impl Metrics {
+    pub fn install(thread_pool: Arc<ThreadPoolMetrics>) {
+        SELF.set(Metrics::new(thread_pool))
+            .ok()
+            .expect("proxy metrics must not be installed more than once");
+    }
+
     pub fn get() -> &'static Self {
-        static SELF: OnceLock<Metrics> = OnceLock::new();
-        SELF.get_or_init(|| Metrics {
-            proxy: ProxyMetrics::default(),
-            wake_compute_lock: ApiLockMetrics::new(),
-        })
+        #[cfg(test)]
+        return SELF.get_or_init(|| Metrics::new(Arc::new(ThreadPoolMetrics::new(0))));
+
+        #[cfg(not(test))]
+        SELF.get()
+            .expect("proxy metrics must be installed by the main() function")
     }
 }
 
 #[derive(MetricGroup)]
-#[metric(new())]
+#[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
 pub struct ProxyMetrics {
     #[metric(flatten)]
     pub db_connections: CounterPairVec<NumDbConnectionsGauge>,
@@ -129,6 +139,10 @@ pub struct ProxyMetrics {
 
     #[metric(namespace = "connect_compute_lock")]
     pub connect_compute_lock: ApiLockMetrics,
+
+    #[metric(namespace = "scram_pool")]
+    #[metric(init = thread_pool)]
+    pub scram_pool: Arc<ThreadPoolMetrics>,
 }
 
 #[derive(MetricGroup)]
@@ -144,12 +158,6 @@ pub struct ApiLockMetrics {
     /// Time it takes to acquire a semaphore lock
     #[metric(metadata = Thresholds::exponential_buckets(1e-4, 2.0))]
     pub semaphore_acquire_seconds: Histogram<16>,
-}
-
-impl Default for ProxyMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Default for ApiLockMetrics {
@@ -552,4 +560,53 @@ pub enum RedisEventsCount {
     CancelSession,
     PasswordUpdate,
     AllowedIpsUpdate,
+}
+
+pub struct ThreadPoolWorkers(usize);
+pub struct ThreadPoolWorkerId(pub usize);
+
+impl LabelValue for ThreadPoolWorkerId {
+    fn visit<V: measured::label::LabelVisitor>(&self, v: V) -> V::Output {
+        v.write_int(self.0 as i64)
+    }
+}
+
+impl LabelGroup for ThreadPoolWorkerId {
+    fn visit_values(&self, v: &mut impl measured::label::LabelGroupVisitor) {
+        v.write_value(LabelName::from_str("worker"), self);
+    }
+}
+
+impl LabelSet for ThreadPoolWorkers {
+    type Value<'a> = ThreadPoolWorkerId;
+
+    fn dynamic_cardinality(&self) -> Option<usize> {
+        Some(self.0)
+    }
+
+    fn encode(&self, value: Self::Value<'_>) -> Option<usize> {
+        (value.0 < self.0).then_some(value.0)
+    }
+
+    fn decode(&self, value: usize) -> Self::Value<'_> {
+        ThreadPoolWorkerId(value)
+    }
+}
+
+impl FixedCardinalitySet for ThreadPoolWorkers {
+    fn cardinality(&self) -> usize {
+        self.0
+    }
+}
+
+#[derive(MetricGroup)]
+#[metric(new(workers: usize))]
+pub struct ThreadPoolMetrics {
+    pub injector_queue_depth: Gauge,
+    #[metric(init = GaugeVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_queue_depth: GaugeVec<ThreadPoolWorkers>,
+    #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
+    #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
+    pub worker_task_skips_total: CounterVec<ThreadPoolWorkers>,
 }

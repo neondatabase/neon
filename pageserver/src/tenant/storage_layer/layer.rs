@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use tracing::Instrument;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
-use utils::sync::heavier_once_cell;
+use utils::sync::{gate, heavier_once_cell};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
@@ -1333,7 +1333,7 @@ impl LayerInner {
 
         is_good_to_continue(&rx.borrow_and_update())?;
 
-        let Ok(_gate) = timeline.gate.enter() else {
+        let Ok(gate) = timeline.gate.enter() else {
             return Err(EvictionCancelled::TimelineGone);
         };
 
@@ -1421,7 +1421,7 @@ impl LayerInner {
         Self::spawn_blocking(move || {
             let _span = span.entered();
 
-            let res = self.evict_blocking(&timeline, &permit);
+            let res = self.evict_blocking(&timeline, &gate, &permit);
 
             let waiters = self.inner.initializer_count();
 
@@ -1447,6 +1447,7 @@ impl LayerInner {
     fn evict_blocking(
         &self,
         timeline: &Timeline,
+        _gate: &gate::GateGuard,
         _permit: &heavier_once_cell::InitPermit,
     ) -> Result<(), EvictionCancelled> {
         // now accesses to `self.inner.get_or_init*` wait on the semaphore or the `_permit`

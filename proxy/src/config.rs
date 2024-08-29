@@ -2,6 +2,7 @@ use crate::{
     auth::{self, backend::AuthRateLimiter},
     console::locks::ApiLocks,
     rate_limiter::RateBucketInfo,
+    scram::threadpool::ThreadPool,
     serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
     Host,
 };
@@ -61,6 +62,7 @@ pub struct HttpConfig {
 }
 
 pub struct AuthenticationConfig {
+    pub thread_pool: Arc<ThreadPool>,
     pub scram_protocol_timeout: tokio::time::Duration,
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,

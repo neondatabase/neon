@@ -373,31 +373,29 @@ impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
                 "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', $1))",
                 &[&(repeats as i32)],
             )?;
-            break;
-        }
-        info!(
-            "current_wal_insert_lsn={}, XLOG_SIZE_OF_XLOG_RECORD={}",
-            client.pg_current_wal_insert_lsn()?,
-            XLOG_SIZE_OF_XLOG_RECORD
-        );
+            info!(
+                "current_wal_insert_lsn={}, XLOG_SIZE_OF_XLOG_RECORD={}",
+                client.pg_current_wal_insert_lsn()?,
+                XLOG_SIZE_OF_XLOG_RECORD
+            );
 
-        // Emit the XLOG_SWITCH
-        let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
-        let xlog_switch_record_end: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
-        let next_segment = PgLsn::from(0x0200_0000);
-        ensure!(
-            xlog_switch_record_end < next_segment,
-            "XLOG_SWITCH record ended on or after the expected segment boundary: {} > {}",
-            xlog_switch_record_end,
-            next_segment
-        );
-        ensure!(
-            u64::from(xlog_switch_record_end) as usize % XLOG_BLCKSZ == XLOG_SIZE_OF_XLOG_SHORT_PHD,
-            "XLOG_SWITCH message ended not on page boundary: {}, offset = {}",
-            xlog_switch_record_end,
-            u64::from(xlog_switch_record_end) as usize % XLOG_BLCKSZ
-        );
-        Ok(vec![before_xlog_switch, xlog_switch_record_end])
+            // Emit the XLOG_SWITCH
+            let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
+            let xlog_switch_record_end: PgLsn =
+                client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
+
+            if u64::from(xlog_switch_record_end) as usize % XLOG_BLCKSZ
+                != XLOG_SIZE_OF_XLOG_SHORT_PHD
+            {
+                warn!(
+                    "XLOG_SWITCH message ended not on page boundary: {}, offset = {}, repeating",
+                    xlog_switch_record_end,
+                    u64::from(xlog_switch_record_end) as usize % XLOG_BLCKSZ
+                );
+                continue;
+            }
+            return Ok(vec![before_xlog_switch, xlog_switch_record_end]);
+        }
     }
 }
 

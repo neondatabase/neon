@@ -4,15 +4,17 @@ use std::convert::Infallible;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use tokio::task::yield_now;
 
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
 };
+use super::pbkdf2::Pbkdf2;
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
+use super::threadpool::ThreadPool;
 use super::ScramKey;
 use crate::config;
+use crate::intern::EndpointIdInt;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
 /// The only channel binding mode we currently support.
@@ -74,37 +76,18 @@ impl<'a> Exchange<'a> {
     }
 }
 
-// copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
-async fn pbkdf2(str: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
-    let hmac = Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
-    let mut prev = hmac
-        .clone()
-        .chain_update(salt)
-        .chain_update(1u32.to_be_bytes())
-        .finalize()
-        .into_bytes();
-
-    let mut hi = prev;
-
-    for i in 1..iterations {
-        prev = hmac.clone().chain_update(prev).finalize().into_bytes();
-
-        for (hi, prev) in hi.iter_mut().zip(prev) {
-            *hi ^= prev;
-        }
-        // yield every ~250us
-        // hopefully reduces tail latencies
-        if i % 1024 == 0 {
-            yield_now().await
-        }
-    }
-
-    hi.into()
-}
-
 // copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L236-L248>
-async fn derive_client_key(password: &[u8], salt: &[u8], iterations: u32) -> ScramKey {
-    let salted_password = pbkdf2(password, salt, iterations).await;
+async fn derive_client_key(
+    pool: &ThreadPool,
+    endpoint: EndpointIdInt,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+) -> ScramKey {
+    let salted_password = pool
+        .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
+        .await
+        .expect("job should not be cancelled");
 
     let make_key = |name| {
         let key = Hmac::<Sha256>::new_from_slice(&salted_password)
@@ -119,11 +102,13 @@ async fn derive_client_key(password: &[u8], salt: &[u8], iterations: u32) -> Scr
 }
 
 pub async fn exchange(
+    pool: &ThreadPool,
+    endpoint: EndpointIdInt,
     secret: &ServerSecret,
     password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
     let salt = base64::decode(&secret.salt_base64)?;
-    let client_key = derive_client_key(password, &salt, secret.iterations).await;
+    let client_key = derive_client_key(pool, endpoint, password, &salt, secret.iterations).await;
 
     if secret.is_password_invalid(&client_key).into() {
         Ok(sasl::Outcome::Failure("password doesn't match"))

@@ -9,7 +9,7 @@ use utils::backoff;
 use utils::id::NodeId;
 
 use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -29,9 +29,10 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS};
+use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS, WAL_BACKUP_TASKS};
 use crate::timeline::{PeerInfo, Timeline};
-use crate::{GlobalTimelines, SafeKeeperConf};
+use crate::timeline_manager::StateSnapshot;
+use crate::{GlobalTimelines, SafeKeeperConf, WAL_BACKUP_RUNTIME};
 
 use once_cell::sync::OnceCell;
 
@@ -41,35 +42,84 @@ const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
 /// Default buffer size when interfacing with [`tokio::fs::File`].
 const BUFFER_SIZE: usize = 32 * 1024;
 
-/// Check whether wal backup is required for timeline. If yes, mark that launcher is
-/// aware of current status and return the timeline.
-async fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
-    match GlobalTimelines::get(ttid).ok() {
-        Some(tli) => {
-            tli.wal_backup_attend().await;
-            Some(tli)
-        }
-        None => None,
-    }
-}
-
-struct WalBackupTaskHandle {
+pub struct WalBackupTaskHandle {
     shutdown_tx: Sender<()>,
     handle: JoinHandle<()>,
 }
 
-struct WalBackupTimelineEntry {
-    timeline: Arc<Timeline>,
-    handle: Option<WalBackupTaskHandle>,
+/// Do we have anything to upload to S3, i.e. should safekeepers run backup activity?
+pub fn is_wal_backup_required(
+    wal_seg_size: usize,
+    num_computes: usize,
+    state: &StateSnapshot,
+) -> bool {
+    num_computes > 0 ||
+    // Currently only the whole segment is offloaded, so compare segment numbers.
+    (state.commit_lsn.segment_number(wal_seg_size) > state.backup_lsn.segment_number(wal_seg_size))
 }
 
-async fn shut_down_task(ttid: TenantTimelineId, entry: &mut WalBackupTimelineEntry) {
-    if let Some(wb_handle) = entry.handle.take() {
+/// Based on peer information determine which safekeeper should offload; if it
+/// is me, run (per timeline) task, if not yet. OTOH, if it is not me and task
+/// is running, kill it.
+pub async fn update_task(
+    conf: &SafeKeeperConf,
+    ttid: TenantTimelineId,
+    need_backup: bool,
+    state: &StateSnapshot,
+    entry: &mut Option<WalBackupTaskHandle>,
+) {
+    let (offloader, election_dbg_str) =
+        determine_offloader(&state.peers, state.backup_lsn, ttid, conf);
+    let elected_me = Some(conf.my_id) == offloader;
+
+    let should_task_run = need_backup && elected_me;
+
+    // start or stop the task
+    if should_task_run != (entry.is_some()) {
+        if should_task_run {
+            info!("elected for backup: {}", election_dbg_str);
+
+            let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+            let timeline_dir = conf.timeline_dir(&ttid);
+
+            let async_task = backup_task_main(
+                ttid,
+                timeline_dir,
+                conf.workdir.clone(),
+                conf.backup_parallel_jobs,
+                shutdown_rx,
+            );
+
+            let handle = if conf.current_thread_runtime {
+                tokio::spawn(async_task)
+            } else {
+                WAL_BACKUP_RUNTIME.spawn(async_task)
+            };
+
+            *entry = Some(WalBackupTaskHandle {
+                shutdown_tx,
+                handle,
+            });
+        } else {
+            if !need_backup {
+                // don't need backup at all
+                info!("stepping down from backup, need_backup={}", need_backup);
+            } else {
+                // someone else has been elected
+                info!("stepping down from backup: {}", election_dbg_str);
+            }
+            shut_down_task(entry).await;
+        }
+    }
+}
+
+async fn shut_down_task(entry: &mut Option<WalBackupTaskHandle>) {
+    if let Some(wb_handle) = entry.take() {
         // Tell the task to shutdown. Error means task exited earlier, that's ok.
         let _ = wb_handle.shutdown_tx.send(()).await;
         // Await the task itself. TODO: restart panicked tasks earlier.
         if let Err(e) = wb_handle.handle.await {
-            warn!("WAL backup task for {} panicked: {}", ttid, e);
+            warn!("WAL backup task panicked: {}", e);
         }
     }
 }
@@ -126,49 +176,6 @@ fn determine_offloader(
     }
 }
 
-/// Based on peer information determine which safekeeper should offload; if it
-/// is me, run (per timeline) task, if not yet. OTOH, if it is not me and task
-/// is running, kill it.
-async fn update_task(
-    conf: &SafeKeeperConf,
-    ttid: TenantTimelineId,
-    entry: &mut WalBackupTimelineEntry,
-) {
-    let alive_peers = entry.timeline.get_peers(conf).await;
-    let wal_backup_lsn = entry.timeline.get_wal_backup_lsn().await;
-    let (offloader, election_dbg_str) =
-        determine_offloader(&alive_peers, wal_backup_lsn, ttid, conf);
-    let elected_me = Some(conf.my_id) == offloader;
-
-    if elected_me != (entry.handle.is_some()) {
-        if elected_me {
-            info!("elected for backup: {}", election_dbg_str);
-
-            let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-            let timeline_dir = conf.timeline_dir(&ttid);
-
-            let handle = tokio::spawn(
-                backup_task_main(
-                    ttid,
-                    timeline_dir,
-                    conf.workdir.clone(),
-                    conf.backup_parallel_jobs,
-                    shutdown_rx,
-                )
-                .in_current_span(),
-            );
-
-            entry.handle = Some(WalBackupTaskHandle {
-                shutdown_tx,
-                handle,
-            });
-        } else {
-            info!("stepping down from backup: {}", election_dbg_str);
-            shut_down_task(ttid, entry).await;
-        }
-    }
-}
-
 static REMOTE_STORAGE: OnceCell<Option<GenericRemoteStorage>> = OnceCell::new();
 
 // Storage must be configured and initialized when this is called.
@@ -190,67 +197,6 @@ pub fn init_remote_storage(conf: &SafeKeeperConf) {
     });
 }
 
-const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
-
-/// Sits on wal_backup_launcher_rx and starts/stops per timeline wal backup
-/// tasks. Having this in separate task simplifies locking, allows to reap
-/// panics and separate elections from offloading itself.
-pub async fn wal_backup_launcher_task_main(
-    conf: SafeKeeperConf,
-    mut wal_backup_launcher_rx: Receiver<TenantTimelineId>,
-) -> anyhow::Result<()> {
-    info!(
-        "WAL backup launcher started, remote config {:?}",
-        conf.remote_storage
-    );
-
-    // Presence in this map means launcher is aware s3 offloading is needed for
-    // the timeline, but task is started only if it makes sense for to offload
-    // from this safekeeper.
-    let mut tasks: HashMap<TenantTimelineId, WalBackupTimelineEntry> = HashMap::new();
-
-    let mut ticker = tokio::time::interval(Duration::from_millis(CHECK_TASKS_INTERVAL_MSEC));
-    loop {
-        tokio::select! {
-            ttid = wal_backup_launcher_rx.recv() => {
-                // channel is never expected to get closed
-                let ttid = ttid.unwrap();
-                if !conf.is_wal_backup_enabled() {
-                    continue; /* just drain the channel and do nothing */
-                }
-                async {
-                    let timeline = is_wal_backup_required(ttid).await;
-                    // do we need to do anything at all?
-                    if timeline.is_some() != tasks.contains_key(&ttid) {
-                        if let Some(timeline) = timeline {
-                            // need to start the task
-                            let entry = tasks.entry(ttid).or_insert(WalBackupTimelineEntry {
-                                timeline,
-                                handle: None,
-                            });
-                            update_task(&conf, ttid, entry).await;
-                        } else {
-                            // need to stop the task
-                            info!("stopping WAL backup task");
-                            let mut entry = tasks.remove(&ttid).unwrap();
-                            shut_down_task(ttid, &mut entry).await;
-                        }
-                    }
-                }.instrument(info_span!("WAL backup", ttid = %ttid)).await;
-            }
-            // For each timeline needing offloading, check if this safekeeper
-            // should do the job and start/stop the task accordingly.
-            _ = ticker.tick() => {
-                for (ttid, entry) in tasks.iter_mut() {
-                    update_task(&conf, *ttid, entry)
-                        .instrument(info_span!("WAL backup", ttid = %ttid))
-                        .await;
-                }
-            }
-        }
-    }
-}
-
 struct WalBackupTask {
     timeline: Arc<Timeline>,
     timeline_dir: Utf8PathBuf,
@@ -261,6 +207,7 @@ struct WalBackupTask {
 }
 
 /// Offload single timeline.
+#[instrument(name = "WAL backup", skip_all, fields(ttid = %ttid))]
 async fn backup_task_main(
     ttid: TenantTimelineId,
     timeline_dir: Utf8PathBuf,
@@ -268,6 +215,8 @@ async fn backup_task_main(
     parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
+    let _guard = WAL_BACKUP_TASKS.guard();
+
     info!("started");
     let res = GlobalTimelines::get(ttid);
     if let Err(e) = res {

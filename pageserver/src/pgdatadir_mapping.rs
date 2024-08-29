@@ -1480,11 +1480,24 @@ impl<'a> DatadirModification<'a> {
             // Allowed switch path:
             // * no aux files -> v1/v2/cross-validation
             // * cross-validation->v2
+
+            let current_policy = if current_policy.is_none() {
+                // This path will only be hit once per tenant: we will decide the final policy in this code block.
+                // The next call to `put_file` will always have `last_aux_file_policy != None`.
+                let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+                let aux_files_key_v1 = self.tline.list_aux_files_v1(lsn, ctx).await?;
+                if aux_files_key_v1.is_empty() {
+                    None
+                } else {
+                    self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
+                    Some(AuxFilePolicy::V1)
+                }
+            } else {
+                current_policy
+            };
+
             if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
-                self.tline.last_aux_file_policy.store(Some(switch_policy));
-                self.tline
-                    .remote_client
-                    .schedule_index_upload_for_aux_file_policy_update(Some(switch_policy))?;
+                self.tline.do_switch_aux_policy(switch_policy)?;
                 info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
                 switch_policy
             } else {
@@ -1773,6 +1786,12 @@ impl<'a> DatadirModification<'a> {
         }
         let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
         self.tline.get(key, lsn, ctx).await
+    }
+
+    /// Only used during unit tests, force putting a key into the modification.
+    #[cfg(test)]
+    pub(crate) fn put_for_test(&mut self, key: Key, val: Value) {
+        self.put(key, val);
     }
 
     fn put(&mut self, key: Key, val: Value) {

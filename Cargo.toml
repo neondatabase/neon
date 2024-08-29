@@ -41,6 +41,7 @@ license = "Apache-2.0"
 
 ## All dependency versions, used in the project
 [workspace.dependencies]
+ahash = "0.8"
 anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
@@ -74,6 +75,7 @@ clap = { version = "4.0", features = ["derive"] }
 comfy-table = "6.1"
 const_format = "0.2"
 crc32c = "0.6"
+crossbeam-deque = "0.8.5"
 crossbeam-utils = "0.8.5"
 dashmap = { version = "5.5.0", features = ["raw-api"] }
 either = "1.8"

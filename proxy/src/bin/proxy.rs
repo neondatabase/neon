@@ -27,6 +27,7 @@ use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use proxy::redis::elasticache;
 use proxy::redis::notifications;
+use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
 use proxy::usage_metrics;
@@ -132,6 +133,9 @@ struct ProxyCliArgs {
     /// timeout for scram authentication protocol
     #[clap(long, default_value = "15s", value_parser = humantime::parse_duration)]
     scram_protocol_timeout: tokio::time::Duration,
+    /// size of the threadpool for password hashing
+    #[clap(long, default_value_t = 4)]
+    scram_thread_pool_size: u8,
     /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     require_client_ip: bool,
@@ -489,6 +493,9 @@ async fn main() -> anyhow::Result<()> {
 
 /// ProxyConfig is created at proxy startup, and lives forever.
 fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
+    let thread_pool = ThreadPool::new(args.scram_thread_pool_size);
+    Metrics::install(thread_pool.metrics.clone());
+
     let tls_config = match (&args.tls_key, &args.tls_cert) {
         (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
             key_path,
@@ -624,6 +631,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
     };
     let authentication_config = AuthenticationConfig {
+        thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),

@@ -20,7 +20,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::Uri;
-use tokio::sync::mpsc;
 
 use tracing::*;
 use utils::pid_file;
@@ -30,13 +29,13 @@ use safekeeper::defaults::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
     DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
+use safekeeper::remove_wal;
 use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, WAL_SERVICE_RUNTIME};
 use safekeeper::{control_file, BROKER_RUNTIME};
 use safekeeper::{http, WAL_REMOVER_RUNTIME};
-use safekeeper::{remove_wal, WAL_BACKUP_RUNTIME};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
@@ -377,8 +376,6 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
     metrics::register_internal(Box::new(timeline_collector))?;
 
-    let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
-
     wal_backup::init_remote_storage(&conf);
 
     // Keep handles to main tasks to die if any of them disappears.
@@ -391,19 +388,9 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let current_thread_rt = conf
         .current_thread_runtime
         .then(|| Handle::try_current().expect("no runtime in main"));
-    let conf_ = conf.clone();
-    let wal_backup_handle = current_thread_rt
-        .as_ref()
-        .unwrap_or_else(|| WAL_BACKUP_RUNTIME.handle())
-        .spawn(wal_backup::wal_backup_launcher_task_main(
-            conf_,
-            wal_backup_launcher_rx,
-        ))
-        .map(|res| ("WAL backup launcher".to_owned(), res));
-    tasks_handles.push(Box::pin(wal_backup_handle));
 
     // Load all timelines from disk to memory.
-    GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx).await?;
+    GlobalTimelines::init(conf.clone()).await?;
 
     let conf_ = conf.clone();
     // Run everything in current thread rt, if asked.

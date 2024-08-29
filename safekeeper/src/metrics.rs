@@ -11,8 +11,9 @@ use futures::Future;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    register_int_counter, register_int_counter_pair_vec, register_int_counter_vec, Gauge,
-    IntCounter, IntCounterPairVec, IntCounterVec, IntGaugeVec,
+    register_int_counter, register_int_counter_pair, register_int_counter_pair_vec,
+    register_int_counter_vec, Gauge, IntCounter, IntCounterPair, IntCounterPairVec, IntCounterVec,
+    IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
@@ -161,6 +162,29 @@ pub static PARTIAL_BACKUP_UPLOADED_BYTES: Lazy<IntCounter> = Lazy::new(|| {
         "Number of bytes uploaded to the S3 during partial backup"
     )
     .expect("Failed to register safekeeper_partial_backup_uploaded_bytes_total counter")
+});
+pub static MANAGER_ITERATIONS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_manager_iterations_total",
+        "Number of iterations of the timeline manager task"
+    )
+    .expect("Failed to register safekeeper_manager_iterations_total counter")
+});
+pub static MANAGER_ACTIVE_CHANGES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_manager_active_changes_total",
+        "Number of timeline active status changes in the timeline manager task"
+    )
+    .expect("Failed to register safekeeper_manager_active_changes_total counter")
+});
+pub static WAL_BACKUP_TASKS: Lazy<IntCounterPair> = Lazy::new(|| {
+    register_int_counter_pair!(
+        "safekeeper_wal_backup_tasks_started_total",
+        "Number of active WAL backup tasks",
+        "safekeeper_wal_backup_tasks_finished_total",
+        "Number of finished WAL backup tasks",
+    )
+    .expect("Failed to register safekeeper_wal_backup_tasks_finished_total counter")
 });
 
 pub const LABEL_UNKNOWN: &str = "unknown";
@@ -614,8 +638,7 @@ impl Collector for TimelineCollector {
         self.written_wal_seconds.reset();
         self.flushed_wal_seconds.reset();
 
-        let timelines = GlobalTimelines::get_all();
-        let timelines_count = timelines.len();
+        let timelines_count = GlobalTimelines::get_all().len();
         let mut active_timelines_count = 0;
 
         // Prometheus Collector is sync, and data is stored under async lock. To
@@ -746,9 +769,9 @@ impl Collector for TimelineCollector {
 
 async fn collect_timeline_metrics() -> Vec<FullTimelineInfo> {
     let mut res = vec![];
-    let timelines = GlobalTimelines::get_all();
+    let active_timelines = GlobalTimelines::get_global_broker_active_set().get_all();
 
-    for tli in timelines {
+    for tli in active_timelines {
         if let Some(info) = tli.info_for_metrics().await {
             res.push(info);
         }

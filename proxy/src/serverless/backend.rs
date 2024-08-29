@@ -15,6 +15,7 @@ use crate::{
     },
     context::RequestMonitoring,
     error::{ErrorKind, ReportableError, UserFacingError},
+    intern::EndpointIdInt,
     proxy::{connect_compute::ConnectMechanism, retry::ShouldRetry},
     rate_limiter::EndpointRateLimiter,
     Host,
@@ -66,8 +67,14 @@ impl PoolingBackend {
                 return Err(AuthError::auth_failed(&*user_info.user));
             }
         };
-        let auth_outcome =
-            crate::auth::validate_password_and_exchange(&conn_info.password, secret).await?;
+        let ep = EndpointIdInt::from(&conn_info.user_info.endpoint);
+        let auth_outcome = crate::auth::validate_password_and_exchange(
+            &config.thread_pool,
+            ep,
+            &conn_info.password,
+            secret,
+        )
+        .await?;
         let res = match auth_outcome {
             crate::sasl::Outcome::Success(key) => {
                 info!("user successfully authenticated");

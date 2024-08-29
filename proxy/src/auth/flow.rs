@@ -5,12 +5,14 @@ use crate::{
     config::TlsServerEndPoint,
     console::AuthSecret,
     context::RequestMonitoring,
-    sasl, scram,
+    intern::EndpointIdInt,
+    sasl,
+    scram::{self, threadpool::ThreadPool},
     stream::{PqStream, Stream},
 };
 use postgres_protocol::authentication::sasl::{SCRAM_SHA_256, SCRAM_SHA_256_PLUS};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
-use std::io;
+use std::{io, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
@@ -53,7 +55,11 @@ impl AuthMethod for PasswordHack {
 
 /// Use clear-text password auth called `password` in docs
 /// <https://www.postgresql.org/docs/current/auth-password.html>
-pub struct CleartextPassword(pub AuthSecret);
+pub struct CleartextPassword {
+    pub pool: Arc<ThreadPool>,
+    pub endpoint: EndpointIdInt,
+    pub secret: AuthSecret,
+}
 
 impl AuthMethod for CleartextPassword {
     #[inline(always)]
@@ -126,7 +132,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
             .strip_suffix(&[0])
             .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
 
-        let outcome = validate_password_and_exchange(password, self.state.0).await?;
+        let outcome = validate_password_and_exchange(
+            &self.state.pool,
+            self.state.endpoint,
+            password,
+            self.state.secret,
+        )
+        .await?;
 
         if let sasl::Outcome::Success(_) = &outcome {
             self.stream.write_message_noflush(&Be::AuthenticationOk)?;
@@ -181,6 +193,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
 }
 
 pub(crate) async fn validate_password_and_exchange(
+    pool: &ThreadPool,
+    endpoint: EndpointIdInt,
     password: &[u8],
     secret: AuthSecret,
 ) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
@@ -194,7 +208,7 @@ pub(crate) async fn validate_password_and_exchange(
         }
         // perform scram authentication as both client and server to validate the keys
         AuthSecret::Scram(scram_secret) => {
-            let outcome = crate::scram::exchange(&scram_secret, password).await?;
+            let outcome = crate::scram::exchange(pool, endpoint, &scram_secret, password).await?;
 
             let client_key = match outcome {
                 sasl::Outcome::Success(client_key) => client_key,

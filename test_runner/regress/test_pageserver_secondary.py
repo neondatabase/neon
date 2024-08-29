@@ -578,7 +578,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
     default_download_period_secs = 60
 
     # The upload period, which will also be the download once the secondary has seen its first heatmap
-    upload_period_secs = 20
+    upload_period_secs = 30
 
     for _i in range(0, tenant_count):
         tenant_id = TenantId.generate()
@@ -596,11 +596,26 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
 
         tenant_timelines[tenant_id] = [timeline_a, timeline_b]
 
+    def await_log(pageserver, deadline, expression):
+        """
+        Wrapper around assert_log_contains that waits with a deadline rather than timeout
+        """
+        now = time.time()
+        if now > deadline:
+            raise RuntimeError(f"Timed out waiting for {expression}")
+        else:
+            timeout = int(deadline - now) + 1
+            try:
+                wait_until(timeout, 1, lambda: pageserver.assert_log_contains(expression))  # type: ignore
+            except:
+                log.error(f"Timed out waiting for '{expression}'")
+                raise
+
     t_start = time.time()
 
     # Wait long enough that the background downloads should happen; we expect all the inital layers
     # of all the initial timelines to show up on the secondary location of each tenant.
-    time.sleep(default_download_period_secs * 1.5)
+    initial_download_deadline = time.time() + default_download_period_secs * 3
 
     for tenant_id, timelines in tenant_timelines.items():
         attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
@@ -608,8 +623,24 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         # We only have two: the other one must be secondary
         ps_secondary = next(p for p in env.pageservers if p != ps_attached)
 
+        now = time.time()
+        if now > initial_download_deadline:
+            raise RuntimeError("Timed out waiting for initial secondary download")
+        else:
+            for timeline_id in timelines:
+                log.info(
+                    f"Waiting for downloads of timeline {timeline_id} on secondary pageserver {ps_secondary.id}"
+                )
+                await_log(
+                    ps_secondary,
+                    initial_download_deadline,
+                    f".*{timeline_id}.*Wrote timeline_detail.*",
+                )
+
         for timeline_id in timelines:
-            log.info(f"Checking for secondary timeline {timeline_id} on node {ps_secondary.id}")
+            log.info(
+                f"Checking for secondary timeline downloads {timeline_id} on node {ps_secondary.id}"
+            )
             # One or more layers should be present for all timelines
             assert ps_secondary.list_layers(tenant_id, timeline_id)
 
@@ -617,13 +648,23 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         env.storage_controller.pageserver_api().timeline_delete(tenant_id, timelines[1])
 
     # Wait long enough for the secondary locations to see the deletion: 2x period plus a grace factor
-    time.sleep(upload_period_secs * 2.5)
+    deletion_deadline = time.time() + upload_period_secs * 3
 
     for tenant_id, timelines in tenant_timelines.items():
         attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
         ps_attached = env.get_pageserver(attached_to_id)
         # We only have two: the other one must be secondary
         ps_secondary = next(p for p in env.pageservers if p != ps_attached)
+
+        expect_del_timeline = timelines[1]
+        log.info(
+            f"Waiting for deletion of timeline {expect_del_timeline} on secondary pageserver {ps_secondary.id}"
+        )
+        await_log(
+            ps_secondary,
+            deletion_deadline,
+            f".*Timeline no longer in heatmap.*{expect_del_timeline}.*",
+        )
 
         # This one was not deleted
         assert ps_secondary.list_layers(tenant_id, timelines[0])
@@ -632,7 +673,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         log.info(
             f"Checking for secondary timeline deletion {tenant_id}/{timeline_id} on node {ps_secondary.id}"
         )
-        assert not ps_secondary.list_layers(tenant_id, timelines[1])
+        assert not ps_secondary.list_layers(tenant_id, expect_del_timeline)
 
     t_end = time.time()
 
