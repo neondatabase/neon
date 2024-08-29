@@ -600,13 +600,9 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
         Some(("import", import_match)) => {
             let tenant_id = get_tenant_id(import_match, env)?;
             let timeline_id = parse_timeline_id(import_match)?.expect("No timeline id provided");
-            let name = import_match
-                .get_one::<String>("node-name")
-                .ok_or_else(|| anyhow!("No node name provided"))?;
-            let update_catalog = import_match
-                .get_one::<bool>("update-catalog")
-                .cloned()
-                .unwrap_or_default();
+            let branch_name = import_match
+                .get_one::<String>("branch-name")
+                .ok_or_else(|| anyhow!("No branch name provided"))?;
 
             // Parse base inputs
             let base_tarfile = import_match
@@ -633,24 +629,11 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let mut cplane = ComputeControlPlane::load(env.clone())?;
             println!("Importing timeline into pageserver ...");
             pageserver
                 .timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)
                 .await?;
-            env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
-
-            println!("Creating endpoint for imported timeline ...");
-            cplane.new_endpoint(
-                name,
-                tenant_id,
-                timeline_id,
-                None,
-                None,
-                pg_version,
-                ComputeMode::Primary,
-                !update_catalog,
-            )?;
+            env.register_branch_mapping(branch_name.to_string(), tenant_id, timeline_id)?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -1487,8 +1470,7 @@ fn cli() -> Command {
                 .about("Import timeline from basebackup directory")
                 .arg(tenant_id_arg.clone())
                 .arg(timeline_id_arg.clone())
-                .arg(Arg::new("node-name").long("node-name")
-                    .help("Name to assign to the imported timeline"))
+                .arg(branch_name_arg.clone())
                 .arg(Arg::new("base-tarfile")
                     .long("base-tarfile")
                     .value_parser(value_parser!(PathBuf))
@@ -1504,7 +1486,6 @@ fn cli() -> Command {
                 .arg(Arg::new("end-lsn").long("end-lsn")
                     .help("Lsn the basebackup ends at"))
                 .arg(pg_version_arg.clone())
-                .arg(update_catalog.clone())
             )
         ).subcommand(
             Command::new("tenant")

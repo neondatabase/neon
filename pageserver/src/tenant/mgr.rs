@@ -495,17 +495,8 @@ pub async fn init_tenant_mgr(
         let mut location_conf = match location_conf {
             Ok(l) => l,
             Err(e) => {
-                warn!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Marking tenant broken, failed to {e:#}");
-
-                tenants.insert(
-                    tenant_shard_id,
-                    TenantSlot::Attached(Tenant::create_broken_tenant(
-                        conf,
-                        tenant_shard_id,
-                        resources.remote_storage.clone(),
-                        format!("{}", e),
-                    )),
-                );
+                // This should only happen in the case of a serialization bug or critical local I/O error: we cannot load this tenant
+                error!(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), "Failed to load tenant config, failed to {e:#}");
                 continue;
             }
         };
@@ -687,8 +678,7 @@ fn tenant_spawn(
         "Cannot load tenant from empty directory {tenant_path:?}"
     );
 
-    let remote_storage = resources.remote_storage.clone();
-    let tenant = match Tenant::spawn(
+    let tenant = Tenant::spawn(
         conf,
         tenant_shard_id,
         resources,
@@ -697,13 +687,7 @@ fn tenant_spawn(
         init_order,
         mode,
         ctx,
-    ) {
-        Ok(tenant) => tenant,
-        Err(e) => {
-            error!("Failed to spawn tenant {tenant_shard_id}, reason: {e:#}");
-            Tenant::create_broken_tenant(conf, tenant_shard_id, remote_storage, format!("{e:#}"))
-        }
-    };
+    );
 
     Ok(tenant)
 }

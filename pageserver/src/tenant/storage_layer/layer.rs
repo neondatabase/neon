@@ -93,16 +93,12 @@ pub(crate) struct Layer(Arc<LayerInner>);
 
 impl std::fmt::Display for Layer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if matches!(self.0.generation, Generation::Broken) {
-            write!(f, "{}-broken", self.layer_desc().short_id())
-        } else {
-            write!(
-                f,
-                "{}{}",
-                self.layer_desc().short_id(),
-                self.0.generation.get_suffix()
-            )
-        }
+        write!(
+            f,
+            "{}{}",
+            self.layer_desc().short_id(),
+            self.0.generation.get_suffix()
+        )
     }
 }
 
@@ -389,7 +385,6 @@ impl Layer {
     }
 
     /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
-    #[cfg(test)]
     pub(crate) async fn load_key_values(
         &self,
         ctx: &RequestContext,
@@ -1774,7 +1769,6 @@ impl DownloadedLayer {
         }
     }
 
-    #[cfg(test)]
     async fn load_key_values(
         &self,
         owner: &Arc<LayerInner>,

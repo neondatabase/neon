@@ -499,7 +499,11 @@ where
     /// Accepts a control file storage containing the safekeeper state.
     /// State must be initialized, i.e. contain filled `tenant_id`, `timeline_id`
     /// and `server` (`wal_seg_size` inside it) fields.
-    pub fn new(state: CTRL, wal_store: WAL, node_id: NodeId) -> Result<SafeKeeper<CTRL, WAL>> {
+    pub fn new(
+        state: TimelineState<CTRL>,
+        wal_store: WAL,
+        node_id: NodeId,
+    ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.tenant_id == TenantId::from([0u8; 16])
             || state.timeline_id == TimelineId::from([0u8; 16])
         {
@@ -512,7 +516,7 @@ where
 
         Ok(SafeKeeper {
             term_start_lsn: Lsn(0),
-            state: TimelineState::new(state),
+            state,
             wal_store,
             node_id,
         })
@@ -524,11 +528,6 @@ where
             .acceptor_state
             .term_history
             .up_to(self.flush_lsn())
-    }
-
-    /// Get current term.
-    pub fn get_term(&self) -> Term {
-        self.state.acceptor_state.term
     }
 
     pub fn get_last_log_term(&self) -> Term {
@@ -912,10 +911,8 @@ where
         )))
     }
 
-    /// Update timeline state with peer safekeeper data.
+    /// Update commit_lsn from peer safekeeper data.
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
-        let mut sync_control_file = false;
-
         if (Lsn(sk_info.commit_lsn) != Lsn::INVALID) && (sk_info.last_log_term != INVALID_TERM) {
             // Note: the check is too restrictive, generally we can update local
             // commit_lsn if our history matches (is part of) history of advanced
@@ -923,29 +920,6 @@ where
             if sk_info.last_log_term == self.get_last_log_term() {
                 self.update_commit_lsn(Lsn(sk_info.commit_lsn)).await?;
             }
-        }
-
-        self.state.inmem.backup_lsn = max(Lsn(sk_info.backup_lsn), self.state.inmem.backup_lsn);
-        sync_control_file |= self.state.backup_lsn + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.backup_lsn;
-
-        self.state.inmem.remote_consistent_lsn = max(
-            Lsn(sk_info.remote_consistent_lsn),
-            self.state.inmem.remote_consistent_lsn,
-        );
-        sync_control_file |= self.state.remote_consistent_lsn
-            + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.remote_consistent_lsn;
-
-        self.state.inmem.peer_horizon_lsn = max(
-            Lsn(sk_info.peer_horizon_lsn),
-            self.state.inmem.peer_horizon_lsn,
-        );
-        sync_control_file |= self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.peer_horizon_lsn;
-
-        if sync_control_file {
-            self.state.flush().await?;
         }
         Ok(())
     }
@@ -1039,7 +1013,7 @@ mod tests {
             persisted_state: test_sk_state(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
-        let mut sk = SafeKeeper::new(storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -1055,7 +1029,7 @@ mod tests {
             persisted_state: state,
         };
 
-        sk = SafeKeeper::new(storage, sk.wal_store, NodeId(0)).unwrap();
+        sk = SafeKeeper::new(TimelineState::new(storage), sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request).await;
@@ -1072,7 +1046,7 @@ mod tests {
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
 
-        let mut sk = SafeKeeper::new(storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
             term: 1,

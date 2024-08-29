@@ -41,7 +41,6 @@ PG_MODULE_MAGIC;
 void		_PG_init(void);
 
 static int	logical_replication_max_snap_files = 300;
-bool primary_is_running = false;
 
 static void
 InitLogicalReplicationMonitor(void)
@@ -289,15 +288,6 @@ _PG_init(void)
 
 	pg_init_extension_server();
 
-	DefineCustomBoolVariable(
-		"neon.primary_is_running",
-		"true if the primary was running at replica startup. false otherwise",
-		NULL,
-		&primary_is_running,
-		false,
-		PGC_POSTMASTER,
-		0,
-		NULL, NULL, NULL);
 	/*
 	 * Important: This must happen after other parts of the extension are
 	 * loaded, otherwise any settings to GUCs that were set before the

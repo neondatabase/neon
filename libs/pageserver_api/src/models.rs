@@ -625,8 +625,7 @@ pub struct TenantInfo {
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u32>,
+    pub generation: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1453,7 +1452,7 @@ mod tests {
             state: TenantState::Active,
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1463,7 +1462,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         let original_broken = TenantInfo {
@@ -1474,7 +1474,7 @@ mod tests {
             },
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
-            generation: None,
+            generation: 1,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -1488,7 +1488,8 @@ mod tests {
             "current_physical_size": 42,
             "attachment_status": {
                 "slug":"attached",
-            }
+            },
+            "generation" : 1
         });
 
         assert_eq!(

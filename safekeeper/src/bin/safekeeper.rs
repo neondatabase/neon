@@ -28,8 +28,8 @@ use utils::pid_file;
 
 use metrics::set_build_info_metric;
 use safekeeper::defaults::{
-    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
-    DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
+    DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR,
+    DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
 use safekeeper::http;
 use safekeeper::wal_service;
@@ -172,6 +172,7 @@ struct Args {
     walsenders_keep_horizon: bool,
     /// Enable partial backup. If disabled, safekeeper will not upload partial
     /// segments to remote storage.
+    /// TODO: now partial backup is always enabled, remove this flag.
     #[arg(long)]
     partial_backup_enabled: bool,
     /// Controls how long backup will wait until uploading the partial segment.
@@ -181,6 +182,15 @@ struct Args {
     /// be used in tests.
     #[arg(long)]
     disable_periodic_broker_push: bool,
+    /// Enable automatic switching to offloaded state.
+    #[arg(long)]
+    enable_offload: bool,
+    /// Delete local WAL files after offloading. When disabled, they will be left on disk.
+    #[arg(long)]
+    delete_offloaded_wal: bool,
+    /// Pending updates to control file will be automatically saved after this interval.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_CONTROL_FILE_SAVE_INTERVAL)]
+    control_file_save_interval: Duration,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -328,9 +338,12 @@ async fn main() -> anyhow::Result<()> {
         sk_auth_token,
         current_thread_runtime: args.current_thread_runtime,
         walsenders_keep_horizon: args.walsenders_keep_horizon,
-        partial_backup_enabled: args.partial_backup_enabled,
+        partial_backup_enabled: true,
         partial_backup_timeout: args.partial_backup_timeout,
         disable_periodic_broker_push: args.disable_periodic_broker_push,
+        enable_offload: args.enable_offload,
+        delete_offloaded_wal: args.delete_offloaded_wal,
+        control_file_save_interval: args.control_file_save_interval,
     };
 
     // initialize sentry if SENTRY_DSN is provided

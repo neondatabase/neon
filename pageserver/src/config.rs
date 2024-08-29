@@ -32,10 +32,7 @@ use utils::{
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::virtual_file;
 use crate::virtual_file::io_engine;
-use crate::{
-    TENANT_CONFIG_NAME, TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME,
-    TIMELINE_DELETE_MARK_SUFFIX,
-};
+use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
 pub mod defaults {
     // TODO(christian): this can be removed after https://github.com/neondatabase/aws/pull/1322
@@ -226,15 +223,11 @@ impl PageServerConf {
     }
 
     /// Points to a place in pageserver's local directory,
-    /// where certain tenant's tenantconf file should be located.
-    ///
-    /// Legacy: superseded by tenant_location_config_path.  Eventually
-    /// remove this function.
-    pub fn tenant_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
-        self.tenant_path(tenant_shard_id).join(TENANT_CONFIG_NAME)
-    }
-
-    pub fn tenant_location_config_path(&self, tenant_shard_id: &TenantShardId) -> Utf8PathBuf {
+    /// where certain tenant's LocationConf be stored.
+    pub(crate) fn tenant_location_config_path(
+        &self,
+        tenant_shard_id: &TenantShardId,
+    ) -> Utf8PathBuf {
         self.tenant_path(tenant_shard_id)
             .join(TENANT_LOCATION_CONFIG_NAME)
     }

@@ -929,7 +929,6 @@ impl DeltaLayerInner {
     }
 
     /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
-    #[cfg(test)]
     pub(super) async fn load_key_values(
         &self,
         ctx: &RequestContext,

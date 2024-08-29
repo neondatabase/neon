@@ -2,9 +2,10 @@ import time
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, PgBin, logical_replication_sync
+from fixtures.neon_fixtures import AuxFileStore, NeonEnv, PgBin, logical_replication_sync
 
 
+@pytest.mark.parametrize("pageserver_aux_file_policy", [AuxFileStore.V2])
 @pytest.mark.timeout(1000)
 def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg):
     env = neon_simple_env

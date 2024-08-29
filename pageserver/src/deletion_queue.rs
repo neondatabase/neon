@@ -382,17 +382,6 @@ pub enum DeletionQueueError {
 }
 
 impl DeletionQueueClient {
-    pub(crate) fn broken() -> Self {
-        // Channels whose receivers are immediately dropped.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let (executor_tx, _executor_rx) = tokio::sync::mpsc::channel(1);
-        Self {
-            tx,
-            executor_tx,
-            lsn_table: Arc::default(),
-        }
-    }
-
     /// This is cancel-safe.  If you drop the future before it completes, the message
     /// is not pushed, although in the context of the deletion queue it doesn't matter: once
     /// we decide to do a deletion the decision is always final.

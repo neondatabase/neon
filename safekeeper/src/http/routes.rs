@@ -214,10 +214,10 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
     // Note: with evicted timelines it should work better then de-evict them and
     // stream; probably start_snapshot would copy partial s3 file to dest path
-    // and stream control file, or return FullAccessTimeline if timeline is not
+    // and stream control file, or return WalResidentTimeline if timeline is not
     // evicted.
     let tli = tli
-        .full_access_guard()
+        .wal_residence_guard()
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -283,7 +283,7 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
     let tli = tli
-        .full_access_guard()
+        .wal_residence_guard()
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -306,7 +306,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     tli.write_shared_state()
         .await
         .sk
-        .state
+        .state_mut()
         .flush()
         .await
         .map_err(ApiError::InternalServerError)?;
