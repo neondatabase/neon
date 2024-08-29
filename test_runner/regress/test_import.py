@@ -18,7 +18,6 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
-    wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import assert_pageserver_backups_equal, subprocess_capture
@@ -144,7 +143,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
     # Wait for data to land in s3
     wait_for_last_record_lsn(client, tenant, timeline, Lsn(end_lsn))
-    wait_for_upload(client, tenant, timeline, Lsn(end_lsn))
+    client.timeline_checkpoint(tenant, timeline, compact=False, wait_until_uploaded=True)
 
     # Check it worked
     endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant)
@@ -290,7 +289,7 @@ def _import(
 
     # Wait for data to land in s3
     wait_for_last_record_lsn(client, tenant, timeline, lsn)
-    wait_for_upload(client, tenant, timeline, lsn)
+    client.timeline_checkpoint(tenant, timeline, compact=False, wait_until_uploaded=True)
 
     # Check it worked
     endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant, lsn=lsn)

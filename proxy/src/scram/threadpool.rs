@@ -68,7 +68,7 @@ impl ThreadPool {
         pool
     }
 
-    pub fn spawn_job(
+    pub(crate) fn spawn_job(
         &self,
         endpoint: EndpointIdInt,
         pbkdf2: Pbkdf2,
@@ -222,12 +222,11 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
         }
 
         for i in 0.. {
-            let mut job = match worker
+            let Some(mut job) = worker
                 .pop()
                 .or_else(|| pool.steal(&mut rng, index, &worker))
-            {
-                Some(job) => job,
-                None => continue 'wait,
+            else {
+                continue 'wait;
             };
 
             pool.metrics
@@ -270,7 +269,7 @@ fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
                         .inc(ThreadPoolWorkerId(index));
 
                     // skip for now
-                    worker.push(job)
+                    worker.push(job);
                 }
             }
 
@@ -316,6 +315,6 @@ mod tests {
             10, 114, 73, 188, 140, 222, 196, 156, 214, 184, 79, 157, 119, 242, 16, 31, 53, 242,
             178, 43, 95, 8, 225, 182, 122, 40, 219, 21, 89, 147, 64, 140,
         ];
-        assert_eq!(actual, expected)
+        assert_eq!(actual, expected);
     }
 }

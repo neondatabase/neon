@@ -2,6 +2,7 @@
 
 import argparse
 import enum
+import os
 import subprocess
 import sys
 from typing import List
@@ -93,7 +94,7 @@ if __name__ == "__main__":
         "--no-color",
         action="store_true",
         help="disable colored output",
-        default=not sys.stdout.isatty(),
+        default=not sys.stdout.isatty() or os.getenv("TERM") == "dumb",
     )
     args = parser.parse_args()
 

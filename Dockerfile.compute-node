@@ -945,7 +945,7 @@ COPY --from=hll-pg-build /hll.tar.gz /ext-src
 COPY --from=plpgsql-check-pg-build /plpgsql_check.tar.gz /ext-src
 #COPY --from=timescaledb-pg-build /timescaledb.tar.gz /ext-src
 COPY --from=pg-hint-plan-pg-build /pg_hint_plan.tar.gz /ext-src
-COPY patches/pg_hintplan.patch /ext-src
+COPY patches/pg_hint_plan.patch /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
 COPY patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
@@ -967,7 +967,7 @@ RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
 RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
 # cmake is required for the h3 test
 RUN apt-get update && apt-get install -y cmake
-RUN patch -p1 < /ext-src/pg_hintplan.patch
+RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN patch -p1 </ext-src/pg_anon.patch
 RUN patch -p1 </ext-src/pg_cron.patch

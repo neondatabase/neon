@@ -62,8 +62,8 @@ pub struct ParquetUploadArgs {
 // But after FAILED_UPLOAD_WARN_THRESHOLD retries, we start to log it at WARN
 // level instead, as repeated failures can mean a more serious problem. If it
 // fails more than FAILED_UPLOAD_RETRIES times, we give up
-pub const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
-pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
+pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 // the parquet crate leaves a lot to be desired...
 // what follows is an attempt to write parquet files with minimal allocs.
@@ -73,7 +73,7 @@ pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 // * after each rowgroup write, we check the length of the file and upload to s3 if large enough
 
 #[derive(parquet_derive::ParquetRecordWriter)]
-pub struct RequestData {
+pub(crate) struct RequestData {
     region: &'static str,
     protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
@@ -736,7 +736,7 @@ mod tests {
                 while let Some(r) = s.next().await {
                     tx.send(r).unwrap();
                 }
-                time::sleep(time::Duration::from_secs(70)).await
+                time::sleep(time::Duration::from_secs(70)).await;
             }
         });
 

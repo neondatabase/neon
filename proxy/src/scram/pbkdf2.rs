@@ -4,7 +4,7 @@ use hmac::{
 };
 use sha2::Sha256;
 
-pub struct Pbkdf2 {
+pub(crate) struct Pbkdf2 {
     hmac: Hmac<Sha256>,
     prev: GenericArray<u8, U32>,
     hi: GenericArray<u8, U32>,
@@ -13,7 +13,7 @@ pub struct Pbkdf2 {
 
 // inspired from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L36-L61>
 impl Pbkdf2 {
-    pub fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
+    pub(crate) fn start(str: &[u8], salt: &[u8], iterations: u32) -> Self {
         let hmac =
             Hmac::<Sha256>::new_from_slice(str).expect("HMAC is able to accept all key sizes");
 
@@ -33,11 +33,11 @@ impl Pbkdf2 {
         }
     }
 
-    pub fn cost(&self) -> u32 {
+    pub(crate) fn cost(&self) -> u32 {
         (self.iterations).clamp(0, 4096)
     }
 
-    pub fn turn(&mut self) -> std::task::Poll<[u8; 32]> {
+    pub(crate) fn turn(&mut self) -> std::task::Poll<[u8; 32]> {
         let Self {
             hmac,
             prev,
@@ -84,6 +84,6 @@ mod tests {
         };
 
         let expected = pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 600000);
-        assert_eq!(hash, expected)
+        assert_eq!(hash, expected);
     }
 }

@@ -113,7 +113,7 @@ md5 = "0.7.0"
 measured = { version = "0.0.22", features=["lasso"] }
 measured-process = { version = "0.0.22" }
 memoffset = "0.8"
-nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
+nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"

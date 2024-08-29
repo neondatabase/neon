@@ -6,7 +6,7 @@ Proxy binary accepts `--auth-backend` CLI option, which determines auth scheme a
   new SCRAM-based console API; uses SNI info to select the destination project (endpoint soon)
 * postgres
   uses postgres to select auth secrets of existing roles. Useful for local testing
-* link
+* web (or link)
   sends login link for all usernames
 
 Also proxy can expose following services to the external world:
@@ -36,7 +36,7 @@ To play with it locally one may start proxy over a local postgres installation
 ```
 
 If both postgres and proxy are running you may send a SQL query:
-```json
+```console
 curl -k -X POST 'https://proxy.localtest.me:4444/sql' \
   -H 'Neon-Connection-String: postgres://stas:pass@proxy.localtest.me:4444/postgres' \
   -H 'Content-Type: application/json' \
@@ -44,7 +44,8 @@ curl -k -X POST 'https://proxy.localtest.me:4444/sql' \
     "query":"SELECT $1::int[] as arr, $2::jsonb as obj, 42 as num",
     "params":[ "{{1,2},{\"3\",4}}", {"key":"val", "ikey":4242}]
   }' | jq
-
+```
+```json
 {
   "command": "SELECT",
   "fields": [

@@ -779,7 +779,7 @@ impl TenantShard {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn optimize_secondary(
         &self,
-        scheduler: &Scheduler,
+        scheduler: &mut Scheduler,
         schedule_context: &ScheduleContext,
     ) -> Option<ScheduleOptimization> {
         if self.intent.secondary.is_empty() {
@@ -1595,7 +1595,7 @@ pub(crate) mod tests {
         schedule_context.avoid(&shard_b.intent.all_pageservers());
         schedule_context.push_attached(shard_b.intent.get_attached().unwrap());
 
-        let optimization_a = shard_a.optimize_secondary(&scheduler, &schedule_context);
+        let optimization_a = shard_a.optimize_secondary(&mut scheduler, &schedule_context);
 
         // Since there is a node with no locations available, the node with two locations for the
         // same tenant should generate an optimization to move one away

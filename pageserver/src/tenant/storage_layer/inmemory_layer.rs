@@ -13,7 +13,7 @@ use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::{l0_flush, page_cache, walrecord};
+use crate::{l0_flush, page_cache};
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
@@ -33,7 +33,7 @@ use std::fmt::Write;
 use std::ops::Range;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
-use tokio::sync::{RwLock, RwLockWriteGuard};
+use tokio::sync::RwLock;
 
 use super::{
     DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
@@ -249,48 +249,13 @@ impl InMemoryLayer {
     /// debugging function to print out the contents of the layer
     ///
     /// this is likely completly unused
-    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
-        let inner = self.inner.read().await;
-
+    pub async fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let end_str = self.end_lsn_or_max();
 
         println!(
             "----- in-memory layer for tli {} LSNs {}-{} ----",
             self.timeline_id, self.start_lsn, end_str,
         );
-
-        if !verbose {
-            return Ok(());
-        }
-
-        let cursor = inner.file.block_cursor();
-        let mut buf = Vec::new();
-        for (key, vec_map) in inner.index.iter() {
-            for (lsn, pos) in vec_map.as_slice() {
-                let mut desc = String::new();
-                cursor.read_blob_into_buf(*pos, &mut buf, ctx).await?;
-                let val = Value::des(&buf);
-                match val {
-                    Ok(Value::Image(img)) => {
-                        write!(&mut desc, " img {} bytes", img.len())?;
-                    }
-                    Ok(Value::WalRecord(rec)) => {
-                        let wal_desc = walrecord::describe_wal_record(&rec).unwrap();
-                        write!(
-                            &mut desc,
-                            " rec {} bytes will_init: {} {}",
-                            buf.len(),
-                            rec.will_init(),
-                            wal_desc
-                        )?;
-                    }
-                    Err(err) => {
-                        write!(&mut desc, " DESERIALIZATION ERROR: {}", err)?;
-                    }
-                }
-                println!("  key {} at {}: {}", key, lsn, desc);
-            }
-        }
 
         Ok(())
     }
@@ -355,6 +320,82 @@ impl InMemoryLayer {
     }
 }
 
+/// Offset of a particular Value within a serialized batch.
+struct SerializedBatchOffset {
+    key: CompactKey,
+    lsn: Lsn,
+    /// offset in bytes from the start of the batch's buffer to the Value's serialized size header.
+    offset: u64,
+}
+
+pub struct SerializedBatch {
+    /// Blobs serialized in EphemeralFile's native format, ready for passing to [`EphemeralFile::write_raw`].
+    pub(crate) raw: Vec<u8>,
+
+    /// Index of values in [`Self::raw`], using offsets relative to the start of the buffer.
+    offsets: Vec<SerializedBatchOffset>,
+
+    /// The highest LSN of any value in the batch
+    pub(crate) max_lsn: Lsn,
+}
+
+impl SerializedBatch {
+    /// Write a blob length in the internal format of the EphemeralFile
+    pub(crate) fn write_blob_length(len: usize, cursor: &mut std::io::Cursor<Vec<u8>>) {
+        use std::io::Write;
+
+        if len < 0x80 {
+            // short one-byte length header
+            let len_buf = [len as u8];
+
+            cursor
+                .write_all(&len_buf)
+                .expect("Writing to Vec is infallible");
+        } else {
+            let mut len_buf = u32::to_be_bytes(len as u32);
+            len_buf[0] |= 0x80;
+            cursor
+                .write_all(&len_buf)
+                .expect("Writing to Vec is infallible");
+        }
+    }
+
+    pub fn from_values(batch: Vec<(CompactKey, Lsn, usize, Value)>) -> Self {
+        // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
+        // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
+        let buffer_size = batch.iter().map(|i| i.2).sum::<usize>() + 4 * batch.len();
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
+
+        let mut offsets: Vec<SerializedBatchOffset> = Vec::with_capacity(batch.len());
+        let mut max_lsn: Lsn = Lsn(0);
+        for (key, lsn, val_ser_size, val) in batch {
+            let relative_off = cursor.position();
+
+            Self::write_blob_length(val_ser_size, &mut cursor);
+            val.ser_into(&mut cursor)
+                .expect("Writing into in-memory buffer is infallible");
+
+            offsets.push(SerializedBatchOffset {
+                key,
+                lsn,
+                offset: relative_off,
+            });
+            max_lsn = std::cmp::max(max_lsn, lsn);
+        }
+
+        let buffer = cursor.into_inner();
+
+        // Assert that we didn't do any extra allocations while building buffer.
+        debug_assert!(buffer.len() <= buffer_size);
+
+        Self {
+            raw: buffer,
+            offsets,
+            max_lsn,
+        }
+    }
+}
+
 fn inmem_layer_display(mut f: impl Write, start_lsn: Lsn, end_lsn: Lsn) -> std::fmt::Result {
     write!(f, "inmem-{:016X}-{:016X}", start_lsn.0, end_lsn.0)
 }
@@ -415,37 +456,20 @@ impl InMemoryLayer {
         })
     }
 
-    // Write operations
-
-    /// Common subroutine of the public put_wal_record() and put_page_image() functions.
-    /// Adds the page version to the in-memory tree
-    pub async fn put_value(
+    // Write path.
+    pub async fn put_batch(
         &self,
-        key: CompactKey,
-        lsn: Lsn,
-        buf: &[u8],
+        serialized_batch: SerializedBatch,
         ctx: &RequestContext,
     ) -> Result<()> {
         let mut inner = self.inner.write().await;
         self.assert_writable();
-        self.put_value_locked(&mut inner, key, lsn, buf, ctx).await
-    }
 
-    async fn put_value_locked(
-        &self,
-        locked_inner: &mut RwLockWriteGuard<'_, InMemoryLayerInner>,
-        key: CompactKey,
-        lsn: Lsn,
-        buf: &[u8],
-        ctx: &RequestContext,
-    ) -> Result<()> {
-        trace!("put_value key {} at {}/{}", key, self.timeline_id, lsn);
-
-        let off = {
-            locked_inner
+        let base_off = {
+            inner
                 .file
-                .write_blob(
-                    buf,
+                .write_raw(
+                    &serialized_batch.raw,
                     &RequestContextBuilder::extend(ctx)
                         .page_content_kind(PageContentKind::InMemoryLayer)
                         .build(),
@@ -453,15 +477,23 @@ impl InMemoryLayer {
                 .await?
         };
 
-        let vec_map = locked_inner.index.entry(key).or_default();
-        let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
-        if old.is_some() {
-            // We already had an entry for this LSN. That's odd..
-            warn!("Key {} at {} already exists", key, lsn);
+        for SerializedBatchOffset {
+            key,
+            lsn,
+            offset: relative_off,
+        } in serialized_batch.offsets
+        {
+            let off = base_off + relative_off;
+            let vec_map = inner.index.entry(key).or_default();
+            let old = vec_map.append_or_update_last(lsn, off).unwrap().0;
+            if old.is_some() {
+                // We already had an entry for this LSN. That's odd..
+                warn!("Key {} at {} already exists", key, lsn);
+            }
         }
 
-        let size = locked_inner.file.len();
-        locked_inner.resource_units.maybe_publish_size(size);
+        let size = inner.file.len();
+        inner.resource_units.maybe_publish_size(size);
 
         Ok(())
     }
@@ -536,7 +568,6 @@ impl InMemoryLayer {
 
         use l0_flush::Inner;
         let _concurrency_permit = match l0_flush_global_state {
-            Inner::PageCached => None,
             Inner::Direct { semaphore, .. } => Some(semaphore.acquire().await),
         };
 
@@ -568,34 +599,6 @@ impl InMemoryLayer {
         .await?;
 
         match l0_flush_global_state {
-            l0_flush::Inner::PageCached => {
-                let ctx = RequestContextBuilder::extend(ctx)
-                    .page_content_kind(PageContentKind::InMemoryLayer)
-                    .build();
-
-                let mut buf = Vec::new();
-
-                let cursor = inner.file.block_cursor();
-
-                for (key, vec_map) in inner.index.iter() {
-                    // Write all page versions
-                    for (lsn, pos) in vec_map.as_slice() {
-                        cursor.read_blob_into_buf(*pos, &mut buf, &ctx).await?;
-                        let will_init = Value::des(&buf)?.will_init();
-                        let (tmp, res) = delta_layer_writer
-                            .put_value_bytes(
-                                Key::from_compact(*key),
-                                *lsn,
-                                buf.slice_len(),
-                                will_init,
-                                &ctx,
-                            )
-                            .await;
-                        res?;
-                        buf = tmp.into_raw_slice().into_inner();
-                    }
-                }
-            }
             l0_flush::Inner::Direct { .. } => {
                 let file_contents: Vec<u8> = inner.file.load_to_vec(ctx).await?;
                 assert_eq!(

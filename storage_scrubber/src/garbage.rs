@@ -19,8 +19,8 @@ use utils::id::TenantId;
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
-    init_remote_generic, list_objects_with_retries_generic,
-    metadata_stream::{stream_tenant_timelines_generic, stream_tenants_generic},
+    init_remote, list_objects_with_retries,
+    metadata_stream::{stream_tenant_timelines, stream_tenants},
     BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth,
 };
 
@@ -153,7 +153,7 @@ async fn find_garbage_inner(
     node_kind: NodeKind,
 ) -> anyhow::Result<GarbageList> {
     // Construct clients for S3 and for Console API
-    let (remote_client, target) = init_remote_generic(bucket_config.clone(), node_kind).await?;
+    let (remote_client, target) = init_remote(bucket_config.clone(), node_kind).await?;
     let cloud_admin_api_client = Arc::new(CloudAdminApiClient::new(console_config));
 
     // Build a set of console-known tenants, for quickly eliminating known-active tenants without having
@@ -179,7 +179,7 @@ async fn find_garbage_inner(
 
     // Enumerate Tenants in S3, and check if each one exists in Console
     tracing::info!("Finding all tenants in bucket {}...", bucket_config.bucket);
-    let tenants = stream_tenants_generic(&remote_client, &target);
+    let tenants = stream_tenants(&remote_client, &target);
     let tenants_checked = tenants.map_ok(|t| {
         let api_client = cloud_admin_api_client.clone();
         let console_cache = console_cache.clone();
@@ -237,14 +237,13 @@ async fn find_garbage_inner(
         // Special case: If it's missing in console, check for known bugs that would enable us to conclusively
         // identify it as purge-able anyway
         if console_result.is_none() {
-            let timelines =
-                stream_tenant_timelines_generic(&remote_client, &target, tenant_shard_id)
-                    .await?
-                    .collect::<Vec<_>>()
-                    .await;
+            let timelines = stream_tenant_timelines(&remote_client, &target, tenant_shard_id)
+                .await?
+                .collect::<Vec<_>>()
+                .await;
             if timelines.is_empty() {
                 // No timelines, but a heatmap: the deletion bug where we deleted everything but heatmaps
-                let tenant_objects = list_objects_with_retries_generic(
+                let tenant_objects = list_objects_with_retries(
                     &remote_client,
                     ListingMode::WithDelimiter,
                     &target.tenant_root(&tenant_shard_id),
@@ -265,7 +264,7 @@ async fn find_garbage_inner(
 
                 for timeline_r in timelines {
                     let timeline = timeline_r?;
-                    let timeline_objects = list_objects_with_retries_generic(
+                    let timeline_objects = list_objects_with_retries(
                         &remote_client,
                         ListingMode::WithDelimiter,
                         &target.timeline_root(&timeline),
@@ -331,8 +330,7 @@ async fn find_garbage_inner(
 
     // Construct a stream of all timelines within active tenants
     let active_tenants = tokio_stream::iter(active_tenants.iter().map(Ok));
-    let timelines =
-        active_tenants.map_ok(|t| stream_tenant_timelines_generic(&remote_client, &target, *t));
+    let timelines = active_tenants.map_ok(|t| stream_tenant_timelines(&remote_client, &target, *t));
     let timelines = timelines.try_buffer_unordered(S3_CONCURRENCY);
     let timelines = timelines.try_flatten();
 
@@ -507,7 +505,7 @@ pub async fn purge_garbage(
     );
 
     let (remote_client, _target) =
-        init_remote_generic(garbage_list.bucket_config.clone(), garbage_list.node_kind).await?;
+        init_remote(garbage_list.bucket_config.clone(), garbage_list.node_kind).await?;
 
     assert_eq!(
         &garbage_list.bucket_config.bucket,

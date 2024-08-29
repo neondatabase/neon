@@ -757,6 +757,9 @@ def test_lsn_lease_size(neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
 
     assert_size_approx_equal_for_lease_test(lease_res, ro_branch_res)
 
+    # we are writing a lot, and flushing all of that to disk is not important for this test
+    env.stop(immediate=True)
+
 
 def insert_with_action(
     env: NeonEnv,

@@ -23,10 +23,30 @@ platforms = [
 ]
 
 [final-excludes]
-# vm_monitor benefits from the same Cargo.lock as the rest of our artifacts, but
-# it is built primarly in separate repo neondatabase/autoscaling and thus is excluded
-# from depending on workspace-hack because most of the dependencies are not used.
-workspace-members = ["vm_monitor"]
+workspace-members = [
+    # vm_monitor benefits from the same Cargo.lock as the rest of our artifacts, but
+    # it is built primarly in separate repo neondatabase/autoscaling and thus is excluded
+    # from depending on workspace-hack because most of the dependencies are not used.
+    "vm_monitor",
+    # All of these exist in libs and are not usually built independently.
+    # Putting workspace hack there adds a bottleneck for cargo builds.
+    "compute_api",
+    "consumption_metrics",
+    "desim",
+    "metrics",
+    "pageserver_api",
+    "postgres_backend",
+    "postgres_connection",
+    "postgres_ffi",
+    "pq_proto",
+    "remote_storage",
+    "safekeeper_api",
+    "tenant_size_model",
+    "tracing-utils",
+    "utils",
+    "wal_craft",
+    "walproposer",
+]
 
 # Write out exact versions rather than a semver range. (Defaults to false.)
 # exact-versions = true

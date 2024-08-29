@@ -1001,51 +1001,10 @@ nm_pack_request(NeonRequest *msg)
 
 	initStringInfo(&s);
 
-	if (neon_protocol_version >= 2)
-	{
-		pq_sendbyte(&s, msg->tag);
-		pq_sendint64(&s, msg->lsn);
-		pq_sendint64(&s, msg->not_modified_since);
-	}
-	else
-	{
-		bool		latest;
-		XLogRecPtr	lsn;
+	pq_sendbyte(&s, msg->tag);
+	pq_sendint64(&s, msg->lsn);
+	pq_sendint64(&s, msg->not_modified_since);
 
-		/*
-		 * In primary, we always request the latest page version.
-		 */
-		if (!RecoveryInProgress())
-		{
-			latest = true;
-			lsn = msg->not_modified_since;
-		}
-		else
-		{
-			/*
-			 * In the protocol V1, we cannot represent that we want to read
-			 * page at LSN X, and we know that it hasn't been modified since
-			 * Y. We can either use 'not_modified_lsn' as the request LSN, and
-			 * risk getting an error if that LSN is too old and has already
-			 * fallen out of the pageserver's GC horizon, or we can send
-			 * 'request_lsn', causing the pageserver to possibly wait for the
-			 * recent WAL to arrive unnecessarily. Or something in between. We
-			 * choose to use the old LSN and risk GC errors, because that's
-			 * what we've done historically.
-			 */
-			latest = false;
-			lsn = msg->not_modified_since;
-		}
-
-		pq_sendbyte(&s, msg->tag);
-		pq_sendbyte(&s, latest);
-		pq_sendint64(&s, lsn);
-	}
-
-	/*
-	 * The rest of the request messages are the same between protocol V1 and
-	 * V2
-	 */
 	switch (messageTag(msg))
 	{
 			/* pagestore_client -> pagestore */
