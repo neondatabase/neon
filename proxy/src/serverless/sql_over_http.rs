@@ -202,6 +202,7 @@ fn get_conn_info(
             options = Some(NeonOptions::parse_options_raw(&value));
         }
     }
+    ctx.set_db_options(params.freeze());
 
     let user_info = ComputeUserInfo {
         endpoint,

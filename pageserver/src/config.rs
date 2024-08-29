@@ -10,8 +10,6 @@ use pageserver_api::{
     shard::TenantShardId,
 };
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use serde;
-use serde::de::IntoDeserializer;
 use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
@@ -31,9 +29,7 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::tenant::{
-    TENANTS_SEGMENT_NAME, TENANT_DELETED_MARKER_FILE_NAME, TIMELINES_SEGMENT_NAME,
-};
+use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::virtual_file;
 use crate::virtual_file::io_engine;
 use crate::{
@@ -271,14 +267,6 @@ impl PageServerConf {
             self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_DELETE_MARK_SUFFIX,
         )
-    }
-
-    pub(crate) fn tenant_deleted_mark_file_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-    ) -> Utf8PathBuf {
-        self.tenant_path(tenant_shard_id)
-            .join(TENANT_DELETED_MARKER_FILE_NAME)
     }
 
     pub fn traces_path(&self) -> Utf8PathBuf {

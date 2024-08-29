@@ -46,7 +46,7 @@ use std::{sync::Arc, time::SystemTime};
 use anyhow::Context;
 use pageserver_api::{config::DiskUsageEvictionTaskConfig, shard::TenantShardId};
 use remote_storage::GenericRemoteStorage;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
