@@ -558,6 +558,12 @@ impl KeySpaceRandomAccum {
         self.ranges.push(range);
     }
 
+    pub fn add_keyspace(&mut self, keyspace: KeySpace) {
+        for range in keyspace.ranges {
+            self.add_range(range);
+        }
+    }
+
     pub fn to_keyspace(mut self) -> KeySpace {
         let mut ranges = Vec::new();
         if !self.ranges.is_empty() {

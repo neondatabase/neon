@@ -4,7 +4,7 @@
 use anyhow::{anyhow, bail, Result};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use tokio::fs;
+use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
 
@@ -168,6 +168,9 @@ pub struct SharedState {
     pub(crate) sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
     /// In memory list containing state of peers sent in latest messages from them.
     pub(crate) peers_info: PeersInfo,
+    // True value hinders old WAL removal; this is used by snapshotting. We
+    // could make it a counter, but there is no need to.
+    pub(crate) wal_removal_on_hold: bool,
 }
 
 impl SharedState {
@@ -205,6 +208,7 @@ impl SharedState {
         Ok(Self {
             sk,
             peers_info: PeersInfo(vec![]),
+            wal_removal_on_hold: false,
         })
     }
 
@@ -222,10 +226,11 @@ impl SharedState {
         Ok(Self {
             sk: SafeKeeper::new(control_store, wal_store, conf.my_id)?,
             peers_info: PeersInfo(vec![]),
+            wal_removal_on_hold: false,
         })
     }
 
-    fn get_wal_seg_size(&self) -> usize {
+    pub(crate) fn get_wal_seg_size(&self) -> usize {
         self.sk.state.server.wal_seg_size as usize
     }
 

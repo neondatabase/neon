@@ -1,19 +1,8 @@
-From 0b0194a57bd0f3598bd57dbedd0df3932330169d Mon Sep 17 00:00:00 2001
-From: Heikki Linnakangas <heikki.linnakangas@iki.fi>
-Date: Fri, 2 Feb 2024 22:26:45 +0200
-Subject: [PATCH 1/1] Make v0.6.0 work with Neon
-
-Now that the WAL-logging happens as a separate step at the end of the
-build, we need a few neon-specific hints to make it work.
----
- src/hnswbuild.c | 36 ++++++++++++++++++++++++++++++++++++
- 1 file changed, 36 insertions(+)
-
 diff --git a/src/hnswbuild.c b/src/hnswbuild.c
-index 680789b..ec54dea 100644
+index dcfb2bd..d5189ee 100644
 --- a/src/hnswbuild.c
 +++ b/src/hnswbuild.c
-@@ -840,9 +840,17 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
+@@ -860,9 +860,17 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
  
  	hnswarea = shm_toc_lookup(toc, PARALLEL_KEY_HNSW_AREA, false);
  
@@ -31,7 +20,7 @@ index 680789b..ec54dea 100644
  	/* Close relations within worker */
  	index_close(indexRel, indexLockmode);
  	table_close(heapRel, heapLockmode);
-@@ -1089,13 +1097,41 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+@@ -1117,12 +1125,38 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
  	SeedRandom(42);
  #endif
  
@@ -43,14 +32,13 @@ index 680789b..ec54dea 100644
  
  	BuildGraph(buildstate, forkNum);
  
+-	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM)
 +#ifdef NEON_SMGR
 +	smgr_finish_unlogged_build_phase_1(RelationGetSmgr(index));
 +#endif
 +
- 	if (RelationNeedsWAL(index))
-+	{
- 		log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocks(index), true);
- 
++	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM) {
+ 		log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
 +#ifdef NEON_SMGR
 +		{
 +#if PG_VERSION_NUM >= 160000
@@ -60,7 +48,7 @@ index 680789b..ec54dea 100644
 +#endif
 +
 +			SetLastWrittenLSNForBlockRange(XactLastRecEnd, rlocator,
-+										   MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
++									   MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
 +			SetLastWrittenLSNForRelation(XactLastRecEnd, rlocator, MAIN_FORKNUM);
 +		}
 +#endif
@@ -69,10 +57,6 @@ index 680789b..ec54dea 100644
 +#ifdef NEON_SMGR
 +	smgr_end_unlogged_build(RelationGetSmgr(index));
 +#endif
-+
+ 
  	FreeBuildState(buildstate);
  }
- 
--- 
-2.39.2
-

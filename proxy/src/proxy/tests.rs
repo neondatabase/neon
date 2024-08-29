@@ -12,7 +12,7 @@ use crate::auth::backend::{
 };
 use crate::config::{CertResolver, RetryConfig};
 use crate::console::caches::NodeInfoCache;
-use crate::console::messages::MetricsAuxInfo;
+use crate::console::messages::{ConsoleError, MetricsAuxInfo};
 use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend};
 use crate::console::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
@@ -484,18 +484,20 @@ impl TestBackend for TestConnectMechanism {
         match action {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
-                let err = console::errors::ApiError::Console {
-                    status: http::StatusCode::FORBIDDEN,
-                    text: "TEST".into(),
-                };
+                let err = console::errors::ApiError::Console(ConsoleError {
+                    http_status_code: http::StatusCode::FORBIDDEN,
+                    error: "TEST".into(),
+                    status: None,
+                });
                 assert!(!err.could_retry());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }
             ConnectAction::WakeRetry => {
-                let err = console::errors::ApiError::Console {
-                    status: http::StatusCode::BAD_REQUEST,
-                    text: "TEST".into(),
-                };
+                let err = console::errors::ApiError::Console(ConsoleError {
+                    http_status_code: http::StatusCode::BAD_REQUEST,
+                    error: "TEST".into(),
+                    status: None,
+                });
                 assert!(err.could_retry());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }

@@ -735,7 +735,7 @@ fn cli() -> clap::Command {
             Arg::new("filecache-connstr")
                 .long("filecache-connstr")
                 .default_value(
-                    "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
+                    "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable application_name=vm-monitor",
                 )
                 .value_name("FILECACHE_CONNSTR"),
         )

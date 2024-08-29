@@ -25,26 +25,17 @@ jobs:
       found: ${{ steps.check-image.outputs.found }}
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Get build-tools image tag for the current commit
         id: get-build-tools-tag
         env:
-          # Usually, for COMMIT_SHA, we use `github.event.pull_request.head.sha || github.sha`, but here, even for PRs,
-          # we want to use `github.sha` i.e. point to a phantom merge commit to determine the image tag correctly.
-          COMMIT_SHA: ${{ github.sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_TAG: |
+            ${{ hashFiles('Dockerfile.build-tools',
+                          '.github/workflows/check-build-tools-image.yml',
+                          '.github/workflows/build-build-tools-image.yml') }}
         run: |
-          LAST_BUILD_TOOLS_SHA=$(
-            gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              --method GET \
-              --field path=Dockerfile.build-tools \
-              --field sha=${COMMIT_SHA} \
-              --field per_page=1 \
-              --jq ".[0].sha" \
-              "/repos/${GITHUB_REPOSITORY}/commits"
-          )
-          echo "image-tag=${LAST_BUILD_TOOLS_SHA}" | tee -a $GITHUB_OUTPUT
+          echo "image-tag=${IMAGE_TAG}" | tee -a $GITHUB_OUTPUT
 
       - name: Check if such tag found in the registry
         id: check-image

@@ -220,7 +220,6 @@ pub struct DeltaLayerInner {
     // values copied from summary
     index_start_blk: u32,
     index_root_blk: u32,
-    lsn_range: Range<Lsn>,
 
     file: VirtualFile,
     file_id: FileId,
@@ -786,7 +785,6 @@ impl DeltaLayerInner {
             file_id,
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
-            lsn_range: actual_summary.lsn_range,
             max_vectored_read_bytes,
         }))
     }
@@ -912,7 +910,7 @@ impl DeltaLayerInner {
 
         let reads = Self::plan_reads(
             &keyspace,
-            lsn_range,
+            lsn_range.clone(),
             data_end_offset,
             index_reader,
             planner,
@@ -925,7 +923,7 @@ impl DeltaLayerInner {
         self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
-        reconstruct_state.on_lsn_advanced(&keyspace, self.lsn_range.start);
+        reconstruct_state.on_lsn_advanced(&keyspace, lsn_range.start);
 
         Ok(())
     }

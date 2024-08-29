@@ -1,38 +1,25 @@
 use hyper::{Body, Request, Response, StatusCode, Uri};
-
 use once_cell::sync::Lazy;
-use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::io::Write as _;
 use std::str::FromStr;
 use std::sync::Arc;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc;
+use tokio::task;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tracing::{info_span, Instrument};
 use utils::failpoint_support::failpoints_handler;
+use utils::http::endpoint::{prometheus_metrics_handler, request_span, ChannelWriter};
 use utils::http::request::parse_query_param;
 
-use std::io::Write as _;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tracing::{info_span, Instrument};
-use utils::http::endpoint::{prometheus_metrics_handler, request_span, ChannelWriter};
-
-use crate::debug_dump::TimelineDigestRequest;
-use crate::receive_wal::WalReceiverState;
-use crate::safekeeper::Term;
-use crate::safekeeper::{ServerInfo, TermLsn};
-use crate::send_wal::WalSenderState;
-use crate::timeline::PeerInfo;
-use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
-
-use crate::timelines_global_map::TimelineDeleteForceResult;
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
+use postgres_ffi::WAL_SEGMENT_SIZE;
+use safekeeper_api::models::TimelineCreateRequest;
+use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
 use utils::{
     auth::SwappableJwtAuth,
     http::{
@@ -46,7 +33,16 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::models::TimelineCreateRequest;
+use crate::debug_dump::TimelineDigestRequest;
+use crate::receive_wal::WalReceiverState;
+use crate::safekeeper::Term;
+use crate::safekeeper::{ServerInfo, TermLsn};
+use crate::send_wal::WalSenderState;
+use crate::timeline::PeerInfo;
+use crate::timelines_global_map::TimelineDeleteForceResult;
+use crate::GlobalTimelines;
+use crate::SafeKeeperConf;
+use crate::{copy_timeline, debug_dump, patch_control_file, pull_timeline};
 
 #[derive(Debug, Serialize)]
 struct SafekeeperStatus {
@@ -199,11 +195,48 @@ async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let data: pull_timeline::Request = json_request(&mut request).await?;
+    let conf = get_conf(&request);
 
-    let resp = pull_timeline::handle_request(data)
+    let resp = pull_timeline::handle_request(data, conf.sk_auth_token.clone())
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
+}
+
+/// Stream tar archive with all timeline data.
+async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    // Note: with evicted timelines it should work better then de-evict them and
+    // stream; probably start_snapshot would copy partial s3 file to dest path
+    // and stream control file, or return FullAccessTimeline if timeline is not
+    // evicted.
+    let tli = tli
+        .full_access_guard()
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    // To stream the body use wrap_stream which wants Stream of Result<Bytes>,
+    // so create the chan and write to it in another task.
+    let (tx, rx) = mpsc::channel(1);
+
+    task::spawn(pull_timeline::stream_snapshot(tli, tx));
+
+    let rx_stream = ReceiverStream::new(rx);
+    let body = Body::wrap_stream(rx_stream);
+
+    let response = Response::builder()
+        .status(200)
+        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap();
+
+    Ok(response)
 }
 
 async fn timeline_copy_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -258,41 +291,6 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
         .await
         .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, response)
-}
-
-/// Download a file from the timeline directory.
-// TODO: figure out a better way to copy files between safekeepers
-async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let ttid = TenantTimelineId::new(
-        parse_request_param(&request, "tenant_id")?,
-        parse_request_param(&request, "timeline_id")?,
-    );
-    check_permission(&request, Some(ttid.tenant_id))?;
-
-    let filename: String = parse_request_param(&request, "filename")?;
-
-    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
-    let tli = tli
-        .full_access_guard()
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
-    let filepath = tli.get_timeline_dir().join(filename);
-    let mut file = File::open(&filepath)
-        .await
-        .map_err(|e| ApiError::InternalServerError(e.into()))?;
-
-    let mut content = Vec::new();
-    // TODO: don't store files in memory
-    file.read_to_end(&mut content)
-        .await
-        .map_err(|e| ApiError::InternalServerError(e.into()))?;
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/octet-stream")
-        .body(Body::from(content))
-        .map_err(|e| ApiError::InternalServerError(e.into()))
 }
 
 /// Force persist control file.
@@ -566,13 +564,13 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .delete("/v1/tenant/:tenant_id", |r| {
             request_span(r, tenant_delete_handler)
         })
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/snapshot",
+            |r| request_span(r, timeline_snapshot_handler),
+        )
         .post("/v1/pull_timeline", |r| {
             request_span(r, timeline_pull_handler)
         })
-        .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename",
-            |r| request_span(r, timeline_files_handler),
-        )
         .post(
             "/v1/tenant/:tenant_id/timeline/:source_timeline_id/copy",
             |r| request_span(r, timeline_copy_handler),

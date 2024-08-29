@@ -349,6 +349,16 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub switch_aux_file_policy: Option<AuxFilePolicy>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub lsn_lease_length: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub lsn_lease_length_for_ts: Option<Duration>,
 }
 
 impl TenantConfOpt {
@@ -411,6 +421,12 @@ impl TenantConfOpt {
             switch_aux_file_policy: self
                 .switch_aux_file_policy
                 .unwrap_or(global_conf.switch_aux_file_policy),
+            lsn_lease_length: self
+                .lsn_lease_length
+                .unwrap_or(global_conf.lsn_lease_length),
+            lsn_lease_length_for_ts: self
+                .lsn_lease_length_for_ts
+                .unwrap_or(global_conf.lsn_lease_length_for_ts),
         }
     }
 }
@@ -486,6 +502,8 @@ impl From<TenantConfOpt> for models::TenantConfig {
             timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
             switch_aux_file_policy: value.switch_aux_file_policy,
+            lsn_lease_length: value.lsn_lease_length.map(humantime),
+            lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
         }
     }
 }

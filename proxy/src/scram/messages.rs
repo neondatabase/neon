@@ -32,8 +32,6 @@ pub struct ClientFirstMessage<'a> {
     pub bare: &'a str,
     /// Channel binding mode.
     pub cbind_flag: ChannelBinding<&'a str>,
-    /// (Client username)[<https://github.com/postgres/postgres/blob/94226d4506e66d6e7cbf/src/backend/libpq/auth-scram.c#L13>].
-    pub username: &'a str,
     /// Client nonce.
     pub nonce: &'a str,
 }
@@ -58,6 +56,14 @@ impl<'a> ClientFirstMessage<'a> {
 
         // In theory, these might be preceded by "reserved-mext" (i.e. "m=")
         let username = parts.next()?.strip_prefix("n=")?;
+
+        // https://github.com/postgres/postgres/blob/f83908798f78c4cafda217ca875602c88ea2ae28/src/backend/libpq/auth-scram.c#L13-L14
+        if !username.is_empty() {
+            tracing::warn!(username, "scram username provided, but is not expected")
+            // TODO(conrad):
+            // return None;
+        }
+
         let nonce = parts.next()?.strip_prefix("r=")?;
 
         // Validate but ignore auth extensions
@@ -66,7 +72,6 @@ impl<'a> ClientFirstMessage<'a> {
         Some(Self {
             bare,
             cbind_flag,
-            username,
             nonce,
         })
     }
@@ -188,19 +193,18 @@ mod tests {
 
         // (Almost) real strings captured during debug sessions
         let cases = [
-            (NotSupportedClient, "n,,n=pepe,r=t8JwklwKecDLwSsA72rHmVju"),
-            (NotSupportedServer, "y,,n=pepe,r=t8JwklwKecDLwSsA72rHmVju"),
+            (NotSupportedClient, "n,,n=,r=t8JwklwKecDLwSsA72rHmVju"),
+            (NotSupportedServer, "y,,n=,r=t8JwklwKecDLwSsA72rHmVju"),
             (
                 Required("tls-server-end-point"),
-                "p=tls-server-end-point,,n=pepe,r=t8JwklwKecDLwSsA72rHmVju",
+                "p=tls-server-end-point,,n=,r=t8JwklwKecDLwSsA72rHmVju",
             ),
         ];
 
         for (cb, input) in cases {
             let msg = ClientFirstMessage::parse(input).unwrap();
 
-            assert_eq!(msg.bare, "n=pepe,r=t8JwklwKecDLwSsA72rHmVju");
-            assert_eq!(msg.username, "pepe");
+            assert_eq!(msg.bare, "n=,r=t8JwklwKecDLwSsA72rHmVju");
             assert_eq!(msg.nonce, "t8JwklwKecDLwSsA72rHmVju");
             assert_eq!(msg.cbind_flag, cb);
         }
@@ -208,14 +212,13 @@ mod tests {
 
     #[test]
     fn parse_client_first_message_with_invalid_gs2_authz() {
-        assert!(ClientFirstMessage::parse("n,authzid,n=user,r=nonce").is_none())
+        assert!(ClientFirstMessage::parse("n,authzid,n=,r=nonce").is_none())
     }
 
     #[test]
     fn parse_client_first_message_with_extra_params() {
-        let msg = ClientFirstMessage::parse("n,,n=user,r=nonce,a=foo,b=bar,c=baz").unwrap();
-        assert_eq!(msg.bare, "n=user,r=nonce,a=foo,b=bar,c=baz");
-        assert_eq!(msg.username, "user");
+        let msg = ClientFirstMessage::parse("n,,n=,r=nonce,a=foo,b=bar,c=baz").unwrap();
+        assert_eq!(msg.bare, "n=,r=nonce,a=foo,b=bar,c=baz");
         assert_eq!(msg.nonce, "nonce");
         assert_eq!(msg.cbind_flag, ChannelBinding::NotSupportedClient);
     }
@@ -223,9 +226,9 @@ mod tests {
     #[test]
     fn parse_client_first_message_with_extra_params_invalid() {
         // must be of the form `<ascii letter>=<...>`
-        assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,abc=foo").is_none());
-        assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,1=foo").is_none());
-        assert!(ClientFirstMessage::parse("n,,n=user,r=nonce,a").is_none());
+        assert!(ClientFirstMessage::parse("n,,n=,r=nonce,abc=foo").is_none());
+        assert!(ClientFirstMessage::parse("n,,n=,r=nonce,1=foo").is_none());
+        assert!(ClientFirstMessage::parse("n,,n=,r=nonce,a").is_none());
     }
 
     #[test]

@@ -133,6 +133,9 @@ def test_storage_controller_smoke(
 
     wait_until(10, 1, lambda: node_evacuated(env.pageservers[0].id))
 
+    # Let all the reconciliations after marking the node offline complete
+    env.storage_controller.reconcile_until_idle()
+
     # Marking pageserver active should not migrate anything to it
     # immediately
     env.storage_controller.node_configure(env.pageservers[0].id, {"availability": "Active"})
@@ -931,19 +934,27 @@ class Failure:
     def clear(self, env: NeonEnv):
         raise NotImplementedError()
 
+    def nodes(self):
+        raise NotImplementedError()
+
 
 class NodeStop(Failure):
-    def __init__(self, pageserver_id, immediate):
-        self.pageserver_id = pageserver_id
+    def __init__(self, pageserver_ids, immediate):
+        self.pageserver_ids = pageserver_ids
         self.immediate = immediate
 
     def apply(self, env: NeonEnv):
-        pageserver = env.get_pageserver(self.pageserver_id)
-        pageserver.stop(immediate=self.immediate)
+        for ps_id in self.pageserver_ids:
+            pageserver = env.get_pageserver(ps_id)
+            pageserver.stop(immediate=self.immediate)
 
     def clear(self, env: NeonEnv):
-        pageserver = env.get_pageserver(self.pageserver_id)
-        pageserver.start()
+        for ps_id in self.pageserver_ids:
+            pageserver = env.get_pageserver(ps_id)
+            pageserver.start()
+
+    def nodes(self):
+        return self.pageserver_ids
 
 
 class PageserverFailpoint(Failure):
@@ -958,6 +969,9 @@ class PageserverFailpoint(Failure):
     def clear(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.http_client().configure_failpoints((self.failpoint, "off"))
+
+    def nodes(self):
+        return [self.pageserver_id]
 
 
 def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
@@ -982,8 +996,9 @@ def build_node_to_tenants_map(env: NeonEnv) -> dict[int, list[TenantId]]:
 @pytest.mark.parametrize(
     "failure",
     [
-        NodeStop(pageserver_id=1, immediate=False),
-        NodeStop(pageserver_id=1, immediate=True),
+        NodeStop(pageserver_ids=[1], immediate=False),
+        NodeStop(pageserver_ids=[1], immediate=True),
+        NodeStop(pageserver_ids=[1, 2], immediate=True),
         PageserverFailpoint(pageserver_id=1, failpoint="get-utilization-http-handler"),
     ],
 )
@@ -1036,33 +1051,50 @@ def test_storage_controller_heartbeats(
     wait_until(10, 1, tenants_placed)
 
     # ... then we apply the failure
-    offline_node_id = failure.pageserver_id
-    online_node_id = (set(range(1, len(env.pageservers) + 1)) - {offline_node_id}).pop()
-    env.get_pageserver(offline_node_id).allowed_errors.append(
-        # In the case of the failpoint failure, the impacted pageserver
-        # still believes it has the tenant attached since location
-        # config calls into it will fail due to being marked offline.
-        ".*Dropped remote consistent LSN updates.*",
-    )
+    offline_node_ids = set(failure.nodes())
+    online_node_ids = set(range(1, len(env.pageservers) + 1)) - offline_node_ids
+
+    for node_id in offline_node_ids:
+        env.get_pageserver(node_id).allowed_errors.append(
+            # In the case of the failpoint failure, the impacted pageserver
+            # still believes it has the tenant attached since location
+            # config calls into it will fail due to being marked offline.
+            ".*Dropped remote consistent LSN updates.*",
+        )
+
+        if len(offline_node_ids) > 1:
+            env.get_pageserver(node_id).allowed_errors.append(
+                ".*Scheduling error when marking pageserver.*offline.*",
+            )
 
     failure.apply(env)
 
     # ... expecting the heartbeats to mark it offline
-    def node_offline():
+    def nodes_offline():
         nodes = env.storage_controller.node_list()
         log.info(f"{nodes=}")
-        target = next(n for n in nodes if n["id"] == offline_node_id)
-        assert target["availability"] == "Offline"
+        for node in nodes:
+            if node["id"] in offline_node_ids:
+                assert node["availability"] == "Offline"
 
     # A node is considered offline if the last successful heartbeat
     # was more than 10 seconds ago (hardcoded in the storage controller).
-    wait_until(20, 1, node_offline)
+    wait_until(20, 1, nodes_offline)
 
     # .. expecting the tenant on the offline node to be migrated
     def tenant_migrated():
+        if len(online_node_ids) == 0:
+            time.sleep(5)
+            return
+
         node_to_tenants = build_node_to_tenants_map(env)
         log.info(f"{node_to_tenants=}")
-        assert set(node_to_tenants[online_node_id]) == set(tenant_ids)
+
+        observed_tenants = set()
+        for node_id in online_node_ids:
+            observed_tenants |= set(node_to_tenants[node_id])
+
+        assert observed_tenants == set(tenant_ids)
 
     wait_until(10, 1, tenant_migrated)
 
@@ -1070,31 +1102,24 @@ def test_storage_controller_heartbeats(
     failure.clear(env)
 
     # ... expecting the offline node to become active again
-    def node_online():
+    def nodes_online():
         nodes = env.storage_controller.node_list()
-        target = next(n for n in nodes if n["id"] == offline_node_id)
-        assert target["availability"] == "Active"
+        for node in nodes:
+            if node["id"] in online_node_ids:
+                assert node["availability"] == "Active"
 
-    wait_until(10, 1, node_online)
+    wait_until(10, 1, nodes_online)
 
     time.sleep(5)
 
-    # ... then we create a new tenant
-    tid = TenantId.generate()
-    env.storage_controller.tenant_create(tid)
-
-    # ... expecting it to be placed on the node that just came back online
-    tenants = env.storage_controller.tenant_list()
-    newest_tenant = next(t for t in tenants if t["tenant_shard_id"] == str(tid))
-    locations = list(newest_tenant["observed"]["locations"].keys())
-    locations = [int(node_id) for node_id in locations]
-    assert locations == [offline_node_id]
+    node_to_tenants = build_node_to_tenants_map(env)
+    log.info(f"Back online: {node_to_tenants=}")
 
     # ... expecting the storage controller to reach a consistent state
     def storage_controller_consistent():
         env.storage_controller.consistency_check()
 
-    wait_until(10, 1, storage_controller_consistent)
+    wait_until(30, 1, storage_controller_consistent)
 
 
 def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):

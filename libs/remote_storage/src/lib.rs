@@ -466,7 +466,11 @@ impl GenericRemoteStorage {
                 Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout)?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
-                info!("Using azure container '{}' in region '{}' as a remote storage, prefix in container: '{:?}'",
+                let storage_account = azure_config
+                    .storage_account
+                    .as_deref()
+                    .unwrap_or("<AZURE_STORAGE_ACCOUNT>");
+                info!("Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
                       azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
                 Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config, timeout)?))
             }
@@ -589,6 +593,8 @@ impl Debug for S3Config {
 pub struct AzureConfig {
     /// Name of the container to connect to.
     pub container_name: String,
+    /// Name of the storage account the container is inside of
+    pub storage_account: Option<String>,
     /// The region where the bucket is located at.
     pub container_region: String,
     /// A "subfolder" in the container, to use the same container separately by multiple remote storage users at once.
@@ -603,8 +609,9 @@ impl Debug for AzureConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AzureConfig")
             .field("bucket_name", &self.container_name)
+            .field("storage_account", &self.storage_account)
             .field("bucket_region", &self.container_region)
-            .field("prefix_in_bucket", &self.prefix_in_container)
+            .field("prefix_in_container", &self.prefix_in_container)
             .field("concurrency_limit", &self.concurrency_limit)
             .field(
                 "max_keys_per_list_response",
@@ -736,6 +743,12 @@ impl RemoteStorageConfig {
             (None, None, None, Some(container_name), Some(container_region)) => {
                 RemoteStorageKind::AzureContainer(AzureConfig {
                     container_name: parse_toml_string("container_name", container_name)?,
+                    storage_account: toml
+                        .get("storage_account")
+                        .map(|storage_account| {
+                            parse_toml_string("storage_account", storage_account)
+                        })
+                        .transpose()?,
                     container_region: parse_toml_string("container_region", container_region)?,
                     prefix_in_container: toml
                         .get("prefix_in_container")

@@ -94,8 +94,6 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*WARN.*path=/v1/utilization .*request was dropped before completing",
     # Can happen during shutdown
     ".*scheduling deletion on drop failed: queue is in state Stopped.*",
-    # Can happen during shutdown
-    ".*ignoring failure to find gc cutoffs: timeline shutting down.*",
 )
 
 

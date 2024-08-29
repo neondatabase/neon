@@ -48,7 +48,6 @@ use utils::{
     vec_map::VecMap,
 };
 
-use std::ops::{Deref, Range};
 use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -62,7 +61,12 @@ use std::{
     cmp::{max, min, Ordering},
     ops::ControlFlow,
 };
+use std::{
+    collections::btree_map::Entry,
+    ops::{Deref, Range},
+};
 
+use crate::metrics::GetKind;
 use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -76,7 +80,6 @@ use crate::{
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     pgdatadir_mapping::CollectKeySpaceError,
 };
-use crate::{deletion_queue::DeletionQueueClient, metrics::GetKind};
 use crate::{
     disk_usage_eviction_task::finite_f32,
     tenant::storage_layer::{
@@ -206,7 +209,6 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub deletion_queue_client: DeletionQueueClient,
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
@@ -456,6 +458,9 @@ pub(crate) struct GcInfo {
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
+
+    /// Leases granted to particular LSNs.
+    pub(crate) leases: BTreeMap<Lsn, LsnLease>,
 }
 
 impl GcInfo {
@@ -1523,17 +1528,46 @@ impl Timeline {
         Ok(())
     }
 
-    /// Obtains a temporary lease blocking garbage collection for the given LSN
+    /// Obtains a temporary lease blocking garbage collection for the given LSN.
+    ///
+    /// This function will error if the requesting LSN is less than the `latest_gc_cutoff_lsn` and there is also
+    /// no existing lease to renew. If there is an existing lease in the map, the lease will be renewed only if
+    /// the request extends the lease. The returned lease is therefore the maximum between the existing lease and
+    /// the requesting lease.
     pub(crate) fn make_lsn_lease(
         &self,
-        _lsn: Lsn,
+        lsn: Lsn,
+        length: Duration,
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
-        const LEASE_LENGTH: Duration = Duration::from_secs(5 * 60);
-        let lease = LsnLease {
-            valid_until: SystemTime::now() + LEASE_LENGTH,
+        let lease = {
+            let mut gc_info = self.gc_info.write().unwrap();
+
+            let valid_until = SystemTime::now() + length;
+
+            let entry = gc_info.leases.entry(lsn);
+
+            let lease = {
+                if let Entry::Occupied(mut occupied) = entry {
+                    let existing_lease = occupied.get_mut();
+                    if valid_until > existing_lease.valid_until {
+                        existing_lease.valid_until = valid_until;
+                    }
+                    existing_lease.clone()
+                } else {
+                    // Reject already GC-ed LSN (lsn < latest_gc_cutoff)
+                    let latest_gc_cutoff_lsn = self.get_latest_gc_cutoff_lsn();
+                    if lsn < *latest_gc_cutoff_lsn {
+                        bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
+                    }
+
+                    entry.or_insert(LsnLease { valid_until }).clone()
+                }
+            };
+
+            lease
         };
-        // TODO: dummy implementation
+
         Ok(lease)
     }
 
@@ -2050,6 +2084,24 @@ const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
+    pub(crate) fn get_lsn_lease_length(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .lsn_lease_length
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
+    // TODO(yuchen): remove unused flag after implementing https://github.com/neondatabase/neon/issues/8072
+    #[allow(unused)]
+    pub(crate) fn get_lsn_lease_length_for_ts(&self) -> Duration {
+        let tenant_conf = self.tenant_conf.load();
+        tenant_conf
+            .tenant_conf
+            .lsn_lease_length_for_ts
+            .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
+    }
+
     pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -4790,7 +4842,7 @@ impl Timeline {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<GcCutoffs> {
+    ) -> Result<GcCutoffs, PageReconstructError> {
         let _timer = self
             .metrics
             .find_gc_cutoffs_histo
@@ -4875,13 +4927,25 @@ impl Timeline {
             return Err(GcError::TimelineCancelled);
         }
 
-        let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
+        let (horizon_cutoff, pitr_cutoff, retain_lsns, max_lsn_with_valid_lease) = {
             let gc_info = self.gc_info.read().unwrap();
 
             let horizon_cutoff = min(gc_info.cutoffs.horizon, self.get_disk_consistent_lsn());
             let pitr_cutoff = gc_info.cutoffs.pitr;
             let retain_lsns = gc_info.retain_lsns.clone();
-            (horizon_cutoff, pitr_cutoff, retain_lsns)
+
+            // Gets the maximum LSN that holds the valid lease.
+            //
+            // Caveat: `refresh_gc_info` is in charged of updating the lease map.
+            // Here, we do not check for stale leases again.
+            let max_lsn_with_valid_lease = gc_info.leases.last_key_value().map(|(lsn, _)| *lsn);
+
+            (
+                horizon_cutoff,
+                pitr_cutoff,
+                retain_lsns,
+                max_lsn_with_valid_lease,
+            )
         };
 
         let mut new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
@@ -4912,7 +4976,13 @@ impl Timeline {
             .set(Lsn::INVALID.0 as i64);
 
         let res = self
-            .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
+            .gc_timeline(
+                horizon_cutoff,
+                pitr_cutoff,
+                retain_lsns,
+                max_lsn_with_valid_lease,
+                new_gc_cutoff,
+            )
             .instrument(
                 info_span!("gc_timeline", timeline_id = %self.timeline_id, cutoff = %new_gc_cutoff),
             )
@@ -4929,6 +4999,7 @@ impl Timeline {
         horizon_cutoff: Lsn,
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
+        max_lsn_with_valid_lease: Option<Lsn>,
         new_gc_cutoff: Lsn,
     ) -> Result<GcResult, GcError> {
         // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
@@ -4977,7 +5048,8 @@ impl Timeline {
         // 1. it is older than cutoff LSN;
         // 2. it is older than PITR interval;
         // 3. it doesn't need to be retained for 'retain_lsns';
-        // 4. newer on-disk image layers cover the layer's whole key range
+        // 4. it does not need to be kept for LSNs holding valid leases.
+        // 5. newer on-disk image layers cover the layer's whole key range
         //
         // TODO holding a write lock is too agressive and avoidable
         let mut guard = self.layers.write().await;
@@ -5028,7 +5100,21 @@ impl Timeline {
                 }
             }
 
-            // 4. Is there a later on-disk layer for this relation?
+            // 4. Is there a valid lease that requires us to keep this layer?
+            if let Some(lsn) = &max_lsn_with_valid_lease {
+                // keep if layer start <= any of the lease
+                if &l.get_lsn_range().start <= lsn {
+                    debug!(
+                        "keeping {} because there is a valid lease preventing GC at {}",
+                        l.layer_name(),
+                        lsn,
+                    );
+                    result.layers_needed_by_leases += 1;
+                    continue 'outer;
+                }
+            }
+
+            // 5. Is there a later on-disk layer for this relation?
             //
             // The end-LSN is exclusive, while disk_consistent_lsn is
             // inclusive. For example, if disk_consistent_lsn is 100, it is
@@ -5404,6 +5490,11 @@ impl Timeline {
     #[cfg(test)]
     pub(super) fn force_advance_lsn(self: &Arc<Timeline>, new_lsn: Lsn) {
         self.last_record_lsn.advance(new_lsn);
+    }
+
+    #[cfg(test)]
+    pub(super) fn force_set_disk_consistent_lsn(&self, new_value: Lsn) {
+        self.disk_consistent_lsn.store(new_value);
     }
 
     /// Force create an image layer and place it into the layer map.

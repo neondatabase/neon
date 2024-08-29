@@ -75,9 +75,6 @@ def test_metric_collection(
     env.pageserver.allowed_errors.extend(
         [
             ".*metrics endpoint refused the sent metrics*",
-            # we have a fast rate of calculation, these can happen at shutdown
-            ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*",
-            ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes",
             ".*metrics_collection: failed to upload to S3: Failed to upload data of length .* to storage path.*",
         ]
     )
@@ -238,9 +235,6 @@ def test_metric_collection_cleans_up_tempfile(
     env.pageserver.allowed_errors.extend(
         [
             ".*metrics endpoint refused the sent metrics*",
-            # we have a fast rate of calculation, these can happen at shutdown
-            ".*synthetic_size_worker:calculate_synthetic_size.*:gather_size_inputs.*: failed to calculate logical size at .*: cancelled.*",
-            ".*synthetic_size_worker: failed to calculate synthetic size for tenant .*: failed to calculate some logical_sizes",
         ]
     )
 

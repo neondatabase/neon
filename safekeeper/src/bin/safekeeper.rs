@@ -13,7 +13,9 @@ use tokio::runtime::Handle;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinError;
 use toml_edit::Document;
+use utils::logging::SecretString;
 
+use std::env::{var, VarError};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
@@ -287,6 +289,22 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Load JWT auth token to connect to other safekeepers for pull_timeline.
+    let sk_auth_token = match var("SAFEKEEPER_AUTH_TOKEN") {
+        Ok(v) => {
+            info!("loaded JWT token for authentication with safekeepers");
+            Some(SecretString::from(v))
+        }
+        Err(VarError::NotPresent) => {
+            info!("no JWT token for authentication with safekeepers detected");
+            None
+        }
+        Err(_) => {
+            warn!("JWT token for authentication with safekeepers is not unicode");
+            None
+        }
+    };
+
     let conf = SafeKeeperConf {
         workdir,
         my_id: id,
@@ -307,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
         pg_auth,
         pg_tenant_only_auth,
         http_auth,
+        sk_auth_token,
         current_thread_runtime: args.current_thread_runtime,
         walsenders_keep_horizon: args.walsenders_keep_horizon,
         partial_backup_enabled: args.partial_backup_enabled,

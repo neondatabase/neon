@@ -14,6 +14,8 @@ use std::{
 };
 use utils::logging::LogFormat;
 
+use crate::models::LsnLease;
+
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
 // as a separate structure.  This information is not neeed by the pageserver
 // itself, it is only used for registering the pageserver with the control
@@ -266,6 +268,16 @@ pub struct TenantConfigToml {
     /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
     /// file is written.
     pub switch_aux_file_policy: crate::models::AuxFilePolicy,
+
+    /// The length for an explicit LSN lease request.
+    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length: Duration,
+
+    /// The length for an implicit LSN lease granted as part of `get_lsn_by_timestamp` request.
+    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
+    #[serde(with = "humantime_serde")]
+    pub lsn_lease_length_for_ts: Duration,
 }
 
 pub mod defaults {
@@ -478,6 +490,8 @@ impl Default for TenantConfigToml {
             timeline_get_throttle: crate::models::ThrottleConfig::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
             switch_aux_file_policy: crate::models::AuxFilePolicy::default_tenant_config(),
+            lsn_lease_length: LsnLease::DEFAULT_LENGTH,
+            lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
         }
     }
 }

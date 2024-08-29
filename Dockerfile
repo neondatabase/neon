@@ -69,8 +69,6 @@ RUN set -e \
     && apt install -y \
         libreadline-dev \
         libseccomp-dev \
-        libicu67 \
-        openssl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \

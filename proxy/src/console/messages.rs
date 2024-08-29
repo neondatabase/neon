@@ -1,16 +1,183 @@
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::fmt::{self, Display};
 
 use crate::auth::IpPattern;
 
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
+use crate::proxy::retry::ShouldRetry;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
 #[derive(Debug, Deserialize)]
 pub struct ConsoleError {
     pub error: Box<str>,
+    #[serde(skip)]
+    pub http_status_code: http::StatusCode,
+    pub status: Option<Status>,
+}
+
+impl ConsoleError {
+    pub fn get_reason(&self) -> Reason {
+        self.status
+            .as_ref()
+            .and_then(|s| s.details.error_info.as_ref())
+            .map(|e| e.reason)
+            .unwrap_or(Reason::Unknown)
+    }
+    pub fn get_user_facing_message(&self) -> String {
+        use super::provider::errors::REQUEST_FAILED;
+        self.status
+            .as_ref()
+            .and_then(|s| s.details.user_facing_message.as_ref())
+            .map(|m| m.message.clone().into())
+            .unwrap_or_else(|| {
+                // Ask @neondatabase/control-plane for review before adding more.
+                match self.http_status_code {
+                    http::StatusCode::NOT_FOUND => {
+                        // Status 404: failed to get a project-related resource.
+                        format!("{REQUEST_FAILED}: endpoint cannot be found")
+                    }
+                    http::StatusCode::NOT_ACCEPTABLE => {
+                        // Status 406: endpoint is disabled (we don't allow connections).
+                        format!("{REQUEST_FAILED}: endpoint is disabled")
+                    }
+                    http::StatusCode::LOCKED | http::StatusCode::UNPROCESSABLE_ENTITY => {
+                        // Status 423: project might be in maintenance mode (or bad state), or quotas exceeded.
+                        format!("{REQUEST_FAILED}: endpoint is temporarily unavailable. Check your quotas and/or contact our support.")
+                    }
+                    _ => REQUEST_FAILED.to_owned(),
+                }
+            })
+    }
+}
+
+impl Display for ConsoleError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let msg = self
+            .status
+            .as_ref()
+            .and_then(|s| s.details.user_facing_message.as_ref())
+            .map(|m| m.message.as_ref())
+            .unwrap_or_else(|| &self.error);
+        write!(f, "{}", msg)
+    }
+}
+
+impl ShouldRetry for ConsoleError {
+    fn could_retry(&self) -> bool {
+        if self.status.is_none() || self.status.as_ref().unwrap().details.retry_info.is_none() {
+            // retry some temporary failures because the compute was in a bad state
+            // (bad request can be returned when the endpoint was in transition)
+            return match &self {
+                ConsoleError {
+                    http_status_code: http::StatusCode::BAD_REQUEST,
+                    ..
+                } => true,
+                // don't retry when quotas are exceeded
+                ConsoleError {
+                    http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
+                    ref error,
+                    ..
+                } => !error.contains("compute time quota of non-primary branches is exceeded"),
+                // locked can be returned when the endpoint was in transition
+                // or when quotas are exceeded. don't retry when quotas are exceeded
+                ConsoleError {
+                    http_status_code: http::StatusCode::LOCKED,
+                    ref error,
+                    ..
+                } => {
+                    !error.contains("quota exceeded")
+                        && !error.contains("the limit for current plan reached")
+                }
+                _ => false,
+            };
+        }
+
+        // retry if the response has a retry delay
+        if let Some(retry_info) = self
+            .status
+            .as_ref()
+            .and_then(|s| s.details.retry_info.as_ref())
+        {
+            retry_info.retry_delay_ms > 0
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Status {
+    pub code: Box<str>,
+    pub message: Box<str>,
+    pub details: Details,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Details {
+    pub error_info: Option<ErrorInfo>,
+    pub retry_info: Option<RetryInfo>,
+    pub user_facing_message: Option<UserFacingMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ErrorInfo {
+    pub reason: Reason,
+    // Schema could also have `metadata` field, but it's not structured. Skip it for now.
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Default)]
+pub enum Reason {
+    #[serde(rename = "ROLE_PROTECTED")]
+    RoleProtected,
+    #[serde(rename = "RESOURCE_NOT_FOUND")]
+    ResourceNotFound,
+    #[serde(rename = "PROJECT_NOT_FOUND")]
+    ProjectNotFound,
+    #[serde(rename = "ENDPOINT_NOT_FOUND")]
+    EndpointNotFound,
+    #[serde(rename = "BRANCH_NOT_FOUND")]
+    BranchNotFound,
+    #[serde(rename = "RATE_LIMIT_EXCEEDED")]
+    RateLimitExceeded,
+    #[serde(rename = "NON_PRIMARY_BRANCH_COMPUTE_TIME_EXCEEDED")]
+    NonPrimaryBranchComputeTimeExceeded,
+    #[serde(rename = "ACTIVE_TIME_QUOTA_EXCEEDED")]
+    ActiveTimeQuotaExceeded,
+    #[serde(rename = "COMPUTE_TIME_QUOTA_EXCEEDED")]
+    ComputeTimeQuotaExceeded,
+    #[serde(rename = "WRITTEN_DATA_QUOTA_EXCEEDED")]
+    WrittenDataQuotaExceeded,
+    #[serde(rename = "DATA_TRANSFER_QUOTA_EXCEEDED")]
+    DataTransferQuotaExceeded,
+    #[serde(rename = "LOGICAL_SIZE_QUOTA_EXCEEDED")]
+    LogicalSizeQuotaExceeded,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl Reason {
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            Reason::ResourceNotFound
+                | Reason::ProjectNotFound
+                | Reason::EndpointNotFound
+                | Reason::BranchNotFound
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetryInfo {
+    pub retry_delay_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserFacingMessage {
+    pub message: Box<str>,
 }
 
 /// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].

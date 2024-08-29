@@ -1,5 +1,3 @@
-use std::usize;
-
 use super::{LimitAlgorithm, Outcome, Sample};
 
 /// Loss-based congestion avoidance.

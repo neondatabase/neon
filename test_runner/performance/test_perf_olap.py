@@ -106,6 +106,7 @@ QUERIES: Tuple[LabelledQuery, ...] = (
 # Disable auto formatting for the list of queries so that it's easier to read
 # fmt: off
 PGVECTOR_QUERIES: Tuple[LabelledQuery, ...] = (
+    LabelledQuery("PGVPREP",  r"ALTER EXTENSION VECTOR UPDATE;"),
     LabelledQuery("PGV0",  r"DROP TABLE IF EXISTS hnsw_test_table;"),
     LabelledQuery("PGV1",  r"CREATE TABLE hnsw_test_table AS TABLE documents WITH NO DATA;"),
     LabelledQuery("PGV2",  r"INSERT INTO hnsw_test_table SELECT * FROM documents;"),
@@ -115,6 +116,10 @@ PGVECTOR_QUERIES: Tuple[LabelledQuery, ...] = (
     LabelledQuery("PGV6",  r"CREATE INDEX ON hnsw_test_table USING hnsw (embeddings vector_l1_ops);"),
     LabelledQuery("PGV7",  r"CREATE INDEX ON hnsw_test_table USING hnsw ((binary_quantize(embeddings)::bit(1536)) bit_hamming_ops);"),
     LabelledQuery("PGV8",  r"CREATE INDEX ON hnsw_test_table USING hnsw ((binary_quantize(embeddings)::bit(1536)) bit_jaccard_ops);"),
+    LabelledQuery("PGV9",  r"DROP TABLE IF EXISTS halfvec_test_table;"),
+    LabelledQuery("PGV10", r"CREATE TABLE halfvec_test_table (_id text NOT NULL, title text, text text, embeddings halfvec(1536), PRIMARY KEY (_id));"),
+    LabelledQuery("PGV11", r"INSERT INTO halfvec_test_table (_id, title, text, embeddings) SELECT _id, title, text, embeddings::halfvec FROM documents;"),
+    LabelledQuery("PGV12", r"CREATE INDEX documents_half_precision_hnsw_idx ON halfvec_test_table USING hnsw (embeddings halfvec_cosine_ops) WITH (m = 64, ef_construction = 128);"),
 )
 # fmt: on
 

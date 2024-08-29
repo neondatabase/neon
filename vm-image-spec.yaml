@@ -18,7 +18,7 @@ commands:
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn
-    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres" /bin/postgres_exporter'
+    shell: 'DATA_SOURCE_NAME="user=cloud_admin sslmode=disable dbname=postgres application_name=postgres-exporter" /bin/postgres_exporter'
   - name: sql-exporter
     user: nobody
     sysvInitAction: respawn
@@ -93,7 +93,7 @@ files:
       target:
         # Data source name always has a URI schema that matches the driver name. In some cases (e.g. MySQL)
         # the schema gets dropped or replaced to match the driver expected DSN format.
-        data_source_name: 'postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable'
+        data_source_name: 'postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter'
 
         # Collectors (referenced by name) to execute on the target.
         # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
@@ -128,7 +128,7 @@ files:
       target:
         # Data source name always has a URI schema that matches the driver name. In some cases (e.g. MySQL)
         # the schema gets dropped or replaced to match the driver expected DSN format.
-        data_source_name: 'postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable'
+        data_source_name: 'postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter_autoscaling'
 
         # Collectors (referenced by name) to execute on the target.
         # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
@@ -304,7 +304,9 @@ files:
           - slot_name
         values: [restart_lsn]
         query: |
-          select slot_name, (restart_lsn - '0/0')::FLOAT8 from pg_replication_slots where slot_type = 'logical';
+          select slot_name, (restart_lsn - '0/0')::FLOAT8 as restart_lsn
+          from pg_replication_slots
+          where slot_type = 'logical';
 
       - metric_name: retained_wal
         type: gauge
@@ -322,14 +324,15 @@ files:
         help: 'Whether or not the replication slot wal_status is lost'
         key_labels:
           - slot_name
-        values: [wal_status_is_lost]
+        values: [wal_is_lost]
         query: |
           SELECT slot_name,
           CASE
             WHEN wal_status = 'lost' THEN 1
             ELSE 0
-          END AS wal_status_is_lost
+          END AS wal_is_lost
           FROM pg_replication_slots;
+
   - filename: neon_collector_autoscaling.yml
     content: |
       collector_name: neon_collector_autoscaling

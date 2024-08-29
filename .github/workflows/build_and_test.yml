@@ -299,21 +299,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
         uses: actions/cache@v4
         with:
           path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
         uses: actions/cache@v4
         with:
           path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
@@ -337,34 +337,8 @@ jobs:
         run: |
           ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
-      - name: Run rust tests
-        env:
-          NEXTEST_RETRIES: 3
-        run: |
-          #nextest does not yet support running doctests
-          cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
-
-          for io_engine in std-fs tokio-epoll-uring ; do
-            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
-          done
-
-          # Run separate tests for real S3
-          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
-          export REMOTE_STORAGE_S3_REGION=eu-central-1
-          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_s3)'
-
-          # Run separate tests for real Azure Blob Storage
-          # XXX: replace region with `eu-central-1`-like region
-          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
-          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
-          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
-          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
-          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
-          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_azure)'
-
+      # Do install *before* running rust tests because they might recompile the
+      # binaries with different features/flags.
       - name: Install rust binaries
         run: |
           # Install target binaries
@@ -404,6 +378,32 @@ jobs:
               echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
           fi
+
+      - name: Run rust tests
+        env:
+          NEXTEST_RETRIES: 3
+        run: |
+          #nextest does not yet support running doctests
+          cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
+
+          for io_engine in std-fs tokio-epoll-uring ; do
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+          done
+
+          # Run separate tests for real S3
+          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
+          export REMOTE_STORAGE_S3_REGION=eu-central-1
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_s3)'
+
+          # Run separate tests for real Azure Blob Storage
+          # XXX: replace region with `eu-central-1`-like region
+          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
+          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
+          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
+          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
+          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
       - name: Install postgres binaries
         run: cp -a pg_install /tmp/neon/pg_install
@@ -858,7 +858,7 @@ jobs:
           cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
           tags: |
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
-      
+
       - name: Build neon extensions test image
         if: matrix.version == 'v16'
         uses: docker/build-push-action@v5
@@ -965,7 +965,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 

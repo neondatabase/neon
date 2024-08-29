@@ -31,6 +31,7 @@ pub(crate) enum PageserverState {
     Available {
         last_seen_at: Instant,
         utilization: PageserverUtilization,
+        new: bool,
     },
     Offline,
 }
@@ -127,6 +128,7 @@ impl HeartbeaterTask {
             heartbeat_futs.push({
                 let jwt_token = self.jwt_token.clone();
                 let cancel = self.cancel.clone();
+                let new_node = !self.state.contains_key(node_id);
 
                 // Clone the node and mark it as available such that the request
                 // goes through to the pageserver even when the node is marked offline.
@@ -159,6 +161,7 @@ impl HeartbeaterTask {
                         PageserverState::Available {
                             last_seen_at: Instant::now(),
                             utilization,
+                            new: new_node,
                         }
                     } else {
                         PageserverState::Offline
@@ -220,6 +223,7 @@ impl HeartbeaterTask {
                     }
                 },
                 Vacant(_) => {
+                    // This is a new node. Don't generate a delta for it.
                     deltas.push((node_id, ps_state.clone()));
                 }
             }
