@@ -81,7 +81,7 @@ all: neon postgres neon-pg-ext
 #
 # The 'postgres_ffi' depends on the Postgres headers.
 .PHONY: neon
-neon: postgres-headers postgres walproposer-lib cargo-target-dir
+neon: postgres-headers walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
 .PHONY: cargo-target-dir
@@ -164,13 +164,8 @@ postgres-clean-%:
 postgres-check-%: postgres-%
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 check
 
-# Note: We do *not* need postgres itself to be compiled to compile
-# PostgreSQL-extensions: we only need the headers for the type definitions.
-# This is different for non-extension binaries, but those are not included
-# in this makefile target, so they should register their own dependency on
-# the postgres-% binary target.
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-headers-%
+neon-pg-ext-%: postgres-%
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
@@ -222,7 +217,7 @@ neon-pg-clean-ext-%:
 # they depend on openssl and other libraries that are not included in our
 # Rust build.
 .PHONY: walproposer-lib
-walproposer-lib: postgres-v17 neon-pg-ext-v17
+walproposer-lib: neon-pg-ext-v17
 	+@echo "Compiling walproposer-lib"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
@@ -249,9 +244,6 @@ walproposer-lib-clean:
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config \
 		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
-
-.PHONY: neon-pg
-neon-pg: postgres neon-pg-ext
 
 .PHONY: neon-pg-ext
 neon-pg-ext: \
