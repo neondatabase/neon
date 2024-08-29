@@ -548,6 +548,7 @@ pub enum RedisEventsCount {
 }
 
 pub struct ThreadPoolWorkers(usize);
+#[derive(Copy, Clone)]
 pub struct ThreadPoolWorkerId(pub usize);
 
 impl LabelValue for ThreadPoolWorkerId {

@@ -4,19 +4,19 @@
 //! 1. Fairness per endpoint.
 //! 2. Yield support for high iteration counts.
 
-mod sleep;
-
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    cell::RefCell,
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Weak,
+    },
+    task::{Context, Poll},
 };
 
-use crossbeam_deque::{Injector, Steal, Stealer, Worker};
-use itertools::Itertools;
-use parking_lot::{Condvar, Mutex};
 use rand::Rng;
 use rand::{rngs::SmallRng, SeedableRng};
-use tokio::sync::oneshot;
 
 use crate::{
     intern::EndpointIdInt,
@@ -27,176 +27,75 @@ use crate::{
 use super::pbkdf2::Pbkdf2;
 
 pub struct ThreadPool {
-    queue: Injector<JobSpec>,
-    stealers: Vec<Stealer<JobSpec>>,
-    parkers: Vec<(Condvar, Mutex<ThreadState>)>,
-    /// bitpacked representation.
-    /// lower 8 bits = number of sleeping threads
-    /// next 8 bits = number of idle threads (searching for work)
-    counters: AtomicU64,
-
+    runtime: Option<tokio::runtime::Runtime>,
     pub metrics: Arc<ThreadPoolMetrics>,
 }
 
-#[derive(PartialEq)]
-enum ThreadState {
-    Parked,
-    Active,
+/// How often to reset the sketch values
+const SKETCH_RESET_INTERVAL: u64 = 1021;
+
+thread_local! {
+    static STATE: RefCell<Option<ThreadRt>> = const { RefCell::new(None) };
 }
 
 impl ThreadPool {
     pub fn new(n_workers: u8) -> Arc<Self> {
-        let workers = (0..n_workers).map(|_| Worker::new_fifo()).collect_vec();
-        let stealers = workers.iter().map(|w| w.stealer()).collect_vec();
+        // rayon would be nice here, but yielding in rayon does not work well afaict.
 
-        let parkers = (0..n_workers)
-            .map(|_| (Condvar::new(), Mutex::new(ThreadState::Active)))
-            .collect_vec();
+        Arc::new_cyclic(|pool| {
+            let pool = pool.clone();
+            let worker_id = AtomicUsize::new(0);
 
-        let pool = Arc::new(Self {
-            queue: Injector::new(),
-            stealers,
-            parkers,
-            // threads start searching for work
-            counters: AtomicU64::new((n_workers as u64) << 8),
-            metrics: Arc::new(ThreadPoolMetrics::new(n_workers as usize)),
-        });
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(n_workers as usize)
+                .on_thread_start(move || {
+                    STATE.with_borrow_mut(|state| {
+                        *state = Some(ThreadRt {
+                            pool: pool.clone(),
+                            id: ThreadPoolWorkerId(worker_id.fetch_add(1, Ordering::Relaxed)),
+                            rng: SmallRng::from_entropy(),
+                            // used to determine whether we should temporarily skip tasks for fairness.
+                            // 99% of estimates will overcount by no more than 4096 samples
+                            countmin: CountMinSketch::with_params(
+                                1.0 / (SKETCH_RESET_INTERVAL as f64),
+                                0.01,
+                            ),
+                            tick: 0,
+                        });
+                    });
+                })
+                .build()
+                .unwrap();
 
-        for (i, worker) in workers.into_iter().enumerate() {
-            let pool = Arc::clone(&pool);
-            std::thread::spawn(move || thread_rt(pool, worker, i));
-        }
-
-        pool
+            Self {
+                runtime: Some(runtime),
+                metrics: Arc::new(ThreadPoolMetrics::new(n_workers as usize)),
+            }
+        })
     }
 
     pub(crate) fn spawn_job(
         &self,
         endpoint: EndpointIdInt,
         pbkdf2: Pbkdf2,
-    ) -> oneshot::Receiver<[u8; 32]> {
-        let (tx, rx) = oneshot::channel();
-        self.push_job(JobSpec {
-            response: tx,
-            pbkdf2,
-            endpoint,
-        });
-        rx
+    ) -> tokio::task::JoinHandle<[u8; 32]> {
+        self.runtime
+            .as_ref()
+            .unwrap()
+            .spawn(JobSpec { pbkdf2, endpoint })
     }
+}
 
-    fn push_job(&self, job: JobSpec) {
-        let queue_was_empty = self.queue.is_empty();
-
-        self.metrics.injector_queue_depth.inc();
-        self.queue.push(job);
-
-        // inspired from <https://github.com/rayon-rs/rayon/blob/3e3962cb8f7b50773bcc360b48a7a674a53a2c77/rayon-core/src/sleep/mod.rs#L242>
-        let counts = self.counters.load(Ordering::SeqCst);
-        let num_awake_but_idle = (counts >> 8) & 0xff;
-        let num_sleepers = counts & 0xff;
-
-        // If the queue is non-empty, then we always wake up a worker
-        // -- clearly the existing idle jobs aren't enough. Otherwise,
-        // check to see if we have enough idle workers.
-        if !queue_was_empty || num_awake_but_idle == 0 {
-            let num_to_wake = Ord::min(1, num_sleepers);
-            self.wake_any_threads(num_to_wake);
-        }
-    }
-
-    #[cold]
-    fn wake_any_threads(&self, mut num_to_wake: u64) {
-        if num_to_wake > 0 {
-            for i in 0..self.parkers.len() {
-                if self.wake_specific_thread(i) {
-                    num_to_wake -= 1;
-                    if num_to_wake == 0 {
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    fn wake_specific_thread(&self, index: usize) -> bool {
-        let (condvar, lock) = &self.parkers[index];
-
-        let mut state = lock.lock();
-        if *state == ThreadState::Parked {
-            condvar.notify_one();
-
-            // When the thread went to sleep, it will have incremented
-            // this value. When we wake it, its our job to decrement
-            // it. We could have the thread do it, but that would
-            // introduce a delay between when the thread was
-            // *notified* and when this counter was decremented. That
-            // might mislead people with new work into thinking that
-            // there are sleeping threads that they should try to
-            // wake, when in fact there is nothing left for them to
-            // do.
-            self.counters.fetch_sub(1, Ordering::SeqCst);
-            *state = ThreadState::Active;
-
-            true
-        } else {
-            false
-        }
-    }
-
-    fn steal(&self, rng: &mut impl Rng, skip: usize, worker: &Worker<JobSpec>) -> Option<JobSpec> {
-        // announce thread as idle
-        self.counters.fetch_add(256, Ordering::SeqCst);
-
-        // try steal from the global queue
-        loop {
-            let mut retry = false;
-            match self.queue.steal_batch_and_pop(worker) {
-                crossbeam_deque::Steal::Success(job) => {
-                    self.metrics
-                        .injector_queue_depth
-                        .set(self.queue.len() as i64);
-                    // no longer idle
-                    self.counters.fetch_sub(256, Ordering::SeqCst);
-                    return Some(job);
-                }
-                crossbeam_deque::Steal::Retry => retry = true,
-                crossbeam_deque::Steal::Empty => {}
-            }
-
-            // try steal from our neighbours (random order)
-            let start = rng.gen_range(0..self.stealers.len());
-            let job = (start..self.stealers.len())
-                .chain(0..start)
-                .filter(|i| *i != skip)
-                .find_map(
-                    |victim| match self.stealers[victim].steal_batch_and_pop(worker) {
-                        crossbeam_deque::Steal::Success(job) => Some(job),
-                        crossbeam_deque::Steal::Empty => None,
-                        crossbeam_deque::Steal::Retry => {
-                            retry = true;
-                            None
-                        }
-                    },
-                );
-
-            if let Some(job) = job {
-                // no longer idle
-                self.counters.fetch_sub(256, Ordering::SeqCst);
-                return Some(job);
-            }
-
-            if !retry {
-                return None;
-            }
-        }
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        self.runtime.take().unwrap().shutdown_background();
     }
 }
 
 struct ThreadRt {
+    pool: Weak<ThreadPool>,
+    id: ThreadPoolWorkerId,
     rng: SmallRng,
-    pool: Arc<ThreadPool>,
-    worker: Worker<JobSpec>,
-    index: usize,
     countmin: CountMinSketch,
     tick: u64,
 }
@@ -224,132 +123,48 @@ impl ThreadRt {
         let probability = P.ln() / (P + rate as f64).ln();
         self.rng.gen_bool(probability)
     }
-
-    fn wait_for_work(&self) {
-        let (condvar, lock) = &self.pool.parkers[self.index];
-        let mut lock = lock.lock();
-
-        if self.worker.is_empty() && self.pool.queue.is_empty() {
-            // queue is empty
-            self.pool
-                .metrics
-                .worker_queue_depth
-                .set(ThreadPoolWorkerId(self.index), 0);
-
-            // subtract 1 from idle count, add 1 to sleeping count.
-            self.pool.counters.fetch_sub(255, Ordering::SeqCst);
-
-            *lock = ThreadState::Parked;
-            condvar.wait(&mut lock);
-        }
-    }
-
-    fn tick(&mut self) -> u64 {
-        self.tick.wrapping_add(1)
-    }
-
-    fn get_work_global(&self) -> Option<JobSpec> {
-        // Fast path, if len == 0, then there are no values
-        if self.pool.queue.is_empty() {
-            return None;
-        }
-        loop {
-            match self.pool.queue.steal_batch_and_pop(&self.worker) {
-                Steal::Success(item) => {
-                    return Some(item);
-                }
-                Steal::Retry => continue,
-                Steal::Empty => return None,
-            }
-        }
-    }
-
-    fn get_work(&mut self) -> Option<JobSpec> {
-        const STEAL_INTERVAL: u64 = 61;
-
-        // Every 61 pops from the local queue, pop from the global queue
-        if self.tick() % STEAL_INTERVAL == 0 {
-            if let Some(job) = self.get_work_global() {
-                return Some(job);
-            }
-        }
-
-        self.worker
-            .pop()
-            .or_else(|| self.pool.steal(&mut self.rng, self.index, &self.worker))
-    }
-}
-
-fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
-    /// How often to reset the sketch values
-    const SKETCH_RESET_INTERVAL: usize = 1021;
-
-    let mut rt = ThreadRt {
-        rng: SmallRng::from_entropy(),
-        pool,
-        worker,
-        index,
-        // used to determine whether we should temporarily skip tasks for fairness.
-        // 99% of estimates will overcount by no more than 4096 samples
-        countmin: CountMinSketch::with_params(1.0 / (SKETCH_RESET_INTERVAL as f64), 0.01),
-        tick: 1,
-    };
-
-    loop {
-        let mut job = loop {
-            if let Some(job) = rt.get_work() {
-                break job;
-            };
-            rt.wait_for_work();
-        };
-
-        rt.pool
-            .metrics
-            .worker_queue_depth
-            .set(ThreadPoolWorkerId(index), rt.worker.len() as i64);
-
-        // receiver is closed, cancel the task
-        if !job.response.is_closed() {
-            if rt.should_run(&job) {
-                rt.pool
-                    .metrics
-                    .worker_task_turns_total
-                    .inc(ThreadPoolWorkerId(index));
-
-                match job.pbkdf2.turn() {
-                    std::task::Poll::Ready(result) => {
-                        let _ = job.response.send(result);
-                    }
-                    // more to do, we shall requeue
-                    std::task::Poll::Pending => rt.worker.push(job),
-                }
-            } else {
-                // skip for now
-
-                rt.pool
-                    .metrics
-                    .worker_task_skips_total
-                    .inc(ThreadPoolWorkerId(index));
-
-                // if our local queue is quite full, push to the global queue
-                // if rt.worker.len() > 32 {
-                //     rt.pool.push_job(job);
-                // } else {
-                    rt.worker.push(job);
-                // }
-            }
-        }
-
-        if rt.index % SKETCH_RESET_INTERVAL == 0 {
-            rt.countmin.reset();
-        }
-    }
 }
 
 struct JobSpec {
-    response: oneshot::Sender<[u8; 32]>,
     pbkdf2: Pbkdf2,
     endpoint: EndpointIdInt,
+}
+
+impl Future for JobSpec {
+    type Output = [u8; 32];
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        STATE.with_borrow_mut(|state| {
+            let state = state.as_mut().expect("should be set on thread startup");
+
+            state.tick = state.tick.wrapping_add(1);
+            if state.tick % SKETCH_RESET_INTERVAL == 0 {
+                state.countmin.reset();
+            }
+
+            if state.should_run(&self) {
+                if let Some(pool) = state.pool.upgrade() {
+                    pool.metrics.worker_task_turns_total.inc(state.id);
+                }
+
+                match self.pbkdf2.turn() {
+                    Poll::Ready(result) => Poll::Ready(result),
+                    // more to do, we shall requeue
+                    Poll::Pending => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                }
+            } else {
+                if let Some(pool) = state.pool.upgrade() {
+                    pool.metrics.worker_task_skips_total.inc(state.id);
+                }
+
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+    }
 }
 
 #[cfg(test)]
