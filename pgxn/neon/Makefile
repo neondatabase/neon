@@ -6,6 +6,7 @@ OBJS = \
 	$(WIN32RES) \
 	extension_server.o \
 	file_cache.o \
+	hll.o \
 	libpagestore.o \
 	neon.o \
 	neon_utils.o \
@@ -22,7 +23,7 @@ SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_LINK = -lcurl
 
 EXTENSION = neon
-DATA = neon--1.0.sql neon--1.0--1.1.sql neon--1.1--1.2.sql neon--1.2--1.3.sql neon--1.3--1.2.sql neon--1.2--1.1.sql neon--1.1--1.0.sql
+DATA = neon--1.0.sql neon--1.0--1.1.sql neon--1.1--1.2.sql neon--1.2--1.3.sql neon--1.3--1.2.sql neon--1.2--1.1.sql neon--1.1--1.0.sql  neon--1.3--1.4.sql neon--1.4--1.3.sql
 PGFILEDESC = "neon - cloud storage for PostgreSQL"
 
 EXTRA_CLEAN = \

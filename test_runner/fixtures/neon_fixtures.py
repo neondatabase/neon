@@ -2114,6 +2114,21 @@ class NeonStorageController(MetricsGetter, LogUtils):
         return self
 
     @staticmethod
+    def retryable_node_operation(op, ps_id, max_attempts, backoff):
+        while max_attempts > 0:
+            try:
+                op(ps_id)
+                return
+            except StorageControllerApiException as e:
+                max_attempts -= 1
+                log.info(f"Operation failed ({max_attempts} attempts left): {e}")
+
+                if max_attempts == 0:
+                    raise e
+
+                time.sleep(backoff)
+
+    @staticmethod
     def raise_api_exception(res: requests.Response):
         try:
             res.raise_for_status()
@@ -2452,6 +2467,38 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
         log.info("storage controller passed consistency check")
+
+    def poll_node_status(
+        self, node_id: int, desired_scheduling_policy: str, max_attempts: int, backoff: int
+    ):
+        """
+        Poll the node status until it reaches 'desired_scheduling_policy' or 'max_attempts' have been exhausted
+        """
+        log.info(f"Polling {node_id} for {desired_scheduling_policy} scheduling policy")
+        while max_attempts > 0:
+            try:
+                status = self.node_status(node_id)
+                policy = status["scheduling"]
+                if policy == desired_scheduling_policy:
+                    return
+                else:
+                    max_attempts -= 1
+                    log.info(f"Status call returned {policy=} ({max_attempts} attempts left)")
+
+                    if max_attempts == 0:
+                        raise AssertionError(
+                            f"Status for {node_id=} did not reach {desired_scheduling_policy=}"
+                        )
+
+                    time.sleep(backoff)
+            except StorageControllerApiException as e:
+                max_attempts -= 1
+                log.info(f"Status call failed ({max_attempts} retries left): {e}")
+
+                if max_attempts == 0:
+                    raise e
+
+                time.sleep(backoff)
 
     def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
         if isinstance(config_strings, tuple):

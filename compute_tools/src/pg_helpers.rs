@@ -489,7 +489,7 @@ pub fn handle_postgres_logs(stderr: std::process::ChildStderr) -> JoinHandle<()>
 /// Read Postgres logs from `stderr` until EOF. Buffer is flushed on one of the following conditions:
 /// - next line starts with timestamp
 /// - EOF
-/// - no new lines were written for the last second
+/// - no new lines were written for the last 100 milliseconds
 async fn handle_postgres_logs_async(stderr: tokio::process::ChildStderr) -> Result<()> {
     let mut lines = tokio::io::BufReader::new(stderr).lines();
     let timeout_duration = Duration::from_millis(100);

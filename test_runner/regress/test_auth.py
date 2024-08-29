@@ -211,7 +211,7 @@ def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     def check_pageserver(expect_success: bool, **conn_kwargs):
         check_connection(
             env.pageserver,
-            f"get_last_record_rlsn {env.initial_tenant} {timeline_id}",
+            f"show {env.initial_tenant}",
             expect_success,
             **conn_kwargs,
         )

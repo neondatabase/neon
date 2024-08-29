@@ -873,9 +873,8 @@ impl ComputeNode {
         Ok(())
     }
 
-    // We could've wrapped this around `pg_ctl reload`, but right now we don't use
-    // `pg_ctl` for start / stop, so this just seems much easier to do as we already
-    // have opened connection to Postgres and superuser access.
+    // Wrapped this around `pg_ctl reload`, but right now we don't use
+    // `pg_ctl` for start / stop.
     #[instrument(skip_all)]
     fn pg_reload_conf(&self) -> Result<()> {
         let pgctl_bin = Path::new(&self.pgbin).parent().unwrap().join("pg_ctl");

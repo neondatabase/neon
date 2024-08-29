@@ -80,7 +80,7 @@ pub struct ConfigToml {
     pub get_impl: GetImpl,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
     pub validate_vectored_get: bool,
-    pub image_compression: Option<ImageCompressionAlgorithm>,
+    pub image_compression: ImageCompressionAlgorithm,
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: crate::models::L0FlushConfig,
 
@@ -286,6 +286,8 @@ pub struct TenantConfigToml {
 pub mod defaults {
     use const_format::formatcp;
 
+    use crate::models::ImageCompressionAlgorithm;
+
     pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
     pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
     pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
@@ -320,7 +322,8 @@ pub mod defaults {
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
-    pub const DEFAULT_IMAGE_COMPRESSION: Option<crate::models::ImageCompressionAlgorithm> = None;
+    pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
+        ImageCompressionAlgorithm::DisabledNoDecompress;
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 

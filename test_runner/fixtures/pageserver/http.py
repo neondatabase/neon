@@ -599,6 +599,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         return res_json
 
+    def timeline_lsn_lease(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
+    ):
+        data = {
+            "lsn": str(lsn),
+        }
+
+        log.info(f"Requesting lsn lease for {lsn=}, {tenant_id=}, {timeline_id=}")
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/lsn_lease",
+            json=data,
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        return res_json
+
     def timeline_get_timestamp_of_lsn(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, lsn: Lsn
     ):

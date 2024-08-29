@@ -169,7 +169,7 @@ pub struct PageServerConf {
 
     pub validate_vectored_get: bool,
 
-    pub image_compression: Option<ImageCompressionAlgorithm>,
+    pub image_compression: ImageCompressionAlgorithm,
 
     /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
     /// is exceeded, we start proactively closing ephemeral layers to limit the total amount

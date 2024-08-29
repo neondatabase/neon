@@ -1656,53 +1656,6 @@ where
             metric_recording.observe(&res);
             res?;
         }
-        // return pair of prev_lsn and last_lsn
-        else if let Some(params) = parts.strip_prefix(&["get_last_record_rlsn"]) {
-            if params.len() != 2 {
-                return Err(QueryError::Other(anyhow::anyhow!(
-                    "invalid param number for get_last_record_rlsn command"
-                )));
-            }
-
-            let tenant_id = TenantId::from_str(params[0])
-                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
-            let timeline_id = TimelineId::from_str(params[1])
-                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
-
-            tracing::Span::current()
-                .record("tenant_id", field::display(tenant_id))
-                .record("timeline_id", field::display(timeline_id));
-
-            self.check_permission(Some(tenant_id))?;
-
-            COMPUTE_COMMANDS_COUNTERS
-                .for_command(ComputeCommandKind::GetLastRecordRlsn)
-                .inc();
-
-            async {
-                let timeline = self
-                    .get_active_tenant_timeline(tenant_id, timeline_id, ShardSelector::Zero)
-                    .await?;
-
-                let end_of_timeline = timeline.get_last_record_rlsn();
-
-                pgb.write_message_noflush(&BeMessage::RowDescription(&[
-                    RowDescriptor::text_col(b"prev_lsn"),
-                    RowDescriptor::text_col(b"last_lsn"),
-                ]))?
-                .write_message_noflush(&BeMessage::DataRow(&[
-                    Some(end_of_timeline.prev.to_string().as_bytes()),
-                    Some(end_of_timeline.last.to_string().as_bytes()),
-                ]))?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-                anyhow::Ok(())
-            }
-            .instrument(info_span!(
-                "handle_get_last_record_lsn",
-                shard_id = tracing::field::Empty
-            ))
-            .await?;
-        }
         // same as basebackup, but result includes relational data as well
         else if let Some(params) = parts.strip_prefix(&["fullbackup"]) {
             if params.len() < 2 {
