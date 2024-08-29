@@ -40,7 +40,7 @@ static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore
         tokio::sync::Semaphore::new(permits)
     });
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, strum_macros::IntoStaticStr)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, strum_macros::IntoStaticStr, enum_map::Enum)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum BackgroundLoopKind {
     Compaction,
@@ -56,19 +56,25 @@ pub(crate) enum BackgroundLoopKind {
 
 impl BackgroundLoopKind {
     fn as_static_str(&self) -> &'static str {
-        let s: &'static str = self.into();
-        s
+        self.into()
     }
 }
+
+static PERMIT_GAUGES: once_cell::sync::Lazy<
+    enum_map::EnumMap<BackgroundLoopKind, metrics::IntCounterPair>,
+> = once_cell::sync::Lazy::new(|| {
+    enum_map::EnumMap::from_array(std::array::from_fn(|i| {
+        let kind = <BackgroundLoopKind as enum_map::Enum>::from_usize(i);
+        crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE.with_label_values(&[kind.into()])
+    }))
+});
 
 /// Cancellation safe.
 pub(crate) async fn concurrent_background_tasks_rate_limit_permit(
     loop_kind: BackgroundLoopKind,
     _ctx: &RequestContext,
 ) -> tokio::sync::SemaphorePermit<'static> {
-    let _guard = crate::metrics::BACKGROUND_LOOP_SEMAPHORE_WAIT_GAUGE
-        .with_label_values(&[loop_kind.as_static_str()])
-        .guard();
+    let _guard = PERMIT_GAUGES[loop_kind].guard();
 
     pausable_failpoint!(
         "initial-size-calculation-permit-pause",

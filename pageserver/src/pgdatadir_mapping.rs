@@ -699,13 +699,17 @@ impl Timeline {
             .await
             .context("scan")?;
         let mut result = HashMap::new();
+        let mut sz = 0;
         for (_, v) in kv {
             let v = v.context("get value")?;
             let v = aux_file::decode_file_value_bytes(&v).context("value decode")?;
             for (fname, content) in v {
+                sz += fname.len();
+                sz += content.len();
                 result.insert(fname, content);
             }
         }
+        self.aux_file_size_estimator.on_base_backup(sz);
         Ok(result)
     }
 
@@ -1474,23 +1478,45 @@ impl<'a> DatadirModification<'a> {
                 Err(PageReconstructError::MissingKey(_)) => None,
                 Err(e) => return Err(e.into()),
             };
-            let files = if let Some(ref old_val) = old_val {
+            let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
                 aux_file::decode_file_value(old_val)?
             } else {
                 Vec::new()
             };
-            let new_files = if content.is_empty() {
-                files
-                    .into_iter()
-                    .filter(|(p, _)| &path != p)
-                    .collect::<Vec<_>>()
-            } else {
-                files
-                    .into_iter()
-                    .filter(|(p, _)| &path != p)
-                    .chain(std::iter::once((path, content)))
-                    .collect::<Vec<_>>()
-            };
+            let mut other_files = Vec::with_capacity(files.len());
+            let mut modifying_file = None;
+            for file @ (p, content) in files {
+                if path == p {
+                    assert!(
+                        modifying_file.is_none(),
+                        "duplicated entries found for {}",
+                        path
+                    );
+                    modifying_file = Some(content);
+                } else {
+                    other_files.push(file);
+                }
+            }
+            let mut new_files = other_files;
+            match (modifying_file, content.is_empty()) {
+                (Some(old_content), false) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_update(old_content.len(), content.len());
+                    new_files.push((path, content));
+                }
+                (Some(old_content), true) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_remove(old_content.len());
+                    // not adding the file key to the final `new_files` vec.
+                }
+                (None, false) => {
+                    self.tline.aux_file_size_estimator.on_add(content.len());
+                    new_files.push((path, content));
+                }
+                (None, true) => anyhow::bail!("removing non-existing aux file: {}", path),
+            }
             let new_val = aux_file::encode_file_value(&new_files)?;
             self.put(key, Value::Image(new_val.into()));
         }
@@ -1671,7 +1697,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         if !self.pending_deletions.is_empty() {
-            writer.delete_batch(&self.pending_deletions).await?;
+            writer.delete_batch(&self.pending_deletions, ctx).await?;
             self.pending_deletions.clear();
         }
 

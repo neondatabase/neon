@@ -395,6 +395,7 @@ impl DeltaLayerWriterInner {
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename. We don't know
         // the end key yet, so we cannot form the final filename yet. We will
@@ -405,7 +406,7 @@ impl DeltaLayerWriterInner {
         let path =
             DeltaLayer::temp_path_for(conf, &tenant_shard_id, &timeline_id, key_start, &lsn_range);
 
-        let mut file = VirtualFile::create(&path).await?;
+        let mut file = VirtualFile::create(&path, ctx).await?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64)).await?;
         let blob_writer = BlobWriter::new(file, PAGE_SZ as u64);
@@ -587,6 +588,7 @@ impl DeltaLayerWriter {
         tenant_shard_id: TenantShardId,
         key_start: Key,
         lsn_range: Range<Lsn>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             inner: Some(
@@ -596,6 +598,7 @@ impl DeltaLayerWriter {
                     tenant_shard_id,
                     key_start,
                     lsn_range,
+                    ctx,
                 )
                 .await?,
             ),
@@ -702,6 +705,7 @@ impl DeltaLayer {
         let mut file = VirtualFile::open_with_options(
             path,
             virtual_file::OpenOptions::new().read(true).write(true),
+            ctx,
         )
         .await
         .with_context(|| format!("Failed to open file '{}'", path))?;
@@ -735,7 +739,7 @@ impl DeltaLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path).await {
+        let file = match VirtualFile::open(path, ctx).await {
             Ok(file) => file,
             Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
         };
@@ -1793,6 +1797,7 @@ mod test {
             harness.tenant_shard_id,
             entries_meta.key_range.start,
             entries_meta.lsn_range.clone(),
+            &ctx,
         )
         .await?;
 
@@ -1980,6 +1985,7 @@ mod test {
                 tenant.tenant_shard_id,
                 Key::MIN,
                 Lsn(0x11)..truncate_at,
+                ctx,
             )
             .await
             .unwrap();

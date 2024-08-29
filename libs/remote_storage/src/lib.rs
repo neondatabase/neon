@@ -263,6 +263,17 @@ pub trait RemoteStorage: Send + Sync + 'static {
         done_if_after: SystemTime,
         cancel: &CancellationToken,
     ) -> Result<(), TimeTravelError>;
+
+    /// Query how busy we currently are: may be used by callers which wish to politely
+    /// back off if there are already a lot of operations underway.
+    fn activity(&self) -> RemoteStorageActivity;
+}
+
+pub struct RemoteStorageActivity {
+    pub read_available: usize,
+    pub read_total: usize,
+    pub write_available: usize,
+    pub write_total: usize,
 }
 
 /// DownloadStream is sensitive to the timeout and cancellation used with the original
@@ -442,6 +453,15 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
                 s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
                     .await
             }
+        }
+    }
+
+    pub fn activity(&self) -> RemoteStorageActivity {
+        match self {
+            Self::LocalFs(s) => s.activity(),
+            Self::AwsS3(s) => s.activity(),
+            Self::AzureBlob(s) => s.activity(),
+            Self::Unreliable(s) => s.activity(),
         }
     }
 }
@@ -792,6 +812,9 @@ struct ConcurrencyLimiter {
     // The helps to ensure we don't exceed the thresholds.
     write: Arc<Semaphore>,
     read: Arc<Semaphore>,
+
+    write_total: usize,
+    read_total: usize,
 }
 
 impl ConcurrencyLimiter {
@@ -820,10 +843,21 @@ impl ConcurrencyLimiter {
         Arc::clone(self.for_kind(kind)).acquire_owned().await
     }
 
+    fn activity(&self) -> RemoteStorageActivity {
+        RemoteStorageActivity {
+            read_available: self.read.available_permits(),
+            read_total: self.read_total,
+            write_available: self.write.available_permits(),
+            write_total: self.write_total,
+        }
+    }
+
     fn new(limit: usize) -> ConcurrencyLimiter {
         Self {
             read: Arc::new(Semaphore::new(limit)),
             write: Arc::new(Semaphore::new(limit)),
+            read_total: limit,
+            write_total: limit,
         }
     }
 }

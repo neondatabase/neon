@@ -129,19 +129,16 @@ pub(crate) fn local_layer_path(
     tenant_shard_id: &TenantShardId,
     timeline_id: &TimelineId,
     layer_file_name: &LayerName,
-    _generation: &Generation,
+    generation: &Generation,
 ) -> Utf8PathBuf {
     let timeline_path = conf.timeline_path(tenant_shard_id, timeline_id);
 
-    timeline_path.join(layer_file_name.to_string())
-
-    // TODO: switch to enabling new-style layer paths after next release
-    // if generation.is_none() {
-    //     // Without a generation, we may only use legacy path style
-    //     timeline_path.join(layer_file_name.to_string())
-    // } else {
-    //     timeline_path.join(format!("{}-v1{}", layer_file_name, generation.get_suffix()))
-    // }
+    if generation.is_none() {
+        // Without a generation, we may only use legacy path style
+        timeline_path.join(layer_file_name.to_string())
+    } else {
+        timeline_path.join(format!("{}-v1{}", layer_file_name, generation.get_suffix()))
+    }
 }
 
 impl Layer {

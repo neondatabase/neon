@@ -45,10 +45,10 @@ use crate::tenant::{
 
 use camino::Utf8PathBuf;
 use chrono::format::{DelayedFormat, StrftimeItems};
-use futures::Future;
+use futures::{Future, StreamExt};
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::{DownloadError, Etag, GenericRemoteStorage};
+use remote_storage::{DownloadError, Etag, GenericRemoteStorage, RemoteStorageActivity};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
@@ -71,6 +71,12 @@ use super::{
 /// `<ttps://github.com/neondatabase/neon/issues/6200>`
 const DOWNLOAD_FRESHEN_INTERVAL: Duration = Duration::from_millis(60000);
 
+/// Range of concurrency we may use when downloading layers within a timeline.  This is independent
+/// for each tenant we're downloading: the concurrency of _tenants_ is defined separately in
+/// `PageServerConf::secondary_download_concurrency`
+const MAX_LAYER_CONCURRENCY: usize = 16;
+const MIN_LAYER_CONCURRENCY: usize = 1;
+
 pub(super) async fn downloader_task(
     tenant_manager: Arc<TenantManager>,
     remote_storage: GenericRemoteStorage,
@@ -79,14 +85,15 @@ pub(super) async fn downloader_task(
     cancel: CancellationToken,
     root_ctx: RequestContext,
 ) {
-    let concurrency = tenant_manager.get_conf().secondary_download_concurrency;
+    // How many tenants' secondary download operations we will run concurrently
+    let tenant_concurrency = tenant_manager.get_conf().secondary_download_concurrency;
 
     let generator = SecondaryDownloader {
         tenant_manager,
         remote_storage,
         root_ctx,
     };
-    let mut scheduler = Scheduler::new(generator, concurrency);
+    let mut scheduler = Scheduler::new(generator, tenant_concurrency);
 
     scheduler
         .run(command_queue, background_jobs_can_start, cancel)
@@ -792,6 +799,8 @@ impl<'a> TenantDownloader<'a> {
 
         tracing::debug!(timeline_id=%timeline.timeline_id, "Downloading layers, {} in heatmap", timeline.layers.len());
 
+        let mut download_futs = Vec::new();
+
         // Download heatmap layers that are not present on local disk, or update their
         // access time if they are already present.
         for layer in timeline.layers {
@@ -874,67 +883,33 @@ impl<'a> TenantDownloader<'a> {
                 }
             }
 
-            // Failpoint for simulating slow remote storage
-            failpoint_support::sleep_millis_async!(
-                "secondary-layer-download-sleep",
-                &self.secondary_state.cancel
-            );
-
-            // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
-            let downloaded_bytes = match download_layer_file(
-                self.conf,
-                self.remote_storage,
-                *tenant_shard_id,
-                timeline.timeline_id,
-                &layer.name,
-                &LayerFileMetadata::from(&layer.metadata),
-                &self.secondary_state.cancel,
+            download_futs.push(self.download_layer(
+                tenant_shard_id,
+                &timeline.timeline_id,
+                layer,
                 ctx,
-            )
-            .await
-            {
-                Ok(bytes) => bytes,
-                Err(DownloadError::NotFound) => {
-                    // A heatmap might be out of date and refer to a layer that doesn't exist any more.
-                    // This is harmless: continue to download the next layer. It is expected during compaction
-                    // GC.
-                    tracing::debug!(
-                        "Skipped downloading missing layer {}, raced with compaction/gc?",
-                        layer.name
-                    );
-                    continue;
+            ));
+        }
+
+        // Break up layer downloads into chunks, so that for each chunk we can re-check how much
+        // concurrency to use based on activity level of remote storage.
+        while !download_futs.is_empty() {
+            let chunk =
+                download_futs.split_off(download_futs.len().saturating_sub(MAX_LAYER_CONCURRENCY));
+
+            let concurrency = Self::layer_concurrency(self.remote_storage.activity());
+
+            let mut result_stream = futures::stream::iter(chunk).buffered(concurrency);
+            let mut result_stream = std::pin::pin!(result_stream);
+            while let Some(result) = result_stream.next().await {
+                match result {
+                    Err(e) => return Err(e),
+                    Ok(None) => {
+                        // No error, but we didn't download the layer.  Don't mark it touched
+                    }
+                    Ok(Some(layer)) => touched.push(layer),
                 }
-                Err(e) => return Err(e.into()),
-            };
-
-            if downloaded_bytes != layer.metadata.file_size {
-                let local_path = local_layer_path(
-                    self.conf,
-                    tenant_shard_id,
-                    &timeline.timeline_id,
-                    &layer.name,
-                    &layer.metadata.generation,
-                );
-
-                tracing::warn!(
-                    "Downloaded layer {} with unexpected size {} != {}.  Removing download.",
-                    layer.name,
-                    downloaded_bytes,
-                    layer.metadata.file_size
-                );
-
-                tokio::fs::remove_file(&local_path)
-                    .await
-                    .or_else(fs_ext::ignore_not_found)?;
-            } else {
-                tracing::info!("Downloaded layer {}, size {}", layer.name, downloaded_bytes);
-                let mut progress = self.secondary_state.progress.lock().unwrap();
-                progress.bytes_downloaded += downloaded_bytes;
-                progress.layers_downloaded += 1;
             }
-
-            SECONDARY_MODE.download_layer.inc();
-            touched.push(layer)
         }
 
         // Write updates to state to record layers we just downloaded or touched.
@@ -965,6 +940,90 @@ impl<'a> TenantDownloader<'a> {
         }
 
         Ok(())
+    }
+
+    async fn download_layer(
+        &self,
+        tenant_shard_id: &TenantShardId,
+        timeline_id: &TimelineId,
+        layer: HeatMapLayer,
+        ctx: &RequestContext,
+    ) -> Result<Option<HeatMapLayer>, UpdateError> {
+        // Failpoint for simulating slow remote storage
+        failpoint_support::sleep_millis_async!(
+            "secondary-layer-download-sleep",
+            &self.secondary_state.cancel
+        );
+
+        // Note: no backoff::retry wrapper here because download_layer_file does its own retries internally
+        let downloaded_bytes = match download_layer_file(
+            self.conf,
+            self.remote_storage,
+            *tenant_shard_id,
+            *timeline_id,
+            &layer.name,
+            &LayerFileMetadata::from(&layer.metadata),
+            &self.secondary_state.cancel,
+            ctx,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(DownloadError::NotFound) => {
+                // A heatmap might be out of date and refer to a layer that doesn't exist any more.
+                // This is harmless: continue to download the next layer. It is expected during compaction
+                // GC.
+                tracing::debug!(
+                    "Skipped downloading missing layer {}, raced with compaction/gc?",
+                    layer.name
+                );
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        if downloaded_bytes != layer.metadata.file_size {
+            let local_path = local_layer_path(
+                self.conf,
+                tenant_shard_id,
+                timeline_id,
+                &layer.name,
+                &layer.metadata.generation,
+            );
+
+            tracing::warn!(
+                "Downloaded layer {} with unexpected size {} != {}.  Removing download.",
+                layer.name,
+                downloaded_bytes,
+                layer.metadata.file_size
+            );
+
+            tokio::fs::remove_file(&local_path)
+                .await
+                .or_else(fs_ext::ignore_not_found)?;
+        } else {
+            tracing::info!("Downloaded layer {}, size {}", layer.name, downloaded_bytes);
+            let mut progress = self.secondary_state.progress.lock().unwrap();
+            progress.bytes_downloaded += downloaded_bytes;
+            progress.layers_downloaded += 1;
+        }
+
+        SECONDARY_MODE.download_layer.inc();
+
+        Ok(Some(layer))
+    }
+
+    /// Calculate the currently allowed parallelism of layer download tasks, based on activity level of the remote storage
+    fn layer_concurrency(activity: RemoteStorageActivity) -> usize {
+        // When less than 75% of units are available, use minimum concurrency.  Else, do a linear mapping
+        // of our concurrency range to the units available within the remaining 25%.
+        let clamp_at = (activity.read_total * 3) / 4;
+        if activity.read_available > clamp_at {
+            (MAX_LAYER_CONCURRENCY * (activity.read_available - clamp_at))
+                / (activity.read_total - clamp_at)
+        } else {
+            MIN_LAYER_CONCURRENCY
+        }
     }
 }
 
@@ -1091,4 +1150,59 @@ async fn init_timeline_state(
     }
 
     detail
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn layer_concurrency() {
+        // Totally idle
+        assert_eq!(
+            TenantDownloader::layer_concurrency(RemoteStorageActivity {
+                read_available: 16,
+                read_total: 16,
+                write_available: 16,
+                write_total: 16
+            }),
+            MAX_LAYER_CONCURRENCY
+        );
+
+        // Totally busy
+        assert_eq!(
+            TenantDownloader::layer_concurrency(RemoteStorageActivity {
+                read_available: 0,
+                read_total: 16,
+
+                write_available: 16,
+                write_total: 16
+            }),
+            MIN_LAYER_CONCURRENCY
+        );
+
+        // Edge of the range at which we interpolate
+        assert_eq!(
+            TenantDownloader::layer_concurrency(RemoteStorageActivity {
+                read_available: 12,
+                read_total: 16,
+
+                write_available: 16,
+                write_total: 16
+            }),
+            MIN_LAYER_CONCURRENCY
+        );
+
+        // Midpoint of the range in which we interpolate
+        assert_eq!(
+            TenantDownloader::layer_concurrency(RemoteStorageActivity {
+                read_available: 14,
+                read_total: 16,
+
+                write_available: 16,
+                write_total: 16
+            }),
+            MAX_LAYER_CONCURRENCY / 2
+        );
+    }
 }

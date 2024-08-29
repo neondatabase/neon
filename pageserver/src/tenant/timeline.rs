@@ -62,9 +62,12 @@ use std::{
 };
 
 use crate::tenant::timeline::init::LocalLayerFileMetadata;
-use crate::tenant::{
-    layer_map::{LayerMap, SearchResult},
-    metadata::TimelineMetadata,
+use crate::{
+    aux_file::AuxFileSizeEstimator,
+    tenant::{
+        layer_map::{LayerMap, SearchResult},
+        metadata::TimelineMetadata,
+    },
 };
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -410,6 +413,8 @@ pub struct Timeline {
 
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
+
+    pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
 }
 
 pub struct WalReceiverInfo {
@@ -2128,6 +2133,16 @@ impl Timeline {
         };
 
         Arc::new_cyclic(|myself| {
+            let metrics = TimelineMetrics::new(
+                &tenant_shard_id,
+                &timeline_id,
+                crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
+                    "mtime",
+                    evictions_low_residence_duration_metric_threshold,
+                ),
+            );
+            let aux_file_metrics = metrics.aux_file_size_gauge.clone();
+
             let mut result = Timeline {
                 conf,
                 tenant_conf,
@@ -2159,14 +2174,7 @@ impl Timeline {
                 ancestor_timeline: ancestor,
                 ancestor_lsn: metadata.ancestor_lsn(),
 
-                metrics: TimelineMetrics::new(
-                    &tenant_shard_id,
-                    &timeline_id,
-                    crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
-                        "mtime",
-                        evictions_low_residence_duration_metric_threshold,
-                    ),
-                ),
+                metrics,
 
                 query_metrics: crate::metrics::SmgrQueryTimePerTimeline::new(
                     &tenant_shard_id,
@@ -2230,6 +2238,8 @@ impl Timeline {
                     dir: None,
                     n_deltas: 0,
                 }),
+
+                aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -3527,7 +3537,11 @@ impl Timeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
+    async fn get_layer_for_write(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut guard = self.layers.write().await;
         let layer = guard
             .get_layer_for_write(
@@ -3536,6 +3550,7 @@ impl Timeline {
                 self.conf,
                 self.timeline_id,
                 self.tenant_shard_id,
+                ctx,
             )
             .await?;
         Ok(layer)
@@ -3800,8 +3815,8 @@ impl Timeline {
                 );
                 self.create_delta_layer(
                     &frozen_layer,
-                    ctx,
                     Some(metadata_keyspace.0.ranges[0].clone()),
+                    ctx,
                 )
                 .await?
             } else {
@@ -3830,7 +3845,7 @@ impl Timeline {
             // Normal case, write out a L0 delta layer file.
             // `create_delta_layer` will not modify the layer map.
             // We will remove frozen layer and add delta layer in one atomic operation later.
-            let Some(layer) = self.create_delta_layer(&frozen_layer, ctx, None).await? else {
+            let Some(layer) = self.create_delta_layer(&frozen_layer, None, ctx).await? else {
                 panic!("delta layer cannot be empty if no filter is applied");
             };
             (
@@ -3959,8 +3974,8 @@ impl Timeline {
     async fn create_delta_layer(
         self: &Arc<Self>,
         frozen_layer: &Arc<InMemoryLayer>,
-        ctx: &RequestContext,
         key_range: Option<Range<Key>>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Option<ResidentLayer>> {
         let self_clone = Arc::clone(self);
         let frozen_layer = Arc::clone(frozen_layer);
@@ -3983,6 +3998,7 @@ impl Timeline {
                 &self_clone
                     .conf
                     .timeline_path(&self_clone.tenant_shard_id, &self_clone.timeline_id),
+                &ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -4176,6 +4192,7 @@ impl Timeline {
                 self.tenant_shard_id,
                 &img_range,
                 lsn,
+                ctx,
             )
             .await?;
 
@@ -4280,6 +4297,7 @@ impl Timeline {
                 &self
                     .conf
                     .timeline_path(&self.tenant_shard_id, &self.timeline_id),
+                ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -4605,11 +4623,9 @@ impl Timeline {
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
         // this is most likely the background tasks, but it might be the spawned task from
         // immediate_gc
-        let cancel = crate::task_mgr::shutdown_token();
         let _g = tokio::select! {
             guard = self.gc_lock.lock() => guard,
             _ = self.cancel.cancelled() => return Ok(GcResult::default()),
-            _ = cancel.cancelled() => return Ok(GcResult::default()),
         };
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
@@ -5181,7 +5197,7 @@ impl<'a> TimelineWriter<'a> {
         let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
 
         let action = self.get_open_layer_action(lsn, buf_size);
-        let layer = self.handle_open_layer_action(lsn, action).await?;
+        let layer = self.handle_open_layer_action(lsn, action, ctx).await?;
         let res = layer.put_value(key, lsn, &buf, ctx).await;
 
         if res.is_ok() {
@@ -5204,14 +5220,15 @@ impl<'a> TimelineWriter<'a> {
         &mut self,
         at: Lsn,
         action: OpenLayerAction,
+        ctx: &RequestContext,
     ) -> anyhow::Result<&Arc<InMemoryLayer>> {
         match action {
             OpenLayerAction::Roll => {
                 let freeze_at = self.write_guard.as_ref().unwrap().max_lsn.unwrap();
                 self.roll_layer(freeze_at).await?;
-                self.open_layer(at).await?;
+                self.open_layer(at, ctx).await?;
             }
-            OpenLayerAction::Open => self.open_layer(at).await?,
+            OpenLayerAction::Open => self.open_layer(at, ctx).await?,
             OpenLayerAction::None => {
                 assert!(self.write_guard.is_some());
             }
@@ -5220,8 +5237,8 @@ impl<'a> TimelineWriter<'a> {
         Ok(&self.write_guard.as_ref().unwrap().open_layer)
     }
 
-    async fn open_layer(&mut self, at: Lsn) -> anyhow::Result<()> {
-        let layer = self.tl.get_layer_for_write(at).await?;
+    async fn open_layer(&mut self, at: Lsn, ctx: &RequestContext) -> anyhow::Result<()> {
+        let layer = self.tl.get_layer_for_write(at, ctx).await?;
         let initial_size = layer.size().await?;
 
         let last_freeze_at = self.last_freeze_at.load();
@@ -5298,10 +5315,14 @@ impl<'a> TimelineWriter<'a> {
         Ok(())
     }
 
-    pub(crate) async fn delete_batch(&mut self, batch: &[(Range<Key>, Lsn)]) -> anyhow::Result<()> {
+    pub(crate) async fn delete_batch(
+        &mut self,
+        batch: &[(Range<Key>, Lsn)],
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         if let Some((_, lsn)) = batch.first() {
             let action = self.get_open_layer_action(*lsn, 0);
-            let layer = self.handle_open_layer_action(*lsn, action).await?;
+            let layer = self.handle_open_layer_action(*lsn, action, ctx).await?;
             layer.put_tombstones(batch).await?;
         }
 

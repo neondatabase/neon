@@ -215,6 +215,7 @@ pub(super) async fn prepare(
                 &detached
                     .conf
                     .timeline_path(&detached.tenant_shard_id, &detached.timeline_id),
+                ctx,
             )
             .await
             .fatal_err("VirtualFile::open for timeline dir fsync");
@@ -339,6 +340,7 @@ async fn copy_lsn_prefix(
         target_timeline.tenant_shard_id,
         layer.layer_desc().key_range.start,
         layer.layer_desc().lsn_range.start..end_lsn,
+        ctx,
     )
     .await
     .map_err(CopyDeltaPrefix)?;

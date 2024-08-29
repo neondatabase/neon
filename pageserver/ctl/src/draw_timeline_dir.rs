@@ -83,6 +83,11 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     let split: Vec<&str> = name.split("__").collect();
     let keys: Vec<&str> = split[0].split('-').collect();
     let mut lsns: Vec<&str> = split[1].split('-').collect();
+
+    if lsns.last().expect("should").len() == 8 {
+        lsns.pop();
+    }
+
     if lsns.len() == 1 {
         lsns.push(lsns[0]);
     }

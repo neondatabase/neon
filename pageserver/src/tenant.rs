@@ -2800,7 +2800,7 @@ impl Tenant {
         // See comments in [`Tenant::branch_timeline`] for more information about why branch
         // creation task can run concurrently with timeline's GC iteration.
         for timeline in gc_timelines {
-            if task_mgr::is_shutdown_requested() || cancel.is_cancelled() {
+            if cancel.is_cancelled() {
                 // We were requested to shut down. Stop and return with the progress we
                 // made.
                 break;

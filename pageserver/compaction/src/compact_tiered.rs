@@ -530,8 +530,6 @@ where
         // If we have accumulated only a narrow band of keyspace, create an
         // image layer. Otherwise write a delta layer.
 
-        // FIXME: deal with the case of lots of values for same key
-
         // FIXME: we are ignoring images here. Did we already divide the work
         // so that we won't encounter them here?
 
@@ -550,38 +548,93 @@ where
         let mut new_jobs = Vec::new();
 
         // Slide a window through the keyspace
-        let mut key_accum = std::pin::pin!(accum_key_values(key_value_stream));
+        let mut key_accum =
+            std::pin::pin!(accum_key_values(key_value_stream, self.target_file_size));
         let mut all_in_window: bool = false;
         let mut window = Window::new();
+
+        // Helper function to create a job for a new delta layer with given key-lsn
+        // rectangle.
+        let create_delta_job = |key_range, lsn_range: &Range<Lsn>, new_jobs: &mut Vec<_>| {
+            // The inputs for the job are all the input layers of the original job that
+            // overlap with the rectangle.
+            let batch_layers: Vec<LayerId> = job
+                .input_layers
+                .iter()
+                .filter(|layer_id| {
+                    overlaps_with(self.layers[layer_id.0].layer.key_range(), &key_range)
+                })
+                .cloned()
+                .collect();
+            assert!(!batch_layers.is_empty());
+            new_jobs.push(CompactionJob {
+                key_range,
+                lsn_range: lsn_range.clone(),
+                strategy: CompactionStrategy::CreateDelta,
+                input_layers: batch_layers,
+                completed: false,
+            });
+        };
+
         loop {
-            if all_in_window && window.elems.is_empty() {
+            if all_in_window && window.is_empty() {
                 // All done!
                 break;
             }
+
+            // If we now have enough keyspace for next delta layer in the window, create a
+            // new delta layer
             if let Some(key_range) = window.choose_next_delta(self.target_file_size, !all_in_window)
             {
-                let batch_layers: Vec<LayerId> = job
-                    .input_layers
-                    .iter()
-                    .filter(|layer_id| {
-                        overlaps_with(self.layers[layer_id.0].layer.key_range(), &key_range)
-                    })
-                    .cloned()
-                    .collect();
-                assert!(!batch_layers.is_empty());
-                new_jobs.push(CompactionJob {
-                    key_range,
-                    lsn_range: job.lsn_range.clone(),
-                    strategy: CompactionStrategy::CreateDelta,
-                    input_layers: batch_layers,
-                    completed: false,
-                });
-            } else {
-                assert!(!all_in_window);
-                if let Some(next_key) = key_accum.next().await.transpose()? {
-                    window.feed(next_key.key, next_key.size);
-                } else {
+                create_delta_job(key_range, &job.lsn_range, &mut new_jobs);
+                continue;
+            }
+            assert!(!all_in_window);
+
+            // Process next key in the key space
+            match key_accum.next().await.transpose()? {
+                None => {
                     all_in_window = true;
+                }
+                Some(next_key) if next_key.partition_lsns.is_empty() => {
+                    // Normal case: extend the window by the key
+                    window.feed(next_key.key, next_key.size);
+                }
+                Some(next_key) => {
+                    // A key with too large size impact for a single delta layer. This
+                    // case occurs if you make a huge number of updates for a single key.
+                    //
+                    // Drain the window with has_more = false to make a clean cut before
+                    // the key, and then make dedicated delta layers for the single key.
+                    //
+                    // We cannot cluster the key with the others, because we don't want
+                    // layer files to overlap with each other in the lsn,key space (no
+                    // overlaps for the rectangles).
+                    let key = next_key.key;
+                    debug!("key {key} with size impact larger than the layer size");
+                    while !window.is_empty() {
+                        let has_more = false;
+                        let key_range = window.choose_next_delta(self.target_file_size, has_more)
+                            .expect("with has_more==false, choose_next_delta always returns something for a non-empty Window");
+                        create_delta_job(key_range, &job.lsn_range, &mut new_jobs);
+                    }
+
+                    // Not really required: but here for future resilience:
+                    // We make a "gap" here, so any structure the window holds should
+                    // probably be reset.
+                    window = Window::new();
+
+                    let mut prior_lsn = job.lsn_range.start;
+                    let mut lsn_ranges = Vec::new();
+                    for (lsn, _size) in next_key.partition_lsns.iter() {
+                        lsn_ranges.push(prior_lsn..*lsn);
+                        prior_lsn = *lsn;
+                    }
+                    lsn_ranges.push(prior_lsn..job.lsn_range.end);
+                    for lsn_range in lsn_ranges {
+                        let key_range = key..key.next();
+                        create_delta_job(key_range, &lsn_range, &mut new_jobs);
+                    }
                 }
             }
         }
@@ -801,6 +854,10 @@ where
 
     fn peek_size(&self) -> u64 {
         self.elems.front().unwrap().accum_size - self.splitoff_size
+    }
+
+    fn is_empty(&self) -> bool {
+        self.elems.is_empty()
     }
 
     fn commit_upto(&mut self, mut upto: usize) {
