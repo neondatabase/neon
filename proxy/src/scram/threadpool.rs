@@ -4,12 +4,14 @@
 //! 1. Fairness per endpoint.
 //! 2. Yield support for high iteration counts.
 
+mod sleep;
+
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 
-use crossbeam_deque::{Injector, Stealer, Worker};
+use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use itertools::Itertools;
 use parking_lot::{Condvar, Mutex};
 use rand::Rng;
@@ -74,15 +76,19 @@ impl ThreadPool {
         pbkdf2: Pbkdf2,
     ) -> oneshot::Receiver<[u8; 32]> {
         let (tx, rx) = oneshot::channel();
-
-        let queue_was_empty = self.queue.is_empty();
-
-        self.metrics.injector_queue_depth.inc();
-        self.queue.push(JobSpec {
+        self.push_job(JobSpec {
             response: tx,
             pbkdf2,
             endpoint,
         });
+        rx
+    }
+
+    fn push_job(&self, job: JobSpec) {
+        let queue_was_empty = self.queue.is_empty();
+
+        self.metrics.injector_queue_depth.inc();
+        self.queue.push(job);
 
         // inspired from <https://github.com/rayon-rs/rayon/blob/3e3962cb8f7b50773bcc360b48a7a674a53a2c77/rayon-core/src/sleep/mod.rs#L242>
         let counts = self.counters.load(Ordering::SeqCst);
@@ -96,8 +102,6 @@ impl ThreadPool {
             let num_to_wake = Ord::min(1, num_sleepers);
             self.wake_any_threads(num_to_wake);
         }
-
-        rx
     }
 
     #[cold]
@@ -145,6 +149,7 @@ impl ThreadPool {
 
         // try steal from the global queue
         loop {
+            let mut retry = false;
             match self.queue.steal_batch_and_pop(worker) {
                 crossbeam_deque::Steal::Success(job) => {
                     self.metrics
@@ -154,14 +159,11 @@ impl ThreadPool {
                     self.counters.fetch_sub(256, Ordering::SeqCst);
                     return Some(job);
                 }
-                crossbeam_deque::Steal::Retry => continue,
-                crossbeam_deque::Steal::Empty => break,
+                crossbeam_deque::Steal::Retry => retry = true,
+                crossbeam_deque::Steal::Empty => {}
             }
-        }
 
-        // try steal from our neighbours
-        loop {
-            let mut retry = false;
+            // try steal from our neighbours (random order)
             let start = rng.gen_range(0..self.stealers.len());
             let job = (start..self.stealers.len())
                 .chain(0..start)
@@ -176,11 +178,13 @@ impl ThreadPool {
                         }
                     },
                 );
-            if job.is_some() {
+
+            if let Some(job) = job {
                 // no longer idle
                 self.counters.fetch_sub(256, Ordering::SeqCst);
-                return job;
+                return Some(job);
             }
+
             if !retry {
                 return None;
             }
@@ -188,100 +192,156 @@ impl ThreadPool {
     }
 }
 
-fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
-    /// interval when we should steal from the global queue
-    /// so that tail latencies are managed appropriately
-    const STEAL_INTERVAL: usize = 61;
+struct ThreadRt {
+    rng: SmallRng,
+    pool: Arc<ThreadPool>,
+    worker: Worker<JobSpec>,
+    index: usize,
+    countmin: CountMinSketch,
+    tick: u64,
+}
 
-    /// How often to reset the sketch values
-    const SKETCH_RESET_INTERVAL: usize = 1021;
+impl ThreadRt {
+    fn should_run(&mut self, job: &JobSpec) -> bool {
+        let rate = self
+            .countmin
+            .inc_and_return(&job.endpoint, job.pbkdf2.cost());
 
-    let mut rng = SmallRng::from_entropy();
+        const P: f64 = 2000.0;
+        // probability decreases as rate increases.
+        // lower probability, higher chance of being skipped
+        //
+        // estimates (rate in terms of 4096 rounds):
+        // rate = 0    => probability = 100%
+        // rate = 10   => probability = 71.3%
+        // rate = 50   => probability = 62.1%
+        // rate = 500  => probability = 52.3%
+        // rate = 1021 => probability = 49.8%
+        //
+        // My expectation is that the pool queue will only begin backing up at ~1000rps
+        // in which case the SKETCH_RESET_INTERVAL represents 1 second. Thus, the rates above
+        // are in requests per second.
+        let probability = P.ln() / (P + rate as f64).ln();
+        self.rng.gen_bool(probability)
+    }
 
-    // used to determine whether we should temporarily skip tasks for fairness.
-    // 99% of estimates will overcount by no more than 4096 samples
-    let mut sketch = CountMinSketch::with_params(1.0 / (SKETCH_RESET_INTERVAL as f64), 0.01);
+    fn wait_for_work(&self) {
+        let (condvar, lock) = &self.pool.parkers[self.index];
+        let mut lock = lock.lock();
 
-    let (condvar, lock) = &pool.parkers[index];
-
-    'wait: loop {
-        // wait for notification of work
-        {
-            let mut lock = lock.lock();
-
+        if self.worker.is_empty() && self.pool.queue.is_empty() {
             // queue is empty
-            pool.metrics
+            self.pool
+                .metrics
                 .worker_queue_depth
-                .set(ThreadPoolWorkerId(index), 0);
+                .set(ThreadPoolWorkerId(self.index), 0);
 
             // subtract 1 from idle count, add 1 to sleeping count.
-            pool.counters.fetch_sub(255, Ordering::SeqCst);
+            self.pool.counters.fetch_sub(255, Ordering::SeqCst);
 
             *lock = ThreadState::Parked;
             condvar.wait(&mut lock);
         }
+    }
 
-        for i in 0.. {
-            let Some(mut job) = worker
-                .pop()
-                .or_else(|| pool.steal(&mut rng, index, &worker))
-            else {
-                continue 'wait;
-            };
+    fn tick(&mut self) -> u64 {
+        self.tick.wrapping_add(1)
+    }
 
-            pool.metrics
-                .worker_queue_depth
-                .set(ThreadPoolWorkerId(index), worker.len() as i64);
-
-            // receiver is closed, cancel the task
-            if !job.response.is_closed() {
-                let rate = sketch.inc_and_return(&job.endpoint, job.pbkdf2.cost());
-
-                const P: f64 = 2000.0;
-                // probability decreases as rate increases.
-                // lower probability, higher chance of being skipped
-                //
-                // estimates (rate in terms of 4096 rounds):
-                // rate = 0    => probability = 100%
-                // rate = 10   => probability = 71.3%
-                // rate = 50   => probability = 62.1%
-                // rate = 500  => probability = 52.3%
-                // rate = 1021 => probability = 49.8%
-                //
-                // My expectation is that the pool queue will only begin backing up at ~1000rps
-                // in which case the SKETCH_RESET_INTERVAL represents 1 second. Thus, the rates above
-                // are in requests per second.
-                let probability = P.ln() / (P + rate as f64).ln();
-                if pool.queue.len() > 32 || rng.gen_bool(probability) {
-                    pool.metrics
-                        .worker_task_turns_total
-                        .inc(ThreadPoolWorkerId(index));
-
-                    match job.pbkdf2.turn() {
-                        std::task::Poll::Ready(result) => {
-                            let _ = job.response.send(result);
-                        }
-                        std::task::Poll::Pending => worker.push(job),
-                    }
-                } else {
-                    pool.metrics
-                        .worker_task_skips_total
-                        .inc(ThreadPoolWorkerId(index));
-
-                    // skip for now
-                    worker.push(job);
+    fn get_work_global(&self) -> Option<JobSpec> {
+        // Fast path, if len == 0, then there are no values
+        if self.pool.queue.is_empty() {
+            return None;
+        }
+        loop {
+            match self.pool.queue.steal_batch_and_pop(&self.worker) {
+                Steal::Success(item) => {
+                    return Some(item);
                 }
+                Steal::Retry => continue,
+                Steal::Empty => return None,
             }
+        }
+    }
 
-            // if we get stuck with a few long lived jobs in the queue
-            // it's better to try and steal from the queue too for fairness
-            if i % STEAL_INTERVAL == 0 {
-                let _ = pool.queue.steal_batch(&worker);
-            }
+    fn get_work(&mut self) -> Option<JobSpec> {
+        const STEAL_INTERVAL: u64 = 61;
 
-            if i % SKETCH_RESET_INTERVAL == 0 {
-                sketch.reset();
+        // Every 61 pops from the local queue, pop from the global queue
+        if self.tick() % STEAL_INTERVAL == 0 {
+            if let Some(job) = self.get_work_global() {
+                return Some(job);
             }
+        }
+
+        self.worker
+            .pop()
+            .or_else(|| self.pool.steal(&mut self.rng, self.index, &self.worker))
+    }
+}
+
+fn thread_rt(pool: Arc<ThreadPool>, worker: Worker<JobSpec>, index: usize) {
+    /// How often to reset the sketch values
+    const SKETCH_RESET_INTERVAL: usize = 1021;
+
+    let mut rt = ThreadRt {
+        rng: SmallRng::from_entropy(),
+        pool,
+        worker,
+        index,
+        // used to determine whether we should temporarily skip tasks for fairness.
+        // 99% of estimates will overcount by no more than 4096 samples
+        countmin: CountMinSketch::with_params(1.0 / (SKETCH_RESET_INTERVAL as f64), 0.01),
+        tick: 1,
+    };
+
+    loop {
+        let mut job = loop {
+            if let Some(job) = rt.get_work() {
+                break job;
+            };
+            rt.wait_for_work();
+        };
+
+        rt.pool
+            .metrics
+            .worker_queue_depth
+            .set(ThreadPoolWorkerId(index), rt.worker.len() as i64);
+
+        // receiver is closed, cancel the task
+        if !job.response.is_closed() {
+            if rt.should_run(&job) {
+                rt.pool
+                    .metrics
+                    .worker_task_turns_total
+                    .inc(ThreadPoolWorkerId(index));
+
+                match job.pbkdf2.turn() {
+                    std::task::Poll::Ready(result) => {
+                        let _ = job.response.send(result);
+                    }
+                    // more to do, we shall requeue
+                    std::task::Poll::Pending => rt.worker.push(job),
+                }
+            } else {
+                // skip for now
+
+                rt.pool
+                    .metrics
+                    .worker_task_skips_total
+                    .inc(ThreadPoolWorkerId(index));
+
+                // if our local queue is quite full, push to the global queue
+                // if rt.worker.len() > 32 {
+                //     rt.pool.push_job(job);
+                // } else {
+                    rt.worker.push(job);
+                // }
+            }
+        }
+
+        if rt.index % SKETCH_RESET_INTERVAL == 0 {
+            rt.countmin.reset();
         }
     }
 }
