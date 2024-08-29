@@ -39,6 +39,9 @@ pub(super) struct Reconciler {
     /// to detach this tenant shard.
     pub(crate) detach: Vec<Node>,
 
+    /// Configuration specific to this reconciler
+    pub(crate) reconciler_config: ReconcilerConfig,
+
     pub(crate) config: TenantConfig,
     pub(crate) observed: ObservedState,
 
@@ -71,6 +74,65 @@ pub(super) struct Reconciler {
 
     /// Access to persistent storage for updating generation numbers
     pub(crate) persistence: Arc<Persistence>,
+}
+
+pub(crate) struct ReconcilerConfigBuilder {
+    config: ReconcilerConfig,
+}
+
+impl ReconcilerConfigBuilder {
+    pub(crate) fn new() -> Self {
+        Self {
+            config: ReconcilerConfig::default(),
+        }
+    }
+
+    pub(crate) fn secondary_warmup_timeout(self, value: Duration) -> Self {
+        Self {
+            config: ReconcilerConfig {
+                secondary_warmup_timeout: Some(value),
+                ..self.config
+            },
+        }
+    }
+
+    pub(crate) fn secondary_download_request_timeout(self, value: Duration) -> Self {
+        Self {
+            config: ReconcilerConfig {
+                secondary_download_request_timeout: Some(value),
+                ..self.config
+            },
+        }
+    }
+
+    pub(crate) fn build(self) -> ReconcilerConfig {
+        self.config
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone)]
+pub(crate) struct ReconcilerConfig {
+    // During live migration give up on warming-up the secondary
+    // after this timeout.
+    secondary_warmup_timeout: Option<Duration>,
+
+    // During live migrations this is the amount of time that
+    // the pagserver will hold our poll.
+    secondary_download_request_timeout: Option<Duration>,
+}
+
+impl ReconcilerConfig {
+    pub(crate) fn get_secondary_warmup_timeout(&self) -> Duration {
+        const SECONDARY_WARMUP_TIMEOUT_DEFAULT: Duration = Duration::from_secs(300);
+        self.secondary_warmup_timeout
+            .unwrap_or(SECONDARY_WARMUP_TIMEOUT_DEFAULT)
+    }
+
+    pub(crate) fn get_secondary_download_request_timeout(&self) -> Duration {
+        const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(20);
+        self.secondary_download_request_timeout
+            .unwrap_or(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT_DEFAULT)
+    }
 }
 
 /// RAII resource units granted to a Reconciler, which it should keep alive until it finishes doing I/O
@@ -300,11 +362,13 @@ impl Reconciler {
     ) -> Result<(), ReconcileError> {
         // This is not the timeout for a request, but the total amount of time we're willing to wait
         // for a secondary location to get up to date before
-        const TOTAL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+        let total_download_timeout = self.reconciler_config.get_secondary_warmup_timeout();
 
         // This the long-polling interval for the secondary download requests we send to destination pageserver
         // during a migration.
-        const REQUEST_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+        let request_download_timeout = self
+            .reconciler_config
+            .get_secondary_download_request_timeout();
 
         let started_at = Instant::now();
 
@@ -315,14 +379,14 @@ impl Reconciler {
                         client
                             .tenant_secondary_download(
                                 tenant_shard_id,
-                                Some(REQUEST_DOWNLOAD_TIMEOUT),
+                                Some(request_download_timeout),
                             )
                             .await
                     },
                     &self.service_config.jwt_token,
                     1,
                     3,
-                    REQUEST_DOWNLOAD_TIMEOUT * 2,
+                    request_download_timeout * 2,
                     &self.cancel,
                 )
                 .await
@@ -350,7 +414,7 @@ impl Reconciler {
                 return Ok(());
             } else if status == StatusCode::ACCEPTED {
                 let total_runtime = started_at.elapsed();
-                if total_runtime > TOTAL_DOWNLOAD_TIMEOUT {
+                if total_runtime > total_download_timeout {
                     tracing::warn!("Timed out after {}ms downloading layers to {node}.  Progress so far: {}/{} layers, {}/{} bytes",
                         total_runtime.as_millis(),
                         progress.layers_downloaded,

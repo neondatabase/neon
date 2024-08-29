@@ -4378,11 +4378,11 @@ impl From<CollectKeySpaceError> for CompactionError {
 impl From<super::upload_queue::NotInitialized> for CompactionError {
     fn from(value: super::upload_queue::NotInitialized) -> Self {
         match value {
-            super::upload_queue::NotInitialized::Uninitialized
-            | super::upload_queue::NotInitialized::Stopped => {
+            super::upload_queue::NotInitialized::Uninitialized => {
                 CompactionError::Other(anyhow::anyhow!(value))
             }
-            super::upload_queue::NotInitialized::ShuttingDown => CompactionError::ShuttingDown,
+            super::upload_queue::NotInitialized::ShuttingDown
+            | super::upload_queue::NotInitialized::Stopped => CompactionError::ShuttingDown,
         }
     }
 }

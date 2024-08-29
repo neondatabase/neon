@@ -58,7 +58,7 @@ RUN set -e \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
-ENV PROTOC_VERSION 25.1
+ENV PROTOC_VERSION=25.1
 RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \
     && unzip -q protoc.zip -d protoc \
     && mv protoc/bin/protoc /usr/local/bin/protoc \
@@ -208,7 +208,6 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
     rustup component add llvm-tools-preview rustfmt clippy && \
-    cargo install --git https://github.com/paritytech/cachepot && \
     cargo install rustfilt            --version ${RUSTFILT_VERSION} && \
     cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} && \
     cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \
@@ -216,7 +215,6 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
-ENV RUSTC_WRAPPER=cachepot
 
 # Show versions
 RUN whoami \

@@ -14,6 +14,7 @@ import textwrap
 import threading
 import time
 import uuid
+from collections import defaultdict
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -2666,6 +2667,69 @@ class NeonStorageController(MetricsGetter, LogUtils):
         )
         log.info(f"Got failpoints request response code {res.status_code}")
         res.raise_for_status()
+
+    def get_tenants_placement(self) -> defaultdict[str, Dict[str, Any]]:
+        """
+        Get the intent and observed placements of all tenants known to the storage controller.
+        """
+        tenants = self.tenant_list()
+
+        tenant_placement: defaultdict[str, Dict[str, Any]] = defaultdict(
+            lambda: {
+                "observed": {"attached": None, "secondary": []},
+                "intent": {"attached": None, "secondary": []},
+            }
+        )
+
+        for t in tenants:
+            for node_id, loc_state in t["observed"]["locations"].items():
+                if (
+                    loc_state is not None
+                    and "conf" in loc_state
+                    and loc_state["conf"] is not None
+                    and loc_state["conf"]["mode"]
+                    in set(["AttachedSingle", "AttachedMulti", "AttachedStale"])
+                ):
+                    tenant_placement[t["tenant_shard_id"]]["observed"]["attached"] = int(node_id)
+
+                if (
+                    loc_state is not None
+                    and "conf" in loc_state
+                    and loc_state["conf"] is not None
+                    and loc_state["conf"]["mode"] == "Secondary"
+                ):
+                    tenant_placement[t["tenant_shard_id"]]["observed"]["secondary"].append(
+                        int(node_id)
+                    )
+
+            if "attached" in t["intent"]:
+                tenant_placement[t["tenant_shard_id"]]["intent"]["attached"] = t["intent"][
+                    "attached"
+                ]
+
+            if "secondary" in t["intent"]:
+                tenant_placement[t["tenant_shard_id"]]["intent"]["secondary"] += t["intent"][
+                    "secondary"
+                ]
+
+        return tenant_placement
+
+    def warm_up_all_secondaries(self):
+        log.info("Warming up all secondary locations")
+
+        tenant_placement = self.get_tenants_placement()
+        for tid, placement in tenant_placement.items():
+            assert placement["observed"]["attached"] is not None
+            primary_id = placement["observed"]["attached"]
+
+            assert len(placement["observed"]["secondary"]) == 1
+            secondary_id = placement["observed"]["secondary"][0]
+
+            parsed_tid = TenantShardId.parse(tid)
+            self.env.get_pageserver(primary_id).http_client().tenant_heatmap_upload(parsed_tid)
+            self.env.get_pageserver(secondary_id).http_client().tenant_secondary_download(
+                parsed_tid, wait_ms=250
+            )
 
     @property
     def workdir(self) -> Path:

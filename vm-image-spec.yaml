@@ -416,7 +416,7 @@ build: |
   # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
   # requires cgroup v2, so we'll build cgroup-tools ourselves.
   FROM debian:bullseye-slim as libcgroup-builder
-  ENV LIBCGROUP_VERSION v2.0.3
+  ENV LIBCGROUP_VERSION=v2.0.3
 
   RUN set -exu \
       && apt update \
@@ -460,7 +460,7 @@ build: |
           pkg-config
 
   # Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
-  ENV PGBOUNCER_TAG pgbouncer_1_22_1
+  ENV PGBOUNCER_TAG=pgbouncer_1_22_1
   RUN set -e \
       && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
       && cd pgbouncer \
