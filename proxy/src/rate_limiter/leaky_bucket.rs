@@ -1,7 +1,6 @@
 use std::{
     hash::Hash,
     sync::atomic::{AtomicUsize, Ordering},
-    time::Duration,
 };
 
 use ahash::RandomState;
@@ -81,13 +80,7 @@ impl LeakyBucketConfig {
 
 impl From<LeakyBucketConfig> for utils::leaky_bucket::LeakyBucketConfig {
     fn from(config: LeakyBucketConfig) -> Self {
-        // seconds_per_request = 1/(request_per_second)
-        let spr = config.rps.recip();
-        let bucket_width = Duration::from_secs_f64(config.max * spr);
-        utils::leaky_bucket::LeakyBucketConfig {
-            cost: Duration::from_secs_f64(spr),
-            bucket_width,
-        }
+        utils::leaky_bucket::LeakyBucketConfig::new(config.rps, config.max)
     }
 }
 
