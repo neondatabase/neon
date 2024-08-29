@@ -1,2 +1,6 @@
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+[[profile.default.overrides]]
+filter = 'package(/^proxy/) & (test(/^scram::threadpool::/) | test(/^auth::backend::tests::auth_quirks/))'
+threads-required = 2
