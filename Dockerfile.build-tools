@@ -26,7 +26,6 @@ RUN set -e \
         liblzma-dev \
         libncurses5-dev \
         libncursesw5-dev \
-        libpq-dev \
         libreadline-dev \
         libseccomp-dev \
         libsqlite3-dev \

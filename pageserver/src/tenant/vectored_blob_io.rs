@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 use bytes::BytesMut;
 use pageserver_api::key::Key;
+use tokio_epoll_uring::BoundedBuf;
 use utils::lsn::Lsn;
 use utils::vec_map::VecMap;
 
@@ -312,8 +313,9 @@ impl<'a> VectoredBlobReader<'a> {
         );
         let buf = self
             .file
-            .read_exact_at_n(buf, read.start, read.size(), ctx)
-            .await?;
+            .read_exact_at(buf.slice(0..read.size()), read.start, ctx)
+            .await?
+            .into_inner();
 
         let blobs_at = read.blobs_at.as_slice();
         let start_offset = blobs_at.first().expect("VectoredRead is never empty").0;

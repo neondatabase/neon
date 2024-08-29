@@ -5,6 +5,7 @@
 //! See also `settings.md` for better description on every parameter.
 
 use anyhow::{bail, ensure, Context};
+use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::{
     config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes},
     shard::TenantShardId,
@@ -167,6 +168,8 @@ pub struct PageServerConf {
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
 
     pub validate_vectored_get: bool,
+
+    pub image_compression: Option<ImageCompressionAlgorithm>,
 
     /// How many bytes of ephemeral layer content will we allow per kilobyte of RAM.  When this
     /// is exceeded, we start proactively closing ephemeral layers to limit the total amount
@@ -348,6 +351,7 @@ impl PageServerConf {
             get_impl,
             max_vectored_read_bytes,
             validate_vectored_get,
+            image_compression,
             ephemeral_bytes_per_memory_kb,
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
@@ -392,6 +396,7 @@ impl PageServerConf {
             get_impl,
             max_vectored_read_bytes,
             validate_vectored_get,
+            image_compression,
             ephemeral_bytes_per_memory_kb,
 
             // ------------------------------------------------------------
@@ -645,6 +650,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             },
             "Correct defaults should be used when no config values are provided"
@@ -718,6 +724,7 @@ background_task_maximum_delay = '334 s'
                         .expect("Invalid default constant")
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
             },
             "Should be able to parse all basic config values correctly"
@@ -996,6 +1003,19 @@ threshold = "20m"
             }
             other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
         }
+    }
+
+    #[test]
+    fn empty_remote_storage_is_error() {
+        let tempdir = tempdir().unwrap();
+        let (workdir, _) = prepare_fs(&tempdir).unwrap();
+        let input = r#"
+remote_storage = {}
+        "#;
+        let doc = toml_edit::Document::from_str(input).unwrap();
+        let err = PageServerConf::parse_and_validate(&doc, &workdir)
+            .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
+        assert!(format!("{err}").contains("remote_storage"), "{err}");
     }
 
     fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {

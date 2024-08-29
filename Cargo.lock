@@ -6817,6 +6817,7 @@ dependencies = [
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
+ "toml_edit 0.19.10",
  "tracing",
  "tracing-error",
  "tracing-subscriber",

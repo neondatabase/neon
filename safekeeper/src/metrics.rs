@@ -72,7 +72,8 @@ pub static WAL_STORAGE_OPERATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "safekeeper_wal_storage_operation_seconds",
         "Seconds spent on WAL storage operations",
-        &["operation"]
+        &["operation"],
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_wal_storage_operation_seconds histogram vec")
 });
@@ -80,7 +81,8 @@ pub static MISC_OPERATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "safekeeper_misc_operation_seconds",
         "Seconds spent on miscellaneous operations",
-        &["operation"]
+        &["operation"],
+        DISK_FSYNC_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_misc_operation_seconds histogram vec")
 });

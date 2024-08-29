@@ -432,6 +432,24 @@ pub enum CompactionAlgorithm {
     Tiered,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum_macros::FromRepr,
+    strum_macros::EnumString,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ImageCompressionAlgorithm {
+    /// Zstandard compression. Level 0 means and None mean the same (default level). Levels can be negative as well.
+    /// For details, see the [manual](http://facebook.github.io/zstd/zstd_manual.html).
+    Zstd { level: Option<i8> },
+}
+
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionAlgorithmSettings {
     pub kind: CompactionAlgorithm,

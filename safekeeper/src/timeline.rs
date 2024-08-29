@@ -36,7 +36,7 @@ use crate::timeline_guard::ResidenceGuard;
 use crate::timeline_manager::{AtomicStatus, ManagerCtl};
 use crate::timelines_set::TimelinesSet;
 use crate::wal_backup::{self};
-use crate::wal_backup_partial::PartialRemoteSegment;
+use crate::wal_backup_partial::{PartialRemoteSegment, RateLimiter};
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
@@ -587,6 +587,7 @@ impl Timeline {
         shared_state: &mut WriteGuardSharedState<'_>,
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
+        partial_backup_rate_limiter: RateLimiter,
     ) -> Result<()> {
         match fs::metadata(&self.timeline_dir).await {
             Ok(_) => {
@@ -617,7 +618,7 @@ impl Timeline {
 
             return Err(e);
         }
-        self.bootstrap(conf, broker_active_set);
+        self.bootstrap(conf, broker_active_set, partial_backup_rate_limiter);
         Ok(())
     }
 
@@ -626,6 +627,7 @@ impl Timeline {
         self: &Arc<Timeline>,
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
+        partial_backup_rate_limiter: RateLimiter,
     ) {
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
@@ -637,6 +639,7 @@ impl Timeline {
             broker_active_set,
             tx,
             rx,
+            partial_backup_rate_limiter,
         ));
     }
 

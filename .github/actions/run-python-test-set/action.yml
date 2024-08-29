@@ -114,6 +114,7 @@ runs:
         export PLATFORM=${PLATFORM:-github-actions-selfhosted}
         export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
         export DEFAULT_PG_VERSION=${PG_VERSION#v}
+        export LD_LIBRARY_PATH=${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/lib
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1

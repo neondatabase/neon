@@ -23,6 +23,8 @@ use super::{
     storage_layer::LayerName,
 };
 
+use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;
+use metrics::UIntGauge;
 use pageserver_api::{
     models,
     shard::{ShardIdentity, TenantShardId},
@@ -99,6 +101,17 @@ pub(crate) struct SecondaryTenant {
 
     // Public state indicating overall progress of downloads relative to the last heatmap seen
     pub(crate) progress: std::sync::Mutex<models::SecondaryProgress>,
+
+    // Sum of layer sizes on local disk
+    pub(super) resident_size_metric: UIntGauge,
+}
+
+impl Drop for SecondaryTenant {
+    fn drop(&mut self) {
+        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
+        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+    }
 }
 
 impl SecondaryTenant {
@@ -108,6 +121,12 @@ impl SecondaryTenant {
         tenant_conf: TenantConfOpt,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
+        let resident_size_metric = SECONDARY_RESIDENT_PHYSICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id])
+            .unwrap();
+
         Arc::new(Self {
             tenant_shard_id,
             // todo: shall we make this a descendent of the
@@ -123,6 +142,8 @@ impl SecondaryTenant {
             detail: std::sync::Mutex::new(SecondaryDetail::new(config.clone())),
 
             progress: std::sync::Mutex::default(),
+
+            resident_size_metric,
         })
     }
 
@@ -211,16 +232,12 @@ impl SecondaryTenant {
             // have to 100% match what is on disk, because it's a best-effort warming
             // of the cache.
             let mut detail = this.detail.lock().unwrap();
-            if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
-                let removed = timeline_detail.on_disk_layers.remove(&name);
-
-                // We might race with removal of the same layer during downloads, if it was removed
-                // from the heatmap.  If we see that the OnDiskState is gone, then no need to
-                // do a physical deletion or store in evicted_at.
-                if let Some(removed) = removed {
-                    removed.remove_blocking();
-                    timeline_detail.evicted_at.insert(name, now);
-                }
+            if let Some(removed) =
+                detail.evict_layer(name, &timeline_id, now, &this.resident_size_metric)
+            {
+                // We might race with removal of the same layer during downloads, so finding the layer we
+                // were trying to remove is optional.  Only issue the disk I/O to remove it if we found it.
+                removed.remove_blocking();
             }
         })
         .await

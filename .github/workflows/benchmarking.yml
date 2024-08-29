@@ -379,6 +379,10 @@ jobs:
 
     - name: Add Postgres binaries to PATH
       run: |
+        LD_LIBRARY_PATH="${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/lib"
+        export LD_LIBRARY_PATH
+        echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
         ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
         echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 

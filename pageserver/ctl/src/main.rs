@@ -178,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
             let toml_item = toml_document
                 .get("remote_storage")
                 .expect("need remote_storage");
-            let config = RemoteStorageConfig::from_toml(toml_item)?.expect("incomplete config");
+            let config = RemoteStorageConfig::from_toml(toml_item)?;
             let storage = remote_storage::GenericRemoteStorage::from_config(&config);
             let cancel = CancellationToken::new();
             storage

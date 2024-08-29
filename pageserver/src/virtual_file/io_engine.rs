@@ -109,7 +109,7 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use super::{FileGuard, Metadata};
+use super::{owned_buffers_io::slice::SliceExt, FileGuard, Metadata};
 
 #[cfg(target_os = "linux")]
 fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std::io::Error {
@@ -122,38 +122,29 @@ fn epoll_uring_error_to_std(e: tokio_epoll_uring::Error<std::io::Error>) -> std:
 }
 
 impl IoEngine {
-    pub(super) async fn read_at<B>(
+    pub(super) async fn read_at<Buf>(
         &self,
         file_guard: FileGuard,
         offset: u64,
-        mut buf: B,
-    ) -> ((FileGuard, B), std::io::Result<usize>)
+        mut slice: tokio_epoll_uring::Slice<Buf>,
+    ) -> (
+        (FileGuard, tokio_epoll_uring::Slice<Buf>),
+        std::io::Result<usize>,
+    )
     where
-        B: tokio_epoll_uring::BoundedBufMut + Send,
+        Buf: tokio_epoll_uring::IoBufMut + Send,
     {
         match self {
             IoEngine::NotSet => panic!("not initialized"),
             IoEngine::StdFs => {
-                // SAFETY: `dst` only lives at most as long as this match arm, during which buf remains valid memory.
-                let dst = unsafe {
-                    std::slice::from_raw_parts_mut(buf.stable_mut_ptr(), buf.bytes_total())
-                };
-                let res = file_guard.with_std_file(|std_file| std_file.read_at(dst, offset));
-                if let Ok(nbytes) = &res {
-                    assert!(*nbytes <= buf.bytes_total());
-                    // SAFETY: see above assertion
-                    unsafe {
-                        buf.set_init(*nbytes);
-                    }
-                }
-                #[allow(dropping_references)]
-                drop(dst);
-                ((file_guard, buf), res)
+                let rust_slice = slice.as_mut_rust_slice_full_zeroed();
+                let res = file_guard.with_std_file(|std_file| std_file.read_at(rust_slice, offset));
+                ((file_guard, slice), res)
             }
             #[cfg(target_os = "linux")]
             IoEngine::TokioEpollUring => {
                 let system = tokio_epoll_uring_ext::thread_local_system().await;
-                let (resources, res) = system.read(file_guard, offset, buf).await;
+                let (resources, res) = system.read(file_guard, offset, slice).await;
                 (resources, res.map_err(epoll_uring_error_to_std))
             }
         }

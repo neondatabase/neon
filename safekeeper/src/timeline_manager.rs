@@ -32,7 +32,7 @@ use crate::{
     timeline_guard::{AccessService, GuardId, ResidenceGuard},
     timelines_set::{TimelineSetGuard, TimelinesSet},
     wal_backup::{self, WalBackupTaskHandle},
-    wal_backup_partial::{self, PartialRemoteSegment},
+    wal_backup_partial::{self, PartialRemoteSegment, RateLimiter},
     SafeKeeperConf,
 };
 
@@ -185,6 +185,7 @@ pub(crate) struct Manager {
 
     // misc
     pub(crate) access_service: AccessService,
+    pub(crate) partial_backup_rate_limiter: RateLimiter,
 }
 
 /// This task gets spawned alongside each timeline and is responsible for managing the timeline's
@@ -197,6 +198,7 @@ pub async fn main_task(
     broker_active_set: Arc<TimelinesSet>,
     manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
     mut manager_rx: tokio::sync::mpsc::UnboundedReceiver<ManagerCtlMessage>,
+    partial_backup_rate_limiter: RateLimiter,
 ) {
     tli.set_status(Status::Started);
 
@@ -209,7 +211,14 @@ pub async fn main_task(
         }
     };
 
-    let mut mgr = Manager::new(tli, conf, broker_active_set, manager_tx).await;
+    let mut mgr = Manager::new(
+        tli,
+        conf,
+        broker_active_set,
+        manager_tx,
+        partial_backup_rate_limiter,
+    )
+    .await;
 
     // Start recovery task which always runs on the timeline.
     if !mgr.is_offloaded && mgr.conf.peer_recovery_enabled {
@@ -321,6 +330,7 @@ impl Manager {
         conf: SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
         manager_tx: tokio::sync::mpsc::UnboundedSender<ManagerCtlMessage>,
+        partial_backup_rate_limiter: RateLimiter,
     ) -> Manager {
         let (is_offloaded, partial_backup_uploaded) = tli.bootstrap_mgr().await;
         Manager {
@@ -339,6 +349,7 @@ impl Manager {
             partial_backup_uploaded,
             access_service: AccessService::new(manager_tx),
             tli,
+            partial_backup_rate_limiter,
         }
     }
 
@@ -525,6 +536,7 @@ impl Manager {
         self.partial_backup_task = Some(tokio::spawn(wal_backup_partial::main_task(
             self.wal_resident_timeline(),
             self.conf.clone(),
+            self.partial_backup_rate_limiter.clone(),
         )));
     }
 

@@ -227,7 +227,7 @@ impl From<UpsertLocationError> for ApiError {
             BadRequest(e) => ApiError::BadRequest(e),
             Unavailable(_) => ApiError::ShuttingDown,
             e @ InProgress => ApiError::Conflict(format!("{e}")),
-            Flush(e) | Other(e) => ApiError::InternalServerError(e),
+            Flush(e) | InternalError(e) => ApiError::InternalServerError(e),
         }
     }
 }
@@ -1296,7 +1296,7 @@ async fn update_tenant_config_handler(
 
     crate::tenant::Tenant::persist_tenant_config(state.conf, &tenant_shard_id, &location_conf)
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
     tenant.set_new_tenant_config(new_tenant_conf);
 
     json_response(StatusCode::OK, ())

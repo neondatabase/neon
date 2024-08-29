@@ -232,12 +232,19 @@ jobs:
 
       - name: Run cargo build
         run: |
+          PQ_LIB_DIR=$(pwd)/pg_install/v16/lib
+          export PQ_LIB_DIR
           mold -run cargo build --locked $CARGO_FLAGS $CARGO_FEATURES --bins --tests -j$(nproc)
 
       - name: Run cargo test
         env:
           NEXTEST_RETRIES: 3
         run: |
+          PQ_LIB_DIR=$(pwd)/pg_install/v16/lib
+          export PQ_LIB_DIR
+          LD_LIBRARY_PATH=$(pwd)/pg_install/v16/lib
+          export LD_LIBRARY_PATH
+
           cargo nextest run $CARGO_FEATURES -j$(nproc)
 
           # Run separate tests for real S3
@@ -378,7 +385,7 @@ jobs:
         run: make walproposer-lib -j$(nproc)
 
       - name: Produce the build stats
-        run: cargo build --all --release --timings -j$(nproc)
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release --timings -j$(nproc)
 
       - name: Upload the build stats
         id: upload-stats

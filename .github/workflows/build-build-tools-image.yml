@@ -82,6 +82,7 @@ jobs:
           tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
 
       - name: Remove custom docker config directory
+        if: always()
         run: |
           rm -rf /tmp/.docker-custom
 

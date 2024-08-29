@@ -35,6 +35,7 @@ use proxy::usage_metrics;
 use anyhow::bail;
 use proxy::config::{self, ProxyConfig};
 use proxy::serverless;
+use remote_storage::RemoteStorageConfig;
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::sync::Arc;
@@ -205,8 +206,8 @@ struct ProxyCliArgs {
     /// remote storage configuration for backup metric collection
     /// Encoded as toml (same format as pageservers), eg
     /// `{bucket_name='the-bucket',bucket_region='us-east-1',prefix_in_bucket='proxy',endpoint='http://minio:9000'}`
-    #[clap(long, default_value = "{}")]
-    metric_backup_collection_remote_storage: String,
+    #[clap(long, value_parser = remote_storage_from_toml)]
+    metric_backup_collection_remote_storage: Option<RemoteStorageConfig>,
     /// chunk size for backup metric collection
     /// Size of each event is no more than 400 bytes, so 2**22 is about 200MB before the compression.
     #[clap(long, default_value = "4194304")]
@@ -511,9 +512,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     }
     let backup_metric_collection_config = config::MetricBackupCollectionConfig {
         interval: args.metric_backup_collection_interval,
-        remote_storage_config: remote_storage_from_toml(
-            &args.metric_backup_collection_remote_storage,
-        )?,
+        remote_storage_config: args.metric_backup_collection_remote_storage.clone(),
         chunk_size: args.metric_backup_collection_chunk_size,
     };
 

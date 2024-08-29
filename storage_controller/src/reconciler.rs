@@ -1,6 +1,7 @@
 use crate::pageserver_client::PageserverClient;
 use crate::persistence::Persistence;
 use crate::service;
+use pageserver_api::controller_api::PlacementPolicy;
 use pageserver_api::models::{
     LocationConfig, LocationConfigMode, LocationConfigSecondary, TenantConfig,
 };
@@ -29,6 +30,7 @@ pub(super) struct Reconciler {
     /// of a tenant's state from when we spawned a reconcile task.
     pub(super) tenant_shard_id: TenantShardId,
     pub(crate) shard: ShardIdentity,
+    pub(crate) placement_policy: PlacementPolicy,
     pub(crate) generation: Option<Generation>,
     pub(crate) intent: TargetState,
 
@@ -641,7 +643,7 @@ impl Reconciler {
                 generation,
                 &self.shard,
                 &self.config,
-                !self.intent.secondary.is_empty(),
+                &self.placement_policy,
             );
             match self.observed.locations.get(&node.get_id()) {
                 Some(conf) if conf.conf.as_ref() == Some(&wanted_conf) => {
@@ -801,8 +803,15 @@ pub(crate) fn attached_location_conf(
     generation: Generation,
     shard: &ShardIdentity,
     config: &TenantConfig,
-    has_secondaries: bool,
+    policy: &PlacementPolicy,
 ) -> LocationConfig {
+    let has_secondaries = match policy {
+        PlacementPolicy::Attached(0) | PlacementPolicy::Detached | PlacementPolicy::Secondary => {
+            false
+        }
+        PlacementPolicy::Attached(_) => true,
+    };
+
     LocationConfig {
         mode: LocationConfigMode::AttachedSingle,
         generation: generation.into(),

@@ -155,16 +155,16 @@ impl StorageController {
         .expect("non-Unicode path")
     }
 
-    /// Find the directory containing postgres binaries, such as `initdb` and `pg_ctl`
+    /// Find the directory containing postgres subdirectories, such `bin` and `lib`
     ///
     /// This usually uses STORAGE_CONTROLLER_POSTGRES_VERSION of postgres, but will fall back
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
-    pub async fn get_pg_bin_dir(&self) -> anyhow::Result<Utf8PathBuf> {
+    async fn get_pg_dir(&self, dir_name: &str) -> anyhow::Result<Utf8PathBuf> {
         let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 15, 14];
 
         for v in prefer_versions {
-            let path = Utf8PathBuf::from_path_buf(self.env.pg_bin_dir(v)?).unwrap();
+            let path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, dir_name)?).unwrap();
             if tokio::fs::try_exists(&path).await? {
                 return Ok(path);
             }
@@ -172,9 +172,18 @@ impl StorageController {
 
         // Fall through
         anyhow::bail!(
-            "Postgres binaries not found in {}",
-            self.env.pg_distrib_dir.display()
+            "Postgres directory '{}' not found in {}",
+            dir_name,
+            self.env.pg_distrib_dir.display(),
         );
+    }
+
+    pub async fn get_pg_bin_dir(&self) -> anyhow::Result<Utf8PathBuf> {
+        self.get_pg_dir("bin").await
+    }
+
+    pub async fn get_pg_lib_dir(&self) -> anyhow::Result<Utf8PathBuf> {
+        self.get_pg_dir("lib").await
     }
 
     /// Readiness check for our postgres process
@@ -229,12 +238,17 @@ impl StorageController {
             .unwrap()
             .join("storage_controller_db");
         let pg_bin_dir = self.get_pg_bin_dir().await?;
+        let pg_lib_dir = self.get_pg_lib_dir().await?;
         let pg_log_path = pg_data_path.join("postgres.log");
 
         if !tokio::fs::try_exists(&pg_data_path).await? {
             // Initialize empty database
             let initdb_path = pg_bin_dir.join("initdb");
             let mut child = Command::new(&initdb_path)
+                .envs(vec![
+                    ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+                    ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+                ])
                 .args(["-D", pg_data_path.as_ref()])
                 .spawn()
                 .expect("Failed to spawn initdb");
@@ -269,7 +283,10 @@ impl StorageController {
             &self.env.base_data_dir,
             pg_bin_dir.join("pg_ctl").as_std_path(),
             db_start_args,
-            [],
+            vec![
+                ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+                ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ],
             background_process::InitialPidFile::Create(self.postgres_pid_file()),
             retry_timeout,
             || self.pg_isready(&pg_bin_dir),
@@ -324,7 +341,10 @@ impl StorageController {
             &self.env.base_data_dir,
             &self.env.storage_controller_bin(),
             args,
-            [],
+            vec![
+                ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+                ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ],
             background_process::InitialPidFile::Create(self.pid_file()),
             retry_timeout,
             || async {

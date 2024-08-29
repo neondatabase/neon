@@ -14,6 +14,7 @@ use std::{
 };
 use utils::logging::LogFormat;
 
+use crate::models::ImageCompressionAlgorithm;
 use crate::models::LsnLease;
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
@@ -79,6 +80,7 @@ pub struct ConfigToml {
     pub get_impl: GetImpl,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
     pub validate_vectored_get: bool,
+    pub image_compression: Option<ImageCompressionAlgorithm>,
     pub ephemeral_bytes_per_memory_kb: usize,
 
     pub tenant_config: TenantConfigToml,
@@ -317,6 +319,8 @@ pub mod defaults {
 
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
+    pub const DEFAULT_IMAGE_COMPRESSION: Option<crate::models::ImageCompressionAlgorithm> = None;
+
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
@@ -399,6 +403,7 @@ impl Default for ConfigToml {
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
             validate_vectored_get: (DEFAULT_VALIDATE_VECTORED_GET),
+            image_compression: (DEFAULT_IMAGE_COMPRESSION),
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
 
             tenant_config: TenantConfigToml::default(),

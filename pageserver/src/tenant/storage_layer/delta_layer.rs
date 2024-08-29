@@ -453,7 +453,12 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> (Vec<u8>, anyhow::Result<()>) {
         assert!(self.lsn_range.start <= lsn);
-        let (val, res) = self.blob_writer.write_blob(val, ctx).await;
+        // We don't want to use compression in delta layer creation
+        let compression = None;
+        let (val, res) = self
+            .blob_writer
+            .write_blob_maybe_compressed(val, ctx, compression)
+            .await;
         let off = match res {
             Ok(off) => off,
             Err(e) => return (val, Err(anyhow::anyhow!(e))),

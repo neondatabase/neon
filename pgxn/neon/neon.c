@@ -12,6 +12,8 @@
 #include "fmgr.h"
 
 #include "miscadmin.h"
+#include "access/subtrans.h"
+#include "access/twophase.h"
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "storage/buf_internals.h"
@@ -22,10 +24,12 @@
 #include "replication/logical.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
+#include "storage/proc.h"
 #include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
+#include "utils/builtins.h"
 #include "utils/pg_lsn.h"
 #include "utils/guc.h"
 #include "utils/wait_event.h"
@@ -266,6 +270,293 @@ LogicalSlotsMonitorMain(Datum main_arg)
 	}
 }
 
+/*
+ * XXX: These private to procarray.c, but we need them here.
+ */
+#define PROCARRAY_MAXPROCS	(MaxBackends + max_prepared_xacts)
+#define TOTAL_MAX_CACHED_SUBXIDS \
+	((PGPROC_MAX_CACHED_SUBXIDS + 1) * PROCARRAY_MAXPROCS)
+
+/*
+ * Restore running-xact information by scanning the CLOG at startup.
+ *
+ * In PostgreSQL, a standby always has to wait for a running-xacts WAL record
+ * to arrive before it can start accepting queries. Furthermore, if there are
+ * transactions with too many subxids (> 64) open to fit in the in-memory
+ * subxids cache, the running-xacts record will be marked as "suboverflowed",
+ * and the standby will need to also wait for the currently in-progress
+ * transactions to finish.
+ *
+ * That's not great in PostgreSQL, because a hot standby does not necessary
+ * open up for queries immediately as you might expect. But it's worse in
+ * Neon: A standby in Neon doesn't need to start WAL replay from a checkpoint
+ * record; it can start at any LSN. Postgres arranges things so that there is
+ * a running-xacts record soon after every checkpoint record, but when you
+ * start from an arbitrary LSN, that doesn't help. If the primary is idle, or
+ * not running at all, it might never write a new running-xacts record,
+ * leaving the replica in a limbo where it can never start accepting queries.
+ *
+ * To mitigate that, we have an additional mechanism to find the running-xacts
+ * information: we scan the CLOG, making note of any XIDs not marked as
+ * committed or aborted. They are added to the Postgres known-assigned XIDs
+ * array by calling ProcArrayApplyRecoveryInfo() in the caller of this
+ * function.
+ *
+ * There is one big limitation with that mechanism: The size of the
+ * known-assigned XIDs is limited, so if there are a lot of in-progress XIDs,
+ * we have to give up. Furthermore, we don't know how many of the in-progress
+ * XIDs are subtransactions, and if we use up all the space in the
+ * known-assigned XIDs array for subtransactions, we might run out of space in
+ * the array later during WAL replay, causing the replica to shut down with
+ * "ERROR: too many KnownAssignedXids". The safe # of XIDs that we can add to
+ * the known-assigned array without risking that error later is very low,
+ * merely PGPROC_MAX_CACHED_SUBXIDS == 64, so we take our chances and use up
+ * to half of the known-assigned XIDs array for the subtransactions, even
+ * though that risks getting the error later.
+ *
+ * Note: It's OK if the recovered list of XIDs includes some transactions that
+ * have crashed in the primary, and hence will never commit. They will be seen
+ * as in-progress, until we see a new next running-acts record with an
+ * oldestActiveXid that invalidates them. That's how the known-assigned XIDs
+ * array always works.
+ *
+ * If scraping the CLOG doesn't succeed for some reason, like the subxid
+ * overflow, Postgres will fall back to waiting for a running-xacts record
+ * like usual.
+ *
+ * Returns true if a complete list of in-progress XIDs was scraped.
+ */
+static bool
+RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *nxids)
+{
+	TransactionId from;
+	TransactionId till;
+	int			max_xcnt;
+	TransactionId *prepared_xids = NULL;
+	int			n_prepared_xids;
+	TransactionId *restored_xids = NULL;
+	int			n_restored_xids;
+	int			next_prepared_idx;
+
+	Assert(*xids == NULL);
+
+	/*
+	 * If the checkpoint doesn't have a valid oldestActiveXid, bail out. We
+	 * don't know where to start the scan.
+	 *
+	 * This shouldn't happen, because the pageserver always maintains a valid
+	 * oldestActiveXid nowadays. Except when starting at an old point in time
+	 * that was ingested before the pageserver was taught to do that.
+	 */
+	if (!TransactionIdIsValid(checkpoint->oldestActiveXid))
+	{
+		elog(LOG, "cannot restore running-xacts from CLOG because oldestActiveXid is not set");
+		goto fail;
+	}
+
+	/*
+	 * We will scan the CLOG starting from the oldest active XID.
+	 *
+	 * In some corner cases, the oldestActiveXid from the last checkpoint
+	 * might already have been truncated from the CLOG. That is,
+	 * oldestActiveXid might be older than oldestXid. That's possible because
+	 * oldestActiveXid is only updated at checkpoints. After the last
+	 * checkpoint, the oldest transaction might have committed, and the CLOG
+	 * might also have been already truncated. So if oldestActiveXid is older
+	 * than oldestXid, start at oldestXid instead. (Otherwise we'd try to
+	 * access CLOG segments that have already been truncated away.)
+	 */
+	from = TransactionIdPrecedes(checkpoint->oldestXid, checkpoint->oldestActiveXid)
+		? checkpoint->oldestActiveXid : checkpoint->oldestXid;
+	till = XidFromFullTransactionId(checkpoint->nextXid);
+
+	/*
+	 * To avoid "too many KnownAssignedXids" error later during replay, we
+	 * limit number of collected transactions. This is a tradeoff: if we are
+	 * willing to consume more of the KnownAssignedXids space for the XIDs
+	 * now, that allows us to start up, but we might run out of space later.
+	 *
+	 * The size of the KnownAssignedXids array is TOTAL_MAX_CACHED_SUBXIDS,
+	 * which is (PGPROC_MAX_CACHED_SUBXIDS + 1) * PROCARRAY_MAXPROCS). In
+	 * PostgreSQL, that's always enough because the primary will always write
+	 * an XLOG_XACT_ASSIGNMENT record if a transaction has more than
+	 * PGPROC_MAX_CACHED_SUBXIDS subtransactions. Seeing that record allows
+	 * the standby to mark the XIDs in pg_subtrans and removing them from the
+	 * KnowingAssignedXids array.
+	 *
+	 * Here, we don't know which XIDs belong to subtransactions that have
+	 * already been WAL-logged with an XLOG_XACT_ASSIGNMENT record. If we
+	 * wanted to be totally safe and avoid the possibility of getting a "too
+	 * many KnownAssignedXids" error later, we would have to limit ourselves
+	 * to PGPROC_MAX_CACHED_SUBXIDS, which is not much. And that includes top
+	 * transaction IDs too, because we cannot distinguish between top
+	 * transaction IDs and subtransactions here.
+	 *
+	 * Somewhat arbitrarily, we use up to half of KnownAssignedXids. That
+	 * strikes a sensible balance between being useful, and risking a "too
+	 * many KnownAssignedXids" error later.
+	 */
+	max_xcnt = TOTAL_MAX_CACHED_SUBXIDS / 2;
+
+	/*
+	 * Collect XIDs of prepared transactions in an array. This includes only
+	 * their top-level XIDs. We assume that StandbyRecoverPreparedTransactions
+	 * has already been called, so we can find all the sub-transactions in
+	 * pg_subtrans.
+	 */
+	PrescanPreparedTransactions(&prepared_xids, &n_prepared_xids);
+	qsort(prepared_xids, n_prepared_xids, sizeof(TransactionId), xidLogicalComparator);
+
+	/*
+	 * Scan the CLOG, collecting in-progress XIDs into 'restored_xids'.
+	 */
+	elog(DEBUG1, "scanning CLOG between %u and %u for in-progress XIDs", from, till);
+	restored_xids = (TransactionId *) palloc(max_xcnt * sizeof(TransactionId));
+	n_restored_xids = 0;
+	next_prepared_idx = 0;
+	for (TransactionId xid = from; xid != till;)
+	{
+		XLogRecPtr	xidlsn;
+		XidStatus	xidstatus;
+
+		xidstatus = TransactionIdGetStatus(xid, &xidlsn);
+
+		/*
+		 * "Merge" the prepared transactions into the restored_xids array as
+		 * we go.  The prepared transactions array is sorted. This is mostly
+		 * a sanity check to ensure that all the prpeared transactions are
+		 * seen as in-progress. (There is a check after the loop that we didn't
+		 * miss any.)
+		 */
+		if (next_prepared_idx < n_prepared_xids && xid == prepared_xids[next_prepared_idx])
+		{
+			/*
+			 * This is a top-level transaction ID of a prepared transaction.
+			 * Include it in the array.
+			 */
+
+			/* sanity check */
+			if (xidstatus != TRANSACTION_STATUS_IN_PROGRESS)
+			{
+				elog(LOG, "prepared transaction %u has unexpected status %X, cannot restore running-xacts from CLOG",
+					 xid, xidstatus);
+				Assert(false);
+				goto fail;
+			}
+
+			elog(DEBUG1, "XID %u: was next prepared xact (%d / %d)", xid, next_prepared_idx, n_prepared_xids);
+			next_prepared_idx++;
+		}
+		else if (xidstatus == TRANSACTION_STATUS_COMMITTED)
+		{
+			elog(DEBUG1, "XID %u: was committed", xid);
+			goto skip;
+		}
+		else if (xidstatus == TRANSACTION_STATUS_ABORTED)
+		{
+			elog(DEBUG1, "XID %u: was aborted", xid);
+			goto skip;
+		}
+		else if (xidstatus == TRANSACTION_STATUS_IN_PROGRESS)
+		{
+			/*
+			 * In-progress transactions are included in the array.
+			 *
+			 * Except subtransactions of the prepared transactions. They are
+			 * already set in pg_subtrans, and hence don't need to be tracked
+			 * in the known-assigned XIDs array.
+			 */
+			if (n_prepared_xids > 0)
+			{
+				TransactionId parent = SubTransGetParent(xid);
+
+				if (TransactionIdIsValid(parent))
+				{
+					/*
+					 * This is a subtransaction belonging to a prepared
+					 * transaction.
+					 *
+					 * Sanity check that it is in the prepared XIDs array. It
+					 * should be, because StandbyRecoverPreparedTransactions
+					 * populated pg_subtrans, and no other XID should be set
+					 * in it yet. (This also relies on the fact that
+					 * StandbyRecoverPreparedTransactions sets the parent of
+					 * each subxid to point directly to the top-level XID,
+					 * rather than restoring the original subtransaction
+					 * hierarchy.)
+					 */
+					if (bsearch(&parent, prepared_xids, next_prepared_idx,
+								sizeof(TransactionId), xidLogicalComparator) == NULL)
+					{
+						elog(LOG, "sub-XID %u has unexpected parent %u, cannot restore running-xacts from CLOG",
+							 xid, parent);
+						Assert(false);
+						goto fail;
+					}
+					elog(DEBUG1, "XID %u: was a subtransaction of prepared xid %u", xid, parent);
+					goto skip;
+				}
+			}
+
+			/* include it in the array */
+			elog(DEBUG1, "XID %u: is in progress", xid);
+		}
+		else
+		{
+			/*
+			 * SUB_COMMITTED is a transient state used at commit. We don't
+			 * expect to see that here.
+			 */
+			elog(LOG, "XID %u has unexpected status %X in pg_xact, cannot restore running-xacts from CLOG",
+				 xid, xidstatus);
+			Assert(false);
+			goto fail;
+		}
+
+		if (n_restored_xids >= max_xcnt)
+		{
+			/*
+			 * Overflowed. We won't be able to install the RunningTransactions
+			 * snapshot.
+			 */
+			elog(LOG, "too many running xacts to restore from the CLOG; oldestXid=%u oldestActiveXid=%u nextXid %u",
+				 checkpoint->oldestXid, checkpoint->oldestActiveXid,
+				 XidFromFullTransactionId(checkpoint->nextXid));
+			goto fail;
+		}
+
+		restored_xids[n_restored_xids++] = xid;
+
+	skip:
+		TransactionIdAdvance(xid);
+		continue;
+	}
+
+	/* sanity check */
+	if (next_prepared_idx != n_prepared_xids)
+	{
+		elog(LOG, "prepared transaction ID %u was not visited in the CLOG scan, cannot restore running-xacts from CLOG",
+			 prepared_xids[next_prepared_idx]);
+		Assert(false);
+		goto fail;
+	}
+
+	elog(LOG, "restored %d running xacts by scanning the CLOG; oldestXid=%u oldestActiveXid=%u nextXid %u",
+		 n_restored_xids, checkpoint->oldestXid, checkpoint->oldestActiveXid, XidFromFullTransactionId(checkpoint->nextXid));
+	*nxids = n_restored_xids;
+	*xids = restored_xids;
+	return true;
+
+ fail:
+	*nxids = 0;
+	*xids = NULL;
+	if (restored_xids)
+		pfree(restored_xids);
+	if (prepared_xids)
+		pfree(prepared_xids);
+	return false;
+}
+
 void
 _PG_init(void)
 {
@@ -287,6 +578,8 @@ _PG_init(void)
 	InitControlPlaneConnector();
 
 	pg_init_extension_server();
+
+	restore_running_xacts_callback = RestoreRunningXactsFromClog;
 
 	/*
 	 * Important: This must happen after other parts of the extension are
