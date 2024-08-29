@@ -118,7 +118,6 @@ pub struct PageServerConf {
     // How often to collect metrics and send them to the metrics endpoint.
     pub metric_collection_interval: Duration,
     // How often to send unchanged cached metrics to the metrics endpoint.
-    pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
@@ -318,7 +317,6 @@ impl PageServerConf {
             broker_keepalive_interval,
             log_format,
             metric_collection_interval,
-            cached_metric_collection_interval,
             metric_collection_endpoint,
             metric_collection_bucket,
             synthetic_size_calculation_interval,
@@ -365,7 +363,6 @@ impl PageServerConf {
             broker_keepalive_interval,
             log_format,
             metric_collection_interval,
-            cached_metric_collection_interval,
             metric_collection_endpoint,
             metric_collection_bucket,
             synthetic_size_calculation_interval,
@@ -456,7 +453,6 @@ impl PageServerConf {
             wal_redo_timeout: Duration::from_secs(60),
             pg_distrib_dir: Some(pg_distrib_dir),
             metric_collection_interval: Duration::from_secs(60),
-            cached_metric_collection_interval: Duration::from_secs(60 * 60),
             synthetic_size_calculation_interval: Duration::from_secs(60),
             background_task_maximum_delay: Duration::ZERO,
             ..Default::default()
@@ -553,7 +549,6 @@ initial_superuser_name = 'zzzz'
 id = 10
 
 metric_collection_interval = '222 s'
-cached_metric_collection_interval = '22200 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
 
@@ -608,9 +603,6 @@ background_task_maximum_delay = '334 s'
                     ConfigurableSemaphore::default(),
                 metric_collection_interval: humantime::parse_duration(
                     defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
-                )?,
-                cached_metric_collection_interval: humantime::parse_duration(
-                    defaults::DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL
                 )?,
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
                 metric_collection_bucket: None,
@@ -690,7 +682,6 @@ background_task_maximum_delay = '334 s'
                 eviction_task_immitated_concurrent_logical_size_queries:
                     ConfigurableSemaphore::default(),
                 metric_collection_interval: Duration::from_secs(222),
-                cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 metric_collection_bucket: None,
                 synthetic_size_calculation_interval: Duration::from_secs(333),

@@ -62,7 +62,6 @@ pub struct ConfigToml {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub log_format: LogFormat,
     pub metric_collection_interval: Duration,
-    pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<reqwest::Url>,
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
     pub synthetic_size_calculation_interval: Duration,
@@ -305,7 +304,6 @@ pub mod defaults {
     pub const DEFAULT_CONCURRENT_TENANT_WARMUP: usize = 8;
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "0s";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
     pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
@@ -366,10 +364,6 @@ impl Default for ConfigToml {
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
             .expect("cannot parse default metric collection interval")),
-            cached_metric_collection_interval: (humantime::parse_duration(
-                DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL,
-            )
-            .expect("cannot parse default cached_metric_collection_interval")),
             synthetic_size_calculation_interval: (humantime::parse_duration(
                 DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL,
             )
