@@ -2706,7 +2706,7 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 
 static void
 #if PG_MAJORVERSION_NUM < 16
-neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neon_request_lsns *request_lsns,
+neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_blockno, neon_request_lsns *request_lsns,
 				  char **buffers, BlockNumber nblocks, const bits8 *mask)
 #else
 neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_blockno, neon_request_lsns *request_lsns,
