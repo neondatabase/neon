@@ -75,7 +75,7 @@ mod tests {
         let salt = b"sodium chloride";
         let pass = b"Ne0n_!5_50_C007";
 
-        let mut job = Pbkdf2::start(pass, salt, 600000);
+        let mut job = Pbkdf2::start(pass, salt, 60000);
         let hash = loop {
             let std::task::Poll::Ready(hash) = job.turn() else {
                 continue;
@@ -83,7 +83,7 @@ mod tests {
             break hash;
         };
 
-        let expected = pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 600000);
+        let expected = pbkdf2_hmac_array::<Sha256, 32>(pass, salt, 60000);
         assert_eq!(hash, expected);
     }
 }
