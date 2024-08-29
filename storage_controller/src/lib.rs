@@ -2,6 +2,7 @@ use serde::Serialize;
 use utils::seqwait::MonotonicCounter;
 
 mod auth;
+mod background_node_operations;
 mod compute_hook;
 mod heartbeater;
 pub mod http;

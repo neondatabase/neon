@@ -533,27 +533,31 @@ async fn handle_inner(
         return Err(SqlOverHttpError::RequestTooLarge);
     }
 
-    let fetch_and_process_request = async {
-        let body = request.into_body().collect().await?.to_bytes();
-        info!(length = body.len(), "request payload read");
-        let payload: Payload = serde_json::from_slice(&body)?;
-        Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
-    }
-    .map_err(SqlOverHttpError::from);
+    let fetch_and_process_request = Box::pin(
+        async {
+            let body = request.into_body().collect().await?.to_bytes();
+            info!(length = body.len(), "request payload read");
+            let payload: Payload = serde_json::from_slice(&body)?;
+            Ok::<Payload, ReadPayloadError>(payload) // Adjust error type accordingly
+        }
+        .map_err(SqlOverHttpError::from),
+    );
 
-    let authenticate_and_connect = async {
-        let keys = backend
-            .authenticate(ctx, &config.authentication_config, &conn_info)
-            .await?;
-        let client = backend
-            .connect_to_compute(ctx, conn_info, keys, !allow_pool)
-            .await?;
-        // not strictly necessary to mark success here,
-        // but it's just insurance for if we forget it somewhere else
-        ctx.latency_timer.success();
-        Ok::<_, HttpConnError>(client)
-    }
-    .map_err(SqlOverHttpError::from);
+    let authenticate_and_connect = Box::pin(
+        async {
+            let keys = backend
+                .authenticate(ctx, &config.authentication_config, &conn_info)
+                .await?;
+            let client = backend
+                .connect_to_compute(ctx, conn_info, keys, !allow_pool)
+                .await?;
+            // not strictly necessary to mark success here,
+            // but it's just insurance for if we forget it somewhere else
+            ctx.latency_timer.success();
+            Ok::<_, HttpConnError>(client)
+        }
+        .map_err(SqlOverHttpError::from),
+    );
 
     let (payload, mut client) = match run_until_cancelled(
         // Run both operations in parallel

@@ -104,7 +104,7 @@ impl PoolingBackend {
     ) -> Result<Client<tokio_postgres::Client>, HttpConnError> {
         let maybe_client = if !force_new {
             info!("pool: looking for an existing connection");
-            self.pool.get(ctx, &conn_info).await?
+            self.pool.get(ctx, &conn_info)?
         } else {
             info!("pool: pool is disabled");
             None

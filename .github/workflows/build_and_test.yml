@@ -1023,6 +1023,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Use custom DOCKER_CONFIG directory to avoid conflicts with default settings
+      # The default value is ~/.docker
+      - name: Set custom docker config directory
+        run: |
+          mkdir -p .docker-custom
+          echo DOCKER_CONFIG=$(pwd)/.docker-custom >> $GITHUB_ENV
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+          password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+
       # `neondatabase/neon` contains multiple binaries, all of them use the same input for the version into the same version formatting library.
       # Pick pageserver as currently the only binary with extra "version" features printed in the string to verify.
       # Regular pageserver version string looks like
@@ -1057,6 +1069,11 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml logs || 0
           docker compose -f ./docker-compose/docker-compose.yml down
 
+      - name: Remove custom docker config directory
+        if: always()
+        run: |
+          rm -rf .docker-custom
+
   promote-images:
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
@@ -1070,7 +1087,8 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
-      - uses: docker/login-action@v3
+      - name: Login to dev ECR
+        uses: docker/login-action@v3
         with:
           registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
           username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
@@ -1103,6 +1121,22 @@ jobs:
           done
           docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
                                              neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
+
+      - name: Login to prod ECR
+        uses: docker/login-action@v3
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        with:
+          registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
+          username: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_ACCESS_KEY_ID }}
+          password: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Copy all images to prod ECR
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        run: |
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+            docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
+                                               369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
+          done
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]

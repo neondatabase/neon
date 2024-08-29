@@ -69,6 +69,9 @@ where
     // Not generic AsRef<OsStr>, otherwise empty `envs` prevents type inference
     EI: IntoIterator<Item = (String, String)>,
 {
+    if !datadir.metadata().context("stat datadir")?.is_dir() {
+        anyhow::bail!("`datadir` must be a directory when calling this function: {datadir:?}");
+    }
     let log_path = datadir.join(format!("{process_name}.log"));
     let process_log_file = fs::OpenOptions::new()
         .create(true)
@@ -85,7 +88,13 @@ where
     let background_command = command
         .stdout(process_log_file)
         .stderr(same_file_for_stderr)
-        .args(args);
+        .args(args)
+        // spawn all child processes in their datadir, useful for all kinds of things,
+        // not least cleaning up child processes e.g. after an unclean exit from the test suite:
+        // ```
+        // lsof  -d cwd -a +D  Users/cs/src/neon/test_output
+        // ```
+        .current_dir(datadir);
 
     let filled_cmd = fill_env_vars_prefixed_neon(fill_remote_storage_secrets_vars(
         fill_rust_env_vars(background_command),

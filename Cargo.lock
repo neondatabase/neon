@@ -5763,6 +5763,7 @@ dependencies = [
  "r2d2",
  "reqwest 0.12.4",
  "routerify",
+ "scopeguard",
  "serde",
  "serde_json",
  "strum",

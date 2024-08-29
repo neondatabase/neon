@@ -102,9 +102,7 @@ use crate::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::{
-    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
-};
+use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
 use pageserver_api::reltag::RelTag;
@@ -121,7 +119,6 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr;
@@ -135,7 +132,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::{config::TenantConf, storage_layer::VectoredValueReconstructState};
+use super::config::TenantConf;
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -854,32 +851,11 @@ impl Timeline {
 
         self.timeline_get_throttle.throttle(ctx, 1).await;
 
-        // Check the page cache. We will get back the most recent page with lsn <= `lsn`.
-        // The cached image can be returned directly if there is no WAL between the cached image
-        // and requested LSN. The cached image can also be used to reduce the amount of WAL needed
-        // for redo.
-        let cached_page_img = match self.lookup_cached_page(&key, lsn, ctx).await {
-            Some((cached_lsn, cached_img)) => {
-                match cached_lsn.cmp(&lsn) {
-                    Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => {
-                        MATERIALIZED_PAGE_CACHE_HIT_DIRECT.inc();
-                        return Ok(cached_img); // exact LSN match, return the image
-                    }
-                    Ordering::Greater => {
-                        unreachable!("the returned lsn should never be after the requested lsn")
-                    }
-                }
-                Some((cached_lsn, cached_img))
-            }
-            None => None,
-        };
-
         match self.conf.get_impl {
             GetImpl::Legacy => {
                 let reconstruct_state = ValueReconstructState {
                     records: Vec::new(),
-                    img: cached_page_img,
+                    img: None,
                 };
 
                 self.get_impl(key, lsn, reconstruct_state, ctx).await
@@ -892,13 +868,6 @@ impl Timeline {
                 // Initialise the reconstruct state for the key with the cache
                 // entry returned above.
                 let mut reconstruct_state = ValuesReconstructState::new();
-
-                // Only add the cached image to the reconstruct state when it exists.
-                if cached_page_img.is_some() {
-                    let mut key_state = VectoredValueReconstructState::default();
-                    key_state.img = cached_page_img;
-                    reconstruct_state.keys.insert(key, Ok(key_state));
-                }
 
                 let vectored_res = self
                     .get_vectored_impl(keyspace.clone(), lsn, &mut reconstruct_state, ctx)
@@ -3207,7 +3176,6 @@ impl Timeline {
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
-                        MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
                         return Ok(traversal_path);
                     }
                     if let Some(prev) = prev_lsn {
@@ -3579,26 +3547,6 @@ impl Timeline {
             completed_keyspace,
             image_covered_keyspace: image_covered_keyspace.consume_keyspace(),
         })
-    }
-
-    /// # Cancel-safety
-    ///
-    /// This method is cancellation-safe.
-    async fn lookup_cached_page(
-        &self,
-        key: &Key,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Option<(Lsn, Bytes)> {
-        let cache = page_cache::get();
-
-        // FIXME: It's pointless to check the cache for things that are not 8kB pages.
-        // We should look at the key to determine if it's a cacheable object
-        let (lsn, read_guard) = cache
-            .lookup_materialized_page(self.tenant_shard_id, self.timeline_id, key, lsn, ctx)
-            .await?;
-        let img = Bytes::from(read_guard.to_vec());
-        Some((lsn, img))
     }
 
     async fn get_ready_ancestor_timeline(
@@ -5247,8 +5195,6 @@ impl Timeline {
                     trace!("found {} WAL records that will init the page for {} at {}, performing WAL redo", data.records.len(), key, request_lsn);
                 };
 
-                let last_rec_lsn = data.records.last().unwrap().0;
-
                 let img = match self
                     .walredo_mgr
                     .as_ref()
@@ -5261,23 +5207,6 @@ impl Timeline {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::WalRedo(e)),
                 };
-
-                if img.len() == page_cache::PAGE_SZ {
-                    let cache = page_cache::get();
-                    if let Err(e) = cache
-                        .memorize_materialized_page(
-                            self.tenant_shard_id,
-                            self.timeline_id,
-                            key,
-                            last_rec_lsn,
-                            &img,
-                        )
-                        .await
-                        .context("Materialized page memoization failed")
-                    {
-                        return Err(PageReconstructError::from(e));
-                    }
-                }
 
                 Ok(img)
             }

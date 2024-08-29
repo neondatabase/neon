@@ -209,6 +209,7 @@ pub enum NodeSchedulingPolicy {
     Active,
     Filling,
     Pause,
+    PauseForRestart,
     Draining,
 }
 
@@ -220,6 +221,7 @@ impl FromStr for NodeSchedulingPolicy {
             "active" => Ok(Self::Active),
             "filling" => Ok(Self::Filling),
             "pause" => Ok(Self::Pause),
+            "pause_for_restart" => Ok(Self::PauseForRestart),
             "draining" => Ok(Self::Draining),
             _ => Err(anyhow::anyhow!("Unknown scheduling state '{s}'")),
         }
@@ -233,6 +235,7 @@ impl From<NodeSchedulingPolicy> for String {
             Active => "active",
             Filling => "filling",
             Pause => "pause",
+            PauseForRestart => "pause_for_restart",
             Draining => "draining",
         }
         .to_string()

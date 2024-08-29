@@ -375,7 +375,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         }
     }
 
-    pub async fn get(
+    pub fn get(
         self: &Arc<Self>,
         ctx: &mut RequestMonitoring,
         conn_info: &ConnInfo,
