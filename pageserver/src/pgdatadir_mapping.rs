@@ -522,7 +522,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Option<TimestampTz>, PageReconstructError> {
         let mut max: Option<TimestampTz> = None;
-        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+        self.map_all_timestamps::<()>(probe_lsn, ctx, |timestamp| {
             if let Some(max_prev) = max {
                 max = Some(max_prev.max(timestamp));
             } else {

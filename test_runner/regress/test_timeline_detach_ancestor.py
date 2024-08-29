@@ -1,5 +1,7 @@
 import datetime
 import enum
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from threading import Barrier
@@ -9,14 +11,17 @@ import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    LogCursor,
     NeonEnvBuilder,
     PgBin,
+    flush_ep_to_pageserver,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
-from fixtures.pageserver.utils import wait_timeline_detail_404
-from fixtures.remote_storage import LocalFsStorage
-from fixtures.utils import assert_pageserver_backups_equal
+from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_timeline_detail_404
+from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
+from fixtures.utils import assert_pageserver_backups_equal, wait_until
+from requests import ReadTimeout
 
 
 def by_end_lsn(info: HistoricLayerInfo) -> Lsn:
@@ -160,7 +165,7 @@ def test_ancestor_detach_branched_from(
     )
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-    assert all_reparented == set()
+    assert all_reparented == []
 
     if restart_after:
         env.pageserver.stop()
@@ -269,7 +274,7 @@ def test_ancestor_detach_reparents_earlier(neon_env_builder: NeonEnvBuilder):
     after = env.neon_cli.create_branch("after", "main", env.initial_tenant, ancestor_start_lsn=None)
 
     all_reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-    assert all_reparented == {reparented, same_branchpoint}
+    assert set(all_reparented) == {reparented, same_branchpoint}
 
     env.pageserver.quiesce_tenants()
 
@@ -529,7 +534,7 @@ def test_compaction_induced_by_detaches_in_history(
 
     for _, timeline_id in skip_main:
         reparented = client.detach_ancestor(env.initial_tenant, timeline_id)
-        assert reparented == set(), "we have no earlier branches at any level"
+        assert reparented == [], "we have no earlier branches at any level"
 
     post_detach_l0s = list(filter(lambda x: x.l0, delta_layers(branch_timeline_id)))
     assert len(post_detach_l0s) == 5, "should had inherited 4 L0s, have 5 in total"
@@ -559,23 +564,49 @@ def test_compaction_induced_by_detaches_in_history(
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
 
 
-def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
-    env.pageserver.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+@pytest.mark.parametrize("sharded", [True, False])
+def test_timeline_ancestor_detach_idempotent_success(
+    neon_env_builder: NeonEnvBuilder, sharded: bool
+):
+    shards = 2 if sharded else 1
 
-    client = env.pageserver.http_client()
+    neon_env_builder.num_pageservers = shards
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shards if sharded else None)
 
-    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
-        client.detach_ancestor(env.initial_tenant, env.initial_timeline)
-    assert info.value.status_code == 409
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    for ps in pageservers.values():
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    if sharded:
+        # FIXME: should this be in the neon_env_builder.init_start?
+        env.storage_controller.reconcile_until_idle()
+        client = env.storage_controller.pageserver_api()
+    else:
+        client = env.pageserver.http_client()
 
     first_branch = env.neon_cli.create_branch("first_branch")
-    second_branch = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
 
-    # funnily enough this does not have a prefix
-    with pytest.raises(PageserverApiException, match="too many ancestors") as info:
-        client.detach_ancestor(env.initial_tenant, second_branch)
-    assert info.value.status_code == 400
+    _ = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
+
+    # these two will be reparented, and they should be returned in stable order
+    # from pageservers OR otherwise there will be an `error!` logging from
+    # storage controller
+    reparented1 = env.neon_cli.create_branch("first_reparented", ancestor_branch_name="main")
+    reparented2 = env.neon_cli.create_branch("second_reparented", ancestor_branch_name="main")
+
+    first_reparenting_response = client.detach_ancestor(env.initial_tenant, first_branch)
+    assert set(first_reparenting_response) == {reparented1, reparented2}
+
+    # FIXME: this should be done by the http req handler
+    for ps in pageservers.values():
+        ps.quiesce_tenants()
+
+    for _ in range(5):
+        # once completed, we can retry this how many times
+        assert (
+            client.detach_ancestor(env.initial_tenant, first_branch) == first_reparenting_response
+        )
 
     client.tenant_delete(env.initial_tenant)
 
@@ -584,10 +615,442 @@ def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
     assert e.value.status_code == 404
 
 
+@pytest.mark.parametrize("sharded", [True, False])
+def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, sharded: bool):
+    # the test is split from test_timeline_ancestor_detach_idempotent_success as only these error cases should create "request was dropped before completing",
+    # given the current first error handling
+    shards = 2 if sharded else 1
+
+    neon_env_builder.num_pageservers = shards
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shards if sharded else None)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    for ps in pageservers.values():
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+        ps.allowed_errors.append(
+            ".* WARN .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: request was dropped before completing"
+        )
+
+    client = (
+        env.pageserver.http_client() if not sharded else env.storage_controller.pageserver_api()
+    )
+
+    with pytest.raises(PageserverApiException, match=".* no ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, env.initial_timeline)
+    assert info.value.status_code == 409
+
+    _ = env.neon_cli.create_branch("first_branch")
+
+    second_branch = env.neon_cli.create_branch("second_branch", ancestor_branch_name="first_branch")
+
+    # funnily enough this does not have a prefix
+    with pytest.raises(PageserverApiException, match="too many ancestors") as info:
+        client.detach_ancestor(env.initial_tenant, second_branch)
+    assert info.value.status_code == 400
+
+
+def test_sharded_timeline_detach_ancestor(neon_env_builder: NeonEnvBuilder):
+    """
+    Sharded timeline detach ancestor; 4 nodes: 1 stuck, 1 restarted, 2 normal.
+
+    Stuck node gets stuck on a pause failpoint for first storage controller request.
+    Restarted node remains stuck until explicit restart from test code.
+
+    We retry the request until storage controller gets 200 OK from all nodes.
+    """
+    branch_name = "soon_detached"
+    shard_count = 4
+    neon_env_builder.num_pageservers = shard_count
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    # FIXME: should this be in the neon_env_builder.init_start?
+    env.storage_controller.reconcile_until_idle()
+    # as we will stop a node, make sure there is no clever rebalancing
+    env.storage_controller.tenant_policy_update(env.initial_tenant, body={"scheduling": "Stop"})
+    env.storage_controller.allowed_errors.append(".*: Scheduling is disabled by policy Stop .*")
+
+    shards = env.storage_controller.locate(env.initial_tenant)
+
+    utilized_pageservers = {x["node_id"] for x in shards}
+    assert len(utilized_pageservers) > 1, "all shards got placed on single pageserver?"
+
+    branch_timeline_id = env.neon_cli.create_branch(branch_name, tenant_id=env.initial_tenant)
+
+    with env.endpoints.create_start(branch_name, tenant_id=env.initial_tenant) as ep:
+        ep.safe_psql(
+            "create table foo as select 1::bigint, i::bigint from generate_series(1, 10000) v(i)"
+        )
+        lsn = flush_ep_to_pageserver(env, ep, env.initial_tenant, branch_timeline_id)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    for shard_info in shards:
+        node_id = int(shard_info["node_id"])
+        shard_id = shard_info["shard_id"]
+        detail = pageservers[node_id].http_client().timeline_detail(shard_id, branch_timeline_id)
+
+        assert Lsn(detail["last_record_lsn"]) >= lsn
+        assert Lsn(detail["initdb_lsn"]) < lsn
+        assert TimelineId(detail["ancestor_timeline_id"]) == env.initial_timeline
+
+    # make one of the nodes get stuck, but continue the initial operation
+    # make another of the nodes get stuck, then restart
+
+    stuck = pageservers[int(shards[0]["node_id"])]
+    stuck.allowed_errors.append(".*: request was dropped before completing")
+    env.storage_controller.allowed_errors.append(".*: request was dropped before completing")
+    stuck_http = stuck.http_client()
+    stuck_http.configure_failpoints(
+        ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause")
+    )
+
+    restarted = pageservers[int(shards[1]["node_id"])]
+    restarted.allowed_errors.extend(
+        [
+            ".*: request was dropped before completing",
+            ".*: Cancelled request finished with an error: ShuttingDown",
+        ]
+    )
+    assert restarted.id != stuck.id
+    restarted_http = restarted.http_client()
+    restarted_http.configure_failpoints(
+        [
+            ("timeline-detach-ancestor::before_starting_after_locking_pausable", "pause"),
+        ]
+    )
+
+    target = env.storage_controller.pageserver_api()
+
+    with pytest.raises(ReadTimeout):
+        target.detach_ancestor(env.initial_tenant, branch_timeline_id, timeout=1)
+
+    stuck_http.configure_failpoints(
+        ("timeline-detach-ancestor::before_starting_after_locking_pausable", "off")
+    )
+
+    barrier = threading.Barrier(2)
+
+    def restart_restarted():
+        barrier.wait()
+        # graceful shutdown should just work, because simultaneously unpaused
+        restarted.stop()
+        # this does not happen always, depends how fast we exit after unpausing
+        # restarted.assert_log_contains("Cancelled request finished with an error: ShuttingDown")
+        restarted.start()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(restart_restarted)
+        barrier.wait()
+        # we have 10s, lets use 1/2 of that to help the shutdown start
+        time.sleep(5)
+        restarted_http.configure_failpoints(
+            ("timeline-detach-ancestor::before_starting_after_locking_pausable", "off")
+        )
+        fut.result()
+
+    # detach ancestor request handling is not sensitive to http cancellation.
+    # this means that the "stuck" is on its way to complete the detach, but the restarted is off
+    # now it can either be complete on all nodes, or still in progress with
+    # one.
+    without_retrying = target.without_status_retrying()
+
+    # this retry loop will be long enough that the tenant can always activate
+    reparented = None
+    for _ in range(10):
+        try:
+            reparented = without_retrying.detach_ancestor(env.initial_tenant, branch_timeline_id)
+        except PageserverApiException as info:
+            assert info.status_code == 503
+            time.sleep(2)
+        else:
+            break
+
+    assert reparented == [], "too many retries (None) or unexpected reparentings"
+
+    for shard_info in shards:
+        node_id = int(shard_info["node_id"])
+        shard_id = shard_info["shard_id"]
+
+        # TODO: ensure quescing is done on pageserver?
+        pageservers[node_id].quiesce_tenants()
+        detail = pageservers[node_id].http_client().timeline_detail(shard_id, branch_timeline_id)
+        wait_for_last_record_lsn(
+            pageservers[node_id].http_client(), shard_id, branch_timeline_id, lsn
+        )
+        assert detail.get("ancestor_timeline_id") is None
+
+    with env.endpoints.create_start(branch_name, tenant_id=env.initial_tenant) as ep:
+        count = int(ep.safe_psql("select count(*) from foo")[0][0])
+        assert count == 10000
+
+
+@pytest.mark.parametrize("mode", ["delete_timeline", "delete_tenant"])
+@pytest.mark.parametrize("sharded", [False, True])
+def test_timeline_detach_ancestor_interrupted_by_deletion(
+    neon_env_builder: NeonEnvBuilder, mode: str, sharded: bool
+):
+    """
+    Timeline ancestor detach interrupted by deleting either:
+    - the detached timeline
+    - the whole tenant
+
+    after starting the detach.
+
+    What remains not tested by this:
+    - shutdown winning over complete
+
+    Shutdown winning over complete needs gc blocking and reparenting any left-overs on retry.
+    """
+
+    if sharded and mode == "delete_tenant":
+        # the shared/exclusive lock for tenant is blocking this:
+        # timeline detach ancestor takes shared, delete tenant takes exclusive
+        pytest.skip(
+            "tenant deletion while timeline ancestor detach is underway is not supported yet"
+        )
+
+    shard_count = 2 if sharded else 1
+
+    neon_env_builder.num_pageservers = shard_count
+
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count if sharded else None)
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    detached_timeline = env.neon_cli.create_branch("detached soon", "main")
+
+    failpoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
+
+    env.storage_controller.reconcile_until_idle()
+    shards = env.storage_controller.locate(env.initial_tenant)
+
+    assert len(set(info["node_id"] for info in shards)) == shard_count
+
+    target = env.storage_controller.pageserver_api() if sharded else env.pageserver.http_client()
+    target = target.without_status_retrying()
+
+    victim = pageservers[int(shards[-1]["node_id"])]
+    victim_http = victim.http_client()
+    victim_http.configure_failpoints((failpoint, "pause"))
+
+    def detach_ancestor():
+        target.detach_ancestor(env.initial_tenant, detached_timeline)
+
+    def at_failpoint() -> Tuple[str, LogCursor]:
+        return victim.assert_log_contains(f"at failpoint {failpoint}")
+
+    def start_delete():
+        if mode == "delete_timeline":
+            target.timeline_delete(env.initial_tenant, detached_timeline)
+        elif mode == "delete_tenant":
+            target.tenant_delete(env.initial_tenant)
+        else:
+            raise RuntimeError(f"unimplemented mode {mode}")
+
+    def at_waiting_on_gate_close(start_offset: LogCursor) -> LogCursor:
+        _, offset = victim.assert_log_contains(
+            "closing is taking longer than expected", offset=start_offset
+        )
+        return offset
+
+    def is_deleted():
+        try:
+            if mode == "delete_timeline":
+                target.timeline_detail(env.initial_tenant, detached_timeline)
+            elif mode == "delete_tenant":
+                target.tenant_status(env.initial_tenant)
+            else:
+                return False
+        except PageserverApiException as e:
+            assert e.status_code == 404
+            return True
+        else:
+            raise RuntimeError("waiting for 404")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            fut = pool.submit(detach_ancestor)
+            _, offset = wait_until(10, 1.0, at_failpoint)
+
+            delete = pool.submit(start_delete)
+
+            wait_until(10, 1.0, lambda: at_waiting_on_gate_close(offset))
+
+            victim_http.configure_failpoints((failpoint, "off"))
+
+            delete.result()
+
+            assert wait_until(10, 1.0, is_deleted), f"unimplemented mode {mode}"
+
+            with pytest.raises(PageserverApiException) as exc:
+                fut.result()
+            assert exc.value.status_code == 503
+        finally:
+            victim_http.configure_failpoints((failpoint, "off"))
+
+
+@pytest.mark.parametrize("mode", ["delete_reparentable_timeline"])
+def test_sharded_tad_interleaved_after_partial_success(neon_env_builder: NeonEnvBuilder, mode: str):
+    """
+    Technically possible storage controller concurrent interleaving timeline
+    deletion with timeline detach.
+
+    Deletion is fine, as any sharded pageservers reach the same end state, but
+    creating reparentable timeline would create an issue as the two nodes would
+    never agree. There is a solution though: the created reparentable timeline
+    must be detached.
+    """
+
+    assert (
+        mode == "delete_reparentable_timeline"
+    ), "only one now, but we could have the create just as well, need gc blocking"
+
+    shard_count = 2
+    neon_env_builder.num_pageservers = shard_count
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+
+    for ps in env.pageservers:
+        ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
+
+    pageservers = dict((int(p.id), p) for p in env.pageservers)
+
+    env.storage_controller.reconcile_until_idle()
+    shards = env.storage_controller.locate(env.initial_tenant)
+    assert len(set(x["node_id"] for x in shards)) == shard_count
+
+    with env.endpoints.create_start("main") as ep:
+        ep.safe_psql("create table foo as select i::bigint from generate_series(1, 1000) t(i)")
+
+        # as the interleaved operation, we will delete this timeline, which was reparenting candidate
+        first_branch_lsn = wait_for_last_flush_lsn(
+            env, ep, env.initial_tenant, env.initial_timeline
+        )
+        for ps, shard_id in [(pageservers[int(x["node_id"])], x["shard_id"]) for x in shards]:
+            ps.http_client().timeline_checkpoint(shard_id, env.initial_timeline)
+
+        ep.safe_psql("create table bar as select i::bigint from generate_series(1, 2000) t(i)")
+        detached_branch_lsn = flush_ep_to_pageserver(
+            env, ep, env.initial_tenant, env.initial_timeline
+        )
+
+    for ps, shard_id in [(pageservers[int(x["node_id"])], x["shard_id"]) for x in shards]:
+        ps.http_client().timeline_checkpoint(shard_id, env.initial_timeline)
+
+    first_branch = env.neon_cli.create_branch(
+        "first_branch", ancestor_branch_name="main", ancestor_start_lsn=first_branch_lsn
+    )
+    detached_branch = env.neon_cli.create_branch(
+        "detached_branch", ancestor_branch_name="main", ancestor_start_lsn=detached_branch_lsn
+    )
+
+    pausepoint = "timeline-detach-ancestor::before_starting_after_locking_pausable"
+
+    stuck = pageservers[int(shards[0]["node_id"])]
+    stuck_http = stuck.http_client().without_status_retrying()
+    stuck_http.configure_failpoints((pausepoint, "pause"))
+
+    victim = pageservers[int(shards[-1]["node_id"])]
+    victim_http = victim.http_client().without_status_retrying()
+    victim_http.configure_failpoints(
+        (pausepoint, "pause"),
+    )
+
+    # noticed a surprising 409 if the other one would fail instead
+    # victim_http.configure_failpoints([
+    #     (pausepoint, "pause"),
+    #     ("timeline-detach-ancestor::before_starting_after_locking", "return"),
+    # ])
+
+    # interleaving a create_timeline which could be reparented will produce two
+    # permanently different reparentings: one node has reparented, other has
+    # not
+    #
+    # with deletion there is no such problem
+    def detach_timeline():
+        env.storage_controller.pageserver_api().detach_ancestor(env.initial_tenant, detached_branch)
+
+    def paused_at_failpoint():
+        stuck.assert_log_contains(f"at failpoint {pausepoint}")
+        victim.assert_log_contains(f"at failpoint {pausepoint}")
+
+    def first_completed():
+        detail = stuck_http.timeline_detail(shards[0]["shard_id"], detached_branch)
+        log.info(detail)
+        assert detail.get("ancestor_lsn") is None
+
+    def first_branch_gone():
+        try:
+            env.storage_controller.pageserver_api().timeline_detail(
+                env.initial_tenant, first_branch
+            )
+        except PageserverApiException as e:
+            log.info(f"error {e}")
+            assert e.status_code == 404
+        else:
+            log.info("still ok")
+            raise RuntimeError("not done yet")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            fut = pool.submit(detach_timeline)
+            wait_until(10, 1.0, paused_at_failpoint)
+
+            # let stuck complete
+            stuck_http.configure_failpoints((pausepoint, "off"))
+            wait_until(10, 1.0, first_completed)
+
+            # if we would let victim fail, for some reason there'd be a 409 response instead of 500
+            # victim_http.configure_failpoints((pausepoint, "off"))
+            # with pytest.raises(PageserverApiException, match=".* 500 Internal Server Error failpoint: timeline-detach-ancestor::before_starting_after_locking") as exc:
+            #     fut.result()
+            # assert exc.value.status_code == 409
+
+            env.storage_controller.pageserver_api().timeline_delete(
+                env.initial_tenant, first_branch
+            )
+            victim_http.configure_failpoints((pausepoint, "off"))
+            wait_until(10, 1.0, first_branch_gone)
+
+            # it now passes, and we should get an error messages about mixed reparenting as the stuck still had something to reparent
+            fut.result()
+
+            msg, offset = env.storage_controller.assert_log_contains(
+                ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*"
+            )
+            log.info(f"expected error message: {msg}")
+            env.storage_controller.allowed_errors.append(
+                ".*: shards returned different results matching=0 .*"
+            )
+
+            detach_timeline()
+
+            # FIXME: perhaps the above should be automatically retried, if we get mixed results?
+            not_found = env.storage_controller.log_contains(
+                ".*/timeline/\\S+/detach_ancestor.*: shards returned different results matching=0 .*",
+                offset=offset,
+            )
+
+            assert not_found is None
+        finally:
+            stuck_http.configure_failpoints((pausepoint, "off"))
+            victim_http.configure_failpoints((pausepoint, "off"))
+
+
 # TODO:
-# - after starting the operation, tenant is deleted
 # - after starting the operation, pageserver is shutdown, restarted
 # - after starting the operation, bottom-most timeline is deleted, pageserver is restarted, gc is inhibited
 # - deletion of reparented while reparenting should fail once, then succeed (?)
 # - branch near existing L1 boundary, image layers?
 # - investigate: why are layers started at uneven lsn? not just after branching, but in general.
+#
+# TEST: 1. tad which partially succeeds, one returns 500
+#       2. create branch below timeline? ~or delete reparented timeline~ (done)
+#       3. on retry all should report the same reparented timelines

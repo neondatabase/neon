@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use detach_ancestor::AncestorDetached;
 use pageserver_api::{models::*, shard::TenantShardId};
 use reqwest::{IntoUrl, Method, StatusCode};
 use utils::{
@@ -416,6 +417,23 @@ impl Client {
             Err(e) => Err(e),
             Ok(response) => Ok(response.status()),
         }
+    }
+
+    pub async fn timeline_detach_ancestor(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+    ) -> Result<AncestorDetached> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/detach_ancestor",
+            self.mgmt_api_endpoint
+        );
+
+        self.request(Method::PUT, &uri, ())
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
     }
 
     pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {

@@ -187,9 +187,9 @@ impl VectoredReadPlanner {
     ///
     /// The `flag` argument has two interesting values:
     /// * [`BlobFlag::ReplaceAll`]: The blob for this key should replace all existing blobs.
-    /// This is used for WAL records that `will_init`.
+    ///   This is used for WAL records that `will_init`.
     /// * [`BlobFlag::Ignore`]: This blob should not be included in the read. This happens
-    /// if the blob is cached.
+    ///   if the blob is cached.
     pub fn handle(&mut self, key: Key, lsn: Lsn, offset: u64, flag: BlobFlag) {
         // Implementation note: internally lag behind by one blob such that
         // we have a start and end offset when initialising [`VectoredRead`]

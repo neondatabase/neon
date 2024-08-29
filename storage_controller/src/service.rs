@@ -117,6 +117,7 @@ enum TenantOperations {
     TimelineCreate,
     TimelineDelete,
     AttachHook,
+    TimelineDetachAncestor,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -2376,18 +2377,18 @@ impl Service {
                 tracing::info!("Doing time travel recovery for shard {tenant_shard_id}",);
 
                 client
-                        .tenant_time_travel_remote_storage(
-                            tenant_shard_id,
-                            &timestamp,
-                            &done_if_after,
-                        )
-                        .await
-                        .map_err(|e| {
-                            ApiError::InternalServerError(anyhow::anyhow!(
-                                "Error doing time travel recovery for shard {tenant_shard_id} on node {}: {e}",
-                                node
-                            ))
-                        })?;
+                    .tenant_time_travel_remote_storage(
+                        tenant_shard_id,
+                        &timestamp,
+                        &done_if_after,
+                    )
+                    .await
+                    .map_err(|e| {
+                        ApiError::InternalServerError(anyhow::anyhow!(
+                            "Error doing time travel recovery for shard {tenant_shard_id} on node {}: {e}",
+                            node
+                        ))
+                    })?;
             }
         }
         Ok(())
@@ -2757,7 +2758,7 @@ impl Service {
         // Create timeline on remaining shards with number >0
         if !targets.is_empty() {
             // If we had multiple shards, issue requests for the remainder now.
-            let jwt = self.config.jwt_token.clone();
+            let jwt = &self.config.jwt_token;
             self.tenant_for_shards(targets, |tenant_shard_id: TenantShardId, node: Node| {
                 let create_req = create_req.clone();
                 Box::pin(create_one(tenant_shard_id, node, jwt.clone(), create_req))
@@ -2766,6 +2767,114 @@ impl Service {
         }
 
         Ok(timeline_info)
+    }
+
+    pub(crate) async fn tenant_timeline_detach_ancestor(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Result<models::detach_ancestor::AncestorDetached, ApiError> {
+        tracing::info!("Detaching timeline {tenant_id}/{timeline_id}",);
+
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineDetachAncestor,
+        )
+        .await;
+
+        self.ensure_attached_wait(tenant_id).await?;
+
+        let targets = {
+            let locked = self.inner.read().unwrap();
+            let mut targets = Vec::new();
+
+            for (tenant_shard_id, shard) in
+                locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+            {
+                let node_id = shard.intent.get_attached().ok_or_else(|| {
+                    ApiError::InternalServerError(anyhow::anyhow!("Shard not scheduled"))
+                })?;
+                let node = locked
+                    .nodes
+                    .get(&node_id)
+                    .expect("Pageservers may not be deleted while referenced");
+
+                targets.push((*tenant_shard_id, node.clone()));
+            }
+            targets
+        };
+
+        if targets.is_empty() {
+            return Err(ApiError::NotFound(
+                anyhow::anyhow!("Tenant not found").into(),
+            ));
+        }
+
+        async fn detach_one(
+            tenant_shard_id: TenantShardId,
+            timeline_id: TimelineId,
+            node: Node,
+            jwt: Option<String>,
+        ) -> Result<(ShardNumber, models::detach_ancestor::AncestorDetached), ApiError> {
+            tracing::info!(
+                "Detaching timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
+            );
+
+            let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+            client
+                .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                .await
+                .map_err(|e| {
+                    use mgmt_api::Error;
+
+                    match e {
+                        // no ancestor (ever)
+                        Error::ApiError(StatusCode::CONFLICT, msg) => ApiError::Conflict(format!(
+                            "{node}: {}",
+                            msg.strip_prefix("Conflict: ").unwrap_or(&msg)
+                        )),
+                        // too many ancestors
+                        Error::ApiError(StatusCode::BAD_REQUEST, msg) => {
+                            ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
+                        }
+                        // rest can be mapped
+                        other => passthrough_api_error(&node, other),
+                    }
+                })
+                .map(|res| (tenant_shard_id.shard_number, res))
+        }
+
+        // no shard needs to go first/last; the operation should be idempotent
+        // TODO: it would be great to ensure that all shards return the same error
+        let mut results = self
+            .tenant_for_shards(targets, |tenant_shard_id, node| {
+                futures::FutureExt::boxed(detach_one(
+                    tenant_shard_id,
+                    timeline_id,
+                    node,
+                    self.config.jwt_token.clone(),
+                ))
+            })
+            .await?;
+
+        let any = results.pop().expect("we must have at least one response");
+
+        let mismatching = results
+            .iter()
+            .filter(|(_, res)| res != &any.1)
+            .collect::<Vec<_>>();
+        if !mismatching.is_empty() {
+            let matching = results.len() - mismatching.len();
+            tracing::error!(
+                matching,
+                compared_against=?any,
+                ?mismatching,
+                "shards returned different results"
+            );
+        }
+
+        Ok(any.1)
     }
 
     /// Helper for concurrently calling a pageserver API on a number of shards, such as timeline creation.
@@ -2894,8 +3003,8 @@ impl Service {
                 .await
                 .map_err(|e| {
                     ApiError::InternalServerError(anyhow::anyhow!(
-                    "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
-                ))
+                        "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
+                    ))
                 })
         }
 
@@ -5070,7 +5179,7 @@ impl Service {
     ///      we did the split, but are probably better placed elsewhere.
     /// - Creating new secondary locations if it improves the spreading of a sharded tenant
     ///    * e.g. after a shard split, some locations will be on the same node (where the split
-    ///     happened), and will probably be better placed elsewhere.
+    ///      happened), and will probably be better placed elsewhere.
     ///
     /// To put it more briefly: whereas the scheduler respects soft constraints in a ScheduleContext at
     /// the time of scheduling, this function looks for cases where a better-scoring location is available
@@ -5633,14 +5742,14 @@ impl Service {
 
     /// Create a node fill plan (pick secondaries to promote) that meets the following requirements:
     /// 1. The node should be filled until it reaches the expected cluster average of
-    /// attached shards. If there are not enough secondaries on the node, the plan stops early.
+    ///    attached shards. If there are not enough secondaries on the node, the plan stops early.
     /// 2. Select tenant shards to promote such that the number of attached shards is balanced
-    /// throughout the cluster. We achieve this by picking tenant shards from each node,
-    /// starting from the ones with the largest number of attached shards, until the node
-    /// reaches the expected cluster average.
+    ///    throughout the cluster. We achieve this by picking tenant shards from each node,
+    ///    starting from the ones with the largest number of attached shards, until the node
+    ///    reaches the expected cluster average.
     /// 3. Avoid promoting more shards of the same tenant than required. The upper bound
-    /// for the number of tenants from the same shard promoted to the node being filled is:
-    /// shard count for the tenant divided by the number of nodes in the cluster.
+    ///    for the number of tenants from the same shard promoted to the node being filled is:
+    ///    shard count for the tenant divided by the number of nodes in the cluster.
     fn fill_node_plan(&self, node_id: NodeId) -> Vec<TenantShardId> {
         let mut locked = self.inner.write().unwrap();
         let fill_requirement = locked.scheduler.compute_fill_requirement(node_id);

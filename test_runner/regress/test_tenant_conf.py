@@ -1,10 +1,7 @@
 import json
-from contextlib import closing
 from typing import Any, Dict
 
-import psycopg2.extras
 from fixtures.common_types import Lsn
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
@@ -63,25 +60,6 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
 
     # check the configuration of the default tenant
     # it should match global configuration
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            log.info(f"show {env.initial_tenant}")
-            pscur.execute(f"show {env.initial_tenant}")
-            res = pscur.fetchone()
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "checkpoint_distance": 10000,
-                    "compaction_target_size": 1048576,
-                    "compaction_period": 20,
-                    "compaction_threshold": 10,
-                    "gc_horizon": 67108864,
-                    "gc_period": 60 * 60,
-                    "image_creation_threshold": 3,
-                    "pitr_interval": 604800,  # 7 days
-                }.items()
-            ), f"Unexpected res: {res}"
     default_tenant_config = http_client.tenant_config(tenant_id=env.initial_tenant)
     assert (
         not default_tenant_config.tenant_specific_overrides
@@ -103,25 +81,6 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     }
 
     # check the configuration of the new tenant
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant}")
-            res = pscur.fetchone()
-            log.info(f"res: {res}")
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "checkpoint_distance": 20000,
-                    "compaction_target_size": 1048576,
-                    "compaction_period": 20,
-                    "compaction_threshold": 10,
-                    "gc_horizon": 67108864,
-                    "gc_period": 30,
-                    "image_creation_threshold": 3,
-                    "pitr_interval": 604800,
-                }.items()
-            ), f"Unexpected res: {res}"
     new_tenant_config = http_client.tenant_config(tenant_id=tenant)
     new_specific_config = new_tenant_config.tenant_specific_overrides
     assert new_specific_config["checkpoint_distance"] == 20000
@@ -166,25 +125,6 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
         conf=conf_update,
     )
 
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant}")
-            res = pscur.fetchone()
-            log.info(f"after config res: {res}")
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "checkpoint_distance": 15000,
-                    "compaction_target_size": 1048576,
-                    "compaction_period": 80,
-                    "compaction_threshold": 10,
-                    "gc_horizon": 67108864,
-                    "gc_period": 80,
-                    "image_creation_threshold": 2,
-                    "pitr_interval": 604800,
-                }.items()
-            ), f"Unexpected res: {res}"
     updated_tenant_config = http_client.tenant_config(tenant_id=tenant)
     updated_specific_config = updated_tenant_config.tenant_specific_overrides
     assert updated_specific_config["checkpoint_distance"] == 15000
@@ -222,25 +162,6 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start()
 
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant}")
-            res = pscur.fetchone()
-            log.info(f"after restart res: {res}")
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "checkpoint_distance": 15000,
-                    "compaction_target_size": 1048576,
-                    "compaction_period": 80,
-                    "compaction_threshold": 10,
-                    "gc_horizon": 67108864,
-                    "gc_period": 80,
-                    "image_creation_threshold": 2,
-                    "pitr_interval": 604800,
-                }.items()
-            ), f"Unexpected res: {res}"
     restarted_tenant_config = http_client.tenant_config(tenant_id=tenant)
     assert (
         restarted_tenant_config == updated_tenant_config
@@ -283,19 +204,10 @@ def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start()
 
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant}")
-            res = pscur.fetchone()
-            log.info(f"after restart res: {res}")
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "compaction_period": 20,
-                    "pitr_interval": 60,
-                }.items()
-            ), f"Unexpected res: {res}"
+    restarted_final_tenant_config = http_client.tenant_config(tenant_id=tenant)
+    assert (
+        restarted_final_tenant_config == final_tenant_config
+    ), "Updated config should not change after the restart"
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
