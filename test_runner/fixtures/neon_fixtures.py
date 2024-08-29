@@ -4893,7 +4893,7 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def logical_replication_sync(subscriber: VanillaPostgres, publisher: Endpoint) -> Lsn:
+def logical_replication_sync(subscriber: PgProtocol, publisher: PgProtocol) -> Lsn:
     """Wait logical replication subscriber to sync with publisher."""
     publisher_lsn = Lsn(publisher.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     while True:
