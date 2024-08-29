@@ -202,11 +202,6 @@ pub struct TimelineResources {
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
-pub(crate) struct AuxFilesState {
-    pub(crate) dir: Option<AuxFilesDirectory>,
-    pub(crate) n_deltas: usize,
-}
-
 /// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
 /// ingestion considerably, because WAL ingestion needs to check on most records if the record
 /// implicitly extends the relation.  At startup, `complete_as_of` is initialized to the current end
@@ -410,14 +405,8 @@ pub struct Timeline {
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
 
-    /// Keep aux directory cache to avoid it's reconstruction on each update
-    pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
-
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
-
-    /// Indicate whether aux file v2 storage is enabled.
-    pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
 
     /// Some test cases directly place keys into the timeline without actually modifying the directory
     /// keys (i.e., DB_DIR). The test cases creating such keys will put the keyspaces here, so that
@@ -2225,14 +2214,7 @@ impl Timeline {
 
                 timeline_get_throttle: resources.timeline_get_throttle,
 
-                aux_files: tokio::sync::Mutex::new(AuxFilesState {
-                    dir: None,
-                    n_deltas: 0,
-                }),
-
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
-
-                last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
 
                 #[cfg(test)]
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
@@ -4407,14 +4389,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<(), detach_ancestor::Error> {
         detach_ancestor::complete(self, tenant, attempt, ctx).await
-    }
-
-    /// Switch aux file policy and schedule upload to the index part.
-    pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
-        self.last_aux_file_policy.store(Some(policy));
-        self.remote_client
-            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
-        Ok(())
     }
 }
 

@@ -70,6 +70,8 @@ pub struct IndexPart {
     ///
     /// None means no aux files have been written to the storage before the point
     /// when this flag is introduced.
+    /// 
+    /// This field is deprecated as part of the aux v1 retirement.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) last_aux_file_policy: Option<AuxFilePolicy>,
 }
