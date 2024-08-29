@@ -22,7 +22,7 @@ use async_stream::try_stream;
 use byteorder::{ReadBytesExt, BE};
 use bytes::{BufMut, Bytes, BytesMut};
 use either::Either;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use hex;
 use std::{
     cmp::Ordering,
@@ -259,6 +259,16 @@ where
         Ok(result)
     }
 
+    pub fn iter<'a>(
+        &'a self,
+        start_key: &'a [u8; L],
+        ctx: &'a RequestContext,
+    ) -> DiskBtreeIterator<'a> {
+        DiskBtreeIterator {
+            stream: Box::pin(self.get_stream_from(start_key, ctx)),
+        }
+    }
+
     /// Return a stream which yields all key, value pairs from the index
     /// starting from the first key greater or equal to `start_key`.
     ///
@@ -493,6 +503,19 @@ where
             }
         }
         Ok(())
+    }
+}
+
+pub struct DiskBtreeIterator<'a> {
+    #[allow(clippy::type_complexity)]
+    stream: std::pin::Pin<
+        Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a>,
+    >,
+}
+
+impl<'a> DiskBtreeIterator<'a> {
+    pub async fn next(&mut self) -> Option<std::result::Result<(Vec<u8>, u64), DiskBtreeError>> {
+        self.stream.next().await
     }
 }
 
@@ -1087,6 +1110,17 @@ pub(crate) mod tests {
             reader.get(&u128::to_be_bytes(u128::MAX), &ctx).await?
                 == all_data.get(&u128::MAX).cloned()
         );
+
+        // Test iterator and get_stream API
+        let mut iter = reader.iter(&[0; 16], &ctx);
+        let mut cnt = 0;
+        while let Some(res) = iter.next().await {
+            let (key, val) = res?;
+            let key = u128::from_be_bytes(key.as_slice().try_into().unwrap());
+            assert_eq!(val, *all_data.get(&key).unwrap());
+            cnt += 1;
+        }
+        assert_eq!(cnt, all_data.len());
 
         Ok(())
     }
