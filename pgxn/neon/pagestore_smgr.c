@@ -796,10 +796,8 @@ static uint64
 prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 						  BlockNumber nblocks, const bits8 *mask)
 {
-	uint64		ring_index;
+	uint64		min_ring_index;
 	PrefetchRequest req;
-	PrefetchRequest *slot;
-	PrfHashEntry *entry;
 #if USE_ASSERT_CHECKING
 	bool		any_hits = false;
 #endif
@@ -810,8 +808,12 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 	req.buftag = tag;
 
 Retry:
+	min_ring_index = UINT64_MAX;
 	for (int i = 0; i < nblocks; i++)
 	{
+		PrefetchRequest *slot = NULL;
+		PrfHashEntry *entry = NULL;
+		uint64		ring_index;
 		neon_request_lsns *lsns;
 		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
 			continue;
@@ -874,6 +876,7 @@ Retry:
 				}
 				else
 				{
+					min_ring_index = Min(min_ring_index, ring_index);
 					/* The buffered request is good enough, return that index */
 					pgBufferUsage.prefetch.duplicates++;
 					continue;
@@ -963,18 +966,21 @@ Retry:
 		 * We must update the slot data before insertion, because the hash
 		 * function reads the buffer tag from the slot.
 		 */
-		slot->buftag = tag;
+		slot->buftag = req.buftag;
 		slot->shard_no = get_shard_number(&tag);
 		slot->my_ring_index = ring_index;
+
+		min_ring_index = Min(min_ring_index, ring_index);
 
 		prefetch_do_request(slot, lsns);
 	}
 
 	Assert(any_hits);
 
-	Assert(slot->status == PRFS_REQUESTED || slot->status == PRFS_RECEIVED);
-	Assert(MyPState->ring_last <= ring_index &&
-		   ring_index < MyPState->ring_unused);
+	Assert(GetPrfSlot(min_ring_index)->status == PRFS_REQUESTED ||
+		   GetPrfSlot(min_ring_index)->status == PRFS_RECEIVED);
+	Assert(MyPState->ring_last <= min_ring_index &&
+		   min_ring_index < MyPState->ring_unused);
 
 	if (flush_every_n_requests > 0 &&
 		MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
@@ -990,7 +996,7 @@ Retry:
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
-	return ring_index;
+	return min_ring_index;
 }
 
 
@@ -2790,6 +2796,7 @@ Retry:
 				pgBufferUsage.prefetch.misses += 1;
 
 				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1, NULL);
+				Assert(ring_index != UINT64_MAX);
 				slot = GetPrfSlot(ring_index);
 			}
 			else
