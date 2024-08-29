@@ -142,52 +142,6 @@ async fn handle_tenant_create(
     )
 }
 
-// For tenant and timeline deletions, which both implement an "initially return 202, then 404 once
-// we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.  This avoids
-// needing to track a "deleting" state for tenants.
-async fn deletion_wrapper<R, F>(service: Arc<Service>, f: F) -> Result<Response<Body>, ApiError>
-where
-    R: std::future::Future<Output = Result<StatusCode, ApiError>> + Send + 'static,
-    F: Fn(Arc<Service>) -> R + Send + Sync + 'static,
-{
-    let started_at = Instant::now();
-    // To keep deletion reasonably snappy for small tenants, initially check after 1 second if deletion
-    // completed.
-    let mut retry_period = Duration::from_secs(1);
-    // On subsequent retries, wait longer.
-    let max_retry_period = Duration::from_secs(5);
-    // Enable callers with a 30 second request timeout to reliably get a response
-    let max_wait = Duration::from_secs(25);
-
-    loop {
-        let status = f(service.clone()).await?;
-        match status {
-            StatusCode::ACCEPTED => {
-                tracing::info!("Deletion accepted, waiting to try again...");
-                tokio::time::sleep(retry_period).await;
-                retry_period = max_retry_period;
-            }
-            StatusCode::NOT_FOUND => {
-                tracing::info!("Deletion complete");
-                return json_response(StatusCode::OK, ());
-            }
-            _ => {
-                tracing::warn!("Unexpected status {status}");
-                return json_response(status, ());
-            }
-        }
-
-        let now = Instant::now();
-        if now + retry_period > started_at + max_wait {
-            tracing::info!("Deletion timed out waiting for 404");
-            // REQUEST_TIMEOUT would be more appropriate, but CONFLICT is already part of
-            // the pageserver's swagger definition for this endpoint, and has the same desired
-            // effect of causing the control plane to retry later.
-            return json_response(StatusCode::CONFLICT, ());
-        }
-    }
-}
-
 async fn handle_tenant_location_config(
     service: Arc<Service>,
     mut req: Request<Body>,
@@ -283,13 +237,17 @@ async fn handle_tenant_delete(
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
 
-    deletion_wrapper(service, move |service| async move {
-        service
-            .tenant_delete(tenant_id)
-            .await
-            .and_then(map_reqwest_hyper_status)
-    })
-    .await
+    let status_code = service
+        .tenant_delete(tenant_id)
+        .await
+        .and_then(map_reqwest_hyper_status)?;
+
+    if status_code == StatusCode::NOT_FOUND {
+        // The pageserver uses 404 for successful deletion, but we use 200
+        json_response(StatusCode::OK, ())
+    } else {
+        json_response(status_code, ())
+    }
 }
 
 async fn handle_tenant_timeline_create(
@@ -316,6 +274,51 @@ async fn handle_tenant_timeline_delete(
     check_permissions(&req, Scope::PageServerApi)?;
 
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    // For timeline deletions, which both implement an "initially return 202, then 404 once
+    // we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.
+    async fn deletion_wrapper<R, F>(service: Arc<Service>, f: F) -> Result<Response<Body>, ApiError>
+    where
+        R: std::future::Future<Output = Result<StatusCode, ApiError>> + Send + 'static,
+        F: Fn(Arc<Service>) -> R + Send + Sync + 'static,
+    {
+        let started_at = Instant::now();
+        // To keep deletion reasonably snappy for small tenants, initially check after 1 second if deletion
+        // completed.
+        let mut retry_period = Duration::from_secs(1);
+        // On subsequent retries, wait longer.
+        let max_retry_period = Duration::from_secs(5);
+        // Enable callers with a 30 second request timeout to reliably get a response
+        let max_wait = Duration::from_secs(25);
+
+        loop {
+            let status = f(service.clone()).await?;
+            match status {
+                StatusCode::ACCEPTED => {
+                    tracing::info!("Deletion accepted, waiting to try again...");
+                    tokio::time::sleep(retry_period).await;
+                    retry_period = max_retry_period;
+                }
+                StatusCode::NOT_FOUND => {
+                    tracing::info!("Deletion complete");
+                    return json_response(StatusCode::OK, ());
+                }
+                _ => {
+                    tracing::warn!("Unexpected status {status}");
+                    return json_response(status, ());
+                }
+            }
+
+            let now = Instant::now();
+            if now + retry_period > started_at + max_wait {
+                tracing::info!("Deletion timed out waiting for 404");
+                // REQUEST_TIMEOUT would be more appropriate, but CONFLICT is already part of
+                // the pageserver's swagger definition for this endpoint, and has the same desired
+                // effect of causing the control plane to retry later.
+                return json_response(StatusCode::CONFLICT, ());
+            }
+        }
+    }
 
     deletion_wrapper(service, move |service| async move {
         service

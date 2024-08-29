@@ -815,6 +815,7 @@ async fn eviction_cancellation_on_drop() {
 /// A test case to remind you the cost of these structures. You can bump the size limit
 /// below if it is really necessary to add more fields to the structures.
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn layer_size() {
     assert_eq!(std::mem::size_of::<LayerAccessStats>(), 2040);
     assert_eq!(std::mem::size_of::<PersistentLayerDesc>(), 104);

@@ -2108,6 +2108,7 @@ pub(crate) struct TimelineMetrics {
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
+    shutdown: std::sync::atomic::AtomicBool,
 }
 
 impl TimelineMetrics {
@@ -2227,6 +2228,7 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
+            shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
 
@@ -2249,6 +2251,17 @@ impl TimelineMetrics {
     }
 
     pub(crate) fn shutdown(&self) {
+        let was_shutdown = self
+            .shutdown
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+
+        if was_shutdown {
+            // this happens on tenant deletion because tenant first shuts down timelines, then
+            // invokes timeline deletion which first shuts down the timeline again.
+            // TODO: this can be removed once https://github.com/neondatabase/neon/issues/5080
+            return;
+        }
+
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;

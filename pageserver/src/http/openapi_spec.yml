@@ -81,8 +81,10 @@ paths:
         Attempts to delete specified tenant. 500, 503 and 409 errors should be retried until 404 is retrieved.
         404 means that deletion successfully finished"
       responses:
+        "200":
+          description: Tenant was successfully deleted, or was already not found.
         "404":
-          description: Tenant not found. This is the success path.
+          description: Tenant not found. This is a success result, equivalent to 200.
           content:
             application/json:
               schema:

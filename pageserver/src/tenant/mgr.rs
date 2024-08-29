@@ -3,6 +3,7 @@
 
 use camino::{Utf8DirEntry, Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
+use hyper::StatusCode;
 use itertools::Itertools;
 use pageserver_api::key::Key;
 use pageserver_api::models::LocationConfigMode;
@@ -54,6 +55,7 @@ use utils::generation::Generation;
 use utils::id::{TenantId, TimelineId};
 
 use super::delete::DeleteTenantError;
+use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
 use super::timeline::detach_ancestor::PreparedTimelineDetach;
 use super::TenantSharedResources;
@@ -1369,7 +1371,7 @@ impl TenantManager {
         &self,
         tenant_shard_id: TenantShardId,
         activation_timeout: Duration,
-    ) -> Result<(), DeleteTenantError> {
+    ) -> Result<StatusCode, DeleteTenantError> {
         super::span::debug_assert_current_span_has_tenant_id();
         // We acquire a SlotGuard during this function to protect against concurrent
         // changes while the ::prepare phase of DeleteTenantFlow executes, but then
@@ -1382,18 +1384,79 @@ impl TenantManager {
         //
         // See https://github.com/neondatabase/neon/issues/5080
 
-        let slot_guard =
-            tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::MustExist)?;
+        // Tenant deletion can happen two ways:
+        // - Legacy: called on an attached location. The attached Tenant object stays alive in Stopping
+        //   state until deletion is complete.
+        // - New: called on a pageserver without an attached location.  We proceed with deletion from
+        //   remote storage.
+        //
+        // See https://github.com/neondatabase/neon/issues/5080 for more context on this transition.
 
-        // unwrap is safe because we used MustExist mode when acquiring
-        let tenant = match slot_guard.get_old_value().as_ref().unwrap() {
-            TenantSlot::Attached(tenant) => tenant.clone(),
-            _ => {
-                // Express "not attached" as equivalent to "not found"
-                return Err(DeleteTenantError::NotAttached);
+        let slot_guard = tenant_map_acquire_slot(&tenant_shard_id, TenantSlotAcquireMode::Any)?;
+        match &slot_guard.old_value {
+            Some(TenantSlot::Attached(tenant)) => {
+                // Legacy deletion flow: the tenant remains attached, goes to Stopping state, and
+                // deletion will be resumed across restarts.
+                let tenant = tenant.clone();
+                return self
+                    .delete_tenant_attached(slot_guard, tenant, activation_timeout)
+                    .await;
             }
+            Some(TenantSlot::Secondary(secondary_tenant)) => {
+                secondary_tenant.shutdown().await;
+                let local_tenant_directory = self.conf.tenant_path(&tenant_shard_id);
+                let tmp_dir = safe_rename_tenant_dir(&local_tenant_directory)
+                    .await
+                    .with_context(|| {
+                        format!("local tenant directory {local_tenant_directory:?} rename")
+                    })?;
+                spawn_background_purge(tmp_dir);
+            }
+            Some(TenantSlot::InProgress(_)) => unreachable!(),
+            None => {}
         };
 
+        // Fall through: local state for this tenant is no longer present, proceed with remote delete
+        let remote_path = remote_tenant_path(&tenant_shard_id);
+        let keys = match self
+            .resources
+            .remote_storage
+            .list(
+                Some(&remote_path),
+                remote_storage::ListingMode::NoDelimiter,
+                None,
+                &self.cancel,
+            )
+            .await
+        {
+            Ok(listing) => listing.keys,
+            Err(remote_storage::DownloadError::Cancelled) => {
+                return Err(DeleteTenantError::Cancelled)
+            }
+            Err(remote_storage::DownloadError::NotFound) => return Ok(StatusCode::NOT_FOUND),
+            Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
+        };
+
+        if keys.is_empty() {
+            tracing::info!("Remote storage already deleted");
+        } else {
+            tracing::info!("Deleting {} keys from remote storage", keys.len());
+            self.resources
+                .remote_storage
+                .delete_objects(&keys, &self.cancel)
+                .await?;
+        }
+
+        // Callers use 404 as success for deletions, for historical reasons.
+        Ok(StatusCode::NOT_FOUND)
+    }
+
+    async fn delete_tenant_attached(
+        &self,
+        slot_guard: SlotGuard,
+        tenant: Arc<Tenant>,
+        activation_timeout: Duration,
+    ) -> Result<StatusCode, DeleteTenantError> {
         match tenant.current_state() {
             TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                 // If deletion is already in progress, return success (the semantics of this
@@ -1403,7 +1466,7 @@ impl TenantManager {
                     // The `delete_progress` lock is held: deletion is already happening
                     // in the bacckground
                     slot_guard.revert();
-                    return Ok(());
+                    return Ok(StatusCode::ACCEPTED);
                 }
             }
             _ => {
@@ -1436,7 +1499,8 @@ impl TenantManager {
 
         // The Tenant goes back into the map in Stopping state, it will eventually be removed by DeleteTenantFLow
         slot_guard.revert();
-        result
+        let () = result?;
+        Ok(StatusCode::ACCEPTED)
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]

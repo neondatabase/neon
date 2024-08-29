@@ -4413,6 +4413,12 @@ impl Timeline {
                 if mode == ImageLayerCreationMode::Initial {
                     return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
                 }
+                if mode == ImageLayerCreationMode::Try && !check_for_image_layers {
+                    // Skip compaction if there are not enough updates. Metadata compaction will do a scan and
+                    // might mess up with evictions.
+                    start = img_range.end;
+                    continue;
+                }
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
