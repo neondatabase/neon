@@ -1,7 +1,7 @@
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use pageserver_api::key::Key;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
