@@ -374,7 +374,7 @@ impl Timeline {
         );
 
         let layers = self.layers.read().await;
-        for layer_desc in layers.layer_map().iter_historic_layers() {
+        for layer_desc in layers.layer_map()?.iter_historic_layers() {
             let layer = layers.get_from_desc(&layer_desc);
             if layer.metadata().shard.shard_count == self.shard_identity.count {
                 // This layer does not belong to a historic ancestor, no need to re-image it.
@@ -552,7 +552,9 @@ impl Timeline {
     ///
     /// The result may be used as an input to eviction and secondary downloads to de-prioritize layers
     /// that we know won't be needed for reads.
-    pub(super) async fn update_layer_visibility(&self) {
+    pub(super) async fn update_layer_visibility(
+        &self,
+    ) -> Result<(), super::layer_manager::Shutdown> {
         let head_lsn = self.get_last_record_lsn();
 
         // We will sweep through layers in reverse-LSN order.  We only do historic layers.  L0 deltas
@@ -560,7 +562,7 @@ impl Timeline {
         // Note that L0 deltas _can_ be covered by image layers, but we consider them 'visible' because we anticipate that
         // they will be subject to L0->L1 compaction in the near future.
         let layer_manager = self.layers.read().await;
-        let layer_map = layer_manager.layer_map();
+        let layer_map = layer_manager.layer_map()?;
 
         let readable_points = {
             let children = self.gc_info.read().unwrap().retain_lsns.clone();
@@ -583,6 +585,7 @@ impl Timeline {
         // TODO: publish our covered KeySpace to our parent, so that when they update their visibility, they can
         // avoid assuming that everything at a branch point is visible.
         drop(covered);
+        Ok(())
     }
 
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
@@ -636,12 +639,8 @@ impl Timeline {
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         stats.read_lock_held_spawn_blocking_startup_micros =
             stats.read_lock_acquisition_micros.till_now(); // set by caller
-        let layers = guard.layer_map();
-        let level0_deltas = layers.get_level0_deltas();
-        let mut level0_deltas = level0_deltas
-            .into_iter()
-            .map(|x| guard.get_from_desc(&x))
-            .collect_vec();
+        let layers = guard.layer_map()?;
+        let level0_deltas = layers.level0_deltas();
         stats.level0_deltas_count = Some(level0_deltas.len());
 
         // Only compact if enough layers have accumulated.
@@ -653,6 +652,11 @@ impl Timeline {
             );
             return Ok(CompactLevel0Phase1Result::default());
         }
+
+        let mut level0_deltas = level0_deltas
+            .iter()
+            .map(|x| guard.get_from_desc(x))
+            .collect::<Vec<_>>();
 
         // Gather the files to compact in this iteration.
         //
@@ -1373,10 +1377,9 @@ impl Timeline {
         // Find the top of the historical layers
         let end_lsn = {
             let guard = self.layers.read().await;
-            let layers = guard.layer_map();
+            let layers = guard.layer_map()?;
 
-            let l0_deltas = layers.get_level0_deltas();
-            drop(guard);
+            let l0_deltas = layers.level0_deltas();
 
             // As an optimization, if we find that there are too few L0 layers,
             // bail out early. We know that the compaction algorithm would do
@@ -1748,7 +1751,7 @@ impl Timeline {
         // 2. Inferred from (1), for each key in the layer selection, the value can be reconstructed only with the layers in the layer selection.
         let (layer_selection, gc_cutoff, retain_lsns_below_horizon) = {
             let guard = self.layers.read().await;
-            let layers = guard.layer_map();
+            let layers = guard.layer_map()?;
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = gc_info.cutoffs.select_min();
@@ -2182,7 +2185,9 @@ impl Timeline {
         // Step 3: Place back to the layer map.
         {
             let mut guard = self.layers.write().await;
-            guard.finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
+            guard
+                .open_mut()?
+                .finish_gc_compaction(&layer_selection, &compact_to, &self.metrics)
         };
         self.remote_client
             .schedule_compaction_update(&layer_selection, &compact_to)?;
@@ -2262,7 +2267,7 @@ impl CompactionJobExecutor for TimelineAdaptor {
         self.flush_updates().await?;
 
         let guard = self.timeline.layers.read().await;
-        let layer_map = guard.layer_map();
+        let layer_map = guard.layer_map()?;
 
         let result = layer_map
             .iter_historic_layers()

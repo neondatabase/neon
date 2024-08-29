@@ -1162,7 +1162,10 @@ async fn layer_map_info_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let layer_map_info = timeline.layer_map_info(reset).await;
+    let layer_map_info = timeline
+        .layer_map_info(reset)
+        .await
+        .map_err(|_shutdown| ApiError::ShuttingDown)?;
 
     json_response(StatusCode::OK, layer_map_info)
 }
