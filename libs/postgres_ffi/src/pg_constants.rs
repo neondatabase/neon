@@ -248,33 +248,6 @@ pub const VM_HEAPBLOCKS_PER_PAGE: u32 =
 /* From origin.c */
 pub const REPLICATION_STATE_MAGIC: u32 = 0x1257DADE;
 
-// List of subdirectories inside pgdata.
-// Copied from src/bin/initdb/initdb.c
-pub const PGDATA_SUBDIRS: [&str; 22] = [
-    "global",
-    "pg_wal/archive_status",
-    "pg_commit_ts",
-    "pg_dynshmem",
-    "pg_notify",
-    "pg_serial",
-    "pg_snapshots",
-    "pg_subtrans",
-    "pg_twophase",
-    "pg_multixact",
-    "pg_multixact/members",
-    "pg_multixact/offsets",
-    "base",
-    "base/1",
-    "pg_replslot",
-    "pg_tblspc",
-    "pg_stat",
-    "pg_stat_tmp",
-    "pg_xact",
-    "pg_logical",
-    "pg_logical/snapshots",
-    "pg_logical/mappings",
-];
-
 // Don't include postgresql.conf as it is inconvenient on node start:
 // we need postgresql.conf before basebackup to synchronize safekeepers
 // so no point in overwriting it during backup restore. Rest of the files

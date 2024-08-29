@@ -30,7 +30,7 @@ use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
-use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
+use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
 use postgres_ffi::TransactionId;
 use postgres_ffi::XLogFileName;
@@ -255,8 +255,13 @@ where
 
         let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
+        let pgversion = self.timeline.pg_version;
+        let subdirs = dispatch_pgversion!(pgversion, {
+            &pgv::bindings::PGDATA_SUBDIRS[..]
+        });
+
         // Create pgdata subdirs structure
-        for dir in PGDATA_SUBDIRS.iter() {
+        for dir in subdirs.iter() {
             let header = new_tar_header_dir(dir)?;
             self.ar
                 .append(&header, &mut io::empty())
