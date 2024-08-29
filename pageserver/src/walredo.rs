@@ -20,7 +20,6 @@
 
 /// Process lifecycle and abstracction for the IPC protocol.
 mod process;
-pub use pageserver_api::config::WalRedoProcessKind as ProcessKind;
 
 /// Code to apply [`NeonWalRecord`]s.
 pub(crate) mod apply_neon;
@@ -54,7 +53,7 @@ pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,
     last_redo_at: std::sync::Mutex<Option<Instant>>,
-    /// The current [`process::Process`] that is used by new redo requests.
+    /// The current [`process::WalRedoProcess`] that is used by new redo requests.
     /// We use [`heavier_once_cell`] for coalescing the spawning, but the redo
     /// requests don't use the [`heavier_once_cell::Guard`] to keep ahold of the
     /// their process object; we use [`Arc::clone`] for that.
@@ -66,7 +65,7 @@ pub struct PostgresRedoManager {
     /// still be using the old redo process. But, those other tasks will most likely
     /// encounter an error as well, and errors are an unexpected condition anyway.
     /// So, probably we could get rid of the `Arc` in the future.
-    redo_process: heavier_once_cell::OnceCell<Arc<process::Process>>,
+    redo_process: heavier_once_cell::OnceCell<Arc<process::WalRedoProcess>>,
 }
 
 ///
@@ -211,26 +210,31 @@ impl PostgresRedoManager {
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
         loop {
-            let proc: Arc<process::Process> = match self.redo_process.get_or_init_detached().await {
-                Ok(guard) => Arc::clone(&guard),
-                Err(permit) => {
-                    // don't hold poison_guard, the launch code can bail
-                    let start = Instant::now();
-                    let proc = Arc::new(
-                        process::Process::launch(self.conf, self.tenant_shard_id, pg_version)
+            let proc: Arc<process::WalRedoProcess> =
+                match self.redo_process.get_or_init_detached().await {
+                    Ok(guard) => Arc::clone(&guard),
+                    Err(permit) => {
+                        // don't hold poison_guard, the launch code can bail
+                        let start = Instant::now();
+                        let proc = Arc::new(
+                            process::WalRedoProcess::launch(
+                                self.conf,
+                                self.tenant_shard_id,
+                                pg_version,
+                            )
                             .context("launch walredo process")?,
-                    );
-                    let duration = start.elapsed();
-                    WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
-                    info!(
-                        duration_ms = duration.as_millis(),
-                        pid = proc.id(),
-                        "launched walredo process"
-                    );
-                    self.redo_process.set(Arc::clone(&proc), permit);
-                    proc
-                }
-            };
+                        );
+                        let duration = start.elapsed();
+                        WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
+                        info!(
+                            duration_ms = duration.as_millis(),
+                            pid = proc.id(),
+                            "launched walredo process"
+                        );
+                        self.redo_process.set(Arc::clone(&proc), permit);
+                        proc
+                    }
+                };
 
             let started_at = std::time::Instant::now();
 

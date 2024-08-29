@@ -78,7 +78,6 @@ pub struct ConfigToml {
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
     pub validate_vectored_get: bool,
     pub ephemeral_bytes_per_memory_kb: usize,
-    pub walredo_process_kind: WalRedoProcessKind,
 
     pub tenant_config: TenantConfigToml,
 
@@ -185,25 +184,6 @@ pub enum GetImpl {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
-
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    strum_macros::IntoStaticStr,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-#[strum(serialize_all = "kebab-case")]
-#[repr(u8)]
-pub enum WalRedoProcessKind {
-    Sync,
-    Async,
-}
 
 /// A tenant's calcuated configuration, which is the result of merging a
 /// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
@@ -328,8 +308,6 @@ pub mod defaults {
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
-
-    pub const DEFAULT_WALREDO_PROCESS_KIND: &str = "async";
 }
 
 impl Default for ConfigToml {
@@ -410,8 +388,6 @@ impl Default for ConfigToml {
             )),
             validate_vectored_get: (DEFAULT_VALIDATE_VECTORED_GET),
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
-
-            walredo_process_kind: (DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap()),
 
             tenant_config: TenantConfigToml::default(),
         }

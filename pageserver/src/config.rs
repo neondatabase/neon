@@ -181,8 +181,6 @@ pub struct PageServerConf {
     ///
     /// Setting this to zero disables limits on total ephemeral layer size.
     pub ephemeral_bytes_per_memory_kb: usize,
-
-    pub walredo_process_kind: pageserver_api::config::WalRedoProcessKind,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -375,7 +373,6 @@ impl PageServerConf {
             max_vectored_read_bytes,
             validate_vectored_get,
             ephemeral_bytes_per_memory_kb,
-            walredo_process_kind,
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
@@ -420,7 +417,6 @@ impl PageServerConf {
             max_vectored_read_bytes,
             validate_vectored_get,
             ephemeral_bytes_per_memory_kb,
-            walredo_process_kind,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -674,7 +670,6 @@ background_task_maximum_delay = '334 s'
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
-                walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -748,7 +743,6 @@ background_task_maximum_delay = '334 s'
                 ),
                 validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
-                walredo_process_kind: defaults::DEFAULT_WALREDO_PROCESS_KIND.parse().unwrap(),
             },
             "Should be able to parse all basic config values correctly"
         );
