@@ -221,6 +221,35 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
     wait_until(number_of_iterations=10, interval=2, func=partial(slot_removed, endpoint))
 
 
+def test_ondemand_wal_download_in_replication_slot_funcs(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    env.neon_cli.create_branch("init")
+    endpoint = env.endpoints.create_start("init")
+
+    with endpoint.connect().cursor() as cur:
+        cur.execute("create table wal_generator (id serial primary key, data text)")
+        cur.execute(
+            "SELECT * FROM pg_create_logical_replication_slot('slotty_mcslotface', 'test_decoding')"
+        )
+        cur.execute(
+            """
+INSERT INTO wal_generator (data)
+SELECT repeat('A', 1024) -- Generates a kilobyte of data per row
+FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of data
+"""
+        )
+
+    endpoint.stop_and_destroy()
+    endpoint = env.endpoints.create_start("init")
+
+    with endpoint.connect().cursor() as cur:
+        cur.execute(
+            "SELECT * FROM pg_logical_slot_peek_binary_changes('slotty_mcslotface', NULL, NULL, 'include-xids', '0')"
+        )
+
+
 # Tests that walsender correctly blocks until WAL is downloaded from safekeepers
 def test_lr_with_slow_safekeeper(neon_env_builder: NeonEnvBuilder, vanilla_pg):
     neon_env_builder.num_safekeepers = 3
@@ -247,6 +276,7 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
     connstr = endpoint.connstr().replace("'", "''")
     vanilla_pg.safe_psql(f"create subscription sub1 connection '{connstr}' publication pub")
     logical_replication_sync(vanilla_pg, endpoint)
+
     vanilla_pg.stop()
 
     # Pause the safekeepers so that they can't send WAL (except to pageserver)

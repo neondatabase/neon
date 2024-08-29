@@ -3395,6 +3395,12 @@ impl Tenant {
         let tenant_shard_id = raw_timeline.owning_tenant.tenant_shard_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
 
+        // Flush the new layer files to disk, before we make the timeline as available to
+        // the outside world.
+        //
+        // Flush loop needs to be spawned in order to be able to flush.
+        unfinished_timeline.maybe_spawn_flush_loop();
+
         import_datadir::import_timeline_from_postgres_datadir(
             unfinished_timeline,
             &pgdata_path,
@@ -3405,12 +3411,6 @@ impl Tenant {
         .with_context(|| {
             format!("Failed to import pgdatadir for timeline {tenant_shard_id}/{timeline_id}")
         })?;
-
-        // Flush the new layer files to disk, before we make the timeline as available to
-        // the outside world.
-        //
-        // Flush loop needs to be spawned in order to be able to flush.
-        unfinished_timeline.maybe_spawn_flush_loop();
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
             anyhow::bail!("failpoint before-checkpoint-new-timeline");
@@ -4044,10 +4044,12 @@ mod tests {
     use crate::DEFAULT_PG_VERSION;
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
+    use itertools::Itertools;
     use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use rand::{thread_rng, Rng};
+    use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use utils::bin_ser::BeSer;
@@ -5262,6 +5264,9 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let mut test_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
+        let mut test_key_end = test_key;
+        test_key_end.field6 = NUM_KEYS as u32;
+        tline.add_extra_test_dense_keyspace(KeySpace::single(test_key..test_key_end));
 
         let mut keyspace = KeySpaceAccum::new();
 
@@ -6221,8 +6226,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
-        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
-        base_key.field1 = AUX_KEY_PREFIX;
+        let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        assert_eq!(base_key.field1, AUX_KEY_PREFIX); // in case someone accidentally changed the prefix...
         let mut test_key = base_key;
         let mut lsn = Lsn(0x10);
 
@@ -6327,6 +6332,7 @@ mod tests {
                 Lsn(0x20), // it's fine to not advance LSN to 0x30 while using 0x30 to get below because `get_vectored_impl` does not wait for LSN
             )
             .await?;
+        tline.add_extra_test_dense_keyspace(KeySpace::single(base_key..(base_key_nonexist.next())));
 
         let child = tenant
             .branch_timeline_test_with_layers(
@@ -6584,8 +6590,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metadata_tombstone_image_creation() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")?;
+    async fn test_metadata_tombstone_image_creation() {
+        let harness = TenantHarness::create("test_metadata_tombstone_image_creation").unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
@@ -6613,7 +6619,8 @@ mod tests {
                 vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
                 Lsn(0x30),
             )
-            .await?;
+            .await
+            .unwrap();
 
         let cancel = CancellationToken::new();
 
@@ -6628,23 +6635,24 @@ mod tests {
                 },
                 &ctx,
             )
-            .await?;
+            .await
+            .unwrap();
 
         // Image layers are created at last_record_lsn
         let images = tline
             .inspect_image_layers(Lsn(0x30), &ctx)
-            .await?
+            .await
+            .unwrap()
             .into_iter()
             .filter(|(k, _)| k.is_metadata_key())
             .collect::<Vec<_>>();
         assert_eq!(images.len(), 2); // the image layer should only contain two existing keys, tombstones should be removed.
-
-        Ok(())
     }
 
     #[tokio::test]
-    async fn test_metadata_tombstone_empty_image_creation() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")?;
+    async fn test_metadata_tombstone_empty_image_creation() {
+        let harness =
+            TenantHarness::create("test_metadata_tombstone_empty_image_creation").unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
@@ -6666,7 +6674,8 @@ mod tests {
                 vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
                 Lsn(0x30),
             )
-            .await?;
+            .await
+            .unwrap();
 
         let cancel = CancellationToken::new();
 
@@ -6681,16 +6690,174 @@ mod tests {
                 },
                 &ctx,
             )
-            .await?;
+            .await
+            .unwrap();
 
         // Image layers are created at last_record_lsn
         let images = tline
             .inspect_image_layers(Lsn(0x30), &ctx)
-            .await?
+            .await
+            .unwrap()
             .into_iter()
             .filter(|(k, _)| k.is_metadata_key())
             .collect::<Vec<_>>();
         assert_eq!(images.len(), 0); // the image layer should not contain tombstones, or it is not created
+    }
+
+    #[tokio::test]
+    async fn test_simple_bottom_most_compaction() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction")?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        //
+        //  | D1 |                       | D3 |
+        // -|    |-- gc horizon -----------------
+        //  |    |                | D2 |
+        // --------- img layer ------------------
+        //
+        // What we should expact from this compaction is:
+        //  | Part of D1 |               | D3 |
+        // --------- img layer with D1+D2 at GC horizon------------------
+
+        // img layer at 0x10
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), test_img(&format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            // TODO: we should test a real delta record here, which requires us to add a variant of NeonWalRecord for testing purpose.
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::Image(test_img("value 1@0x20")),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::Image(test_img("value 2@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x40),
+                Value::Image(test_img("value 3@0x40")),
+            ),
+        ];
+        let delta2 = vec![
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::Image(test_img("value 5@0x20")),
+            ),
+            (
+                get_key(6),
+                Lsn(0x20),
+                Value::Image(test_img("value 6@0x20")),
+            ),
+        ];
+        let delta3 = vec![
+            (
+                get_key(8),
+                Lsn(0x40),
+                Value::Image(test_img("value 8@0x40")),
+            ),
+            (
+                get_key(9),
+                Lsn(0x40),
+                Value::Image(test_img("value 9@0x40")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![delta1, delta2, delta3], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            guard.cutoffs.pitr = Lsn(0x30);
+            guard.cutoffs.horizon = Lsn(0x30);
+        }
+
+        let cancel = CancellationToken::new();
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+
+        // Check if the image layer at the GC horizon contains exactly what we want
+        let image_at_gc_horizon = tline
+            .inspect_image_layers(Lsn(0x30), &ctx)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|(k, _)| k.is_metadata_key())
+            .collect::<Vec<_>>();
+
+        assert_eq!(image_at_gc_horizon.len(), 10);
+        let expected_lsn = [0x10, 0x20, 0x30, 0x10, 0x10, 0x20, 0x20, 0x10, 0x10, 0x10];
+        for idx in 0..10 {
+            assert_eq!(
+                image_at_gc_horizon[idx],
+                (
+                    get_key(idx as u32),
+                    test_img(&format!("value {idx}@{:#x}", expected_lsn[idx]))
+                )
+            );
+        }
+
+        // Check if old layers are removed / new layers have the expected LSN
+        let mut all_layers = tline.inspect_historic_layers().await.unwrap();
+        all_layers.sort_by(|k1, k2| {
+            (
+                k1.is_delta,
+                k1.key_range.start,
+                k1.key_range.end,
+                k1.lsn_range.start,
+                k1.lsn_range.end,
+            )
+                .cmp(&(
+                    k2.is_delta,
+                    k2.key_range.start,
+                    k2.key_range.end,
+                    k2.lsn_range.start,
+                    k2.lsn_range.end,
+                ))
+        });
+        assert_eq!(
+            all_layers,
+            vec![
+                // Image layer at GC horizon
+                PersistentLayerKey {
+                    key_range: Key::MIN..get_key(10),
+                    lsn_range: Lsn(0x30)..Lsn(0x31),
+                    is_delta: false
+                },
+                // The delta layer that is cut in the middle
+                PersistentLayerKey {
+                    key_range: Key::MIN..get_key(9),
+                    lsn_range: Lsn(0x30)..Lsn(0x41),
+                    is_delta: true
+                },
+                // The delta layer we created and should not be picked for the compaction
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x40)..Lsn(0x41),
+                    is_delta: true
+                }
+            ]
+        );
 
         Ok(())
     }

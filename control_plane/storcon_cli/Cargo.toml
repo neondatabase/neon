@@ -9,6 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
+futures.workspace = true
 humantime.workspace = true
 hyper.workspace = true
 pageserver_api.workspace = true

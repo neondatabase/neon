@@ -2,6 +2,7 @@ import time
 from datetime import datetime, timezone
 
 from fixtures.common_types import Lsn
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
@@ -32,7 +33,12 @@ def test_tenant_s3_restore(
         assert remote_storage, "remote storage not configured"
         enable_remote_storage_versioning(remote_storage)
 
-    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    # change it back after initdb, recovery doesn't work if the two
+    # index_part.json uploads happen at same second or too close to each other.
+    initial_tenant_conf = MANY_SMALL_LAYERS_TENANT_CONFIG
+    del initial_tenant_conf["checkpoint_distance"]
+
+    env = neon_env_builder.init_start(initial_tenant_conf)
     env.pageserver.allowed_errors.extend(
         [
             # The deletion queue will complain when it encounters simulated S3 errors
@@ -43,14 +49,16 @@ def test_tenant_s3_restore(
     )
 
     ps_http = env.pageserver.http_client()
-
     tenant_id = env.initial_tenant
+
+    # now lets create the small layers
+    ps_http.set_tenant_config(tenant_id, MANY_SMALL_LAYERS_TENANT_CONFIG)
 
     # Default tenant and the one we created
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
 
     # create two timelines one being the parent of another, both with non-trivial data
-    parent = None
+    parent = "main"
     last_flush_lsns = []
 
     for timeline in ["first", "second"]:
@@ -64,6 +72,7 @@ def test_tenant_s3_restore(
             last_flush_lsns.append(last_flush_lsn)
         ps_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
+        log.info(f"{timeline} timeline {timeline_id} {last_flush_lsn=}")
         parent = timeline
 
     # These sleeps are important because they fend off differences in clocks between us and S3
@@ -107,6 +116,9 @@ def test_tenant_s3_restore(
 
     ps_http.tenant_attach(tenant_id, generation=generation)
     env.pageserver.quiesce_tenants()
+
+    for tline in ps_http.timeline_list(env.initial_tenant):
+        log.info(f"timeline detail: {tline}")
 
     for i, timeline in enumerate(["first", "second"]):
         with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:

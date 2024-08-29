@@ -833,7 +833,7 @@ class NeonEnvBuilder:
     def enable_scrub_on_exit(self):
         """
         Call this if you would like the fixture to automatically run
-        s3_scrubber at the end of the test, as a bidirectional test
+        storage_scrubber at the end of the test, as a bidirectional test
         that the scrubber is working properly, and that the code within
         the test didn't produce any invalid remote state.
         """
@@ -948,7 +948,7 @@ class NeonEnvBuilder:
 
             if self.scrub_on_exit:
                 try:
-                    S3Scrubber(self).scan_metadata()
+                    StorageScrubber(self).scan_metadata()
                 except Exception as e:
                     log.error(f"Error during remote storage scrub: {e}")
                     cleanup_error = e
@@ -3386,7 +3386,7 @@ def static_proxy(
         yield proxy
 
 
-class Endpoint(PgProtocol):
+class Endpoint(PgProtocol, LogUtils):
     """An object representing a Postgres compute endpoint managed by the control plane."""
 
     def __init__(
@@ -3452,6 +3452,7 @@ class Endpoint(PgProtocol):
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
+        self.logfile = self.endpoint_path() / "compute.log"
 
         config_lines = config_lines or []
 
@@ -3936,7 +3937,7 @@ class Safekeeper(LogUtils):
         wait_until(20, 0.5, paused)
 
 
-class S3Scrubber:
+class StorageScrubber:
     def __init__(self, env: NeonEnvBuilder, log_dir: Optional[Path] = None):
         self.env = env
         self.log_dir = log_dir or env.test_output_dir
@@ -3956,7 +3957,7 @@ class S3Scrubber:
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
 
-        base_args = [str(self.env.neon_binpath / "s3_scrubber")]
+        base_args = [str(self.env.neon_binpath / "storage_scrubber")]
         args = base_args + args
 
         (output_path, stdout, status_code) = subprocess_capture(

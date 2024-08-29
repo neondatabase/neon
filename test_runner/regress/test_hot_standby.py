@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import threading
 import time
 from functools import partial
@@ -16,20 +15,6 @@ from fixtures.neon_fixtures import (
     wait_replica_caughtup,
 )
 from fixtures.utils import wait_until
-
-
-# Check for corrupted WAL messages which might otherwise go unnoticed if
-# reconnection fixes this.
-def scan_standby_log_for_errors(secondary):
-    log_path = secondary.endpoint_path() / "compute.log"
-    with log_path.open("r") as f:
-        markers = re.compile(
-            r"incorrect resource manager data|record with incorrect|invalid magic number|unexpected pageaddr"
-        )
-        for line in f:
-            if markers.search(line):
-                log.info(f"bad error in standby log: {line}")
-                raise AssertionError()
 
 
 def test_hot_standby(neon_simple_env: NeonEnv):
@@ -91,7 +76,11 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                         assert response is not None
                         assert response == responses[query]
 
-            scan_standby_log_for_errors(secondary)
+            # Check for corrupted WAL messages which might otherwise go unnoticed if
+            # reconnection fixes this.
+            assert not secondary.log_contains(
+                "incorrect resource manager data|record with incorrect|invalid magic number|unexpected pageaddr"
+            )
 
     # clean up
     if slow_down_send:

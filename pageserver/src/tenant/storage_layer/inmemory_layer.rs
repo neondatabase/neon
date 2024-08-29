@@ -52,7 +52,7 @@ pub struct InMemoryLayer {
 
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is `None`.
-    end_lsn: OnceLock<Lsn>,
+    pub(crate) end_lsn: OnceLock<Lsn>,
 
     /// Used for traversal path. Cached representation of the in-memory layer before frozen.
     local_path_str: Arc<str>,

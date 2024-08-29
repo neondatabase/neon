@@ -10,7 +10,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
-    S3Scrubber,
+    StorageScrubber,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
@@ -707,7 +707,7 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, neon_env_builder: NeonEnvBuilder)
 
     remote_storage_kind = RemoteStorageKind.MOCK_S3
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
-    scrubber = S3Scrubber(neon_env_builder)
+    scrubber = StorageScrubber(neon_env_builder)
     env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
 
     ps_http = env.pageserver.http_client()

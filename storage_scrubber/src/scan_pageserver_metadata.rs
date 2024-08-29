@@ -125,7 +125,7 @@ impl MetadataSummary {
         {
             *self
                 .indices_by_version
-                .entry(index_part.get_version())
+                .entry(index_part.version())
                 .or_insert(0) += 1;
 
             if let Err(e) = self.update_histograms(index_part) {

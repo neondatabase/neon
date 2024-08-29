@@ -919,6 +919,14 @@ impl Timeline {
             result.add_key(AUX_FILES_KEY);
         }
 
+        #[cfg(test)]
+        {
+            let guard = self.extra_test_dense_keyspace.load();
+            for kr in &guard.ranges {
+                result.add_range(kr.clone());
+            }
+        }
+
         Ok((
             result.to_keyspace(),
             /* AUX sparse key space */

@@ -1,4 +1,4 @@
-# Neon S3 scrubber
+# Neon Storage Scrubber
 
 This tool directly accesses the S3 buckets used by the Neon `pageserver`
 and `safekeeper`, and does housekeeping such as cleaning up objects for tenants & timelines that no longer exist.

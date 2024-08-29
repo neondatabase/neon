@@ -8,6 +8,7 @@
 !scripts/combine_control_files.py
 !scripts/ninstall.sh
 !vm-cgconfig.conf
+!docker-compose/run-tests.sh
 
 # Directories
 !.cargo/
@@ -20,7 +21,7 @@
 !patches/
 !pgxn/
 !proxy/
-!s3_scrubber/
+!storage_scrubber/
 !safekeeper/
 !storage_broker/
 !storage_controller/
