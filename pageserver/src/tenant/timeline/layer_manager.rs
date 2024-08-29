@@ -35,6 +35,10 @@ impl LayerManager {
         self.layer_fmgr.get_from_desc(desc)
     }
 
+    pub(crate) fn get_from_key(&self, desc: &PersistentLayerKey) -> Layer {
+        self.layer_fmgr.get_from_key(desc)
+    }
+
     /// Get an immutable reference to the layer map.
     ///
     /// We expect users only to be able to get an immutable layer map. If users want to make modifications,
@@ -365,14 +369,18 @@ impl<T> Default for LayerFileManager<T> {
 }
 
 impl<T: AsLayerDesc + Clone> LayerFileManager<T> {
-    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
+    fn get_from_key(&self, key: &PersistentLayerKey) -> T {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
-            .get(&desc.key())
-            .with_context(|| format!("get layer from desc: {}", desc.layer_name()))
+            .get(key)
+            .with_context(|| format!("get layer from key: {}", key))
             .expect("not found")
             .clone()
+    }
+
+    fn get_from_desc(&self, desc: &PersistentLayerDesc) -> T {
+        self.get_from_key(&desc.key())
     }
 
     fn contains_key(&self, key: &PersistentLayerKey) -> bool {

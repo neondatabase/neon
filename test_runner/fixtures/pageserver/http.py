@@ -663,6 +663,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_image_layer_creation=False,
         wait_until_uploaded=False,
         compact: Optional[bool] = None,
+        **kwargs,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -680,6 +681,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint",
             params=query,
+            **kwargs,
         )
         log.info(f"Got checkpoint request response code: {res.status_code}")
         self.verbose_error(res)

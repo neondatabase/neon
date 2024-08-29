@@ -32,6 +32,7 @@ once_cell.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 postgres_connection.workspace = true
+rand.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 routerify.workspace = true
 serde.workspace = true
