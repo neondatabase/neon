@@ -491,7 +491,6 @@ pub struct ThrottleConfig {
     pub refill_interval: Duration,
     pub refill_amount: NonZeroU32,
     pub max: u32,
-    pub fair: bool,
 }
 
 impl ThrottleConfig {
@@ -503,7 +502,6 @@ impl ThrottleConfig {
             refill_interval: Duration::from_millis(1),
             refill_amount: NonZeroU32::new(1).unwrap(),
             max: 1,
-            fair: true,
         }
     }
     /// The requests per second allowed  by the given config.

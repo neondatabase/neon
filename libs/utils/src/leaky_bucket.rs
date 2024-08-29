@@ -11,13 +11,15 @@
 //!
 //! The bucket size tunes the burst support. The drain rate tunes the steady-rate requests per second.
 //!
-//! # GCRA (<https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm>)
+//! # [GCRA](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm)
 //!
 //! GCRA is a continuous rate leaky-bucket impl that stores minimal state and requires
 //! no background jobs to drain tokens, as the design utilises timestamps to drain automatically over time.
 //!
 //! We store an "empty_at" timestamp as the only state. As time progresses, we will naturally approach
 //! the empty state. The full-bucket state is calculated from `empty_at - config.bucket_width`.
+//!
+//! Another explaination can be found here: <https://brandur.org/rate-limiting>
 
 use std::{sync::Mutex, time::Duration};
 
@@ -42,11 +44,11 @@ impl LeakyBucketConfig {
 }
 
 pub struct LeakyBucketState {
-    /// Bucket is represented by `available_at..empty_at` where `available_at = empty_at - config.bucket_width`.
+    /// Bucket is represented by `allow_at..empty_at` where `allow_at = empty_at - config.bucket_width`.
     ///
     /// At any given time, `empty_at - now` represents the number of tokens in the bucket, multiplied by the "time_cost".
     /// Adding `n` tokens to the bucket is done by moving `empty_at` forward by `n * config.time_cost`.
-    /// If `now < available_at`, the bucket is considered filled and cannot accept any more tokens.
+    /// If `now < allow_at`, the bucket is considered filled and cannot accept any more tokens.
     /// Draining the bucket will happen naturally as `now` moves forward.
     ///
     /// Let `n` be some "time cost" for the request,
@@ -103,10 +105,10 @@ impl LeakyBucketState {
 
         let n = config.cost.mul_f64(n);
         let new_empty_at = empty_at + n;
-        let available_at = new_empty_at.checked_sub(config.bucket_width);
+        let allow_at = new_empty_at.checked_sub(config.bucket_width);
 
         //                     empty_at
-        //        available_at  |   new_empty_at
+        //          allow_at    |   new_empty_at
         //           /          |   /
         // -------o-[---------o-|--]---------
         //   now1 ^      now2 ^
@@ -114,8 +116,8 @@ impl LeakyBucketState {
         // at now1, the bucket would be completely filled if we add n tokens.
         // at now2, the bucket would be partially filled if we add n tokens.
 
-        match available_at {
-            Some(available_at) if now < available_at => Err(available_at),
+        match allow_at {
+            Some(allow_at) if now < allow_at => Err(allow_at),
             _ => {
                 self.empty_at = new_empty_at;
                 Ok(())

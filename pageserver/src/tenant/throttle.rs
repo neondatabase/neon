@@ -77,7 +77,6 @@ where
             refill_interval,
             refill_amount,
             max,
-            fair: _,
         } = config;
         let task_kinds: EnumSet<TaskKind> = task_kinds
             .iter()
