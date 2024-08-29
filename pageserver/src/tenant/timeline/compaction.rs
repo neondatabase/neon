@@ -446,6 +446,45 @@ impl Timeline {
         Ok(())
     }
 
+    /// Update the LayerVisibilityHint of layers covered by image layers, based on whether there is
+    /// an image layer between them and the most recent readable LSN (branch point or tip of timeline).  The
+    /// purpose of the visibility hint is to record which layers need to be available to service reads.
+    ///
+    /// The result may be used as an input to eviction and secondary downloads to de-prioritize layers
+    /// that we know won't be needed for reads.
+    pub(super) async fn update_layer_visibility(&self) {
+        let head_lsn = self.get_last_record_lsn();
+
+        // We will sweep through layers in reverse-LSN order.  We only do historic layers.  L0 deltas
+        // are implicitly left visible, because LayerVisibilityHint's default is Visible, and we never modify it here.
+        // Note that L0 deltas _can_ be covered by image layers, but we consider them 'visible' because we anticipate that
+        // they will be subject to L0->L1 compaction in the near future.
+        let layer_manager = self.layers.read().await;
+        let layer_map = layer_manager.layer_map();
+
+        let readable_points = {
+            let children = self.gc_info.read().unwrap().retain_lsns.clone();
+
+            let mut readable_points = Vec::with_capacity(children.len() + 1);
+            for (child_lsn, _child_timeline_id) in &children {
+                readable_points.push(*child_lsn);
+            }
+            readable_points.push(head_lsn);
+            readable_points
+        };
+
+        let (layer_visibility, covered) = layer_map.get_visibility(readable_points);
+        for (layer_desc, visibility) in layer_visibility {
+            // FIXME: a more efficiency bulk zip() through the layers rather than NlogN getting each one
+            let layer = layer_manager.get_from_desc(&layer_desc);
+            layer.set_visibility(visibility);
+        }
+
+        // TODO: publish our covered KeySpace to our parent, so that when they update their visibility, they can
+        // avoid assuming that everything at a branch point is visible.
+        drop(covered);
+    }
+
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
     /// as Level 1 files. Returns whether the L0 layers are fully compacted.
     async fn compact_level0(

@@ -144,6 +144,7 @@ impl RemotePath {
 ///
 /// The WithDelimiter mode will populate `prefixes` and `keys` in the result.  The
 /// NoDelimiter mode will only populate `keys`.
+#[derive(Copy, Clone)]
 pub enum ListingMode {
     WithDelimiter,
     NoDelimiter,

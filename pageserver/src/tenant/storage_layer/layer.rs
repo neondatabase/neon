@@ -24,7 +24,8 @@ use super::delta_layer::{self, DeltaEntry};
 use super::image_layer::{self};
 use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
-    PersistentLayerDesc, ValueReconstructResult, ValueReconstructState, ValuesReconstructState,
+    LayerVisibilityHint, PersistentLayerDesc, ValueReconstructResult, ValueReconstructState,
+    ValuesReconstructState,
 };
 
 use utils::generation::Generation;
@@ -246,7 +247,7 @@ impl Layer {
                 &timeline.generation,
             );
 
-            let layer = LayerInner::new(
+            LayerInner::new(
                 conf,
                 timeline,
                 local_path,
@@ -254,14 +255,7 @@ impl Layer {
                 Some(inner),
                 timeline.generation,
                 timeline.get_shard_index(),
-            );
-
-            // Newly created layers are marked visible by default: the usual case is that they were created to be read.
-            layer
-                .access_stats
-                .set_visibility(super::LayerVisibilityHint::Visible);
-
-            layer
+            )
         }));
 
         let downloaded = resident.expect("just initialized");
@@ -493,6 +487,32 @@ impl Layer {
             }
         }
     }
+
+    pub(crate) fn set_visibility(&self, visibility: LayerVisibilityHint) {
+        let old_visibility = self.access_stats().set_visibility(visibility.clone());
+        use LayerVisibilityHint::*;
+        match (old_visibility, visibility) {
+            (Visible, Covered) => {
+                // Subtract this layer's contribution to the visible size metric
+                if let Some(tl) = self.0.timeline.upgrade() {
+                    tl.metrics
+                        .visible_physical_size_gauge
+                        .sub(self.0.desc.file_size)
+                }
+            }
+            (Covered, Visible) => {
+                // Add this layer's contribution to the visible size metric
+                if let Some(tl) = self.0.timeline.upgrade() {
+                    tl.metrics
+                        .visible_physical_size_gauge
+                        .add(self.0.desc.file_size)
+                }
+            }
+            (Covered, Covered) | (Visible, Visible) => {
+                // no change
+            }
+        }
+    }
 }
 
 /// The download-ness ([`DownloadedLayer`]) can be either resident or wanted evicted.
@@ -693,6 +713,13 @@ impl Drop for LayerInner {
                 timeline.metrics.layer_count_image.dec();
                 timeline.metrics.layer_size_image.sub(self.desc.file_size);
             }
+
+            if matches!(self.access_stats.visibility(), LayerVisibilityHint::Visible) {
+                timeline
+                    .metrics
+                    .visible_physical_size_gauge
+                    .sub(self.desc.file_size);
+            }
         }
 
         if !*self.wanted_deleted.get_mut() {
@@ -800,6 +827,12 @@ impl LayerInner {
             timeline.metrics.layer_count_image.inc();
             timeline.metrics.layer_size_image.add(desc.file_size);
         }
+
+        // New layers are visible by default. This metric is later updated on drop or in set_visibility
+        timeline
+            .metrics
+            .visible_physical_size_gauge
+            .add(desc.file_size);
 
         LayerInner {
             conf,
