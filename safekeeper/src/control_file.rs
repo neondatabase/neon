@@ -12,15 +12,16 @@ use std::ops::Deref;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::control_file_upgrade::downgrade_v9_to_v8;
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
-use crate::state::TimelinePersistentState;
+use crate::state::{EvictionState, TimelinePersistentState};
 use crate::{control_file_upgrade::upgrade_control_file, timeline::get_timeline_dir};
 use utils::{bin_ser::LeSer, id::TenantTimelineId};
 
 use crate::SafeKeeperConf;
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
-pub const SK_FORMAT_VERSION: u32 = 8;
+pub const SK_FORMAT_VERSION: u32 = 9;
 
 // contains persistent metadata for safekeeper
 pub const CONTROL_FILE_NAME: &str = "safekeeper.control";
@@ -178,8 +179,18 @@ impl Storage for FileStorage {
         })?;
         let mut buf: Vec<u8> = Vec::new();
         WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_MAGIC)?;
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
-        s.ser_into(&mut buf)?;
+
+        if s.eviction_state == EvictionState::Present {
+            // temp hack for forward compatibility
+            const PREV_FORMAT_VERSION: u32 = 8;
+            let prev = downgrade_v9_to_v8(s);
+            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, PREV_FORMAT_VERSION)?;
+            prev.ser_into(&mut buf)?;
+        } else {
+            // otherwise, we write the current format version
+            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
+            s.ser_into(&mut buf)?;
+        }
 
         // calculate checksum before resize
         let checksum = crc32c::crc32c(&buf);

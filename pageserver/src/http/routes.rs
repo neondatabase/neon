@@ -36,7 +36,7 @@ use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskSpawnRequest, LocationConfigMode, TenantAttachRequest,
-    TenantLoadRequest, TenantLocationConfigRequest,
+    TenantLocationConfigRequest,
 };
 use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
@@ -205,7 +205,6 @@ impl From<TenantSlotError> for ApiError {
             NotFound(tenant_id) => {
                 ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
             }
-            e @ AlreadyExists(_, _) => ApiError::Conflict(format!("{e}")),
             InProgress => {
                 ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
             }
@@ -335,13 +334,10 @@ impl From<crate::tenant::delete::DeleteTenantError> for ApiError {
         use crate::tenant::delete::DeleteTenantError::*;
         match value {
             Get(g) => ApiError::from(g),
-            e @ AlreadyInProgress => ApiError::Conflict(e.to_string()),
             Timeline(t) => ApiError::from(t),
-            NotAttached => ApiError::NotFound(anyhow::anyhow!("Tenant is not attached").into()),
             SlotError(e) => e.into(),
             SlotUpsertError(e) => e.into(),
             Other(o) => ApiError::InternalServerError(o),
-            e @ InvalidState(_) => ApiError::PreconditionFailed(e.to_string().into_boxed_str()),
             Cancelled => ApiError::ShuttingDown,
         }
     }
@@ -891,8 +887,6 @@ async fn tenant_detach_handler(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
-    let detach_ignored: Option<bool> = parse_query_param(&request, "detach_ignored")?;
-
     // This is a legacy API (`/location_conf` is the replacement).  It only supports unsharded tenants
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
 
@@ -900,12 +894,7 @@ async fn tenant_detach_handler(
     let conf = state.conf;
     state
         .tenant_manager
-        .detach_tenant(
-            conf,
-            tenant_shard_id,
-            detach_ignored.unwrap_or(false),
-            &state.deletion_queue_client,
-        )
+        .detach_tenant(conf, tenant_shard_id, &state.deletion_queue_client)
         .instrument(info_span!("tenant_detach", %tenant_id, shard_id=%tenant_shard_id.shard_slug()))
         .await?;
 
@@ -928,54 +917,6 @@ async fn tenant_reset_handler(
         .reset_tenant(tenant_shard_id, drop_cache.unwrap_or(false), &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, ())
-}
-
-async fn tenant_load_handler(
-    mut request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    let maybe_body: Option<TenantLoadRequest> = json_request_or_empty_body(&mut request).await?;
-
-    let state = get_state(&request);
-
-    // The /load request is only usable when control_plane_api is not set.  Once it is set, callers
-    // should always use /attach instead.
-    let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
-
-    mgr::load_tenant(
-        state.conf,
-        tenant_id,
-        generation,
-        state.broker_client.clone(),
-        state.remote_storage.clone(),
-        state.deletion_queue_client.clone(),
-        &ctx,
-    )
-    .instrument(info_span!("load", %tenant_id))
-    .await?;
-
-    json_response(StatusCode::ACCEPTED, ())
-}
-
-async fn tenant_ignore_handler(
-    request: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let state = get_state(&request);
-    let conf = state.conf;
-    mgr::ignore_tenant(conf, tenant_id)
-        .instrument(info_span!("ignore_tenant", %tenant_id))
-        .await?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1071,23 +1012,16 @@ async fn tenant_delete_handler(
 
     let state = get_state(&request);
 
-    let status = state
+    state
         .tenant_manager
-        .delete_tenant(tenant_shard_id, ACTIVE_TENANT_TIMEOUT)
+        .delete_tenant(tenant_shard_id)
         .instrument(info_span!("tenant_delete_handler",
             tenant_id = %tenant_shard_id.tenant_id,
             shard_id = %tenant_shard_id.shard_slug()
         ))
         .await?;
 
-    // Callers use 404 as success for deletions, for historical reasons.
-    if status == StatusCode::NOT_FOUND {
-        return Err(ApiError::NotFound(
-            anyhow::anyhow!("Deletion complete").into(),
-        ));
-    }
-
-    json_response(status, ())
+    json_response(StatusCode::OK, ())
 }
 
 /// HTTP endpoint to query the current tenant_size of a tenant.
@@ -1507,7 +1441,7 @@ async fn put_tenant_location_config_handler(
     if let LocationConfigMode::Detached = request_data.config.mode {
         if let Err(e) = state
             .tenant_manager
-            .detach_tenant(conf, tenant_shard_id, true, &state.deletion_queue_client)
+            .detach_tenant(conf, tenant_shard_id, &state.deletion_queue_client)
             .instrument(info_span!("tenant_detach",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug()
@@ -2763,12 +2697,6 @@ pub fn make_router(
         })
         .post("/v1/tenant/:tenant_shard_id/reset", |r| {
             api_handler(r, tenant_reset_handler)
-        })
-        .post("/v1/tenant/:tenant_id/load", |r| {
-            api_handler(r, tenant_load_handler)
-        })
-        .post("/v1/tenant/:tenant_id/ignore", |r| {
-            api_handler(r, tenant_ignore_handler)
         })
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",

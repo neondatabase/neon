@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
-from fixtures.pageserver.utils import wait_tenant_status_404, wait_timeline_detail_404
+from fixtures.pageserver.utils import wait_timeline_detail_404
 from fixtures.remote_storage import LocalFsStorage
 from fixtures.utils import assert_pageserver_backups_equal
 
@@ -578,7 +578,6 @@ def test_timeline_ancestor_errors(neon_env_builder: NeonEnvBuilder):
     assert info.value.status_code == 400
 
     client.tenant_delete(env.initial_tenant)
-    wait_tenant_status_404(client, env.initial_tenant, 10, 1)
 
     with pytest.raises(PageserverApiException) as e:
         client.detach_ancestor(env.initial_tenant, first_branch)

@@ -958,7 +958,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        state::{PersistedPeers, TimelinePersistentState},
+        state::{EvictionState, PersistedPeers, TimelinePersistentState},
         wal_storage::Storage,
     };
     use std::{ops::Deref, str::FromStr, time::Instant};
@@ -1225,6 +1225,7 @@ mod tests {
                 },
             )]),
             partial_backup: crate::wal_backup_partial::State::default(),
+            eviction_state: EvictionState::Present,
         };
 
         let ser = state.ser().unwrap();
@@ -1272,6 +1273,8 @@ mod tests {
             0xb0, 0x01, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
             // partial_backup
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // eviction_state
+            0x00, 0x00, 0x00, 0x00,
         ];
 
         assert_eq!(Hex(&ser), Hex(&expected));

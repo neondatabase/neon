@@ -26,7 +26,6 @@ from fixtures.pageserver.utils import (
     assert_tenant_state,
     timeline_delete_wait_completed,
     wait_for_upload_queue_empty,
-    wait_tenant_status_404,
     wait_until_tenant_active,
 )
 from fixtures.pg_version import PgVersion
@@ -864,38 +863,32 @@ def delete_lazy_activating(
 ):
     pageserver_http = pageserver.http_client()
 
-    # Deletion itself won't complete due to our failpoint: Tenant::shutdown can't complete while calculating
-    # logical size is paused in a failpoint.  So instead we will use a log observation to check that
-    # on-demand activation was triggered by the tenant deletion
-    log_match = f".*attach{{tenant_id={delete_tenant_id} shard_id=0000 gen=[0-9a-f]+}}: Activating tenant \\(on-demand\\).*"
-
     if expect_attaching:
         assert pageserver_http.tenant_status(delete_tenant_id)["state"]["slug"] == "Attaching"
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         log.info("Starting background delete")
 
-        def activated_on_demand():
-            assert pageserver.log_contains(log_match) is not None
+        def shutting_down():
+            assert pageserver.log_contains(".*Waiting for timelines.*") is not None
 
         def delete_tenant():
             pageserver_http.tenant_delete(delete_tenant_id)
 
         background_delete = executor.submit(delete_tenant)
 
-        log.info(f"Waiting for activation message '{log_match}'")
+        # We expect deletion to enter shutdown of the tenant even though it's in the attaching state
         try:
-            wait_until(10, 1, activated_on_demand)
+            # Deletion will get to the point in shutdown where it's waiting for timeline shutdown, then
+            # hang because of our failpoint blocking activation.
+            wait_until(10, 1, shutting_down)
         finally:
             log.info("Clearing failpoint")
             pageserver_http.configure_failpoints(("timeline-calculate-logical-size-pause", "off"))
 
-        # Deletion should complete successfully now that failpoint is unblocked
+        # Deletion should complete successfully now that failpoint is unblocked and shutdown can complete
         log.info("Joining background delete")
         background_delete.result(timeout=10)
-
-        # Poll for deletion to complete
-        wait_tenant_status_404(pageserver_http, tenant_id=delete_tenant_id, iterations=40)
 
 
 def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):

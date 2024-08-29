@@ -344,56 +344,6 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 
 
-# Creates and ignores a tenant, then detaches it: first, with no parameters (should fail),
-# then with parameters to force ignored tenant detach (should not fail).
-def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-    client = env.pageserver.http_client()
-
-    # create a new tenant
-    tenant_id, _ = env.neon_cli.create_tenant()
-
-    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
-
-    # assert tenant exists on disk
-    assert env.pageserver.tenant_dir(tenant_id).exists()
-
-    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
-    # we rely upon autocommit after each statement
-    endpoint.safe_psql_many(
-        queries=[
-            "CREATE TABLE t(key int primary key, value text)",
-            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
-        ]
-    )
-
-    # ignore tenant
-    client.tenant_ignore(tenant_id)
-    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
-    # ensure tenant couldn't be detached without the special flag for ignored tenant
-    log.info("detaching ignored tenant WITHOUT required flag")
-    with pytest.raises(
-        expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
-    ):
-        client.tenant_detach(tenant_id)
-
-    log.info("tenant detached failed as expected")
-
-    # ensure tenant is detached with ignore state
-    log.info("detaching ignored tenant with required flag")
-    client.tenant_detach(tenant_id, True)
-    log.info("ignored tenant detached without error")
-
-    # check that nothing is left on disk for deleted tenant
-    assert not env.pageserver.tenant_dir(tenant_id).exists()
-
-    # assert the tenant does not exists in the Pageserver
-    tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
-    assert (
-        tenant_id not in tenants_after_detach
-    ), f"Ignored and then detached tenant {tenant_id} should not be present in pageserver's memory"
-
-
 # Creates a tenant, and detaches it with extra paremeter that forces ignored tenant detach.
 # Tenant should be detached without issues.
 def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
@@ -498,153 +448,6 @@ def test_detach_while_attaching(
 
     with endpoint.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM foo")
-
-
-# Tests that `ignore` and `get` operations' combination is able to remove and restore the tenant in pageserver's memory.
-# * writes some data into tenant's timeline
-# * ensures it's synced with the remote storage
-# * `ignore` the tenant
-# * verify that ignored tenant files are generally unchanged, only an ignored mark had appeared
-# * verify the ignored tenant is gone from pageserver's memory
-# * restart the pageserver and verify that ignored tenant is still not loaded
-# * `load` the same tenant
-# * ensure that it's status is `Active` and it's present in pageserver's memory with all timelines
-def test_ignored_tenant_reattach(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
-
-    ignored_tenant_id, _ = env.neon_cli.create_tenant()
-    tenant_dir = env.pageserver.tenant_dir(ignored_tenant_id)
-    tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    tenants_before_ignore.sort()
-    timelines_before_ignore = [
-        timeline["timeline_id"]
-        for timeline in pageserver_http.timeline_list(tenant_id=ignored_tenant_id)
-    ]
-    files_before_ignore = [tenant_path for tenant_path in tenant_dir.glob("**/*")]
-
-    # ignore the tenant and veirfy it's not present in pageserver replies, with its files still on disk
-    pageserver_http.tenant_ignore(ignored_tenant_id)
-
-    files_after_ignore_with_retain = [tenant_path for tenant_path in tenant_dir.glob("**/*")]
-    new_files = set(files_after_ignore_with_retain) - set(files_before_ignore)
-    disappeared_files = set(files_before_ignore) - set(files_after_ignore_with_retain)
-    assert (
-        len(disappeared_files) == 0
-    ), f"Tenant ignore should not remove files from disk, missing: {disappeared_files}"
-    assert (
-        len(new_files) == 1
-    ), f"Only tenant ignore file should appear on disk but got: {new_files}"
-
-    tenants_after_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    assert ignored_tenant_id not in tenants_after_ignore, "Ignored tenant should be missing"
-    assert len(tenants_after_ignore) + 1 == len(
-        tenants_before_ignore
-    ), "Only ignored tenant should be missing"
-
-    # restart the pageserver to ensure we don't load the ignore timeline
-    env.pageserver.stop()
-    env.pageserver.start()
-    tenants_after_restart = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    tenants_after_restart.sort()
-    assert (
-        tenants_after_restart == tenants_after_ignore
-    ), "Ignored tenant should not be reloaded after pageserver restart"
-
-    # now, load it from the local files and expect it works
-    env.pageserver.tenant_load(tenant_id=ignored_tenant_id)
-    wait_until_tenant_state(pageserver_http, ignored_tenant_id, "Active", 5)
-
-    tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    tenants_after_attach.sort()
-    assert tenants_after_attach == tenants_before_ignore, "Should have all tenants back"
-
-    timelines_after_ignore = [
-        timeline["timeline_id"]
-        for timeline in pageserver_http.timeline_list(tenant_id=ignored_tenant_id)
-    ]
-    assert timelines_before_ignore == timelines_after_ignore, "Should have all timelines back"
-
-
-# Tests that it's possible to `load` tenants with missing layers and get them restored:
-# * writes some data into tenant's timeline
-# * ensures it's synced with the remote storage
-# * `ignore` the tenant
-# * removes all timeline's local layers
-# * `load` the same tenant
-# * ensure that it's status is `Active`
-# * check that timeline data is restored
-def test_ignored_tenant_download_missing_layers(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
-    endpoint = env.endpoints.create_start("main")
-
-    tenant_id = env.initial_tenant
-    timeline_id = env.initial_timeline
-
-    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
-
-    data_id = 1
-    data_secret = "very secret secret"
-    insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, endpoint)
-
-    tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    tenants_before_ignore.sort()
-    timelines_before_ignore = [
-        timeline["timeline_id"] for timeline in pageserver_http.timeline_list(tenant_id=tenant_id)
-    ]
-
-    # ignore the tenant and remove its layers
-    pageserver_http.tenant_ignore(tenant_id)
-    timeline_dir = env.pageserver.timeline_dir(tenant_id, timeline_id)
-    layers_removed = False
-    for dir_entry in timeline_dir.iterdir():
-        if dir_entry.name.startswith("00000"):
-            # Looks like a layer file. Remove it
-            dir_entry.unlink()
-            layers_removed = True
-    assert layers_removed, f"Found no layers for tenant {timeline_dir}"
-
-    # now, load it from the local files and expect it to work due to remote storage restoration
-    env.pageserver.tenant_load(tenant_id=tenant_id)
-    wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
-
-    tenants_after_attach = [tenant["id"] for tenant in pageserver_http.tenant_list()]
-    tenants_after_attach.sort()
-    assert tenants_after_attach == tenants_before_ignore, "Should have all tenants back"
-
-    timelines_after_ignore = [
-        timeline["timeline_id"] for timeline in pageserver_http.timeline_list(tenant_id=tenant_id)
-    ]
-    assert timelines_before_ignore == timelines_after_ignore, "Should have all timelines back"
-
-    endpoint.stop()
-    endpoint.start()
-    ensure_test_data(data_id, data_secret, endpoint)
-
-
-# Tests that attach is never working on a tenant, ignored or not, as long as it's not absent locally
-# Similarly, tests that it's not possible to schedule a `load` for tenat that's not ignored.
-def test_load_negatives(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-    env = neon_env_builder.init_start()
-    pageserver_http = env.pageserver.http_client()
-    env.endpoints.create_start("main")
-
-    tenant_id = env.initial_tenant
-
-    env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
-
-    env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
-    with pytest.raises(
-        expected_exception=PageserverApiException,
-        match=f"tenant {tenant_id} already exists, state: Active",
-    ):
-        env.pageserver.tenant_load(tenant_id)
-
-    pageserver_http.tenant_ignore(tenant_id)
 
 
 def test_detach_while_activating(
@@ -770,7 +573,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
 
     wait_until(10, 0.5, found_broken)
 
-    client.tenant_ignore(env.initial_tenant)
+    client.tenant_detach(env.initial_tenant)
 
     def found_cleaned_up():
         m = client.get_metrics()
@@ -782,7 +585,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
 
     wait_until(10, 0.5, found_cleaned_up)
 
-    env.pageserver.tenant_load(env.initial_tenant)
+    env.pageserver.tenant_attach(env.initial_tenant)
 
     def found_active():
         m = client.get_metrics()

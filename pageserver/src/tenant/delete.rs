@@ -6,25 +6,23 @@ use pageserver_api::{models::TenantState, shard::TenantShardId};
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, instrument, Instrument};
+use tracing::{error, Instrument};
 
 use utils::{backoff, completion, crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
     config::PageServerConf,
     context::RequestContext,
-    task_mgr::{self, TaskKind},
+    task_mgr::{self},
     tenant::{
         mgr::{TenantSlot, TenantsMapRemoveResult},
         remote_timeline_client::remote_heatmap_path,
-        timeline::ShutdownMode,
     },
 };
 
 use super::{
     mgr::{GetTenantError, TenantSlotError, TenantSlotUpsertError, TenantsMap},
     remote_timeline_client::{FAILED_REMOTE_OP_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD},
-    span,
     timeline::delete::DeleteTimelineFlow,
     tree_sort_timelines, DeleteTimelineError, Tenant, TenantPreload,
 };
@@ -33,15 +31,6 @@ use super::{
 pub(crate) enum DeleteTenantError {
     #[error("GetTenant {0}")]
     Get(#[from] GetTenantError),
-
-    #[error("Tenant not attached")]
-    NotAttached,
-
-    #[error("Invalid state {0}. Expected Active or Broken")]
-    InvalidState(TenantState),
-
-    #[error("Tenant deletion is already in progress")]
-    AlreadyInProgress,
 
     #[error("Tenant map slot error {0}")]
     SlotError(#[from] TenantSlotError),
@@ -72,56 +61,6 @@ fn remote_tenant_delete_mark_path(
         .and_then(RemotePath::new)
         .context("tenant path")?;
     Ok(tenant_remote_path.join(Utf8Path::new("timelines/deleted")))
-}
-
-async fn create_remote_delete_mark(
-    conf: &PageServerConf,
-    remote_storage: &GenericRemoteStorage,
-    tenant_shard_id: &TenantShardId,
-    cancel: &CancellationToken,
-) -> Result<(), DeleteTenantError> {
-    let remote_mark_path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
-
-    let data: &[u8] = &[];
-    backoff::retry(
-        || async {
-            let data = bytes::Bytes::from_static(data);
-            let stream = futures::stream::once(futures::future::ready(Ok(data)));
-            remote_storage
-                .upload(stream, 0, &remote_mark_path, None, cancel)
-                .await
-        },
-        TimeoutOrCancel::caused_by_cancel,
-        FAILED_UPLOAD_WARN_THRESHOLD,
-        FAILED_REMOTE_OP_RETRIES,
-        "mark_upload",
-        cancel,
-    )
-    .await
-    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
-    .and_then(|x| x)
-    .context("mark_upload")?;
-
-    Ok(())
-}
-
-async fn create_local_delete_mark(
-    conf: &PageServerConf,
-    tenant_shard_id: &TenantShardId,
-) -> Result<(), DeleteTenantError> {
-    let marker_path = conf.tenant_deleted_mark_file_path(tenant_shard_id);
-
-    // Note: we're ok to replace existing file.
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&marker_path)
-        .with_context(|| format!("could not create delete marker file {marker_path:?}"))?;
-
-    crashsafe::fsync_file_and_parent(&marker_path).context("sync_mark")?;
-
-    Ok(())
 }
 
 async fn schedule_ordered_timeline_deletions(
@@ -262,21 +201,6 @@ async fn cleanup_remaining_fs_traces(
     Ok(())
 }
 
-/// Orchestrates tenant shut down of all tasks, removes its in-memory structures,
-/// and deletes its data from both disk and s3.
-/// The sequence of steps:
-/// 1. Upload remote deletion mark.
-/// 2. Create local mark file.
-/// 3. Shutdown tasks
-/// 4. Run ordered timeline deletions
-/// 5. Wait for timeline deletion operations that were scheduled before tenant deletion was requested
-/// 6. Remove remote mark
-/// 7. Cleanup remaining fs traces, tenant dir, config, timelines dir, local delete mark
-/// It is resumable from any step in case a crash/restart occurs.
-/// There are two entrypoints to the process:
-/// 1. [`DeleteTenantFlow::run`] this is the main one called by a management api handler.
-/// 2. [`DeleteTenantFlow::resume_from_attach`] is called when deletion is resumed tenant is found to be deleted during attach process.
-///  Note the only other place that messes around timeline delete mark is the `Tenant::spawn_load` function.
 #[derive(Default)]
 pub enum DeleteTenantFlow {
     #[default]
@@ -286,91 +210,6 @@ pub enum DeleteTenantFlow {
 }
 
 impl DeleteTenantFlow {
-    // These steps are run in the context of management api request handler.
-    // Long running steps are continued to run in the background.
-    // NB: If this fails half-way through, and is retried, the retry will go through
-    // all the same steps again. Make sure the code here is idempotent, and don't
-    // error out if some of the shutdown tasks have already been completed!
-    // NOTE: static needed for background part.
-    // We assume that calling code sets up the span with tenant_id.
-    #[instrument(skip_all)]
-    pub(crate) async fn run(
-        conf: &'static PageServerConf,
-        remote_storage: GenericRemoteStorage,
-        tenants: &'static std::sync::RwLock<TenantsMap>,
-        tenant: Arc<Tenant>,
-        cancel: &CancellationToken,
-    ) -> Result<(), DeleteTenantError> {
-        span::debug_assert_current_span_has_tenant_id();
-
-        pausable_failpoint!("tenant-delete-before-run");
-
-        let mut guard = Self::prepare(&tenant).await?;
-
-        if let Err(e) = Self::run_inner(&mut guard, conf, &remote_storage, &tenant, cancel).await {
-            tenant.set_broken(format!("{e:#}")).await;
-            return Err(e);
-        }
-
-        Self::schedule_background(guard, conf, remote_storage, tenants, tenant);
-
-        Ok(())
-    }
-
-    // Helper function needed to be able to match once on returned error and transition tenant into broken state.
-    // This is needed because tenant.shutwodn is not idempotent. If tenant state is set to stopping another call to tenant.shutdown
-    // will result in an error, but here we need to be able to retry shutdown when tenant deletion is retried.
-    // So the solution is to set tenant state to broken.
-    async fn run_inner(
-        guard: &mut OwnedMutexGuard<Self>,
-        conf: &'static PageServerConf,
-        remote_storage: &GenericRemoteStorage,
-        tenant: &Tenant,
-        cancel: &CancellationToken,
-    ) -> Result<(), DeleteTenantError> {
-        guard.mark_in_progress()?;
-
-        fail::fail_point!("tenant-delete-before-create-remote-mark", |_| {
-            Err(anyhow::anyhow!(
-                "failpoint: tenant-delete-before-create-remote-mark"
-            ))?
-        });
-
-        create_remote_delete_mark(conf, remote_storage, &tenant.tenant_shard_id, cancel)
-            .await
-            .context("remote_mark")?;
-
-        fail::fail_point!("tenant-delete-before-create-local-mark", |_| {
-            Err(anyhow::anyhow!(
-                "failpoint: tenant-delete-before-create-local-mark"
-            ))?
-        });
-
-        create_local_delete_mark(conf, &tenant.tenant_shard_id)
-            .await
-            .context("local delete mark")?;
-
-        fail::fail_point!("tenant-delete-before-background", |_| {
-            Err(anyhow::anyhow!(
-                "failpoint: tenant-delete-before-background"
-            ))?
-        });
-
-        Ok(())
-    }
-
-    fn mark_in_progress(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Finished => anyhow::bail!("Bug. Is in finished state"),
-            Self::InProgress { .. } => { /* We're in a retry */ }
-            Self::NotStarted => { /* Fresh start */ }
-        }
-
-        *self = Self::InProgress;
-
-        Ok(())
-    }
-
     pub(crate) async fn should_resume_deletion(
         conf: &'static PageServerConf,
         remote_mark_exists: bool,
@@ -426,79 +265,6 @@ impl DeleteTenantFlow {
             tenant,
         )
         .await
-    }
-
-    /// Check whether background deletion of this tenant is currently in progress
-    pub(crate) fn is_in_progress(tenant: &Tenant) -> bool {
-        tenant.delete_progress.try_lock().is_err()
-    }
-
-    async fn prepare(
-        tenant: &Arc<Tenant>,
-    ) -> Result<tokio::sync::OwnedMutexGuard<Self>, DeleteTenantError> {
-        // FIXME: unsure about active only. Our init jobs may not be cancellable properly,
-        // so at least for now allow deletions only for active tenants. TODO recheck
-        // Broken and Stopping is needed for retries.
-        if !matches!(
-            tenant.current_state(),
-            TenantState::Active | TenantState::Broken { .. }
-        ) {
-            return Err(DeleteTenantError::InvalidState(tenant.current_state()));
-        }
-
-        let guard = Arc::clone(&tenant.delete_progress)
-            .try_lock_owned()
-            .map_err(|_| DeleteTenantError::AlreadyInProgress)?;
-
-        fail::fail_point!("tenant-delete-before-shutdown", |_| {
-            Err(anyhow::anyhow!("failpoint: tenant-delete-before-shutdown"))?
-        });
-
-        // make pageserver shutdown not to wait for our completion
-        let (_, progress) = completion::channel();
-
-        // It would be good to only set stopping here and continue shutdown in the background, but shutdown is not idempotent.
-        // i e it is an error to do:
-        // tenant.set_stopping
-        // tenant.shutdown
-        // Its also bad that we're holding tenants.read here.
-        // TODO relax set_stopping to be idempotent?
-        if tenant.shutdown(progress, ShutdownMode::Hard).await.is_err() {
-            return Err(DeleteTenantError::Other(anyhow::anyhow!(
-                "tenant shutdown is already in progress"
-            )));
-        }
-
-        Ok(guard)
-    }
-
-    fn schedule_background(
-        guard: OwnedMutexGuard<Self>,
-        conf: &'static PageServerConf,
-        remote_storage: GenericRemoteStorage,
-        tenants: &'static std::sync::RwLock<TenantsMap>,
-        tenant: Arc<Tenant>,
-    ) {
-        let tenant_shard_id = tenant.tenant_shard_id;
-
-        task_mgr::spawn(
-            task_mgr::BACKGROUND_RUNTIME.handle(),
-            TaskKind::TimelineDeletionWorker,
-            Some(tenant_shard_id),
-            None,
-            "tenant_delete",
-            false,
-            async move {
-                if let Err(err) =
-                    Self::background(guard, conf, remote_storage, tenants, &tenant).await
-                {
-                    error!("Error: {err:#}");
-                    tenant.set_broken(format!("{err:#}")).await;
-                };
-                Ok(())
-            }
-            .instrument(tracing::info_span!(parent: None, "delete_tenant", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug())),
-        );
     }
 
     async fn background(
@@ -580,8 +346,6 @@ impl DeleteTenantFlow {
             .context("cleanup_remaining_fs_traces")?;
 
         {
-            pausable_failpoint!("tenant-delete-before-map-remove");
-
             // This block is simply removing the TenantSlot for this tenant.  It requires a loop because
             // we might conflict with a TenantSlot::InProgress marker and need to wait for it.
             //

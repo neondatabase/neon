@@ -4,7 +4,6 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare, PgCompare
-from fixtures.pageserver.utils import wait_tenant_status_404
 from fixtures.pg_version import PgVersion
 
 
@@ -68,7 +67,6 @@ def measure_recovery_time(env: NeonCompare):
     (attach_gen, _) = attach_status
 
     client.tenant_delete(env.tenant)
-    wait_tenant_status_404(client, env.tenant, iterations=60, interval=0.5)
     env.env.pageserver.tenant_create(tenant_id=env.tenant, generation=attach_gen)
 
     # Measure recovery time

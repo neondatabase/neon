@@ -24,7 +24,6 @@ from fixtures.pageserver.utils import (
     enable_remote_storage_versioning,
     list_prefix,
     remote_storage_delete_key,
-    tenant_delete_wait_completed,
     timeline_delete_wait_completed,
 )
 from fixtures.pg_version import PgVersion
@@ -158,7 +157,7 @@ def test_storage_controller_smoke(
 
     # Delete all the tenants
     for tid in tenant_ids:
-        tenant_delete_wait_completed(env.storage_controller.pageserver_api(), tid, 10)
+        env.storage_controller.pageserver_api().tenant_delete(tid)
 
     env.storage_controller.consistency_check()
 
@@ -1384,7 +1383,8 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     env.storage_controller.allowed_errors.extend(
         [
-            ".*Lock on.*",
+            ".*Exclusive lock by.*",
+            ".*Shared lock by.*",
             ".*Scheduling is disabled by policy.*",
             f".*Operation TimelineCreate on key {tenant_id} has waited.*",
         ]
@@ -1416,9 +1416,23 @@ def test_lock_time_tracing(neon_env_builder: NeonEnvBuilder):
     )
     thread_update_tenant_policy.join()
 
-    env.storage_controller.assert_log_contains("Lock on UpdatePolicy was held for")
-    env.storage_controller.assert_log_contains(
+    env.storage_controller.assert_log_contains("Exclusive lock by UpdatePolicy was held for")
+    _, last_log_cursor = env.storage_controller.assert_log_contains(
         f"Operation TimelineCreate on key {tenant_id} has waited"
+    )
+
+    # Test out shared lock
+    env.storage_controller.configure_failpoints(
+        ("tenant-create-timeline-shared-lock", "return(31000)")
+    )
+
+    timeline_id = TimelineId.generate()
+    # This will hold the shared lock for enough time to cause an warning
+    env.storage_controller.pageserver_api().timeline_create(
+        pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
+    )
+    env.storage_controller.assert_log_contains(
+        "Shared lock by TimelineCreate was held for", offset=last_log_cursor
     )
 
 
@@ -1527,13 +1541,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
         )
 
     # Give things a chance to settle.
-    # A call to `reconcile_until_idle` could be used here instead,
-    # however since all attachments are placed on the same node,
-    # we'd have to wait for a long time (2 minutes-ish) for optimizations
-    # to quiesce.
-    # TODO: once the initial attachment selection is fixed, update this
-    # to use `reconcile_until_idle`.
-    time.sleep(2)
+    env.storage_controller.reconcile_until_idle(timeout_secs=30)
 
     nodes = env.storage_controller.node_list()
     assert len(nodes) == 2

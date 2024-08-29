@@ -78,29 +78,14 @@ paths:
 
     delete:
       description: |
-        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried until 404 is retrieved.
-        404 means that deletion successfully finished"
+        Attempts to delete specified tenant. 500, 503 and 409 errors should be retried.  Deleting
+        a non-existent tenant is considered successful (returns 200).
       responses:
         "200":
           description: Tenant was successfully deleted, or was already not found.
-        "404":
-          description: Tenant not found. This is a success result, equivalent to 200.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/NotFoundError"
-        "409":
-          description: Deletion is already in progress, continue polling
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ConflictError"
-        "412":
-          description: Deletion may not proceed, tenant is not in Active state
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PreconditionFailedError"
+        "503":
+          description: Service is unavailable, or tenant is already being modified (perhaps concurrently deleted)
+
 
   /v1/tenant/{tenant_id}/time_travel_remote_storage:
     parameters:
@@ -389,48 +374,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-  /v1/tenant/{tenant_id}/ignore:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      description: |
-        Remove tenant data (including all corresponding timelines) from pageserver's memory.
-        Files on local disk and remote storage are not affected.
-
-        Future pageserver restarts won't load the data back until `load` is called on such tenant.
-      responses:
-        "200":
-          description: Tenant ignored
-
-
-  /v1/tenant/{tenant_id}/load:
-    parameters:
-      - name: tenant_id
-        in: path
-        required: true
-        schema:
-          type: string
-    post:
-      description: |
-        Schedules an operation that attempts to load a tenant from the local disk and
-        synchronise it with the remote storage (if enabled), repeating pageserver's restart logic for tenant load.
-        If the tenant was ignored before, removes the ignore mark and continues with load scheduling.
-
-        Errors if the tenant is absent on disk, already present in memory or fails to schedule its load.
-        Scheduling a load does not mean that the tenant would load successfully, check tenant status to ensure load correctness.
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TenantLoadRequest"
-      responses:
-        "202":
-          description: Tenant scheduled to load successfully
 
   /v1/tenant/{tenant_id}/{timeline_id}/preserve_initdb_archive:
     parameters:

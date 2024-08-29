@@ -11,8 +11,6 @@ from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver, StorageScrubb
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import (
     assert_prefix_empty,
-    poll_for_remote_storage_iterations,
-    tenant_delete_wait_completed,
     wait_for_upload_queue_empty,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind, S3Storage, s3_storage
@@ -363,8 +361,7 @@ def test_live_migration(neon_env_builder: NeonEnvBuilder):
 
     # Check that deletion works properly on a tenant that was live-migrated
     # (reproduce https://github.com/neondatabase/neon/issues/6802)
-    iterations = poll_for_remote_storage_iterations(remote_storage_kind)
-    tenant_delete_wait_completed(pageserver_b.http_client(), tenant_id, iterations)
+    pageserver_b.http_client().tenant_delete(tenant_id)
 
 
 def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
@@ -552,7 +549,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     )
 
     log.info("Deleting tenant...")
-    tenant_delete_wait_completed(ps_attached.http_client(), tenant_id, 10)
+    ps_attached.http_client().tenant_delete(tenant_id)
 
     assert_prefix_empty(
         neon_env_builder.pageserver_remote_storage,

@@ -7,6 +7,7 @@
 //! ```
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{io, result};
 
 use anyhow::Context;
@@ -111,11 +112,16 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<()> {
+    pub async fn start(
+        &self,
+        extra_opts: Vec<String>,
+        retry_timeout: &Duration,
+    ) -> anyhow::Result<()> {
         print!(
-            "Starting safekeeper at '{}' in '{}'",
+            "Starting safekeeper at '{}' in '{}', retrying for {:?}",
             self.pg_connection_config.raw_address(),
-            self.datadir_path().display()
+            self.datadir_path().display(),
+            retry_timeout,
         );
         io::stdout().flush().unwrap();
 
@@ -200,6 +206,7 @@ impl SafekeeperNode {
             &args,
             self.safekeeper_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
+            retry_timeout,
             || async {
                 match self.check_status().await {
                     Ok(()) => Ok(true),
