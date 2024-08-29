@@ -98,7 +98,7 @@ def test_timeline_archive(neon_simple_env: NeonEnv):
     # Test that the leaf can't be unarchived
     with pytest.raises(
         PageserverApiException,
-        match="Cannot unarchive timeline which has archived ancestor",
+        match="ancestor is archived",
     ) as exc:
         assert timeline_path.exists()
 
