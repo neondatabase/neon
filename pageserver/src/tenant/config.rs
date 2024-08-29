@@ -316,10 +316,6 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub trace_read_requests: Option<bool>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
     pub eviction_policy: Option<EvictionPolicy>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -397,9 +393,6 @@ impl TenantConfOpt {
                 .lagging_wal_timeout
                 .unwrap_or(global_conf.lagging_wal_timeout),
             max_lsn_wal_lag: self.max_lsn_wal_lag.unwrap_or(global_conf.max_lsn_wal_lag),
-            trace_read_requests: self
-                .trace_read_requests
-                .unwrap_or(global_conf.trace_read_requests),
             eviction_policy: self.eviction_policy.unwrap_or(global_conf.eviction_policy),
             min_resident_size_override: self
                 .min_resident_size_override
@@ -491,7 +484,6 @@ impl From<TenantConfOpt> for models::TenantConfig {
             walreceiver_connect_timeout: value.walreceiver_connect_timeout.map(humantime),
             lagging_wal_timeout: value.lagging_wal_timeout.map(humantime),
             max_lsn_wal_lag: value.max_lsn_wal_lag,
-            trace_read_requests: value.trace_read_requests,
             eviction_policy: value.eviction_policy,
             min_resident_size_override: value.min_resident_size_override,
             evictions_low_residence_duration_metric_threshold: value

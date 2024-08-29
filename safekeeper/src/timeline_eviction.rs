@@ -5,6 +5,7 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use remote_storage::RemotePath;
+use std::time::Instant;
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncWriteExt},
@@ -13,6 +14,7 @@ use tracing::{debug, info, instrument, warn};
 use utils::crashsafe::durable_rename;
 
 use crate::{
+    metrics::{EvictionEvent, EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED},
     timeline_manager::{Manager, StateSnapshot},
     wal_backup,
     wal_backup_partial::{self, PartialRemoteSegment},
@@ -48,6 +50,7 @@ impl Manager {
                 .flush_lsn
                 .segment_number(self.wal_seg_size)
                 == self.last_removed_segno + 1
+            && self.resident_since.elapsed() >= self.conf.eviction_min_resident
     }
 
     /// Evict the timeline to remote storage.
@@ -63,6 +66,15 @@ impl Manager {
         };
 
         info!("starting eviction, using {:?}", partial_backup_uploaded);
+
+        EVICTION_EVENTS_STARTED
+            .with_label_values(&[EvictionEvent::Evict.into()])
+            .inc();
+        let _guard = scopeguard::guard((), |_| {
+            EVICTION_EVENTS_COMPLETED
+                .with_label_values(&[EvictionEvent::Evict.into()])
+                .inc();
+        });
 
         if let Err(e) = do_eviction(self, &partial_backup_uploaded).await {
             warn!("failed to evict timeline: {:?}", e);
@@ -86,10 +98,21 @@ impl Manager {
 
         info!("starting uneviction, using {:?}", partial_backup_uploaded);
 
+        EVICTION_EVENTS_STARTED
+            .with_label_values(&[EvictionEvent::Restore.into()])
+            .inc();
+        let _guard = scopeguard::guard((), |_| {
+            EVICTION_EVENTS_COMPLETED
+                .with_label_values(&[EvictionEvent::Restore.into()])
+                .inc();
+        });
+
         if let Err(e) = do_uneviction(self, &partial_backup_uploaded).await {
             warn!("failed to unevict timeline: {:?}", e);
             return;
         }
+
+        self.resident_since = Instant::now();
 
         info!("successfully restored evicted timeline");
     }

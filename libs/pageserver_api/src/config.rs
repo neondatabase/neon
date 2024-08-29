@@ -244,7 +244,6 @@ pub struct TenantConfigToml {
     /// A lagging safekeeper will be changed after `lagging_wal_timeout` time elapses since the last WAL update,
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
-    pub trace_read_requests: bool,
     pub eviction_policy: crate::models::EvictionPolicy,
     pub min_resident_size_override: Option<u64>,
     // See the corresponding metric's help string.
@@ -323,7 +322,7 @@ pub mod defaults {
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
-        ImageCompressionAlgorithm::DisabledNoDecompress;
+        ImageCompressionAlgorithm::Disabled;
 
     pub const DEFAULT_VALIDATE_VECTORED_GET: bool = true;
 
@@ -488,7 +487,6 @@ impl Default for TenantConfigToml {
                 .expect("cannot parse default walreceiver lagging wal timeout"),
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
-            trace_read_requests: false,
             eviction_policy: crate::models::EvictionPolicy::NoEviction,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: humantime::parse_duration(

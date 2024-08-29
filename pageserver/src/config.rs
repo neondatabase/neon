@@ -14,7 +14,6 @@ use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
-use utils::id::ConnectionId;
 use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
@@ -265,22 +264,6 @@ impl PageServerConf {
             self.timeline_path(&tenant_shard_id, &timeline_id),
             TIMELINE_DELETE_MARK_SUFFIX,
         )
-    }
-
-    pub fn traces_path(&self) -> Utf8PathBuf {
-        self.workdir.join("traces")
-    }
-
-    pub fn trace_path(
-        &self,
-        tenant_shard_id: &TenantShardId,
-        timeline_id: &TimelineId,
-        connection_id: &ConnectionId,
-    ) -> Utf8PathBuf {
-        self.traces_path()
-            .join(tenant_shard_id.to_string())
-            .join(timeline_id.to_string())
-            .join(connection_id.to_string())
     }
 
     /// Turns storage remote path of a file into its local path.
@@ -851,34 +834,6 @@ broker_endpoint = '{broker_endpoint}'
                 "Remote storage config should correctly parse the S3 config"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_tenant_config() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-
-        let broker_endpoint = "http://127.0.0.1:7777";
-        let trace_read_requests = true;
-
-        let config_string = format!(
-            r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{pg_distrib_dir}'
-broker_endpoint = '{broker_endpoint}'
-
-[tenant_config]
-trace_read_requests = {trace_read_requests}"#,
-        );
-
-        let toml = config_string.parse()?;
-
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
-        assert_eq!(
-            conf.default_tenant_conf.trace_read_requests, trace_read_requests,
-            "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
-        );
-
         Ok(())
     }
 

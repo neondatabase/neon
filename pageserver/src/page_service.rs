@@ -36,7 +36,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::id::ConnectionId;
 use utils::sync::gate::GateGuard;
 use utils::{
     auth::{Claims, Scope, SwappableJwtAuth},
@@ -66,7 +65,6 @@ use crate::tenant::GetTimelineError;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Tenant;
 use crate::tenant::Timeline;
-use crate::trace::Tracer;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
@@ -430,18 +428,6 @@ impl PageServerHandler {
             .get_active_tenant_with_timeout(tenant_id, ShardSelector::First, ACTIVE_TENANT_TIMEOUT)
             .await?;
 
-        // Make request tracer if needed
-        let mut tracer = if tenant.get_trace_read_requests() {
-            let connection_id = ConnectionId::generate();
-            let path =
-                tenant
-                    .conf
-                    .trace_path(&tenant.tenant_shard_id(), &timeline_id, &connection_id);
-            Some(Tracer::new(path))
-        } else {
-            None
-        };
-
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
         self.flush_cancellable(pgb, &tenant.cancel).await?;
@@ -472,11 +458,6 @@ impl PageServerHandler {
 
             trace!("query: {copy_data_bytes:?}");
             fail::fail_point!("ps::handle-pagerequest-message");
-
-            // Trace request if needed
-            if let Some(t) = tracer.as_mut() {
-                t.trace(&copy_data_bytes)
-            }
 
             let neon_fe_msg =
                 PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
