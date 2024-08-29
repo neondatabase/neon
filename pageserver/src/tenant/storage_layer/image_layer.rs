@@ -265,9 +265,8 @@ impl ImageLayer {
     async fn load_inner(&self, ctx: &RequestContext) -> Result<ImageLayerInner> {
         let path = self.path();
 
-        let loaded = ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx)
-            .await
-            .and_then(|res| res)?;
+        let loaded =
+            ImageLayerInner::load(&path, self.desc.image_layer_lsn(), None, None, ctx).await?;
 
         // not production code
         let actual_layer_name = LayerName::from_str(path.file_name().unwrap()).unwrap();
@@ -385,17 +384,16 @@ impl ImageLayerInner {
         summary: Option<Summary>,
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
-    ) -> Result<Result<Self, anyhow::Error>, anyhow::Error> {
-        let file = match VirtualFile::open(path, ctx).await {
-            Ok(file) => file,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("open layer file"))),
-        };
+    ) -> anyhow::Result<Self> {
+        let file = VirtualFile::open(path, ctx)
+            .await
+            .context("open layer file")?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
-        let summary_blk = match block_reader.read_blk(0, ctx).await {
-            Ok(blk) => blk,
-            Err(e) => return Ok(Err(anyhow::Error::new(e).context("read first block"))),
-        };
+        let summary_blk = block_reader
+            .read_blk(0, ctx)
+            .await
+            .context("read first block")?;
 
         // length is the only way how this could fail, so it's not actually likely at all unless
         // read_blk returns wrong sized block.
@@ -420,7 +418,7 @@ impl ImageLayerInner {
             }
         }
 
-        Ok(Ok(ImageLayerInner {
+        Ok(ImageLayerInner {
             index_start_blk: actual_summary.index_start_blk,
             index_root_blk: actual_summary.index_root_blk,
             lsn,
@@ -428,7 +426,7 @@ impl ImageLayerInner {
             file_id,
             max_vectored_read_bytes,
             key_range: actual_summary.key_range,
-        }))
+        })
     }
 
     pub(super) async fn get_value_reconstruct_data(

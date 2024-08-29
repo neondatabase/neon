@@ -1736,13 +1736,14 @@ impl Timeline {
         }
     }
 
-    /// Outermost timeline compaction operation; downloads needed layers.
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
     pub(crate) async fn compact(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1762,8 +1763,8 @@ impl Timeline {
         // compaction task goes over it's period (20s) which is quite often in production.
         let (_guard, _permit) = tokio::select! {
             tuple = prepare => { tuple },
-            _ = self.cancel.cancelled() => return Ok(()),
-            _ = cancel.cancelled() => return Ok(()),
+            _ = self.cancel.cancelled() => return Ok(false),
+            _ = cancel.cancelled() => return Ok(false),
         };
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1771,11 +1772,14 @@ impl Timeline {
         // Last record Lsn could be zero in case the timeline was just created
         if !last_record_lsn.is_valid() {
             warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(());
+            return Ok(false);
         }
 
         match self.get_compaction_algorithm_settings().kind {
-            CompactionAlgorithm::Tiered => self.compact_tiered(cancel, ctx).await,
+            CompactionAlgorithm::Tiered => {
+                self.compact_tiered(cancel, ctx).await?;
+                Ok(false)
+            }
             CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
         }
     }

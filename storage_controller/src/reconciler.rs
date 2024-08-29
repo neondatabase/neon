@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
@@ -748,6 +749,8 @@ impl Reconciler {
             }
             self.location_config(&node, conf, None, false).await?;
         }
+
+        failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
 
         Ok(())
     }
