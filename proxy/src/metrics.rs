@@ -614,9 +614,6 @@ impl FixedCardinalitySet for ThreadPoolWorkers {
 #[derive(MetricGroup)]
 #[metric(new(workers: usize))]
 pub struct ThreadPoolMetrics {
-    pub injector_queue_depth: Gauge,
-    #[metric(init = GaugeVec::with_label_set(ThreadPoolWorkers(workers)))]
-    pub worker_queue_depth: GaugeVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
