@@ -29,13 +29,15 @@ use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
-use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
+use crate::tenant::disk_btree::{
+    DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
+};
 use crate::tenant::storage_layer::{
     LayerAccessStats, ValueReconstructResult, ValueReconstructState,
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+    BlobFlag, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
 };
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::{self, VirtualFile};
@@ -51,6 +53,7 @@ use pageserver_api::models::LayerAccessKind;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
@@ -370,12 +373,10 @@ impl ImageLayer {
 }
 
 impl ImageLayerInner {
-    #[cfg(test)]
     pub(crate) fn key_range(&self) -> &Range<Key> {
         &self.key_range
     }
 
-    #[cfg(test)]
     pub(crate) fn lsn(&self) -> Lsn {
         self.lsn
     }
@@ -700,7 +701,6 @@ impl ImageLayerInner {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> ImageLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
@@ -709,9 +709,9 @@ impl ImageLayerInner {
             image_layer: self,
             ctx,
             index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
-            key_values_batch: std::collections::VecDeque::new(),
+            key_values_batch: VecDeque::new(),
             is_end: false,
-            planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner::new(
+            planner: StreamingVectoredReadPlanner::new(
                 1024 * 8192, // The default value. Unit tests might use a different value. 1024 * 8K = 8MB buffer.
                 1024,        // The default value. Unit tests might use a different value
             ),
@@ -975,17 +975,15 @@ impl Drop for ImageLayerWriter {
     }
 }
 
-#[cfg(test)]
 pub struct ImageLayerIterator<'a> {
     image_layer: &'a ImageLayerInner,
     ctx: &'a RequestContext,
-    planner: crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner,
-    index_iter: crate::tenant::disk_btree::DiskBtreeIterator<'a>,
-    key_values_batch: std::collections::VecDeque<(Key, Lsn, Value)>,
+    planner: StreamingVectoredReadPlanner,
+    index_iter: DiskBtreeIterator<'a>,
+    key_values_batch: VecDeque<(Key, Lsn, Value)>,
     is_end: bool,
 }
 
-#[cfg(test)]
 impl<'a> ImageLayerIterator<'a> {
     /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {

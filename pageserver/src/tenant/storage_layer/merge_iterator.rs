@@ -547,5 +547,9 @@ mod tests {
             &ctx,
         );
         assert_merge_iter_equal(&mut merge_iter, &expect).await;
+
+        is_send(merge_iter);
     }
+
+    fn is_send(_: impl Send) {}
 }

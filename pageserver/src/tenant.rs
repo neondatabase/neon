@@ -6810,7 +6810,7 @@ mod tests {
             vec![
                 // Image layer at GC horizon
                 PersistentLayerKey {
-                    key_range: Key::MIN..get_key(10),
+                    key_range: Key::MIN..Key::MAX,
                     lsn_range: Lsn(0x30)..Lsn(0x31),
                     is_delta: false
                 },

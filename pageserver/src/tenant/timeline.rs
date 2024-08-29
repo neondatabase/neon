@@ -70,7 +70,6 @@ use std::{
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
-        config::defaults::DEFAULT_PITR_INTERVAL,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::PersistentLayerDesc,
@@ -105,6 +104,7 @@ use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
