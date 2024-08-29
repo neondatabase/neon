@@ -457,17 +457,21 @@ jobs:
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
-      options: --init
+      options: --init --user root
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Download Neon artifact
-      uses: ./.github/actions/download
-      with:
-        name: neon-${{ runner.os }}-${{ runner.arch }}-release-artifact
-        path: /tmp/neon/
-        prefix: latest
+    # until https://github.com/neondatabase/neon/issues/8275 is fixed we temporarily install postgresql-16
+    # instead of using Neon artifacts containing pgbench
+    - name: Install postgresql-16 where pytest expects it
+      run: |
+        apt-get update && apt-get install -y postgresql-common
+        /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+        apt-get -y install postgresql-16
+        mkdir -p /tmp/neon/pg_install/v16/bin
+        ln -s /usr/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench
+        ln -s /usr/bin/psql /tmp/neon/pg_install/v16/bin/psql
 
     - name: Set up Connection String
       id: set-up-connstr
