@@ -587,24 +587,13 @@ impl Iteration {
         // Wrap `fut` into a future that logs a message every `period` so that we get a
         // very obvious breadcrumb in the logs _while_ a slow iteration is happening.
         let liveness_logger = async move {
-            let Some(mut next_warn_at) = self.started_at.checked_add(period) else {
-                warn!("checked_add overflow");
-                return fut.await;
-            };
             loop {
-                match tokio::time::timeout_at(next_warn_at.into(), &mut fut).await {
+                match tokio::time::timeout(period, &mut fut).await {
                     Ok(x) => return x,
                     Err(_) => {
                         // info level as per the same rationale why warn_when_period_overrun is info
                         // =>  https://github.com/neondatabase/neon/pull/5724
                         info!("still running");
-                        next_warn_at = match Instant::now().checked_add(period) {
-                            Some(x) => x,
-                            None => {
-                                warn!("checked_add overflow");
-                                return fut.await;
-                            }
-                        };
                     }
                 }
             }
