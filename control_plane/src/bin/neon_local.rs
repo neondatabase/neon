@@ -21,10 +21,8 @@ use pageserver_api::config::defaults::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_PAGESERVER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_PAGESERVER_PG_PORT,
 };
-use pageserver_api::controller_api::PlacementPolicy;
-use pageserver_api::models::{
-    ShardParameters, TenantCreateRequest, TimelineCreateRequest, TimelineInfo,
-};
+use pageserver_api::controller_api::{PlacementPolicy, TenantCreateRequest};
+use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;

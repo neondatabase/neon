@@ -39,7 +39,7 @@ use crate::wal_backup::{self};
 use crate::wal_backup_partial::PartialRemoteSegment;
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
-use crate::metrics::{FullTimelineInfo, WalStorageMetrics};
+use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
 use crate::{debug_dump, timeline_manager, wal_storage};
 use crate::{GlobalTimelines, SafeKeeperConf};
@@ -856,28 +856,40 @@ impl Timeline {
         }
 
         debug!("requesting WalResidentTimeline guard");
+        let started_at = Instant::now();
+        let status_before = self.mgr_status.get();
 
-        // Wait 5 seconds for the guard to be acquired, should be enough for uneviction.
-        // If it times out, most likely there is a deadlock in the manager task.
-        let res = tokio::time::timeout(
-            Duration::from_secs(5),
+        // Wait 30 seconds for the guard to be acquired. It can time out if someone is
+        // holding the lock (e.g. during `SafeKeeper::process_msg()`) or manager task
+        // is stuck.
+        let res = tokio::time::timeout_at(
+            started_at + Duration::from_secs(30),
             self.manager_ctl.wal_residence_guard(),
         )
         .await;
 
         let guard = match res {
-            Ok(Ok(guard)) => guard,
+            Ok(Ok(guard)) => {
+                let finished_at = Instant::now();
+                let elapsed = finished_at - started_at;
+                MISC_OPERATION_SECONDS
+                    .with_label_values(&["wal_residence_guard"])
+                    .observe(elapsed.as_secs_f64());
+
+                guard
+            }
             Ok(Err(e)) => {
                 warn!(
-                    "error while acquiring WalResidentTimeline guard (current state {:?}): {}",
-                    self.mgr_status.get(),
-                    e
+                    "error while acquiring WalResidentTimeline guard, statuses {:?} => {:?}",
+                    status_before,
+                    self.mgr_status.get()
                 );
                 return Err(e);
             }
             Err(_) => {
                 warn!(
-                    "timeout while acquiring WalResidentTimeline guard (current state {:?})",
+                    "timeout while acquiring WalResidentTimeline guard, statuses {:?} => {:?}",
+                    status_before,
                     self.mgr_status.get()
                 );
                 anyhow::bail!("timeout while acquiring WalResidentTimeline guard");

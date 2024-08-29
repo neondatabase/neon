@@ -5448,12 +5448,12 @@ impl Timeline {
         }
         images.sort_unstable_by(|(ka, _), (kb, _)| ka.cmp(kb));
         let min_key = *images.first().map(|(k, _)| k).unwrap();
-        let max_key = images.last().map(|(k, _)| k).unwrap().next();
+        let end_key = images.last().map(|(k, _)| k).unwrap().next();
         let mut image_layer_writer = ImageLayerWriter::new(
             self.conf,
             self.timeline_id,
             self.tenant_shard_id,
-            &(min_key..max_key),
+            &(min_key..end_key),
             lsn,
             ctx,
         )
@@ -5485,7 +5485,7 @@ impl Timeline {
         let last_record_lsn = self.get_last_record_lsn();
         deltas.sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
         let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
-        let max_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
+        let end_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
         let min_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
         let max_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
         assert!(
@@ -5508,7 +5508,7 @@ impl Timeline {
         for (key, lsn, val) in deltas {
             delta_layer_writer.put_value(key, lsn, val, ctx).await?;
         }
-        let delta_layer = delta_layer_writer.finish(max_key, self, ctx).await?;
+        let delta_layer = delta_layer_writer.finish(end_key, self, ctx).await?;
 
         {
             let mut guard = self.layers.write().await;

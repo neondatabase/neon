@@ -88,6 +88,7 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
+use crate::walredo;
 use crate::InitializationOrder;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
@@ -212,8 +213,6 @@ pub(crate) enum SpawnMode {
     Eager,
     /// Lazy activation in the background, with the option to skip the queue if the need comes up
     Lazy,
-    /// Tenant has been created during the lifetime of this process
-    Create,
 }
 
 ///
@@ -323,6 +322,16 @@ impl From<harness::TestRedoManager> for WalRedoManager {
 }
 
 impl WalRedoManager {
+    pub(crate) async fn shutdown(&self) {
+        match self {
+            Self::Prod(mgr) => mgr.shutdown().await,
+            #[cfg(test)]
+            Self::Test(_) => {
+                // Not applicable to test redo manager
+            }
+        }
+    }
+
     pub(crate) fn maybe_quiesce(&self, idle_timeout: Duration) {
         match self {
             Self::Prod(mgr) => mgr.maybe_quiesce(idle_timeout),
@@ -343,7 +352,7 @@ impl WalRedoManager {
         base_img: Option<(Lsn, bytes::Bytes)>,
         records: Vec<(Lsn, crate::walrecord::NeonWalRecord)>,
         pg_version: u32,
-    ) -> anyhow::Result<bytes::Bytes> {
+    ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
             Self::Prod(mgr) => {
                 mgr.request_redo(key, lsn, base_img, records, pg_version)
@@ -797,9 +806,6 @@ impl Tenant {
                 };
 
                 let preload = match &mode {
-                    SpawnMode::Create => {
-                        None
-                    },
                     SpawnMode::Eager | SpawnMode::Lazy => {
                         let _preload_timer = TENANT.preload.start_timer();
                         let res = tenant_clone
@@ -821,11 +827,8 @@ impl Tenant {
 
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
                 let attached = {
-                    let _attach_timer = match mode {
-                        SpawnMode::Create => None,
-                        SpawnMode::Eager | SpawnMode::Lazy => Some(TENANT.attach.start_timer()),
-                    };
-                    tenant_clone.attach(preload, mode, &ctx).await
+                    let _attach_timer = Some(TENANT.attach.start_timer());
+                    tenant_clone.attach(preload, &ctx).await
                 };
 
                 match attached {
@@ -901,21 +904,14 @@ impl Tenant {
     async fn attach(
         self: &Arc<Tenant>,
         preload: Option<TenantPreload>,
-        mode: SpawnMode,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         failpoint_support::sleep_millis_async!("before-attaching-tenant");
 
-        let preload = match (preload, mode) {
-            (Some(p), _) => p,
-            (None, SpawnMode::Create) => TenantPreload {
-                timelines: HashMap::new(),
-            },
-            (None, _) => {
-                anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
-            }
+        let Some(preload) = preload else {
+            anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
         };
 
         let mut timelines_to_resume_deletions = vec![];
@@ -1852,6 +1848,10 @@ impl Tenant {
         // this will additionally shutdown and await all timeline tasks.
         tracing::debug!("Waiting for tasks...");
         task_mgr::shutdown_tasks(None, Some(self.tenant_shard_id), None).await;
+
+        if let Some(walredo_mgr) = self.walredo_mgr.as_ref() {
+            walredo_mgr.shutdown().await;
+        }
 
         // Wait for any in-flight operations to complete
         self.gate.close().await;
@@ -3826,7 +3826,7 @@ pub(crate) mod harness {
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())
                 .await?;
-            tenant.attach(Some(preload), SpawnMode::Eager, ctx).await?;
+            tenant.attach(Some(preload), ctx).await?;
 
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
@@ -3854,7 +3854,7 @@ pub(crate) mod harness {
             base_img: Option<(Lsn, Bytes)>,
             records: Vec<(Lsn, NeonWalRecord)>,
             _pg_version: u32,
-        ) -> anyhow::Result<Bytes> {
+        ) -> Result<Bytes, walredo::Error> {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
             if records_neon {
                 // For Neon wal records, we can decode without spawning postgres, so do so.

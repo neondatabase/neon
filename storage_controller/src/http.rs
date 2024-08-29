@@ -10,8 +10,9 @@ use hyper::header::CONTENT_TYPE;
 use hyper::{Body, Request, Response};
 use hyper::{StatusCode, Uri};
 use metrics::{BuildInfo, NeonMetrics};
+use pageserver_api::controller_api::TenantCreateRequest;
 use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
+    TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
     TenantTimeTravelRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;

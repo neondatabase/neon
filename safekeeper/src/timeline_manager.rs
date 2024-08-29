@@ -22,7 +22,7 @@ use utils::lsn::Lsn;
 
 use crate::{
     control_file::{FileStorage, Storage},
-    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL},
+    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS},
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
     safekeeper::Term,
@@ -357,6 +357,10 @@ impl Manager {
 
     /// Get a snapshot of the timeline state.
     async fn state_snapshot(&self) -> StateSnapshot {
+        let _timer = MISC_OPERATION_SECONDS
+            .with_label_values(&["state_snapshot"])
+            .start_timer();
+
         StateSnapshot::new(
             self.tli.read_shared_state().await,
             self.conf.heartbeat_timeout,

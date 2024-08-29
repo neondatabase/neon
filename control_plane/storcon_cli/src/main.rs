@@ -4,13 +4,13 @@ use std::{str::FromStr, time::Duration};
 use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
-        NodeAvailabilityWrapper, NodeDescribeResponse, ShardSchedulingPolicy,
+        NodeAvailabilityWrapper, NodeDescribeResponse, ShardSchedulingPolicy, TenantCreateRequest,
         TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
-        ShardParameters, TenantConfig, TenantConfigRequest, TenantCreateRequest,
-        TenantShardSplitRequest, TenantShardSplitResponse,
+        ShardParameters, TenantConfig, TenantConfigRequest, TenantShardSplitRequest,
+        TenantShardSplitResponse,
     },
     shard::{ShardStripeSize, TenantShardId},
 };
@@ -336,14 +336,18 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         Command::TenantCreate { tenant_id } => {
-            vps_client
-                .tenant_create(&TenantCreateRequest {
-                    new_tenant_id: TenantShardId::unsharded(tenant_id),
-                    generation: None,
-                    shard_parameters: ShardParameters::default(),
-                    placement_policy: Some(PlacementPolicy::Attached(1)),
-                    config: TenantConfig::default(),
-                })
+            storcon_client
+                .dispatch(
+                    Method::POST,
+                    "v1/tenant".to_string(),
+                    Some(TenantCreateRequest {
+                        new_tenant_id: TenantShardId::unsharded(tenant_id),
+                        generation: None,
+                        shard_parameters: ShardParameters::default(),
+                        placement_policy: Some(PlacementPolicy::Attached(1)),
+                        config: TenantConfig::default(),
+                    }),
+                )
                 .await?;
         }
         Command::TenantDelete { tenant_id } => {

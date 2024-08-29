@@ -17,7 +17,11 @@ const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 // should be handled gracefully.
 fn watch_compute_activity(compute: &ComputeNode) {
     // Suppose that `connstr` doesn't change
-    let connstr = compute.connstr.as_str();
+    let mut connstr = compute.connstr.clone();
+    connstr
+        .query_pairs_mut()
+        .append_pair("application_name", "compute_activity_monitor");
+    let connstr = connstr.as_str();
 
     // During startup and configuration we connect to every Postgres database,
     // but we don't want to count this as some user activity. So wait until
