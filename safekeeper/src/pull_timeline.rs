@@ -11,6 +11,7 @@ use tracing::info;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
+    pausable_failpoint,
 };
 
 use crate::{
@@ -162,6 +163,8 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     filenames.remove(control_file_index);
     filenames.insert(0, "safekeeper.control".to_string());
 
+    pausable_failpoint!("sk-pull-timeline-after-list-pausable");
+
     info!(
         "downloading {} files from safekeeper {}",
         filenames.len(),
@@ -183,6 +186,13 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
 
         let mut file = tokio::fs::File::create(&file_path).await?;
         let mut response = client.get(&http_url).send().await?;
+        if response.status() != reqwest::StatusCode::OK {
+            bail!(
+                "pulling file {} failed: status is {}",
+                filename,
+                response.status()
+            );
+        }
         while let Some(chunk) = response.chunk().await? {
             file.write_all(&chunk).await?;
             file.flush().await?;

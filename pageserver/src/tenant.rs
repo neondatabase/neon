@@ -42,6 +42,7 @@ use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 use utils::failpoint_support;
 use utils::fs_ext;
+use utils::pausable_failpoint;
 use utils::sync::gate::Gate;
 use utils::sync::gate::GateGuard;
 use utils::timeout::timeout_cancellable;
@@ -121,32 +122,6 @@ use utils::{
     id::TimelineId,
     lsn::{Lsn, RecordLsn},
 };
-
-/// Declare a failpoint that can use the `pause` failpoint action.
-/// We don't want to block the executor thread, hence, spawn_blocking + await.
-macro_rules! pausable_failpoint {
-    ($name:literal) => {
-        if cfg!(feature = "testing") {
-            tokio::task::spawn_blocking({
-                let current = tracing::Span::current();
-                move || {
-                    let _entered = current.entered();
-                    tracing::info!("at failpoint {}", $name);
-                    fail::fail_point!($name);
-                }
-            })
-            .await
-            .expect("spawn_blocking");
-        }
-    };
-    ($name:literal, $cond:expr) => {
-        if cfg!(feature = "testing") {
-            if $cond {
-                pausable_failpoint!($name)
-            }
-        }
-    };
-}
 
 pub mod blob_io;
 pub mod block_io;

@@ -194,7 +194,7 @@ files:
 
       - metric_name: pg_stats_userdb
         type: gauge
-        help: 'Stats for the oldest non-system db'
+        help: 'Stats for several oldest non-system dbs'
         key_labels:
           - datname
         value_label: kind
@@ -205,9 +205,8 @@ files:
           - inserted
           - updated
           - deleted
-        # We export stats for only one non-system database. Without this limit
+        # We export stats for 10 non-system database. Without this limit
         # it is too easy to abuse the system by creating lots of databases.
-        # We can try lifting this limit in the future after we understand the needs better.
         query: |
           select pg_database_size(datname) as db_size, deadlocks,
                  tup_inserted as inserted, tup_updated as updated, tup_deleted as deleted,
@@ -218,7 +217,7 @@ files:
                from pg_database
               where datname <> 'postgres' and not datistemplate
               order by oid
-              limit 1
+              limit 10
            );
 
       - metric_name: max_cluster_size

@@ -26,7 +26,7 @@ defaults:
 jobs:
   create-storage-release-branch:
     if: ${{ github.event.schedule == '0 6 * * MON' || format('{0}', inputs.create-storage-release-branch) == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     permissions:
       contents: write # for `git push`
@@ -53,7 +53,7 @@ jobs:
         GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       run: |
         cat << EOF > body.md
-          ## Release ${RELEASE_DATE}
+          ## Storage & Compute release ${RELEASE_DATE}
 
           **Please merge this Pull Request using 'Create a merge commit' button**
         EOF
@@ -65,7 +65,7 @@ jobs:
 
   create-proxy-release-branch:
     if: ${{ github.event.schedule == '0 6 * * THU' || format('{0}', inputs.create-proxy-release-branch) == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     permissions:
       contents: write # for `git push`

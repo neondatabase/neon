@@ -48,7 +48,7 @@ use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::LayerAccessKind;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -474,7 +474,7 @@ impl ImageLayerInner {
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         let reads = self
-            .plan_reads(keyspace, ctx)
+            .plan_reads(keyspace, None, ctx)
             .await
             .map_err(GetVectoredError::Other)?;
 
@@ -486,9 +486,15 @@ impl ImageLayerInner {
         Ok(())
     }
 
+    /// Traverse the layer's index to build read operations on the overlap of the input keyspace
+    /// and the keys in this layer.
+    ///
+    /// If shard_identity is provided, it will be used to filter keys down to those stored on
+    /// this shard.
     async fn plan_reads(
         &self,
         keyspace: KeySpace,
+        shard_identity: Option<&ShardIdentity>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>> {
         let mut planner = VectoredReadPlanner::new(
@@ -508,7 +514,6 @@ impl ImageLayerInner {
 
         for range in keyspace.ranges.iter() {
             let mut range_end_handled = false;
-
             let mut search_key: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
             range.start.write_to_byte_slice(&mut search_key);
 
@@ -521,12 +526,22 @@ impl ImageLayerInner {
                 let key = Key::from_slice(&raw_key[..KEY_SIZE]);
                 assert!(key >= range.start);
 
+                let flag = if let Some(shard_identity) = shard_identity {
+                    if shard_identity.is_key_disposable(&key) {
+                        BlobFlag::Ignore
+                    } else {
+                        BlobFlag::None
+                    }
+                } else {
+                    BlobFlag::None
+                };
+
                 if key >= range.end {
                     planner.handle_range_end(offset);
                     range_end_handled = true;
                     break;
                 } else {
-                    planner.handle(key, self.lsn, offset, BlobFlag::None);
+                    planner.handle(key, self.lsn, offset, flag);
                 }
             }
 
@@ -537,6 +552,50 @@ impl ImageLayerInner {
         }
 
         Ok(planner.finish())
+    }
+
+    /// Given a key range, select the parts of that range that should be retained by the ShardIdentity,
+    /// then execute vectored GET operations, passing the results of all read keys into the writer.
+    pub(super) async fn filter(
+        &self,
+        shard_identity: &ShardIdentity,
+        writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<usize> {
+        // Fragment the range into the regions owned by this ShardIdentity
+        let plan = self
+            .plan_reads(
+                KeySpace {
+                    // If asked for the total key space, plan_reads will give us all the keys in the layer
+                    ranges: vec![Key::MIN..Key::MAX],
+                },
+                Some(shard_identity),
+                ctx,
+            )
+            .await?;
+
+        let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let mut key_count = 0;
+        for read in plan.into_iter() {
+            let buf_size = read.size();
+
+            let buf = BytesMut::with_capacity(buf_size);
+            let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
+
+            let frozen_buf = blobs_buf.buf.freeze();
+
+            for meta in blobs_buf.blobs.iter() {
+                let img_buf = frozen_buf.slice(meta.start..meta.end);
+
+                key_count += 1;
+                writer
+                    .put_image(meta.meta.key, img_buf, ctx)
+                    .await
+                    .context(format!("Storing key {}", meta.meta.key))?;
+            }
+        }
+
+        Ok(key_count)
     }
 
     async fn do_reads_and_update_state(
@@ -853,6 +912,139 @@ impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             inner.blob_writer.into_inner().remove();
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use bytes::Bytes;
+    use pageserver_api::{
+        key::Key,
+        shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
+    };
+    use utils::{id::TimelineId, lsn::Lsn};
+
+    use crate::{tenant::harness::TenantHarness, DEFAULT_PG_VERSION};
+
+    use super::ImageLayerWriter;
+
+    #[tokio::test]
+    async fn image_layer_rewrite() {
+        let harness = TenantHarness::create("test_image_layer_rewrite").unwrap();
+        let (tenant, ctx) = harness.load().await;
+
+        // The LSN at which we will create an image layer to filter
+        let lsn = Lsn(0xdeadbeef0000);
+
+        let timeline_id = TimelineId::generate();
+        let timeline = tenant
+            .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+
+        // This key range contains several 0x8000 page stripes, only one of which belongs to shard zero
+        let input_start = Key::from_hex("000000067f00000001000000ae0000000000").unwrap();
+        let input_end = Key::from_hex("000000067f00000001000000ae0000020000").unwrap();
+        let range = input_start..input_end;
+
+        // Build an image layer to filter
+        let resident = {
+            let mut writer = ImageLayerWriter::new(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                &range,
+                lsn,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+            let foo_img = Bytes::from_static(&[1, 2, 3, 4]);
+            let mut key = range.start;
+            while key < range.end {
+                writer.put_image(key, foo_img.clone(), &ctx).await.unwrap();
+
+                key = key.next();
+            }
+            writer.finish(&timeline, &ctx).await.unwrap()
+        };
+        let original_size = resident.metadata().file_size;
+
+        // Filter for various shards: this exercises cases like values at start of key range, end of key
+        // range, middle of key range.
+        for shard_number in 0..4 {
+            let mut filtered_writer = ImageLayerWriter::new(
+                harness.conf,
+                timeline_id,
+                harness.tenant_shard_id,
+                &range,
+                lsn,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+            // TenantHarness gave us an unsharded tenant, but we'll use a sharded ShardIdentity
+            // to exercise filter()
+            let shard_identity = ShardIdentity::new(
+                ShardNumber(shard_number),
+                ShardCount::new(4),
+                ShardStripeSize(0x8000),
+            )
+            .unwrap();
+
+            let wrote_keys = resident
+                .filter(&shard_identity, &mut filtered_writer, &ctx)
+                .await
+                .unwrap();
+            let replacement = if wrote_keys > 0 {
+                Some(filtered_writer.finish(&timeline, &ctx).await.unwrap())
+            } else {
+                None
+            };
+
+            // This exact size and those below will need updating as/when the layer encoding changes, but
+            // should be deterministic for a given version of the format, as we used no randomness generating the input.
+            assert_eq!(original_size, 1597440);
+
+            match shard_number {
+                0 => {
+                    // We should have written out just one stripe for our shard identity
+                    assert_eq!(wrote_keys, 0x8000);
+                    let replacement = replacement.unwrap();
+
+                    // We should have dropped some of the data
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+
+                    // Assert that we dropped ~3/4 of the data.
+                    assert_eq!(replacement.metadata().file_size, 417792);
+                }
+                1 => {
+                    // Shard 1 has no keys in our input range
+                    assert_eq!(wrote_keys, 0x0);
+                    assert!(replacement.is_none());
+                }
+                2 => {
+                    // Shard 2 has one stripes in the input range
+                    assert_eq!(wrote_keys, 0x8000);
+                    let replacement = replacement.unwrap();
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+                    assert_eq!(replacement.metadata().file_size, 417792);
+                }
+                3 => {
+                    // Shard 3 has two stripes in the input range
+                    assert_eq!(wrote_keys, 0x10000);
+                    let replacement = replacement.unwrap();
+                    assert!(replacement.metadata().file_size < original_size);
+                    assert!(replacement.metadata().file_size > 0);
+                    assert_eq!(replacement.metadata().file_size, 811008);
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }

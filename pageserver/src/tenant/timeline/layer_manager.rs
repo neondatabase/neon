@@ -212,13 +212,34 @@ impl LayerManager {
         &mut self,
         rewrite_layers: &[(Layer, ResidentLayer)],
         drop_layers: &[Layer],
-        _metrics: &TimelineMetrics,
+        metrics: &TimelineMetrics,
     ) {
         let mut updates = self.layer_map.batch_update();
+        for (old_layer, new_layer) in rewrite_layers {
+            debug_assert_eq!(
+                old_layer.layer_desc().key_range,
+                new_layer.layer_desc().key_range
+            );
+            debug_assert_eq!(
+                old_layer.layer_desc().lsn_range,
+                new_layer.layer_desc().lsn_range
+            );
 
-        // TODO: implement rewrites (currently this code path only used for drops)
-        assert!(rewrite_layers.is_empty());
+            // Safety: we may never rewrite the same file in-place.  Callers are responsible
+            // for ensuring that they only rewrite layers after something changes the path,
+            // such as an increment in the generation number.
+            assert_ne!(old_layer.local_path(), new_layer.local_path());
 
+            Self::delete_historic_layer(old_layer, &mut updates, &mut self.layer_fmgr);
+
+            Self::insert_historic_layer(
+                new_layer.as_ref().clone(),
+                &mut updates,
+                &mut self.layer_fmgr,
+            );
+
+            metrics.record_new_file_metrics(new_layer.layer_desc().file_size);
+        }
         for l in drop_layers {
             Self::delete_historic_layer(l, &mut updates, &mut self.layer_fmgr);
         }

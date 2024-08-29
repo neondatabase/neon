@@ -15,7 +15,7 @@ pub async fn task_main(_conf: SafeKeeperConf) -> anyhow::Result<()> {
         for tli in &tlis {
             let ttid = tli.ttid;
             async {
-                if let Err(e) = tli.maybe_persist_control_file().await {
+                if let Err(e) = tli.maybe_persist_control_file(false).await {
                     warn!("failed to persist control file: {e}");
                 }
                 if let Err(e) = tli.remove_old_wal().await {

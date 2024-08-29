@@ -5,6 +5,7 @@ use utils::lsn::Lsn;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Ingest aux files into the pageserver.
 #[derive(clap::Parser)]
@@ -88,11 +89,17 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
         println!("ingested {file_cnt} files");
     }
 
-    let files = mgmt_api_client
-        .list_aux_files(tenant_shard_id, timeline_id, Lsn(Lsn::MAX.0 - 1))
-        .await?;
-
-    println!("{} files found", files.len());
+    for _ in 0..100 {
+        let start = Instant::now();
+        let files = mgmt_api_client
+            .list_aux_files(tenant_shard_id, timeline_id, Lsn(Lsn::MAX.0 - 1))
+            .await?;
+        println!(
+            "{} files found in {}s",
+            files.len(),
+            start.elapsed().as_secs_f64()
+        );
+    }
 
     anyhow::Ok(())
 }

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 bytes.workspace = true
 byteorder.workspace = true
+itertools.workspace = true
 pin-project-lite.workspace = true
 postgres-protocol.workspace = true
 rand.workspace = true

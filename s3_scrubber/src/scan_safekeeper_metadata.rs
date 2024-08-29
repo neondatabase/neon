@@ -1,7 +1,8 @@
-use std::{collections::HashSet, str::FromStr};
+use std::{collections::HashSet, str::FromStr, sync::Arc};
 
 use aws_sdk_s3::Client;
 use futures::stream::{StreamExt, TryStreamExt};
+use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::{XLogFileName, PG_TLI};
 use serde::Serialize;
@@ -70,9 +71,12 @@ pub async fn scan_safekeeper_metadata(
         "checking bucket {}, region {}, dump_db_table {}",
         bucket_config.bucket, bucket_config.region, dump_db_table
     );
-    // Use the native TLS implementation (Neon requires TLS)
-    let tls_connector =
-        postgres_native_tls::MakeTlsConnector::new(native_tls::TlsConnector::new().unwrap());
+    // Use rustls (Neon requires TLS)
+    let root_store = TLS_ROOTS.get_or_try_init(load_certs)?.clone();
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let tls_connector = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
     let (client, connection) = tokio_postgres::connect(&dump_db_connstr, tls_connector).await?;
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
@@ -234,3 +238,11 @@ async fn check_timeline(
         is_deleted: false,
     })
 }
+
+fn load_certs() -> Result<Arc<rustls::RootCertStore>, std::io::Error> {
+    let der_certs = rustls_native_certs::load_native_certs()?;
+    let mut store = rustls::RootCertStore::empty();
+    store.add_parsable_certificates(der_certs);
+    Ok(Arc::new(store))
+}
+static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();

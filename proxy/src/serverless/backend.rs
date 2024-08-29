@@ -232,9 +232,9 @@ impl ConnectMechanism for TokioMechanism {
             .connect_timeout(timeout);
 
         let pause = ctx.latency_timer.pause(crate::metrics::Waiting::Compute);
-        let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+        let res = config.connect(tokio_postgres::NoTls).await;
         drop(pause);
-        drop(permit);
+        let (client, connection) = permit.release_result(res)?;
 
         tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
         Ok(poll_client(

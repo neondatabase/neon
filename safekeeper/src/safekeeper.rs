@@ -827,9 +827,9 @@ where
 
     /// Persist control file if there is something to save and enough time
     /// passed after the last save.
-    pub async fn maybe_persist_inmem_control_file(&mut self) -> Result<bool> {
+    pub async fn maybe_persist_inmem_control_file(&mut self, force: bool) -> Result<bool> {
         const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
-        if self.state.pers.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
+        if !force && self.state.pers.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
             return Ok(false);
         }
         let need_persist = self.state.inmem.commit_lsn > self.state.commit_lsn

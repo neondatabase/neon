@@ -9,6 +9,7 @@ use futures::future::Either;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
+use proxy::metrics::{Metrics, ThreadPoolMetrics};
 use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
@@ -64,6 +65,8 @@ async fn main() -> anyhow::Result<()> {
     let _logging_guard = proxy::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
+
+    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
 
     let args = cli().get_matches();
     let destination: String = args.get_one::<String>("dest").unwrap().parse()?;

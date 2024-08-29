@@ -19,7 +19,7 @@ permissions: {}
 
 jobs:
   check-image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       tag: ${{ steps.get-build-tools-tag.outputs.image-tag }}
       found: ${{ steps.check-image.outputs.found }}

@@ -531,6 +531,64 @@ def test_recovery_uncommitted(neon_env_builder: NeonEnvBuilder):
     asyncio.run(run_recovery_uncommitted(env))
 
 
+async def run_wal_truncation(env: NeonEnv):
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    (sk1, sk2, sk3) = env.safekeepers
+
+    ep = env.endpoints.create_start("main")
+    ep.safe_psql("create table t (key int, value text)")
+    ep.safe_psql("insert into t select generate_series(1, 100), 'payload'")
+
+    # insert with only one sk3 up to create tail of flushed but not committed WAL on it
+    sk1.stop()
+    sk2.stop()
+    conn = await ep.connect_async()
+    # query should hang, so execute in separate task
+    bg_query = asyncio.create_task(
+        conn.execute("insert into t select generate_series(1, 180000), 'Papaya'")
+    )
+    sleep_sec = 2
+    await asyncio.sleep(sleep_sec)
+    # it must still be not finished
+    assert not bg_query.done()
+    # note: destoy will kill compute_ctl, preventing it waiting for hanging sync-safekeepers.
+    ep.stop_and_destroy()
+
+    # stop sk3 as well
+    sk3.stop()
+
+    # now start sk1 and sk2 and make them commit something
+    sk1.start()
+    sk2.start()
+    ep = env.endpoints.create_start(
+        "main",
+    )
+    ep.safe_psql("insert into t select generate_series(1, 200), 'payload'")
+
+    # start sk3 and wait for it to catch up
+    sk3.start()
+    flush_lsn = Lsn(ep.safe_psql_scalar("SELECT pg_current_wal_flush_lsn()"))
+    await wait_for_lsn(sk3, tenant_id, timeline_id, flush_lsn)
+
+    timeline_start_lsn = sk1.get_timeline_start_lsn(tenant_id, timeline_id)
+    digests = [
+        sk.http_client().timeline_digest(tenant_id, timeline_id, timeline_start_lsn, flush_lsn)
+        for sk in [sk1, sk2]
+    ]
+    assert digests[0] == digests[1], f"digest on sk1 is {digests[0]} but on sk3 is {digests[1]}"
+
+
+# Simple deterministic test creating tail of WAL on safekeeper which is
+# truncated when majority without this sk elects walproposer starting earlier.
+def test_wal_truncation(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    asyncio.run(run_wal_truncation(env))
+
+
 async def run_segment_init_failure(env: NeonEnv):
     env.neon_cli.create_branch("test_segment_init_failure")
     ep = env.endpoints.create_start("test_segment_init_failure")

@@ -11,7 +11,6 @@ use crate::{
 };
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use smol_str::SmolStr;
 use std::{collections::HashSet, net::IpAddr, str::FromStr};
 use thiserror::Error;
 use tracing::{info, warn};
@@ -95,13 +94,6 @@ impl ComputeUserInfoMaybeEndpoint {
         // Some parameters are stored in the startup message.
         let get_param = |key| params.get(key).ok_or(MissingKey(key));
         let user: RoleName = get_param("user")?.into();
-
-        // record the values if we have them
-        ctx.set_application(params.get("application_name").map(SmolStr::from));
-        ctx.set_user(user.clone());
-        if let Some(dbname) = params.get("database") {
-            ctx.set_dbname(dbname.into());
-        }
 
         // Project name might be passed via PG's command-line options.
         let endpoint_option = params

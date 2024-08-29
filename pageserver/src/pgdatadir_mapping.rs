@@ -1552,7 +1552,7 @@ impl<'a> DatadirModification<'a> {
                     self.tline.aux_file_size_estimator.on_add(content.len());
                     new_files.push((path, content));
                 }
-                (None, true) => anyhow::bail!("removing non-existing aux file: {}", path),
+                (None, true) => warn!("removing non-existing aux file: {}", path),
             }
             let new_val = aux_file::encode_file_value(&new_files)?;
             self.put(key, Value::Image(new_val.into()));

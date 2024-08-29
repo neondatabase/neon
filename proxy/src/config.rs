@@ -1,7 +1,7 @@
 use crate::{
     auth::{self, backend::AuthRateLimiter},
     console::locks::ApiLocks,
-    rate_limiter::RateBucketInfo,
+    rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
     scram::threadpool::ThreadPool,
     serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
     Host,
@@ -580,14 +580,18 @@ impl RetryConfig {
 }
 
 /// Helper for cmdline cache options parsing.
+#[derive(serde::Deserialize)]
 pub struct ConcurrencyLockOptions {
     /// The number of shards the lock map should have
     pub shards: usize,
     /// The number of allowed concurrent requests for each endpoitn
-    pub permits: usize,
+    #[serde(flatten)]
+    pub limiter: RateLimiterConfig,
     /// Garbage collection epoch
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
     pub epoch: Duration,
     /// Lock timeout
+    #[serde(deserialize_with = "humantime_serde::deserialize")]
     pub timeout: Duration,
 }
 
@@ -596,13 +600,18 @@ impl ConcurrencyLockOptions {
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
     /// Default options for [`crate::console::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
-        "shards=64,permits=10,epoch=10m,timeout=10ms";
+        "shards=64,permits=100,epoch=10m,timeout=10ms";
 
     // pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "shards=32,permits=4,epoch=10m,timeout=1s";
 
     /// Parse lock options passed via cmdline.
     /// Example: [`Self::DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK`].
     fn parse(options: &str) -> anyhow::Result<Self> {
+        let options = options.trim();
+        if options.starts_with('{') && options.ends_with('}') {
+            return Ok(serde_json::from_str(options)?);
+        }
+
         let mut shards = None;
         let mut permits = None;
         let mut epoch = None;
@@ -629,9 +638,13 @@ impl ConcurrencyLockOptions {
             shards = Some(2);
         }
 
+        let permits = permits.context("missing `permits`")?;
         let out = Self {
             shards: shards.context("missing `shards`")?,
-            permits: permits.context("missing `permits`")?,
+            limiter: RateLimiterConfig {
+                algorithm: RateLimitAlgorithm::Fixed,
+                initial_limit: permits,
+            },
             epoch: epoch.context("missing `epoch`")?,
             timeout: timeout.context("missing `timeout`")?,
         };
@@ -657,6 +670,8 @@ impl FromStr for ConcurrencyLockOptions {
 
 #[cfg(test)]
 mod tests {
+    use crate::rate_limiter::Aimd;
+
     use super::*;
 
     #[test]
@@ -684,36 +699,68 @@ mod tests {
     fn test_parse_lock_options() -> anyhow::Result<()> {
         let ConcurrencyLockOptions {
             epoch,
-            permits,
+            limiter,
             shards,
             timeout,
         } = "shards=32,permits=4,epoch=10m,timeout=1s".parse()?;
         assert_eq!(epoch, Duration::from_secs(10 * 60));
         assert_eq!(timeout, Duration::from_secs(1));
         assert_eq!(shards, 32);
-        assert_eq!(permits, 4);
+        assert_eq!(limiter.initial_limit, 4);
+        assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
 
         let ConcurrencyLockOptions {
             epoch,
-            permits,
+            limiter,
             shards,
             timeout,
         } = "epoch=60s,shards=16,timeout=100ms,permits=8".parse()?;
         assert_eq!(epoch, Duration::from_secs(60));
         assert_eq!(timeout, Duration::from_millis(100));
         assert_eq!(shards, 16);
-        assert_eq!(permits, 8);
+        assert_eq!(limiter.initial_limit, 8);
+        assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
 
         let ConcurrencyLockOptions {
             epoch,
-            permits,
+            limiter,
             shards,
             timeout,
         } = "permits=0".parse()?;
         assert_eq!(epoch, Duration::ZERO);
         assert_eq!(timeout, Duration::ZERO);
         assert_eq!(shards, 2);
-        assert_eq!(permits, 0);
+        assert_eq!(limiter.initial_limit, 0);
+        assert_eq!(limiter.algorithm, RateLimitAlgorithm::Fixed);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_json_lock_options() -> anyhow::Result<()> {
+        let ConcurrencyLockOptions {
+            epoch,
+            limiter,
+            shards,
+            timeout,
+        } = r#"{"shards":32,"initial_limit":44,"aimd":{"min":5,"max":500,"inc":10,"dec":0.9,"utilisation":0.8},"epoch":"10m","timeout":"1s"}"#
+            .parse()?;
+        assert_eq!(epoch, Duration::from_secs(10 * 60));
+        assert_eq!(timeout, Duration::from_secs(1));
+        assert_eq!(shards, 32);
+        assert_eq!(limiter.initial_limit, 44);
+        assert_eq!(
+            limiter.algorithm,
+            RateLimitAlgorithm::Aimd {
+                conf: Aimd {
+                    min: 5,
+                    max: 500,
+                    dec: 0.9,
+                    inc: 10,
+                    utilisation: 0.8
+                }
+            },
+        );
 
         Ok(())
     }

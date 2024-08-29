@@ -47,8 +47,8 @@ use utils::backoff;
 use super::StorageMetadata;
 use crate::{
     error::Cancelled, support::PermitCarrying, ConcurrencyLimiter, Download, DownloadError,
-    Listing, ListingMode, RemotePath, RemoteStorage, RemoteStorageActivity, S3Config,
-    TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Listing, ListingMode, RemotePath, RemoteStorage, S3Config, TimeTravelError, TimeoutOrCancel,
+    MAX_KEYS_PER_DELETE, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 pub(super) mod metrics;
@@ -974,10 +974,6 @@ impl RemoteStorage for S3Bucket {
             }
         }
         Ok(())
-    }
-
-    fn activity(&self) -> RemoteStorageActivity {
-        self.concurrency_limiter.activity()
     }
 }
 

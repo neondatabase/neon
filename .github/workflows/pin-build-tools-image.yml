@@ -26,7 +26,7 @@ permissions: {}
 
 jobs:
   tag-image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     env:
       FROM_TAG: ${{ inputs.from-tag }}

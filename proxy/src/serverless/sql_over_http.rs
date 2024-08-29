@@ -17,6 +17,7 @@ use hyper1::http::HeaderValue;
 use hyper1::Response;
 use hyper1::StatusCode;
 use hyper1::{HeaderMap, Request};
+use pq_proto::StartupMessageParamsBuilder;
 use serde_json::json;
 use serde_json::Value;
 use tokio::time;
@@ -192,13 +193,13 @@ fn get_conn_info(
 
     let mut options = Option::None;
 
+    let mut params = StartupMessageParamsBuilder::default();
+    params.insert("user", &username);
+    params.insert("database", &dbname);
     for (key, value) in pairs {
-        match &*key {
-            "options" => {
-                options = Some(NeonOptions::parse_options_raw(&value));
-            }
-            "application_name" => ctx.set_application(Some(value.into())),
-            _ => {}
+        params.insert(&key, &value);
+        if key == "options" {
+            options = Some(NeonOptions::parse_options_raw(&value));
         }
     }
 

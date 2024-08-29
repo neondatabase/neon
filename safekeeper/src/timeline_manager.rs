@@ -106,7 +106,7 @@ pub async fn main_task(
 
             if !is_active {
                 // TODO: maybe use tokio::spawn?
-                if let Err(e) = tli.maybe_persist_control_file().await {
+                if let Err(e) = tli.maybe_persist_control_file(false).await {
                     warn!("control file save in update_status failed: {:?}", e);
                 }
             }

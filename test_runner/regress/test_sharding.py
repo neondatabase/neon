@@ -177,7 +177,16 @@ def test_sharding_split_unsharded(
     env.storage_controller.consistency_check()
 
 
-def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        None,
+        "compact-shard-ancestors-localonly",
+        "compact-shard-ancestors-enqueued",
+        "compact-shard-ancestors-persistent",
+    ],
+)
+def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: Optional[str]):
     """
     Test that after a split, we clean up parent layer data in the child shards via compaction.
     """
@@ -196,6 +205,11 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
         "image_layer_creation_check_threshold": "0",
     }
 
+    neon_env_builder.storage_controller_config = {
+        # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
+        "max_unavailable": "300s"
+    }
+
     env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
@@ -212,6 +226,10 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
 
     # Split one shard into two
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=2)
+
+    # Let all shards move into their stable locations, so that during subsequent steps we
+    # don't have reconciles in progress (simpler to reason about what messages we expect in logs)
+    env.storage_controller.reconcile_until_idle()
 
     # Check we got the shard IDs we expected
     assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 2)) is not None
@@ -233,6 +251,90 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder):
 
         # Physical size should shrink because some layers have been dropped
         assert detail_after["current_physical_size"] < detail_before["current_physical_size"]
+
+    # Compaction shouldn't make anything unreadable
+    workload.validate()
+
+    # Force a generation increase: layer rewrites are a long-term thing and only happen after
+    # the generation has increased.
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    # Cleanup part 2: once layers are outside the PITR window, they will be rewritten if they are partially redundant
+    env.storage_controller.pageserver_api().set_tenant_config(tenant_id, {"pitr_interval": "0s"})
+    env.storage_controller.reconcile_until_idle()
+
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+
+        # Apply failpoints for the layer-rewriting phase: this is the area of code that has sensitive behavior
+        # across restarts, as we will have local layer files that temporarily disagree with the remote metadata
+        # for the same local layer file name.
+        if failpoint is not None:
+            ps.http_client().configure_failpoints((failpoint, "exit"))
+
+        # Do a GC to update gc_info (compaction uses this to decide whether a layer is to be rewritten)
+        # Set gc_horizon=0 to let PITR horizon control GC cutoff exclusively.
+        ps.http_client().timeline_gc(shard, timeline_id, gc_horizon=0)
+
+        # We will compare stats before + after compaction
+        detail_before = ps.http_client().timeline_detail(shard, timeline_id)
+
+        # Invoke compaction: this should rewrite layers that are behind the pitr horizon
+        try:
+            ps.http_client().timeline_compact(shard, timeline_id)
+        except requests.ConnectionError as e:
+            if failpoint is None:
+                raise e
+            else:
+                log.info(f"Compaction failed (failpoint={failpoint}): {e}")
+
+            if failpoint in (
+                "compact-shard-ancestors-localonly",
+                "compact-shard-ancestors-enqueued",
+            ):
+                # If we left local files that don't match remote metadata, we expect warnings on next startup
+                env.pageserver.allowed_errors.append(
+                    ".*removing local file .+ because it has unexpected length.*"
+                )
+
+            # Post-failpoint: we check that the pageserver comes back online happily.
+            env.pageserver.running = False
+            env.pageserver.start()
+        else:
+            assert failpoint is None  # We shouldn't reach success path if a failpoint was set
+
+            detail_after = ps.http_client().timeline_detail(shard, timeline_id)
+
+            # Physical size should shrink because layers are smaller
+            assert detail_after["current_physical_size"] < detail_before["current_physical_size"]
+
+    # Validate size statistics
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+        timeline_info = ps.http_client().timeline_detail(shard, timeline_id)
+        reported_size = timeline_info["current_physical_size"]
+        layer_paths = ps.list_layers(shard, timeline_id)
+        measured_size = 0
+        for p in layer_paths:
+            abs_path = ps.timeline_dir(shard, timeline_id) / p
+            measured_size += os.stat(abs_path).st_size
+
+        log.info(
+            f"shard {shard} reported size {reported_size}, measured size {measured_size} ({len(layer_paths)} layers)"
+        )
+
+        if failpoint in (
+            "compact-shard-ancestors-localonly",
+            "compact-shard-ancestors-enqueued",
+        ):
+            # If we injected a failure between local rewrite and remote upload, then after
+            # restart we may end up with neither version of the file on local disk (the new file
+            # is cleaned up because it doesn't matchc remote metadata).  So local size isn't
+            # necessarily going to match remote physical size.
+            continue
+
+        assert measured_size == reported_size
 
     # Compaction shouldn't make anything unreadable
     workload.validate()

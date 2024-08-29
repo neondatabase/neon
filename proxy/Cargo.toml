@@ -38,6 +38,7 @@ hmac.workspace = true
 hostname.workspace = true
 http.workspace = true
 humantime.workspace = true
+humantime-serde.workspace = true
 hyper.workspace = true
 hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
@@ -82,6 +83,7 @@ thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
 tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
@@ -94,10 +96,8 @@ url.workspace = true
 urlencoding.workspace = true
 utils.workspace = true
 uuid.workspace = true
-webpki-roots.workspace = true
+rustls-native-certs.workspace = true
 x509-parser.workspace = true
-native-tls.workspace = true
-postgres-native-tls.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
 

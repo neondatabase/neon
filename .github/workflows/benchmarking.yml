@@ -38,6 +38,11 @@ on:
         description: 'AWS-RDS and AWS-AURORA normally only run on Saturday. Set this to true to run them on every workflow_dispatch'
         required: false
         default: false
+      run_only_pgvector_tests:
+        type: boolean
+        description: 'Run pgvector tests but no other tests. If not set, all tests including pgvector tests will be run'
+        required: false
+        default: false
 
 defaults:
   run:
@@ -50,6 +55,7 @@ concurrency:
 
 jobs:
   bench:
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
@@ -120,6 +126,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   generate-matrices:
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     # Create matrices for the benchmarking jobs, so we run benchmarks on rds only once a week (on Saturday)
     #
     # Available platforms:
@@ -130,7 +137,7 @@ jobs:
     # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
     env:
       RUN_AWS_RDS_AND_AURORA: ${{ github.event.inputs.run_AWS_RDS_AND_AURORA || 'false' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
       olap-compare-matrix: ${{ steps.olap-compare-matrix.outputs.matrix }}
@@ -197,6 +204,7 @@ jobs:
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
   pgbench-compare:
+    if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
     needs: [ generate-matrices ]
 
     strategy:
@@ -343,6 +351,92 @@ jobs:
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
+  pgbench-pgvector:
+    env:
+      TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
+      TEST_PG_BENCH_SCALES_MATRIX: "1"
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      DEFAULT_PG_VERSION: 16
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
+      PLATFORM: "neon-captest-pgvector"
+
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      options: --init
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    - name: Add Postgres binaries to PATH
+      run: |
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
+
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+        CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR }}
+        
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+
+        QUERIES=("SELECT version()")
+        QUERIES+=("SHOW neon.tenant_id")
+        QUERIES+=("SHOW neon.timeline_id")
+        
+        for q in "${QUERIES[@]}"; do
+          psql ${CONNSTR} -c "${q}"
+        done
+
+    - name: Benchmark pgvector hnsw indexing
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance/test_perf_olap.py
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgvector_indexing
+      env:
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+
+    - name: Benchmark pgvector hnsw queries
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_pgvector
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+    
+    - name: Create Allure report
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
+
+    - name: Post to a Slack channel
+      if: ${{ github.event.schedule && failure() }}
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: "C033QLM5P7D" # dev-staging-stream
+        slack-message: "Periodic perf testing neon-captest-pgvector: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+
   clickbench-compare:
     # ClichBench DB for rds-aurora and rds-Postgres deployed to the same clusters
     # we use for performance testing in pgbench-compare.
@@ -351,7 +445,7 @@ jobs:
     #
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     needs: [ generate-matrices, pgbench-compare ]
 
     strategy:
@@ -455,7 +549,7 @@ jobs:
     # We might change it after https://github.com/neondatabase/neon/issues/2900.
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     needs: [ generate-matrices, clickbench-compare ]
 
     strategy:
@@ -557,7 +651,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   user-examples-compare:
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
     needs: [ generate-matrices, tpch-compare ]
 
     strategy:

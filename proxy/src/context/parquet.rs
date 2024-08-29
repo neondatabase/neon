@@ -13,7 +13,9 @@ use parquet::{
     },
     record::RecordWriter,
 };
+use pq_proto::StartupMessageParams;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
+use serde::ser::SerializeMap;
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, Span};
@@ -87,6 +89,7 @@ pub struct RequestData {
     database: Option<String>,
     project: Option<String>,
     branch: Option<String>,
+    pg_options: Option<String>,
     auth_method: Option<&'static str>,
     error: Option<&'static str>,
     /// Success is counted if we form a HTTP response with sql rows inside
@@ -101,6 +104,23 @@ pub struct RequestData {
     disconnect_timestamp: Option<chrono::NaiveDateTime>,
 }
 
+struct Options<'a> {
+    options: &'a StartupMessageParams,
+}
+
+impl<'a> serde::Serialize for Options<'a> {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = s.serialize_map(None)?;
+        for (k, v) in self.options.iter() {
+            state.serialize_entry(k, v)?;
+        }
+        state.end()
+    }
+}
+
 impl From<&RequestMonitoring> for RequestData {
     fn from(value: &RequestMonitoring) -> Self {
         Self {
@@ -113,6 +133,10 @@ impl From<&RequestMonitoring> for RequestData {
             database: value.dbname.as_deref().map(String::from),
             project: value.project.as_deref().map(String::from),
             branch: value.branch.as_deref().map(String::from),
+            pg_options: value
+                .pg_options
+                .as_ref()
+                .and_then(|options| serde_json::to_string(&Options { options }).ok()),
             auth_method: value.auth_method.as_ref().map(|x| match x {
                 super::AuthMethod::Web => "web",
                 super::AuthMethod::ScramSha256 => "scram_sha_256",
@@ -494,6 +518,7 @@ mod tests {
             database: Some(hex::encode(rng.gen::<[u8; 16]>())),
             project: Some(hex::encode(rng.gen::<[u8; 16]>())),
             branch: Some(hex::encode(rng.gen::<[u8; 16]>())),
+            pg_options: None,
             auth_method: None,
             protocol: ["tcp", "ws", "http"][rng.gen_range(0..3)],
             region: "us-east-1",
@@ -570,15 +595,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1315314, 3, 6000),
-                (1315307, 3, 6000),
-                (1315367, 3, 6000),
-                (1315324, 3, 6000),
-                (1315454, 3, 6000),
-                (1315296, 3, 6000),
-                (1315088, 3, 6000),
-                (1315324, 3, 6000),
-                (438713, 1, 2000)
+                (1315874, 3, 6000),
+                (1315867, 3, 6000),
+                (1315927, 3, 6000),
+                (1315884, 3, 6000),
+                (1316014, 3, 6000),
+                (1315856, 3, 6000),
+                (1315648, 3, 6000),
+                (1315884, 3, 6000),
+                (438913, 1, 2000)
             ]
         );
 
@@ -608,11 +633,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1222212, 5, 10000),
-                (1228362, 5, 10000),
-                (1230156, 5, 10000),
-                (1229518, 5, 10000),
-                (1220796, 5, 10000)
+                (1223214, 5, 10000),
+                (1229364, 5, 10000),
+                (1231158, 5, 10000),
+                (1230520, 5, 10000),
+                (1221798, 5, 10000)
             ]
         );
 
@@ -644,11 +669,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1207859, 5, 10000),
-                (1207590, 5, 10000),
-                (1207883, 5, 10000),
-                (1207871, 5, 10000),
-                (1208126, 5, 10000)
+                (1208861, 5, 10000),
+                (1208592, 5, 10000),
+                (1208885, 5, 10000),
+                (1208873, 5, 10000),
+                (1209128, 5, 10000)
             ]
         );
 
@@ -673,15 +698,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1315314, 3, 6000),
-                (1315307, 3, 6000),
-                (1315367, 3, 6000),
-                (1315324, 3, 6000),
-                (1315454, 3, 6000),
-                (1315296, 3, 6000),
-                (1315088, 3, 6000),
-                (1315324, 3, 6000),
-                (438713, 1, 2000)
+                (1315874, 3, 6000),
+                (1315867, 3, 6000),
+                (1315927, 3, 6000),
+                (1315884, 3, 6000),
+                (1316014, 3, 6000),
+                (1315856, 3, 6000),
+                (1315648, 3, 6000),
+                (1315884, 3, 6000),
+                (438913, 1, 2000)
             ]
         );
 
@@ -718,7 +743,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(659462, 2, 3001), (659176, 2, 3000), (658972, 2, 2999)]
+            [(659836, 2, 3001), (659550, 2, 3000), (659346, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

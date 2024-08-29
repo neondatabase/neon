@@ -35,7 +35,7 @@ use crate::{
     },
     stream, url,
 };
-use crate::{scram, EndpointCacheKey, EndpointId, Normalize, RoleName};
+use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {

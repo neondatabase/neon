@@ -16,7 +16,7 @@ use crate::tenant::{Tenant, TenantState};
 use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::{backoff, completion};
+use utils::{backoff, completion, pausable_failpoint};
 
 static CONCURRENT_BACKGROUND_TASKS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
     once_cell::sync::Lazy::new(|| {

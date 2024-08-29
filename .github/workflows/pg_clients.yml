@@ -20,7 +20,7 @@ concurrency:
 jobs:
   test-postgres-client-libs:
     # TODO: switch to gen2 runner, requires docker
-    runs-on: [ ubuntu-latest ]
+    runs-on: ubuntu-22.04
 
     env:
       DEFAULT_PG_VERSION: 14

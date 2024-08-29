@@ -51,9 +51,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketRw<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.project();
         let mut stream = this.stream;
-        this.send.put(buf);
 
         ready!(stream.as_mut().poll_ready(cx).map_err(io_error))?;
+
+        this.send.put(buf);
         match stream.as_mut().start_send(Frame::binary(this.send.split())) {
             Ok(()) => Poll::Ready(Ok(buf.len())),
             Err(e) => Poll::Ready(Err(io_error(e))),

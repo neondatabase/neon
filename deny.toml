@@ -99,6 +99,13 @@ name = "async-executor"
 [[bans.deny]]
 name = "smol"
 
+[[bans.deny]]
+# We want to use rustls instead of the platform's native tls implementation.
+name = "native-tls"
+
+[[bans.deny]]
+name = "openssl"
+
 # This section is considered when running `cargo deny check sources`.
 # More documentation about the 'sources' section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html

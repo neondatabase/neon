@@ -187,6 +187,7 @@ impl SecondaryTenant {
         };
 
         let now = SystemTime::now();
+        tracing::info!("Evicting secondary layer");
 
         let this = self.clone();
 

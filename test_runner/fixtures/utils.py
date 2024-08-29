@@ -196,7 +196,7 @@ def query_scalar(cur: cursor, query: str) -> Any:
 
 
 # Traverse directory to get total size.
-def get_dir_size(path: str) -> int:
+def get_dir_size(path: Path) -> int:
     """Return size in bytes."""
     totalbytes = 0
     for root, _dirs, files in os.walk(path):
@@ -560,3 +560,25 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str
 
     elapsed = time.time() - started_at
     log.info(f"assert_pageserver_backups_equal completed in {elapsed}s")
+
+
+class PropagatingThread(threading.Thread):
+    _target: Any
+    _args: Any
+    _kwargs: Any
+    """
+    Simple Thread wrapper with join() propagating the possible exception in the thread.
+    """
+
+    def run(self):
+        self.exc = None
+        try:
+            self.ret = self._target(*self._args, **self._kwargs)
+        except BaseException as e:
+            self.exc = e
+
+    def join(self, timeout=None):
+        super(PropagatingThread, self).join(timeout)
+        if self.exc:
+            raise self.exc
+        return self.ret
