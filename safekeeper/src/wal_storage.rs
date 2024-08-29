@@ -44,7 +44,10 @@ pub trait Storage {
     /// the segment and short header at the page of given LSN. This is only used
     /// for timeline initialization because compute will stream data only since
     /// init_lsn. Other segment headers are included in compute stream.
-    fn initialize_first_segment(&mut self, init_lsn: Lsn) -> impl Future<Output = Result<()>> + Send;
+    fn initialize_first_segment(
+        &mut self,
+        init_lsn: Lsn,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     /// Write piece of WAL from buf to disk, but not necessarily sync it.
     fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> impl Future<Output = Result<()>> + Send;
