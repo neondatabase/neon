@@ -11,6 +11,7 @@ either.workspace = true
 tokio-rustls.workspace = true
 anyhow.workspace = true
 hex.workspace = true
+humantime.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 bytes.workspace = true

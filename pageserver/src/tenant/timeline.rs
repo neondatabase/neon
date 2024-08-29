@@ -103,7 +103,6 @@ use crate::metrics::{
 };
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 use crate::tenant::config::TenantConfOpt;
-use pageserver_api::key::{is_inherited_key, is_rel_fsm_block_key, is_rel_vm_block_key};
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
@@ -3158,7 +3157,7 @@ impl Timeline {
 
             // Recurse into ancestor if needed
             if let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() {
-                if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
+                if key.is_inherited_key() && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
                     trace!(
                         "going into ancestor {}, cont_lsn is {}",
                         timeline.ancestor_lsn,
@@ -3847,22 +3846,25 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
+            // FIXME(auxfilesv2): support multiple metadata key partitions might need initdb support as well?
+            // This code path will not be hit during regression tests. After #7099 we have a single partition
+            // with two key ranges. If someone wants to fix initdb optimization in the future, this might need
+            // to be fixed.
+
             // For metadata, always create delta layers.
             let delta_layer = if !metadata_partition.parts.is_empty() {
                 assert_eq!(
                     metadata_partition.parts.len(),
                     1,
-                    "currently sparse keyspace should only contain a single aux file keyspace"
+                    "currently sparse keyspace should only contain a single metadata keyspace"
                 );
                 let metadata_keyspace = &metadata_partition.parts[0];
-                assert_eq!(
-                    metadata_keyspace.0.ranges.len(),
-                    1,
-                    "aux file keyspace should be a single range"
-                );
                 self.create_delta_layer(
                     &frozen_layer,
-                    Some(metadata_keyspace.0.ranges[0].clone()),
+                    Some(
+                        metadata_keyspace.0.ranges.first().unwrap().start
+                            ..metadata_keyspace.0.ranges.last().unwrap().end,
+                    ),
                     ctx,
                 )
                 .await
@@ -4229,7 +4231,7 @@ impl Timeline {
                                 // Unfortunately we cannot do this for the main fork, or for
                                 // any metadata keys, keys, as that would lead to actual data
                                 // loss.
-                                if is_rel_fsm_block_key(img_key) || is_rel_vm_block_key(img_key) {
+                                if img_key.is_rel_fsm_block_key() || img_key.is_rel_vm_block_key() {
                                     warn!("could not reconstruct FSM or VM key {img_key}, filling with zeros: {err:?}");
                                     ZERO_PAGE.clone()
                                 } else {

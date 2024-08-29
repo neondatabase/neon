@@ -1,6 +1,6 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use pageserver_api::key::{is_rel_block_key, key_to_rel_block, Key};
+use pageserver_api::key::Key;
 use pageserver_api::keyspace::KeySpaceAccum;
 use pageserver_api::models::PagestreamGetPageRequest;
 
@@ -187,7 +187,7 @@ async fn main_impl(
                     for r in partitioning.keys.ranges.iter() {
                         let mut i = r.start;
                         while i != r.end {
-                            if is_rel_block_key(&i) {
+                            if i.is_rel_block_key() {
                                 filtered.add_key(i);
                             }
                             i = i.next();
@@ -308,9 +308,10 @@ async fn main_impl(
                     let r = &ranges[weights.sample(&mut rng)];
                     let key: i128 = rng.gen_range(r.start..r.end);
                     let key = Key::from_i128(key);
-                    assert!(is_rel_block_key(&key));
-                    let (rel_tag, block_no) =
-                        key_to_rel_block(key).expect("we filter non-rel-block keys out above");
+                    assert!(key.is_rel_block_key());
+                    let (rel_tag, block_no) = key
+                        .to_rel_block()
+                        .expect("we filter non-rel-block keys out above");
                     PagestreamGetPageRequest {
                         request_lsn: if rng.gen_bool(args.req_latest_probability) {
                             Lsn::MAX

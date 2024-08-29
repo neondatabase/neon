@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::RepOriginId;
 use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
@@ -37,6 +38,9 @@ pub const RELATION_SIZE_PREFIX: u8 = 0x61;
 
 /// The key prefix of AUX file keys.
 pub const AUX_KEY_PREFIX: u8 = 0x62;
+
+/// The key prefix of ReplOrigin keys.
+pub const REPL_ORIGIN_KEY_PREFIX: u8 = 0x63;
 
 /// Check if the key falls in the range of metadata keys.
 pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
@@ -385,9 +389,11 @@ pub fn rel_size_to_key(rel: RelTag) -> Key {
     }
 }
 
-#[inline(always)]
-pub fn is_rel_size_key(key: &Key) -> bool {
-    key.field1 == 0 && key.field6 == u32::MAX
+impl Key {
+    #[inline(always)]
+    pub fn is_rel_size_key(&self) -> bool {
+        self.field1 == 0 && self.field6 == u32::MAX
+    }
 }
 
 #[inline(always)]
@@ -478,12 +484,14 @@ pub fn slru_segment_size_to_key(kind: SlruKind, segno: u32) -> Key {
     }
 }
 
-pub fn is_slru_segment_size_key(key: &Key) -> bool {
-    key.field1 == 0x01
-        && key.field2 < 0x03
-        && key.field3 == 0x01
-        && key.field5 == 0
-        && key.field6 == u32::MAX
+impl Key {
+    pub fn is_slru_segment_size_key(&self) -> bool {
+        self.field1 == 0x01
+            && self.field2 < 0x03
+            && self.field3 == 0x01
+            && self.field5 == 0
+            && self.field6 == u32::MAX
+    }
 }
 
 #[inline(always)]
@@ -583,6 +591,37 @@ pub const AUX_FILES_KEY: Key = Key {
     field6: 2,
 };
 
+#[inline(always)]
+pub fn repl_origin_key(origin_id: RepOriginId) -> Key {
+    Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: origin_id as u32,
+    }
+}
+
+/// Get the range of replorigin keys.
+pub fn repl_origin_key_range() -> Range<Key> {
+    Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: 0,
+    }..Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: 0x10000,
+    }
+}
+
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
@@ -591,73 +630,78 @@ pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
 /// Sparse keyspace range for vectored get. Missing key error will be ignored for this range.
 pub const NON_INHERITED_SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
 
-// AUX_FILES currently stores only data for logical replication (slots etc), and
-// we don't preserve these on a branch because safekeepers can't follow timeline
-// switch (and generally it likely should be optional), so ignore these.
-#[inline(always)]
-pub fn is_inherited_key(key: Key) -> bool {
-    !NON_INHERITED_RANGE.contains(&key) && !NON_INHERITED_SPARSE_RANGE.contains(&key)
-}
+impl Key {
+    // AUX_FILES currently stores only data for logical replication (slots etc), and
+    // we don't preserve these on a branch because safekeepers can't follow timeline
+    // switch (and generally it likely should be optional), so ignore these.
+    #[inline(always)]
+    pub fn is_inherited_key(self) -> bool {
+        !NON_INHERITED_RANGE.contains(&self) && !NON_INHERITED_SPARSE_RANGE.contains(&self)
+    }
 
-#[inline(always)]
-pub fn is_rel_fsm_block_key(key: Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
-}
+    #[inline(always)]
+    pub fn is_rel_fsm_block_key(self) -> bool {
+        self.field1 == 0x00
+            && self.field4 != 0
+            && self.field5 == FSM_FORKNUM
+            && self.field6 != 0xffffffff
+    }
 
-#[inline(always)]
-pub fn is_rel_vm_block_key(key: Key) -> bool {
-    key.field1 == 0x00
-        && key.field4 != 0
-        && key.field5 == VISIBILITYMAP_FORKNUM
-        && key.field6 != 0xffffffff
-}
+    #[inline(always)]
+    pub fn is_rel_vm_block_key(self) -> bool {
+        self.field1 == 0x00
+            && self.field4 != 0
+            && self.field5 == VISIBILITYMAP_FORKNUM
+            && self.field6 != 0xffffffff
+    }
 
-#[inline(always)]
-pub fn key_to_slru_block(key: Key) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
-    Ok(match key.field1 {
-        0x01 => {
-            let kind = match key.field2 {
-                0x00 => SlruKind::Clog,
-                0x01 => SlruKind::MultiXactMembers,
-                0x02 => SlruKind::MultiXactOffsets,
-                _ => anyhow::bail!("unrecognized slru kind 0x{:02x}", key.field2),
-            };
-            let segno = key.field4;
-            let blknum = key.field6;
+    #[inline(always)]
+    pub fn to_slru_block(self) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
+        Ok(match self.field1 {
+            0x01 => {
+                let kind = match self.field2 {
+                    0x00 => SlruKind::Clog,
+                    0x01 => SlruKind::MultiXactMembers,
+                    0x02 => SlruKind::MultiXactOffsets,
+                    _ => anyhow::bail!("unrecognized slru kind 0x{:02x}", self.field2),
+                };
+                let segno = self.field4;
+                let blknum = self.field6;
 
-            (kind, segno, blknum)
-        }
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
-}
+                (kind, segno, blknum)
+            }
+            _ => anyhow::bail!("unexpected value kind 0x{:02x}", self.field1),
+        })
+    }
 
-#[inline(always)]
-pub fn is_slru_block_key(key: Key) -> bool {
-    key.field1 == 0x01                // SLRU-related
-        && key.field3 == 0x00000001   // but not SlruDir
-        && key.field6 != 0xffffffff // and not SlruSegSize
-}
+    #[inline(always)]
+    pub fn is_slru_block_key(self) -> bool {
+        self.field1 == 0x01                // SLRU-related
+        && self.field3 == 0x00000001   // but not SlruDir
+        && self.field6 != 0xffffffff // and not SlruSegSize
+    }
 
-#[inline(always)]
-pub fn is_rel_block_key(key: &Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0 && key.field6 != 0xffffffff
-}
+    #[inline(always)]
+    pub fn is_rel_block_key(&self) -> bool {
+        self.field1 == 0x00 && self.field4 != 0 && self.field6 != 0xffffffff
+    }
 
-/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
-#[inline(always)]
-pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
-    Ok(match key.field1 {
-        0x00 => (
-            RelTag {
-                spcnode: key.field2,
-                dbnode: key.field3,
-                relnode: key.field4,
-                forknum: key.field5,
-            },
-            key.field6,
-        ),
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
+    /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.
+    #[inline(always)]
+    pub fn to_rel_block(self) -> anyhow::Result<(RelTag, BlockNumber)> {
+        Ok(match self.field1 {
+            0x00 => (
+                RelTag {
+                    spcnode: self.field2,
+                    dbnode: self.field3,
+                    relnode: self.field4,
+                    forknum: self.field5,
+                },
+                self.field6,
+            ),
+            _ => anyhow::bail!("unexpected value kind 0x{:02x}", self.field1),
+        })
+    }
 }
 
 impl std::str::FromStr for Key {

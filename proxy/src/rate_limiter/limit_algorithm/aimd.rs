@@ -51,7 +51,9 @@ impl LimitAlgorithm for Aimd {
                 // E.g. round(2 * 0.9) = 2, but floor(2 * 0.9) = 1
                 let limit = limit.floor() as usize;
 
-                limit.clamp(self.min, self.max)
+                let limit = limit.clamp(self.min, self.max);
+                tracing::info!(limit, "limit decreased");
+                limit
             }
         }
     }
@@ -66,6 +68,53 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn increase_decrease() {
+        let config = RateLimiterConfig {
+            initial_limit: 1,
+            algorithm: RateLimitAlgorithm::Aimd {
+                conf: Aimd {
+                    min: 1,
+                    max: 2,
+                    inc: 10,
+                    dec: 0.5,
+                    utilisation: 0.8,
+                },
+            },
+        };
+
+        let limiter = DynamicLimiter::new(config);
+
+        let token = limiter
+            .acquire_timeout(Duration::from_millis(1))
+            .await
+            .unwrap();
+        token.release(Outcome::Success);
+
+        assert_eq!(limiter.state().limit(), 2);
+
+        let token = limiter
+            .acquire_timeout(Duration::from_millis(1))
+            .await
+            .unwrap();
+        token.release(Outcome::Success);
+        assert_eq!(limiter.state().limit(), 2);
+
+        let token = limiter
+            .acquire_timeout(Duration::from_millis(1))
+            .await
+            .unwrap();
+        token.release(Outcome::Overload);
+        assert_eq!(limiter.state().limit(), 1);
+
+        let token = limiter
+            .acquire_timeout(Duration::from_millis(1))
+            .await
+            .unwrap();
+        token.release(Outcome::Overload);
+        assert_eq!(limiter.state().limit(), 1);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn should_decrease_limit_on_overload() {
@@ -85,12 +134,47 @@ mod tests {
         let limiter = DynamicLimiter::new(config);
 
         let token = limiter
-            .acquire_timeout(Duration::from_millis(1))
+            .acquire_timeout(Duration::from_millis(100))
             .await
             .unwrap();
         token.release(Outcome::Overload);
 
         assert_eq!(limiter.state().limit(), 5, "overload: decrease");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_timeout_times_out() {
+        let config = RateLimiterConfig {
+            initial_limit: 1,
+            algorithm: RateLimitAlgorithm::Aimd {
+                conf: Aimd {
+                    min: 1,
+                    max: 2,
+                    inc: 10,
+                    dec: 0.5,
+                    utilisation: 0.8,
+                },
+            },
+        };
+
+        let limiter = DynamicLimiter::new(config);
+
+        let token = limiter
+            .acquire_timeout(Duration::from_millis(1))
+            .await
+            .unwrap();
+        let now = tokio::time::Instant::now();
+        limiter
+            .acquire_timeout(Duration::from_secs(1))
+            .await
+            .err()
+            .unwrap();
+
+        assert!(now.elapsed() >= Duration::from_secs(1));
+
+        token.release(Outcome::Success);
+
+        assert_eq!(limiter.state().limit(), 2);
     }
 
     #[tokio::test(start_paused = true)]

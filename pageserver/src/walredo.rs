@@ -34,7 +34,6 @@ use crate::repository::Key;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
-use pageserver_api::key::key_to_rel_block;
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::shard::TenantShardId;
 use std::sync::Arc;
@@ -208,7 +207,7 @@ impl PostgresRedoManager {
     ) -> anyhow::Result<Bytes> {
         *(self.last_redo_at.lock().unwrap()) = Some(Instant::now());
 
-        let (rel, blknum) = key_to_rel_block(key).context("invalid record")?;
+        let (rel, blknum) = key.to_rel_block().context("invalid record")?;
         const MAX_RETRY_ATTEMPTS: u32 = 1;
         let mut n_attempts = 0u32;
         loop {
@@ -362,10 +361,10 @@ impl PostgresRedoManager {
         &self,
         key: Key,
         page: &mut BytesMut,
-        _record_lsn: Lsn,
+        record_lsn: Lsn,
         record: &NeonWalRecord,
     ) -> anyhow::Result<()> {
-        apply_neon::apply_in_neon(record, key, page)?;
+        apply_neon::apply_in_neon(record, record_lsn, key, page)?;
 
         Ok(())
     }

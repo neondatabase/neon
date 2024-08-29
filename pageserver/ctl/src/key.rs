@@ -72,13 +72,14 @@ impl DescribeKeyCommand {
         println!("{key:?}");
 
         macro_rules! kind_query {
+            ([$($name:ident),*$(,)?]) => {{[$(kind_query!($name)),*]}};
             ($name:ident) => {{
                 let s: &'static str = stringify!($name);
                 let s = s.strip_prefix("is_").unwrap_or(s);
                 let s = s.strip_suffix("_key").unwrap_or(s);
 
                 #[allow(clippy::needless_borrow)]
-                (s, pageserver_api::key::$name(key))
+                (s, key.$name())
             }};
         }
 
@@ -86,18 +87,15 @@ impl DescribeKeyCommand {
         // "recognization". I think it accurately represents how strictly we model the Key
         // right now, but could of course be made less confusing.
 
-        let queries = [
-            ("rel_block", pageserver_api::key::is_rel_block_key(&key)),
-            kind_query!(is_rel_vm_block_key),
-            kind_query!(is_rel_fsm_block_key),
-            kind_query!(is_slru_block_key),
-            kind_query!(is_inherited_key),
-            ("rel_size", pageserver_api::key::is_rel_size_key(&key)),
-            (
-                "slru_segment_size",
-                pageserver_api::key::is_slru_segment_size_key(&key),
-            ),
-        ];
+        let queries = kind_query!([
+            is_rel_block_key,
+            is_rel_vm_block_key,
+            is_rel_fsm_block_key,
+            is_slru_block_key,
+            is_inherited_key,
+            is_rel_size_key,
+            is_slru_segment_size_key,
+        ]);
 
         let recognized_kind = "recognized kind";
         let metadata_key = "metadata key";

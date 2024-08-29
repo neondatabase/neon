@@ -133,8 +133,7 @@ impl Timeline {
                         },
                         &image_ctx,
                     )
-                    .await
-                    .map_err(anyhow::Error::from)?;
+                    .await?;
 
                 self.upload_new_image_layers(image_layers)?;
                 partitioning.parts.len()

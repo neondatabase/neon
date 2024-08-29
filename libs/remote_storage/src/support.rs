@@ -78,6 +78,10 @@ where
                 let e = Err(std::io::Error::from(e));
                 return Poll::Ready(Some(e));
             }
+        } else {
+            // this would be perfectly valid behaviour for doing a graceful completion on the
+            // download for example, but not one we expect to do right now.
+            tracing::warn!("continuing polling after having cancelled or timeouted");
         }
 
         this.inner.poll_next(cx)
@@ -89,13 +93,22 @@ where
 }
 
 /// Fires only on the first cancel or timeout, not on both.
-pub(crate) async fn cancel_or_timeout(
+pub(crate) fn cancel_or_timeout(
     timeout: Duration,
     cancel: CancellationToken,
-) -> TimeoutOrCancel {
-    tokio::select! {
-        _ = tokio::time::sleep(timeout) => TimeoutOrCancel::Timeout,
-        _ = cancel.cancelled() => TimeoutOrCancel::Cancel,
+) -> impl std::future::Future<Output = TimeoutOrCancel> + 'static {
+    // futures are lazy, they don't do anything before being polled.
+    //
+    // "precalculate" the wanted deadline before returning the future, so that we can use pause
+    // failpoint to trigger a timeout in test.
+    let deadline = tokio::time::Instant::now() + timeout;
+    async move {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => TimeoutOrCancel::Timeout,
+            _ = cancel.cancelled() => {
+                TimeoutOrCancel::Cancel
+            },
+        }
     }
 }
 
@@ -171,5 +184,32 @@ mod tests {
             _ = stream.next() => unreachable!("no cancellation ever happens because we already timed out"),
             _ = tokio::time::sleep(Duration::from_secs(121)) => {},
         }
+    }
+
+    #[tokio::test]
+    async fn notified_but_pollable_after() {
+        let inner = futures::stream::once(futures::future::ready(Ok(bytes::Bytes::from_static(
+            b"hello world",
+        ))));
+        let timeout = Duration::from_secs(120);
+        let cancel = CancellationToken::new();
+
+        cancel.cancel();
+        let stream = DownloadStream::new(cancel_or_timeout(timeout, cancel.clone()), inner);
+        let mut stream = std::pin::pin!(stream);
+
+        let next = stream.next().await;
+        let ioe = next.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                ioe.get_ref().unwrap().downcast_ref::<DownloadError>(),
+                Some(&DownloadError::Cancelled)
+            ),
+            "{ioe:?}"
+        );
+
+        let next = stream.next().await;
+        let bytes = next.unwrap().unwrap();
+        assert_eq!(&b"hello world"[..], bytes);
     }
 }

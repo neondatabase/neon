@@ -11,7 +11,6 @@ use utils::id::TimelineId;
 
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
-use crate::tenant::upload_queue::UploadQueueInitialized;
 use crate::tenant::Generation;
 use pageserver_api::shard::ShardIndex;
 
@@ -42,7 +41,7 @@ pub struct IndexPart {
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated for convenience when reading the serialized structure, but is
     // private because internally we would read from metadata instead.
-    disk_consistent_lsn: Lsn,
+    pub(super) disk_consistent_lsn: Lsn,
 
     #[serde(rename = "metadata_bytes")]
     pub metadata: TimelineMetadata,
@@ -80,23 +79,15 @@ impl IndexPart {
 
     pub const FILE_NAME: &'static str = "index_part.json";
 
-    fn new(
-        layers_and_metadata: &HashMap<LayerName, LayerFileMetadata>,
-        disk_consistent_lsn: Lsn,
-        metadata: TimelineMetadata,
-        lineage: Lineage,
-        last_aux_file_policy: Option<AuxFilePolicy>,
-    ) -> Self {
-        let layer_metadata = layers_and_metadata.clone();
-
-        Self {
+    pub(crate) fn empty(metadata: TimelineMetadata) -> Self {
+        IndexPart {
             version: Self::LATEST_VERSION,
-            layer_metadata,
-            disk_consistent_lsn,
+            layer_metadata: Default::default(),
+            disk_consistent_lsn: metadata.disk_consistent_lsn(),
             metadata,
             deleted_at: None,
-            lineage,
-            last_aux_file_policy,
+            lineage: Default::default(),
+            last_aux_file_policy: None,
         }
     }
 
@@ -106,7 +97,7 @@ impl IndexPart {
 
     /// If you want this under normal operations, read it from self.metadata:
     /// this method is just for the scrubber to use when validating an index.
-    pub fn get_disk_consistent_lsn(&self) -> Lsn {
+    pub fn duplicated_disk_consistent_lsn(&self) -> Lsn {
         self.disk_consistent_lsn
     }
 
@@ -120,34 +111,11 @@ impl IndexPart {
 
     #[cfg(test)]
     pub(crate) fn example() -> Self {
-        let example_metadata = TimelineMetadata::example();
-        Self::new(
-            &HashMap::new(),
-            example_metadata.disk_consistent_lsn(),
-            example_metadata,
-            Default::default(),
-            Some(AuxFilePolicy::V1),
-        )
+        Self::empty(TimelineMetadata::example())
     }
 
     pub(crate) fn last_aux_file_policy(&self) -> Option<AuxFilePolicy> {
         self.last_aux_file_policy
-    }
-}
-
-impl From<&UploadQueueInitialized> for IndexPart {
-    fn from(uq: &UploadQueueInitialized) -> Self {
-        let disk_consistent_lsn = uq.latest_metadata.disk_consistent_lsn();
-        let metadata = uq.latest_metadata.clone();
-        let lineage = uq.latest_lineage.clone();
-
-        Self::new(
-            &uq.latest_files,
-            disk_consistent_lsn,
-            metadata,
-            lineage,
-            uq.last_aux_file_policy,
-        )
     }
 }
 
@@ -236,11 +204,10 @@ impl Lineage {
     /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed
     /// to start a read/write primary at this lsn".
     ///
-    /// Returns true if the Lsn was previously a branch point.
+    /// Returns true if the Lsn was previously our branch point.
     pub(crate) fn is_previous_ancestor_lsn(&self, lsn: Lsn) -> bool {
         self.original_ancestor
-            .as_ref()
-            .is_some_and(|(_, ancestor_lsn, _)| lsn == *ancestor_lsn)
+            .is_some_and(|(_, ancestor_lsn, _)| ancestor_lsn == lsn)
     }
 }
 

@@ -17,8 +17,8 @@ use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use itertools::Itertools;
 use pageserver_api::key::{
-    dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
-    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
+    relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
     AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
@@ -27,7 +27,7 @@ use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{Oid, TimestampTz, TransactionId};
+use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
@@ -760,6 +760,27 @@ impl Timeline {
         }
     }
 
+    pub(crate) async fn get_replorigins(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
+        let kv = self
+            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .await
+            .context("scan")?;
+        let mut result = HashMap::new();
+        for (k, v) in kv {
+            let v = v.context("get value")?;
+            let origin_id = k.field6 as RepOriginId;
+            let origin_lsn = Lsn::des(&v).unwrap();
+            if origin_lsn != Lsn::INVALID {
+                result.insert(origin_id, origin_lsn);
+            }
+        }
+        Ok(result)
+    }
+
     /// Does the same as get_current_logical_size but counted on demand.
     /// Used to initialize the logical size tracking on startup.
     ///
@@ -885,7 +906,9 @@ impl Timeline {
         Ok((
             result.to_keyspace(),
             /* AUX sparse key space */
-            SparseKeySpace(KeySpace::single(Key::metadata_aux_key_range())),
+            SparseKeySpace(KeySpace {
+                ranges: vec![repl_origin_key_range(), Key::metadata_aux_key_range()],
+            }),
         ))
     }
 
@@ -1152,6 +1175,20 @@ impl<'a> DatadirModification<'a> {
 
         self.put(twophase_file_key(xid), Value::Image(img));
         Ok(())
+    }
+
+    pub async fn set_replorigin(
+        &mut self,
+        origin_id: RepOriginId,
+        origin_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let key = repl_origin_key(origin_id);
+        self.put(key, Value::Image(origin_lsn.ser().unwrap().into()));
+        Ok(())
+    }
+
+    pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> anyhow::Result<()> {
+        self.set_replorigin(origin_id, Lsn::INVALID).await
     }
 
     pub fn put_control_file(&mut self, img: Bytes) -> anyhow::Result<()> {
@@ -1684,7 +1721,7 @@ impl<'a> DatadirModification<'a> {
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
             for (lsn, value) in values {
-                if is_rel_block_key(&key) || is_slru_block_key(key) {
+                if key.is_rel_block_key() || key.is_slru_block_key() {
                     // This bails out on first error without modifying pending_updates.
                     // That's Ok, cf this function's doc comment.
                     writer.put(key, lsn, &value, ctx).await?;

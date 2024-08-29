@@ -1,9 +1,6 @@
 use std::{ops::RangeInclusive, str::FromStr};
 
-use crate::{
-    key::{is_rel_block_key, Key},
-    models::ShardParameters,
-};
+use crate::{key::Key, models::ShardParameters};
 use hex::FromHex;
 use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use serde::{Deserialize, Serialize};
@@ -672,7 +669,7 @@ fn key_is_shard0(key: &Key) -> bool {
     // because they must be included in basebackups.
     let is_initfork = key.field5 == INIT_FORKNUM;
 
-    !is_rel_block_key(key) || is_initfork
+    !key.is_rel_block_key() || is_initfork
 }
 
 /// Provide the same result as the function in postgres `hashfn.h` with the same name

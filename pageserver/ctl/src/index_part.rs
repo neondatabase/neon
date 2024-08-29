@@ -26,7 +26,7 @@ pub(crate) async fn main(cmd: &IndexPartCmd) -> anyhow::Result<()> {
 
             let output = Output {
                 layer_metadata: &des.layer_metadata,
-                disk_consistent_lsn: des.get_disk_consistent_lsn(),
+                disk_consistent_lsn: des.metadata.disk_consistent_lsn(),
                 timeline_metadata: &des.metadata,
             };
 
