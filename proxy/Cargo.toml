@@ -26,6 +26,7 @@ clap.workspace = true
 consumption_metrics.workspace = true
 dashmap.workspace = true
 env_logger.workspace = true
+framed-websockets.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hashbrown.workspace = true
@@ -35,7 +36,6 @@ hmac.workspace = true
 hostname.workspace = true
 http.workspace = true
 humantime.workspace = true
-hyper-tungstenite.workspace = true
 hyper.workspace = true
 hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
@@ -76,7 +76,6 @@ smol_str.workspace = true
 smallvec.workspace = true
 socket2.workspace = true
 subtle.workspace = true
-sync_wrapper.workspace = true
 task-local-extensions.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
@@ -106,6 +105,7 @@ workspace_hack.workspace = true
 [dev-dependencies]
 camino-tempfile.workspace = true
 fallible-iterator.workspace = true
+tokio-tungstenite.workspace = true
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true

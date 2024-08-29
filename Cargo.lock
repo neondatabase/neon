@@ -708,7 +708,7 @@ dependencies = [
  "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.20.0",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -980,6 +980,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3e2c3daef883ecc1b5d58c15adae93470a91d425f3532ba1695849656af3fc1"
 
 [[package]]
+name = "bytemuck"
+version = "1.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78834c15cb5d5efe3452d58b1e8ba890dd62d21907f867f383358198e56ebca5"
+
+[[package]]
 name = "byteorder"
 version = "1.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1236,8 +1242,10 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "tar",
+ "thiserror",
  "tokio",
  "tokio-postgres",
+ "tokio-stream",
  "tokio-util",
  "toml_edit",
  "tracing",
@@ -1599,7 +1607,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6943ae99c34386c84a470c499d3414f66502a41340aa895406e0d2e4a207b91d"
 dependencies = [
  "cfg-if",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "lock_api",
  "once_cell",
  "parking_lot_core 0.9.8",
@@ -2001,6 +2009,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "framed-websockets"
+version = "0.1.0"
+source = "git+https://github.com/neondatabase/framed-websockets#34eff3d6f8cfccbc5f35e4f65314ff7328621127"
+dependencies = [
+ "base64 0.21.1",
+ "bytemuck",
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "http-body-util",
+ "hyper 1.2.0",
+ "hyper-util",
+ "pin-project",
+ "rand 0.8.5",
+ "sha1",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "fs2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2278,9 +2307,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.14.0"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c6201b9ff9fd90a5a3bac2e56a830d0caa509576f0e503818ee82c181b3437a"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 dependencies = [
  "ahash",
  "allocator-api2",
@@ -2288,11 +2317,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.8.4"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8094feaf31ff591f651a2664fb9cfd92bba7a60ce3197265e9482ebe753c8f7"
+checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
 dependencies = [
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -2602,21 +2631,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-tungstenite"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a343d17fe7885302ed7252767dc7bb83609a874b6ff581142241ec4b73957ad"
-dependencies = [
- "http-body-util",
- "hyper 1.2.0",
- "hyper-util",
- "pin-project-lite",
- "tokio",
- "tokio-tungstenite 0.21.0",
- "tungstenite 0.21.0",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2693,7 +2707,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad227c3af19d4914570ad36d30409928b75967c298feb9ea1969db3a610bb14e"
 dependencies = [
  "equivalent",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -2955,7 +2969,7 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3262e75e648fce39813cb56ac41f3c3e3f65217ebf3844d818d1f9398cfb0dc"
 dependencies = [
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -3008,7 +3022,7 @@ checksum = "652bc741286361c06de8cb4d89b21a6437f120c508c51713663589eeb9928ac5"
 dependencies = [
  "bytes",
  "crossbeam-utils",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "itoa",
  "lasso",
  "measured-derive",
@@ -3570,7 +3584,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79"
 dependencies = [
  "dlv-list",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -3903,7 +3917,7 @@ dependencies = [
  "ahash",
  "bytes",
  "chrono",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "num",
  "num-bigint",
  "paste",
@@ -4387,9 +4401,10 @@ dependencies = [
  "dashmap",
  "env_logger",
  "fallible-iterator",
+ "framed-websockets",
  "futures",
  "git-version",
- "hashbrown 0.13.2",
+ "hashbrown 0.14.5",
  "hashlink",
  "hex",
  "hmac",
@@ -4399,7 +4414,6 @@ dependencies = [
  "humantime",
  "hyper 0.14.26",
  "hyper 1.2.0",
- "hyper-tungstenite",
  "hyper-util",
  "indexmap 2.0.1",
  "ipnet",
@@ -4444,7 +4458,6 @@ dependencies = [
  "smol_str",
  "socket2 0.5.5",
  "subtle",
- "sync_wrapper",
  "task-local-extensions",
  "thiserror",
  "tikv-jemalloc-ctl",
@@ -4453,6 +4466,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls 0.25.0",
+ "tokio-tungstenite",
  "tokio-util",
  "tower-service",
  "tracing",
@@ -5961,7 +5975,7 @@ checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
 [[package]]
 name = "svg_fmt"
 version = "0.4.2"
-source = "git+https://github.com/neondatabase/fork--nical--rust_debug?branch=neon#c1820b28664b5df68de7f043fccf2ed5d67b6ae8"
+source = "git+https://github.com/nical/rust_debug?rev=28a7d96eecff2f28e75b1ea09f2d499a60d0e3b4#28a7d96eecff2f28e75b1ea09f2d499a60d0e3b4"
 
 [[package]]
 name = "syn"
@@ -6389,19 +6403,7 @@ dependencies = [
  "futures-util",
  "log",
  "tokio",
- "tungstenite 0.20.1",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c83b561d025642014097b66e6c1bb422783339e0909e4429cde4749d1990bc38"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.21.0",
+ "tungstenite",
 ]
 
 [[package]]
@@ -6415,7 +6417,7 @@ dependencies = [
  "futures-io",
  "futures-sink",
  "futures-util",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "pin-project-lite",
  "tokio",
  "tracing",
@@ -6688,25 +6690,6 @@ dependencies = [
  "bytes",
  "data-encoding",
  "http 0.2.9",
- "httparse",
- "log",
- "rand 0.8.5",
- "sha1",
- "thiserror",
- "url",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ef1a641ea34f399a848dea702823bbecfb4c486f911735368f1f137cb8257e1"
-dependencies = [
- "byteorder",
- "bytes",
- "data-encoding",
- "http 1.1.0",
  "httparse",
  "log",
  "rand 0.8.5",
@@ -7512,7 +7495,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "getrandom 0.2.11",
- "hashbrown 0.14.0",
+ "hashbrown 0.14.5",
  "hex",
  "hmac",
  "hyper 0.14.26",

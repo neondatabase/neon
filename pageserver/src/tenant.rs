@@ -190,7 +190,7 @@ pub const TENANT_DELETED_MARKER_FILE_NAME: &str = "deleted";
 #[derive(Clone)]
 pub struct TenantSharedResources {
     pub broker_client: storage_broker::BrokerClientChannel,
-    pub remote_storage: Option<GenericRemoteStorage>,
+    pub remote_storage: GenericRemoteStorage,
     pub deletion_queue_client: DeletionQueueClient,
 }
 
@@ -292,7 +292,7 @@ pub struct Tenant {
     walredo_mgr: Option<Arc<WalRedoManager>>,
 
     // provides access to timeline data sitting in the remote storage
-    pub(crate) remote_storage: Option<GenericRemoteStorage>,
+    pub(crate) remote_storage: GenericRemoteStorage,
 
     // Access to global deletion queue for when this tenant wants to schedule a deletion
     deletion_queue_client: DeletionQueueClient,
@@ -551,21 +551,22 @@ impl Tenant {
         );
 
         if let Some(index_part) = index_part.as_ref() {
-            timeline
-                .remote_client
-                .as_ref()
-                .unwrap()
-                .init_upload_queue(index_part)?;
-        } else if self.remote_storage.is_some() {
+            timeline.remote_client.init_upload_queue(index_part)?;
+        } else {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
             // By doing what we do here, the index part upload is retried.
             // If control plane retries timeline creation in the meantime, the mgmt API handler
             // for timeline creation will coalesce on the upload we queue here.
+
             // FIXME: this branch should be dead code as we no longer write local metadata.
-            let rtc = timeline.remote_client.as_ref().unwrap();
-            rtc.init_upload_queue_for_empty_remote(&metadata)?;
-            rtc.schedule_index_upload_for_full_metadata_update(&metadata)?;
+
+            timeline
+                .remote_client
+                .init_upload_queue_for_empty_remote(&metadata)?;
+            timeline
+                .remote_client
+                .schedule_index_upload_for_full_metadata_update(&metadata)?;
         }
 
         timeline
@@ -777,14 +778,14 @@ impl Tenant {
                     AttachType::Normal
                 };
 
-                let preload = match (&mode, &remote_storage) {
-                    (SpawnMode::Create, _) => {
+                let preload = match &mode {
+                    SpawnMode::Create => {
                         None
                     },
-                    (SpawnMode::Eager | SpawnMode::Lazy, Some(remote_storage)) => {
+                    SpawnMode::Eager | SpawnMode::Lazy => {
                         let _preload_timer = TENANT.preload.start_timer();
                         let res = tenant_clone
-                            .preload(remote_storage, task_mgr::shutdown_token())
+                            .preload(&remote_storage, task_mgr::shutdown_token())
                             .await;
                         match res {
                             Ok(p) => Some(p),
@@ -794,10 +795,7 @@ impl Tenant {
                             }
                         }
                     }
-                    (_, None) => {
-                        let _preload_timer = TENANT.preload.start_timer();
-                        None
-                    }
+
                 };
 
                 // Remote preload is complete.
@@ -1021,7 +1019,7 @@ impl Tenant {
                 index_part,
                 remote_metadata,
                 TimelineResources {
-                    remote_client: Some(remote_client),
+                    remote_client,
                     deletion_queue_client: self.deletion_queue_client.clone(),
                     timeline_get_throttle: self.timeline_get_throttle.clone(),
                 },
@@ -1047,7 +1045,7 @@ impl Tenant {
                 Arc::clone(self),
                 timeline_id,
                 &index_part.metadata,
-                Some(remote_timeline_client),
+                remote_timeline_client,
                 self.deletion_queue_client.clone(),
             )
             .instrument(tracing::info_span!("timeline_delete", %timeline_id))
@@ -1139,9 +1137,7 @@ impl Tenant {
         let mut size = 0;
 
         for timeline in self.list_timelines() {
-            if let Some(remote_client) = &timeline.remote_client {
-                size += remote_client.get_remote_physical_size();
-            }
+            size += timeline.remote_client.get_remote_physical_size();
         }
 
         size
@@ -1191,6 +1187,7 @@ impl Tenant {
     pub fn create_broken_tenant(
         conf: &'static PageServerConf,
         tenant_shard_id: TenantShardId,
+        remote_storage: GenericRemoteStorage,
         reason: String,
     ) -> Arc<Tenant> {
         Arc::new(Tenant::new(
@@ -1205,7 +1202,7 @@ impl Tenant {
             ShardIdentity::broken(tenant_shard_id.shard_number, tenant_shard_id.shard_count),
             None,
             tenant_shard_id,
-            None,
+            remote_storage,
             DeletionQueueClient::broken(),
         ))
     }
@@ -1398,13 +1395,7 @@ impl Tenant {
         tline.freeze_and_flush().await.context("freeze_and_flush")?;
 
         // Make sure the freeze_and_flush reaches remote storage.
-        tline
-            .remote_client
-            .as_ref()
-            .unwrap()
-            .wait_completion()
-            .await
-            .unwrap();
+        tline.remote_client.wait_completion().await.unwrap();
 
         let tl = uninit_tl.finish_creation()?;
         // The non-test code would call tl.activate() here.
@@ -1470,20 +1461,19 @@ impl Tenant {
                     return Err(CreateTimelineError::Conflict);
                 }
 
-                if let Some(remote_client) = existing.remote_client.as_ref() {
-                    // Wait for uploads to complete, so that when we return Ok, the timeline
-                    // is known to be durable on remote storage. Just like we do at the end of
-                    // this function, after we have created the timeline ourselves.
-                    //
-                    // We only really care that the initial version of `index_part.json` has
-                    // been uploaded. That's enough to remember that the timeline
-                    // exists. However, there is no function to wait specifically for that so
-                    // we just wait for all in-progress uploads to finish.
-                    remote_client
-                        .wait_completion()
-                        .await
-                        .context("wait for timeline uploads to complete")?;
-                }
+                // Wait for uploads to complete, so that when we return Ok, the timeline
+                // is known to be durable on remote storage. Just like we do at the end of
+                // this function, after we have created the timeline ourselves.
+                //
+                // We only really care that the initial version of `index_part.json` has
+                // been uploaded. That's enough to remember that the timeline
+                // exists. However, there is no function to wait specifically for that so
+                // we just wait for all in-progress uploads to finish.
+                existing
+                    .remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for timeline uploads to complete")?;
 
                 return Ok(existing);
             }
@@ -1559,14 +1549,14 @@ impl Tenant {
         // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
         // not send a success to the caller until it is.  The same applies to handling retries,
         // see the handling of [`TimelineExclusionError::AlreadyExists`] above.
-        if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
-            let kind = ancestor_timeline_id
-                .map(|_| "branched")
-                .unwrap_or("bootstrapped");
-            remote_client.wait_completion().await.with_context(|| {
-                format!("wait for {} timeline initial uploads to complete", kind)
-            })?;
-        }
+        let kind = ancestor_timeline_id
+            .map(|_| "branched")
+            .unwrap_or("bootstrapped");
+        loaded_timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .with_context(|| format!("wait for {} timeline initial uploads to complete", kind))?;
 
         loaded_timeline.activate(self.clone(), broker_client, None, ctx);
 
@@ -2161,32 +2151,26 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         let timelines = self.timelines.lock().unwrap().clone();
         for timeline in timelines.values() {
-            let Some(tl_client) = &timeline.remote_client else {
-                anyhow::bail!("Remote storage is mandatory");
-            };
-
-            let Some(remote_storage) = &self.remote_storage else {
-                anyhow::bail!("Remote storage is mandatory");
-            };
-
             // We do not block timeline creation/deletion during splits inside the pageserver: it is up to higher levels
             // to ensure that they do not start a split if currently in the process of doing these.
 
             // Upload an index from the parent: this is partly to provide freshness for the
             // child tenants that will copy it, and partly for general ease-of-debugging: there will
             // always be a parent shard index in the same generation as we wrote the child shard index.
-            tl_client.schedule_index_upload_for_file_changes()?;
-            tl_client.wait_completion().await?;
+            timeline
+                .remote_client
+                .schedule_index_upload_for_file_changes()?;
+            timeline.remote_client.wait_completion().await?;
 
             // Shut down the timeline's remote client: this means that the indices we write
             // for child shards will not be invalidated by the parent shard deleting layers.
-            tl_client.shutdown().await;
+            timeline.remote_client.shutdown().await;
 
             // Download methods can still be used after shutdown, as they don't flow through the remote client's
             // queue.  In principal the RemoteTimelineClient could provide this without downloading it, but this
             // operation is rare, so it's simpler to just download it (and robustly guarantees that the index
             // we use here really is the remotely persistent one).
-            let result = tl_client
+            let result = timeline.remote_client
                 .download_index_file(&self.cancel)
                 .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))
                 .await?;
@@ -2199,7 +2183,7 @@ impl Tenant {
 
             for child_shard in child_shards {
                 upload_index_part(
-                    remote_storage,
+                    &self.remote_storage,
                     child_shard,
                     &timeline.timeline_id,
                     self.generation,
@@ -2475,7 +2459,7 @@ impl Tenant {
         shard_identity: ShardIdentity,
         walredo_mgr: Option<Arc<WalRedoManager>>,
         tenant_shard_id: TenantShardId,
-        remote_storage: Option<GenericRemoteStorage>,
+        remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
     ) -> Tenant {
         let (state, mut rx) = watch::channel(state);
@@ -3119,11 +3103,10 @@ impl Tenant {
         // We still need to upload its metadata eagerly: if other nodes `attach` the tenant and miss this timeline, their GC
         // could get incorrect information and remove more layers, than needed.
         // See also https://github.com/neondatabase/neon/issues/3865
-        if let Some(remote_client) = new_timeline.remote_client.as_ref() {
-            remote_client
-                .schedule_index_upload_for_full_metadata_update(&metadata)
-                .context("branch initial metadata upload")?;
-        }
+        new_timeline
+            .remote_client
+            .schedule_index_upload_for_full_metadata_update(&metadata)
+            .context("branch initial metadata upload")?;
 
         Ok(new_timeline)
     }
@@ -3155,11 +3138,6 @@ impl Tenant {
         pgdata_path: &Utf8PathBuf,
         timeline_id: &TimelineId,
     ) -> anyhow::Result<()> {
-        let Some(storage) = &self.remote_storage else {
-            // No remote storage?  No upload.
-            return Ok(());
-        };
-
         let temp_path = timelines_path.join(format!(
             "{INITDB_PATH}.upload-{timeline_id}.{TEMP_FILE_SUFFIX}"
         ));
@@ -3183,7 +3161,7 @@ impl Tenant {
         backoff::retry(
             || async {
                 self::remote_timeline_client::upload_initdb_dir(
-                    storage,
+                    &self.remote_storage,
                     &self.tenant_shard_id.tenant_id,
                     timeline_id,
                     pgdata_zstd.try_clone().await?,
@@ -3240,9 +3218,6 @@ impl Tenant {
             }
         }
         if let Some(existing_initdb_timeline_id) = load_existing_initdb {
-            let Some(storage) = &self.remote_storage else {
-                bail!("no storage configured but load_existing_initdb set to {existing_initdb_timeline_id}");
-            };
             if existing_initdb_timeline_id != timeline_id {
                 let source_path = &remote_initdb_archive_path(
                     &self.tenant_shard_id.tenant_id,
@@ -3252,7 +3227,7 @@ impl Tenant {
                     &remote_initdb_archive_path(&self.tenant_shard_id.tenant_id, &timeline_id);
 
                 // if this fails, it will get retried by retried control plane requests
-                storage
+                self.remote_storage
                     .copy_object(source_path, dest_path, &self.cancel)
                     .await
                     .context("copy initdb tar")?;
@@ -3260,7 +3235,7 @@ impl Tenant {
             let (initdb_tar_zst_path, initdb_tar_zst) =
                 self::remote_timeline_client::download_initdb_tar_zst(
                     self.conf,
-                    storage,
+                    &self.remote_storage,
                     &self.tenant_shard_id,
                     &existing_initdb_timeline_id,
                     &self.cancel,
@@ -3355,20 +3330,14 @@ impl Tenant {
 
     /// Call this before constructing a timeline, to build its required structures
     fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
-        let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
-            let remote_client = RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.deletion_queue_client.clone(),
-                self.conf,
-                self.tenant_shard_id,
-                timeline_id,
-                self.generation,
-            );
-            Some(remote_client)
-        } else {
-            None
-        };
-
+        let remote_client = RemoteTimelineClient::new(
+            self.remote_storage.clone(),
+            self.deletion_queue_client.clone(),
+            self.conf,
+            self.tenant_shard_id,
+            timeline_id,
+            self.generation,
+        );
         TimelineResources {
             remote_client,
             deletion_queue_client: self.deletion_queue_client.clone(),
@@ -3392,9 +3361,9 @@ impl Tenant {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
-        if let Some(remote_client) = &resources.remote_client {
-            remote_client.init_upload_queue_for_empty_remote(new_metadata)?;
-        }
+        resources
+            .remote_client
+            .init_upload_queue_for_empty_remote(new_metadata)?;
 
         let timeline_struct = self
             .create_timeline_struct(
@@ -3562,9 +3531,7 @@ impl Tenant {
             tracing::info!(timeline_id=%timeline.timeline_id, "Flushing...");
             timeline.freeze_and_flush().await?;
             tracing::info!(timeline_id=%timeline.timeline_id, "Waiting for uploads...");
-            if let Some(client) = &timeline.remote_client {
-                client.wait_completion().await?;
-            }
+            timeline.remote_client.wait_completion().await?;
 
             Ok(())
         }
@@ -3878,7 +3845,7 @@ pub(crate) mod harness {
                 ShardIdentity::unsharded(),
                 Some(walredo_mgr),
                 self.tenant_shard_id,
-                Some(self.remote_storage.clone()),
+                self.remote_storage.clone(),
                 self.deletion_queue.new_client(),
             ));
 

@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use pageserver_compaction::helpers::PAGE_SZ;
 use pageserver_compaction::simulator::MockTimeline;
 use rand::Rng;
 use std::io::Write;
@@ -51,7 +52,7 @@ async fn simulate(cmd: &SimulateCmd, results_path: &Path) -> anyhow::Result<()> 
     let mut executor = MockTimeline::new();
 
     // Convert the logical size in MB into a key range.
-    let key_range = 0..((cmd.logical_size * 1024 * 1024) / 8192);
+    let key_range = 0..((cmd.logical_size * 1024 * 1024) / PAGE_SZ);
     //let key_range = u64::MIN..u64::MAX;
     println!(
         "starting simulation with key range {:016X}-{:016X}",

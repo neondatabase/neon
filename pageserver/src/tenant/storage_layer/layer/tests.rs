@@ -145,7 +145,7 @@ async fn smoke_test() {
         .await
         .expect("the local layer file still exists");
 
-    let rtc = timeline.remote_client.as_ref().unwrap();
+    let rtc = &timeline.remote_client;
 
     {
         let layers = &[layer];
@@ -761,13 +761,7 @@ async fn eviction_cancellation_on_drop() {
     timeline.freeze_and_flush().await.unwrap();
 
     // wait for the upload to complete so our Arc::strong_count assertion holds
-    timeline
-        .remote_client
-        .as_ref()
-        .unwrap()
-        .wait_completion()
-        .await
-        .unwrap();
+    timeline.remote_client.wait_completion().await.unwrap();
 
     let (evicted_layer, not_evicted) = {
         let mut layers = {

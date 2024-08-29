@@ -181,25 +181,23 @@ async fn ensure_timelines_dir_empty(timelines_path: &Utf8Path) -> Result<(), Del
 
 async fn remove_tenant_remote_delete_mark(
     conf: &PageServerConf,
-    remote_storage: Option<&GenericRemoteStorage>,
+    remote_storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
     cancel: &CancellationToken,
 ) -> Result<(), DeleteTenantError> {
-    if let Some(remote_storage) = remote_storage {
-        let path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
-        backoff::retry(
-            || async { remote_storage.delete(&path, cancel).await },
-            TimeoutOrCancel::caused_by_cancel,
-            FAILED_UPLOAD_WARN_THRESHOLD,
-            FAILED_REMOTE_OP_RETRIES,
-            "remove_tenant_remote_delete_mark",
-            cancel,
-        )
-        .await
-        .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
-        .and_then(|x| x)
-        .context("remove_tenant_remote_delete_mark")?;
-    }
+    let path = remote_tenant_delete_mark_path(conf, tenant_shard_id)?;
+    backoff::retry(
+        || async { remote_storage.delete(&path, cancel).await },
+        TimeoutOrCancel::caused_by_cancel,
+        FAILED_UPLOAD_WARN_THRESHOLD,
+        FAILED_REMOTE_OP_RETRIES,
+        "remove_tenant_remote_delete_mark",
+        cancel,
+    )
+    .await
+    .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
+    .and_then(|x| x)
+    .context("remove_tenant_remote_delete_mark")?;
     Ok(())
 }
 
@@ -297,7 +295,7 @@ impl DeleteTenantFlow {
     #[instrument(skip_all)]
     pub(crate) async fn run(
         conf: &'static PageServerConf,
-        remote_storage: Option<GenericRemoteStorage>,
+        remote_storage: GenericRemoteStorage,
         tenants: &'static std::sync::RwLock<TenantsMap>,
         tenant: Arc<Tenant>,
         cancel: &CancellationToken,
@@ -308,9 +306,7 @@ impl DeleteTenantFlow {
 
         let mut guard = Self::prepare(&tenant).await?;
 
-        if let Err(e) =
-            Self::run_inner(&mut guard, conf, remote_storage.as_ref(), &tenant, cancel).await
-        {
+        if let Err(e) = Self::run_inner(&mut guard, conf, &remote_storage, &tenant, cancel).await {
             tenant.set_broken(format!("{e:#}")).await;
             return Err(e);
         }
@@ -327,7 +323,7 @@ impl DeleteTenantFlow {
     async fn run_inner(
         guard: &mut OwnedMutexGuard<Self>,
         conf: &'static PageServerConf,
-        remote_storage: Option<&GenericRemoteStorage>,
+        remote_storage: &GenericRemoteStorage,
         tenant: &Tenant,
         cancel: &CancellationToken,
     ) -> Result<(), DeleteTenantError> {
@@ -339,14 +335,9 @@ impl DeleteTenantFlow {
             ))?
         });
 
-        // IDEA: implement detach as delete without remote storage. Then they would use the same lock (deletion_progress) so wont contend.
-        // Though sounds scary, different mark name?
-        // Detach currently uses remove_dir_all so in case of a crash we can end up in a weird state.
-        if let Some(remote_storage) = &remote_storage {
-            create_remote_delete_mark(conf, remote_storage, &tenant.tenant_shard_id, cancel)
-                .await
-                .context("remote_mark")?
-        }
+        create_remote_delete_mark(conf, remote_storage, &tenant.tenant_shard_id, cancel)
+            .await
+            .context("remote_mark")?;
 
         fail::fail_point!("tenant-delete-before-create-local-mark", |_| {
             Err(anyhow::anyhow!(
@@ -483,7 +474,7 @@ impl DeleteTenantFlow {
     fn schedule_background(
         guard: OwnedMutexGuard<Self>,
         conf: &'static PageServerConf,
-        remote_storage: Option<GenericRemoteStorage>,
+        remote_storage: GenericRemoteStorage,
         tenants: &'static std::sync::RwLock<TenantsMap>,
         tenant: Arc<Tenant>,
     ) {
@@ -512,7 +503,7 @@ impl DeleteTenantFlow {
     async fn background(
         mut guard: OwnedMutexGuard<Self>,
         conf: &PageServerConf,
-        remote_storage: Option<GenericRemoteStorage>,
+        remote_storage: GenericRemoteStorage,
         tenants: &'static std::sync::RwLock<TenantsMap>,
         tenant: &Arc<Tenant>,
     ) -> Result<(), DeleteTenantError> {
@@ -551,7 +542,7 @@ impl DeleteTenantFlow {
 
         remove_tenant_remote_delete_mark(
             conf,
-            remote_storage.as_ref(),
+            &remote_storage,
             &tenant.tenant_shard_id,
             &task_mgr::shutdown_token(),
         )

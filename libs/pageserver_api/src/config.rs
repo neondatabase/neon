@@ -327,7 +327,7 @@ pub mod defaults {
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
-    pub const DEFAULT_WALREDO_PROCESS_KIND: &str = "sync";
+    pub const DEFAULT_WALREDO_PROCESS_KIND: &str = "async";
 }
 
 impl Default for ConfigToml {

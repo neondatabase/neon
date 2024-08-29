@@ -1127,6 +1127,11 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    pub(crate) fn is_deleting(&self) -> bool {
+        let mut locked = self.upload_queue.lock().unwrap();
+        locked.stopped_mut().is_ok()
+    }
+
     pub(crate) async fn preserve_initdb_archive(
         self: &Arc<Self>,
         tenant_id: &TenantId,
@@ -2132,7 +2137,7 @@ mod tests {
             tenant_ctx: _tenant_ctx,
         } = test_setup;
 
-        let client = timeline.remote_client.as_ref().unwrap();
+        let client = &timeline.remote_client;
 
         // Download back the index.json, and check that the list of files is correct
         let initial_index_part = match client
@@ -2323,7 +2328,7 @@ mod tests {
             timeline,
             ..
         } = TestSetup::new("metrics").await.unwrap();
-        let client = timeline.remote_client.as_ref().unwrap();
+        let client = &timeline.remote_client;
 
         let layer_file_name_1: LayerName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
         let local_path = local_layer_path(

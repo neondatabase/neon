@@ -5,17 +5,21 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
+use crate::catalog::SchemaDumpError;
+use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
+use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::task;
 use tracing::{error, info, warn};
 use tracing_utils::http::OtelName;
+use utils::http::request::must_get_query_param;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
@@ -129,6 +133,34 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Err((msg, code)) => {
                     error!("error handling /terminate request: {msg}");
                     render_json_error(&msg, code)
+                }
+            }
+        }
+
+        (&Method::GET, "/dbs_and_roles") => {
+            info!("serving /dbs_and_roles GET request",);
+            match get_dbs_and_roles(compute).await {
+                Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
+                Err(_) => {
+                    render_json_error("can't get dbs and roles", StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
+
+        (&Method::GET, "/database_schema") => {
+            let database = match must_get_query_param(&req, "database") {
+                Err(e) => return e.into_response(),
+                Ok(database) => database,
+            };
+            info!("serving /database_schema GET request with database: {database}",);
+            match get_database_schema(compute, &database).await {
+                Ok(res) => render_plain(Body::wrap_stream(res)),
+                Err(SchemaDumpError::DatabaseDoesNotExist) => {
+                    render_json_error("database does not exist", StatusCode::NOT_FOUND)
+                }
+                Err(e) => {
+                    error!("can't get schema dump: {}", e);
+                    render_json_error("can't get schema dump", StatusCode::INTERNAL_SERVER_ERROR)
                 }
             }
         }
@@ -303,7 +335,22 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
     };
     Response::builder()
         .status(status)
+        .header(CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::to_string(&error).unwrap()))
+        .unwrap()
+}
+
+fn render_json(body: Body) -> Response<Body> {
+    Response::builder()
+        .header(CONTENT_TYPE, "application/json")
+        .body(body)
+        .unwrap()
+}
+
+fn render_plain(body: Body) -> Response<Body> {
+    Response::builder()
+        .header(CONTENT_TYPE, "text/plain")
+        .body(body)
         .unwrap()
 }
 

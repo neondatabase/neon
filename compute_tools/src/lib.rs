@@ -8,6 +8,7 @@ pub mod configurator;
 pub mod http;
 #[macro_use]
 pub mod logger;
+pub mod catalog;
 pub mod compute;
 pub mod extension_server;
 pub mod monitor;

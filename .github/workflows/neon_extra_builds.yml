@@ -136,7 +136,7 @@ jobs:
   check-linux-arm-build:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, large-arm64 ]
+    runs-on: [ self-hosted, small-arm64 ]
 
     env:
       # Use release build only, to have less debug info around
@@ -260,7 +260,7 @@ jobs:
   check-codestyle-rust-arm:
     needs: [ check-permissions, build-build-tools-image ]
     timeout-minutes: 90
-    runs-on: [ self-hosted, large-arm64 ]
+    runs-on: [ self-hosted, small-arm64 ]
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}

@@ -104,7 +104,7 @@ pub struct State {
     tenant_manager: Arc<TenantManager>,
     auth: Option<Arc<SwappableJwtAuth>>,
     allowlist_routes: Vec<Uri>,
-    remote_storage: Option<GenericRemoteStorage>,
+    remote_storage: GenericRemoteStorage,
     broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     deletion_queue_client: DeletionQueueClient,
@@ -118,7 +118,7 @@ impl State {
         conf: &'static PageServerConf,
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
-        remote_storage: Option<GenericRemoteStorage>,
+        remote_storage: GenericRemoteStorage,
         broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
         deletion_queue_client: DeletionQueueClient,
@@ -812,12 +812,6 @@ async fn tenant_attach_handler(
     let state = get_state(&request);
 
     let generation = get_request_generation(state, maybe_body.as_ref().and_then(|r| r.generation))?;
-
-    if state.remote_storage.is_none() {
-        return Err(ApiError::BadRequest(anyhow!(
-            "attach_tenant is not possible because pageserver was configured without remote storage"
-        )));
-    }
 
     let tenant_shard_id = TenantShardId::unsharded(tenant_id);
     let shard_params = ShardParameters::default();
@@ -1643,12 +1637,6 @@ async fn tenant_time_travel_remote_storage_handler(
         )));
     }
 
-    let Some(storage) = state.remote_storage.as_ref() else {
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "remote storage not configured, cannot run time travel"
-        )));
-    };
-
     if timestamp > done_if_after {
         return Err(ApiError::BadRequest(anyhow!(
             "The done_if_after timestamp comes before the timestamp to recover to"
@@ -1658,7 +1646,7 @@ async fn tenant_time_travel_remote_storage_handler(
     tracing::info!("Issuing time travel request internally. timestamp={timestamp_raw}, done_if_after={done_if_after_raw}");
 
     remote_timeline_client::upload::time_travel_recover_tenant(
-        storage,
+        &state.remote_storage,
         &tenant_shard_id,
         timestamp,
         done_if_after,
@@ -1903,11 +1891,6 @@ async fn deletion_queue_flush(
 ) -> Result<Response<Body>, ApiError> {
     let state = get_state(&r);
 
-    if state.remote_storage.is_none() {
-        // Nothing to do if remote storage is disabled.
-        return json_response(StatusCode::OK, ());
-    }
-
     let execute = parse_query_param(&r, "execute")?.unwrap_or(false);
 
     let flush = async {
@@ -2072,18 +2055,11 @@ async fn disk_usage_eviction_run(
     };
 
     let state = get_state(&r);
-
-    let Some(storage) = state.remote_storage.as_ref() else {
-        return Err(ApiError::InternalServerError(anyhow::anyhow!(
-            "remote storage not configured, cannot run eviction iteration"
-        )));
-    };
-
     let eviction_state = state.disk_usage_eviction_state.clone();
 
     let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
         &eviction_state,
-        storage,
+        &state.remote_storage,
         usage,
         &state.tenant_manager,
         config.eviction_order.into(),
@@ -2120,29 +2096,23 @@ async fn tenant_scan_remote_handler(
     let state = get_state(&request);
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
 
-    let Some(remote_storage) = state.remote_storage.as_ref() else {
-        return Err(ApiError::BadRequest(anyhow::anyhow!(
-            "Remote storage not configured"
-        )));
-    };
-
     let mut response = TenantScanRemoteStorageResponse::default();
 
     let (shards, _other_keys) =
-        list_remote_tenant_shards(remote_storage, tenant_id, cancel.clone())
+        list_remote_tenant_shards(&state.remote_storage, tenant_id, cancel.clone())
             .await
             .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
     for tenant_shard_id in shards {
         let (timeline_ids, _other_keys) =
-            list_remote_timelines(remote_storage, tenant_shard_id, cancel.clone())
+            list_remote_timelines(&state.remote_storage, tenant_shard_id, cancel.clone())
                 .await
                 .map_err(|e| ApiError::InternalServerError(anyhow::anyhow!(e)))?;
 
         let mut generation = Generation::none();
         for timeline_id in timeline_ids {
             match download_index_part(
-                remote_storage,
+                &state.remote_storage,
                 &tenant_shard_id,
                 &timeline_id,
                 Generation::MAX,

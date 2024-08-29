@@ -293,6 +293,16 @@ files:
         values: [checkpoints_timed]
         query: |
           SELECT checkpoints_timed FROM pg_stat_bgwriter;
+
+      # Number of slots is limited by max_replication_slots, so collecting position for all of them shouldn't be bad.
+      - metric_name: logical_slot_restart_lsn
+        type: gauge
+        help: 'restart_lsn of logical slots'
+        key_labels:
+          - slot_name
+        values: [restart_lsn]
+        query: |
+          select slot_name, restart_lsn from pg_replication_slots where slot_type = 'logical';
   - filename: neon_collector_autoscaling.yml
     content: |
       collector_name: neon_collector_autoscaling

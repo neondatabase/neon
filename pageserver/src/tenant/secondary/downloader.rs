@@ -26,7 +26,7 @@ use crate::{
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
     },
     virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
-    METADATA_FILE_NAME, TEMP_FILE_SUFFIX,
+    TEMP_FILE_SUFFIX,
 };
 
 use super::{
@@ -1074,11 +1074,7 @@ async fn init_timeline_state(
             .fatal_err(&format!("Read metadata on {}", file_path));
 
         let file_name = file_path.file_name().expect("created it from the dentry");
-        if file_name == METADATA_FILE_NAME {
-            // Secondary mode doesn't use local metadata files, but they might have been left behind by an attached tenant.
-            warn!(path=?dentry.path(), "found legacy metadata file, these should have been removed in load_tenant_config");
-            continue;
-        } else if crate::is_temporary(&file_path)
+        if crate::is_temporary(&file_path)
             || is_temp_download_file(&file_path)
             || is_ephemeral_file(file_name)
         {

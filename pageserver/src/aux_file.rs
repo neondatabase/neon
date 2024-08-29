@@ -5,14 +5,35 @@ use bytes::{Buf, BufMut, Bytes};
 use pageserver_api::key::{Key, AUX_KEY_PREFIX, METADATA_KEY_SIZE};
 use tracing::warn;
 
-/// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, first 13B of 128b xxhash].
+// BEGIN Copyright (c) 2017 Servo Contributors
+
+/// Const version of FNV hash.
+#[inline]
+#[must_use]
+pub const fn fnv_hash(bytes: &[u8]) -> u128 {
+    const INITIAL_STATE: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013B;
+
+    let mut hash = INITIAL_STATE;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u128;
+        hash = hash.wrapping_mul(PRIME);
+        i += 1;
+    }
+    hash
+}
+
+// END Copyright (c) 2017 Servo Contributors
+
+/// Create a metadata key from a hash, encoded as [AUX_KEY_PREFIX, 2B directory prefix, least significant 13B of FNV hash].
 fn aux_hash_to_metadata_key(dir_level1: u8, dir_level2: u8, data: &[u8]) -> Key {
-    let mut key = [0; METADATA_KEY_SIZE];
-    let hash = twox_hash::xxh3::hash128(data).to_be_bytes();
+    let mut key: [u8; 16] = [0; METADATA_KEY_SIZE];
+    let hash = fnv_hash(data).to_be_bytes();
     key[0] = AUX_KEY_PREFIX;
     key[1] = dir_level1;
     key[2] = dir_level2;
-    key[3..16].copy_from_slice(&hash[0..13]);
+    key[3..16].copy_from_slice(&hash[3..16]);
     Key::from_metadata_key_fixed_size(&key)
 }
 
@@ -200,15 +221,19 @@ mod tests {
     fn test_hash_portable() {
         // AUX file encoding requires the hash to be portable across all platforms. This test case checks
         // if the algorithm produces the same hash across different environments.
+
         assert_eq!(
-            305317690835051308206966631765527126151,
-            twox_hash::xxh3::hash128("test1".as_bytes())
+            265160408618497461376862998434862070044,
+            super::fnv_hash("test1".as_bytes())
         );
         assert_eq!(
-            85104974691013376326742244813280798847,
-            twox_hash::xxh3::hash128("test/test2".as_bytes())
+            295486155126299629456360817749600553988,
+            super::fnv_hash("test/test2".as_bytes())
         );
-        assert_eq!(0, twox_hash::xxh3::hash128("".as_bytes()));
+        assert_eq!(
+            144066263297769815596495629667062367629,
+            super::fnv_hash("".as_bytes())
+        );
     }
 
     #[test]
@@ -216,28 +241,28 @@ mod tests {
         // To correct retrieve AUX files, the generated keys for the same file must be the same for all versions
         // of the page server.
         assert_eq!(
-            "6200000101E5B20C5F8DD5AA3289D6D9EAFA",
-            encode_aux_file_key("pg_logical/mappings/test1").to_string()
+            "62000001017F8B83D94F7081693471ABF91C",
+            encode_aux_file_key("pg_logical/mappings/test1").to_string(),
         );
         assert_eq!(
-            "620000010239AAC544893139B26F501B97E6",
-            encode_aux_file_key("pg_logical/snapshots/test2").to_string()
+            "62000001027F8E83D94F7081693471ABFCCD",
+            encode_aux_file_key("pg_logical/snapshots/test2").to_string(),
         );
         assert_eq!(
-            "620000010300000000000000000000000000",
-            encode_aux_file_key("pg_logical/replorigin_checkpoint").to_string()
+            "62000001032E07BB014262B821756295C58D",
+            encode_aux_file_key("pg_logical/replorigin_checkpoint").to_string(),
         );
         assert_eq!(
-            "62000001FF8635AF2134B7266EC5B4189FD6",
-            encode_aux_file_key("pg_logical/unsupported").to_string()
+            "62000001FF4F38E1C74754E7D03C1A660178",
+            encode_aux_file_key("pg_logical/unsupported").to_string(),
         );
         assert_eq!(
-            "6200000201772D0E5D71DE14DA86142A1619",
+            "62000002017F8D83D94F7081693471ABFB92",
             encode_aux_file_key("pg_replslot/test3").to_string()
         );
         assert_eq!(
-            "620000FFFF1866EBEB53B807B26A2416F317",
-            encode_aux_file_key("other_file_not_supported").to_string()
+            "620000FFFF2B6ECC8AEF93F643DC44F15E03",
+            encode_aux_file_key("other_file_not_supported").to_string(),
         );
     }
 
