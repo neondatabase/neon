@@ -5564,9 +5564,12 @@ impl Service {
                 break;
             }
 
-            let mut can_take = attached - expected_attached;
+            let can_take = attached - expected_attached;
+            let needed = fill_requirement - plan.len();
+            let mut take = std::cmp::min(can_take, needed);
+
             let mut remove_node = false;
-            while can_take > 0 {
+            while take > 0 {
                 match tids_by_node.get_mut(&node_id) {
                     Some(tids) => match tids.pop() {
                         Some(tid) => {
@@ -5578,7 +5581,7 @@ impl Service {
                             if *promoted < max_promote_for_tenant {
                                 plan.push(tid);
                                 *promoted += 1;
-                                can_take -= 1;
+                                take -= 1;
                             }
                         }
                         None => {

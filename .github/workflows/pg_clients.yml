@@ -41,7 +41,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pypoetry/virtualenvs
-        key: v2-${{ runner.os }}-python-deps-ubunutu-latest-${{ hashFiles('poetry.lock') }}
+        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-ubunutu-latest-${{ hashFiles('poetry.lock') }}
 
     - name: Install Python deps
       shell: bash -euxo pipefail {0}
@@ -85,7 +85,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         retention-days: 7
-        name: python-test-pg_clients-${{ runner.os }}-stage-logs
+        name: python-test-pg_clients-${{ runner.os }}-${{ runner.arch }}-stage-logs
         path: ${{ env.TEST_OUTPUT }}
 
     - name: Post to a Slack channel
