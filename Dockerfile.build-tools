@@ -99,7 +99,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
     && rm awscliv2.zip
 
 # Mold: A Modern Linker
-ENV MOLD_VERSION v2.31.0
+ENV MOLD_VERSION=v2.33.0
 RUN set -e \
     && git clone https://github.com/rui314/mold.git \
     && mkdir mold/build \
@@ -168,7 +168,7 @@ USER nonroot:nonroot
 WORKDIR /home/nonroot
 
 # Python
-ENV PYTHON_VERSION=3.9.18 \
+ENV PYTHON_VERSION=3.9.19 \
     PYENV_ROOT=/home/nonroot/.pyenv \
     PATH=/home/nonroot/.pyenv/shims:/home/nonroot/.pyenv/bin:/home/nonroot/.poetry/bin:$PATH
 RUN set -e \
@@ -192,9 +192,14 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.80.0
+ENV RUSTC_VERSION=1.80.1
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
+ARG RUSTFILT_VERSION=0.2.1
+ARG CARGO_HAKARI_VERSION=0.9.30
+ARG CARGO_DENY_VERSION=0.16.1
+ARG CARGO_HACK_VERSION=0.6.31
+ARG CARGO_NEXTEST_VERSION=0.9.72
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
 	chmod +x rustup-init && \
 	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
@@ -204,11 +209,11 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     cargo --version && rustup --version && \
     rustup component add llvm-tools-preview rustfmt clippy && \
     cargo install --git https://github.com/paritytech/cachepot && \
-    cargo install rustfilt && \
-    cargo install cargo-hakari && \
-    cargo install cargo-deny --locked && \
-    cargo install cargo-hack && \
-    cargo install cargo-nextest && \
+    cargo install rustfilt            --version ${RUSTFILT_VERSION} && \
+    cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} && \
+    cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \
+    cargo install cargo-hack          --version ${CARGO_HACK_VERSION} && \
+    cargo install cargo-nextest       --version ${CARGO_NEXTEST_VERSION} && \
     rm -rf /home/nonroot/.cargo/registry && \
     rm -rf /home/nonroot/.cargo/git
 ENV RUSTC_WRAPPER=cachepot

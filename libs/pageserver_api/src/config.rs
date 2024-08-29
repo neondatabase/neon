@@ -82,6 +82,7 @@ pub struct ConfigToml {
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
     pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
+    pub virtual_file_direct_io: crate::models::virtual_file::DirectIoMode,
 
     pub tenant_config: TenantConfigToml,
 
@@ -441,6 +442,7 @@ impl Default for ConfigToml {
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
             compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+            virtual_file_direct_io: crate::models::virtual_file::DirectIoMode::default(),
 
             tenant_config: TenantConfigToml::default(),
         }

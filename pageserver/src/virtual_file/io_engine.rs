@@ -330,3 +330,29 @@ pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
     .join()
     .unwrap()
 }
+
+/// For use in benchmark binaries only.
+///
+/// Benchmarks which initialize `virtual_file` need to know what engine to use, but we also
+/// don't want to silently fall back to slower I/O engines in a benchmark: this could waste
+/// developer time trying to figure out why it's slow.
+///
+/// In practice, this method will either return IoEngineKind::TokioEpollUring, or panic.
+pub fn io_engine_for_bench() -> IoEngineKind {
+    #[cfg(not(target_os = "linux"))]
+    {
+        panic!("This benchmark does I/O and can only give a representative result on Linux");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match feature_test().unwrap() {
+            FeatureTestResult::PlatformPreferred(engine) => engine,
+            FeatureTestResult::Worse {
+                engine: _engine,
+                remark,
+            } => {
+                panic!("This benchmark does I/O can requires the preferred I/O engine: {remark}");
+            }
+        }
+    }
+}

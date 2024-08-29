@@ -181,6 +181,9 @@ pub struct PageServerConf {
     /// This flag is temporary and will be removed after gradual rollout.
     /// See <https://github.com/neondatabase/neon/issues/8184>.
     pub compact_level0_phase1_value_access: pageserver_api::config::CompactL0Phase1ValueAccess,
+
+    /// Direct IO settings
+    pub virtual_file_direct_io: virtual_file::DirectIoMode,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -342,6 +345,7 @@ impl PageServerConf {
             ephemeral_bytes_per_memory_kb,
             compact_level0_phase1_value_access,
             l0_flush,
+            virtual_file_direct_io,
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
@@ -387,6 +391,7 @@ impl PageServerConf {
             image_compression,
             ephemeral_bytes_per_memory_kb,
             compact_level0_phase1_value_access,
+            virtual_file_direct_io,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -644,6 +649,7 @@ background_task_maximum_delay = '334 s'
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -719,6 +725,7 @@ background_task_maximum_delay = '334 s'
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
             },
             "Should be able to parse all basic config values correctly"
         );
