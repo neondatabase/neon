@@ -117,42 +117,46 @@ def ingest_test_result(
 ):
     rows = []
     for f in test_cases_dir.glob("*.json"):
-        test = json.loads(f.read_text())
-        # Drop unneded fields from raw data
-        raw = test.copy()
-        raw.pop("parameterValues")
-        raw.pop("labels")
-        raw.pop("extra")
+        try:
+            test = json.loads(f.read_text())
 
-        # All allure parameters are prefixed with "__", see test_runner/fixtures/parametrize.py
-        parameters = {
-            p["name"].removeprefix("__"): p["value"]
-            for p in test["parameters"]
-            if p["name"].startswith("__")
-        }
-        arch = parameters.get("arch", "UNKNOWN").strip("'")
+            # Drop unneded fields from raw data
+            raw = test.copy()
+            raw.pop("parameterValues")
+            raw.pop("labels")
+            raw.pop("extra")
 
-        build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
-        labels = {label["name"]: label["value"] for label in test["labels"]}
-        row = Row(
-            parent_suite=labels["parentSuite"],
-            suite=labels["suite"],
-            name=unparametrized_name,
-            status=test["status"],
-            started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
-            stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
-            duration=test["time"]["duration"],
-            flaky=test["flaky"] or test["retriesStatusChange"],
-            arch=arch,
-            build_type=build_type,
-            pg_version=pg_version,
-            run_id=run_id,
-            run_attempt=run_attempt,
-            reference=reference,
-            revision=revision,
-            raw=json.dumps(raw),
-        )
-        rows.append(dataclasses.astuple(row))
+            # All allure parameters are prefixed with "__", see test_runner/fixtures/parametrize.py
+            parameters = {
+                p["name"].removeprefix("__"): p["value"]
+                for p in test["parameters"]
+                if p["name"].startswith("__")
+            }
+            arch = parameters.get("arch", "UNKNOWN").strip("'")
+
+            build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
+            labels = {label["name"]: label["value"] for label in test["labels"]}
+            row = Row(
+                parent_suite=labels["parentSuite"],
+                suite=labels["suite"],
+                name=unparametrized_name,
+                status=test["status"],
+                started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
+                stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
+                duration=test["time"]["duration"],
+                flaky=test["flaky"] or test["retriesStatusChange"],
+                arch=arch,
+                build_type=build_type,
+                pg_version=pg_version,
+                run_id=run_id,
+                run_attempt=run_attempt,
+                reference=reference,
+                revision=revision,
+                raw=json.dumps(raw),
+            )
+            rows.append(dataclasses.astuple(row))
+        except:
+            print(f"Error parsing JSON. Skipping file: {f.name}")
 
     columns = ",".join(f.name for f in dataclasses.fields(Row))
     query = f"INSERT INTO results ({columns}) VALUES %s ON CONFLICT DO NOTHING"
