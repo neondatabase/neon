@@ -17,13 +17,11 @@ from performance.pageserver.util import (
 @pytest.mark.parametrize("duration", [30])
 @pytest.mark.parametrize("pgbench_scale", [get_scale_for_db(200)])
 @pytest.mark.parametrize("n_tenants", [10])
-@pytest.mark.parametrize("get_vectored_impl", ["sequential", "vectored"])
 @pytest.mark.timeout(1000)
 def test_basebackup_with_high_slru_count(
     neon_env_builder: NeonEnvBuilder,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
-    get_vectored_impl: str,
     n_tenants: int,
     pgbench_scale: int,
     duration: int,
@@ -47,7 +45,7 @@ def test_basebackup_with_high_slru_count(
     max_file_descriptors = 500000
     neon_env_builder.pageserver_config_override = (
         f"page_cache_size={page_cache_size}; max_file_descriptors={max_file_descriptors}; "
-        f"get_vectored_impl='{get_vectored_impl}'; validate_vectored_get=false"
+        f"get_vectored_impl='vectored'; validate_vectored_get=false"
     )
     params.update(
         {

@@ -18,7 +18,7 @@ use anyhow::{anyhow, ensure, Result};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
-use std::collections::{BTreeMap, BinaryHeap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tracing::*;
@@ -375,15 +375,6 @@ impl InMemoryLayer {
         let inner = self.inner.read().await;
         let reader = inner.file.block_cursor();
 
-        #[derive(Eq, PartialEq, Ord, PartialOrd)]
-        struct BlockRead {
-            key: Key,
-            lsn: Lsn,
-            block_offset: u64,
-        }
-
-        let mut planned_block_reads = BinaryHeap::new();
-
         for range in keyspace.ranges.iter() {
             for (key, vec_map) in inner.index.range(range.start..range.end) {
                 let lsn_range = match reconstruct_state.get_cached_lsn(key) {
@@ -392,46 +383,29 @@ impl InMemoryLayer {
                 };
 
                 let slice = vec_map.slice_range(lsn_range);
+
                 for (entry_lsn, pos) in slice.iter().rev() {
-                    planned_block_reads.push(BlockRead {
-                        key: *key,
-                        lsn: *entry_lsn,
-                        block_offset: *pos,
-                    });
+                    // TODO: this uses the page cache => https://github.com/neondatabase/neon/issues/8183
+                    let buf = reader.read_blob(*pos, &ctx).await;
+                    if let Err(e) = buf {
+                        reconstruct_state
+                            .on_key_error(*key, PageReconstructError::from(anyhow!(e)));
+                        break;
+                    }
+
+                    let value = Value::des(&buf.unwrap());
+                    if let Err(e) = value {
+                        reconstruct_state
+                            .on_key_error(*key, PageReconstructError::from(anyhow!(e)));
+                        break;
+                    }
+
+                    let key_situation =
+                        reconstruct_state.update_key(key, *entry_lsn, value.unwrap());
+                    if key_situation == ValueReconstructSituation::Complete {
+                        break;
+                    }
                 }
-            }
-        }
-
-        let keyspace_size = keyspace.total_raw_size();
-
-        let mut completed_keys = HashSet::new();
-        while completed_keys.len() < keyspace_size && !planned_block_reads.is_empty() {
-            let block_read = planned_block_reads.pop().unwrap();
-            if completed_keys.contains(&block_read.key) {
-                continue;
-            }
-
-            // TODO: this uses the page cache => https://github.com/neondatabase/neon/issues/8183
-            let buf = reader.read_blob(block_read.block_offset, &ctx).await;
-            if let Err(e) = buf {
-                reconstruct_state
-                    .on_key_error(block_read.key, PageReconstructError::from(anyhow!(e)));
-                completed_keys.insert(block_read.key);
-                continue;
-            }
-
-            let value = Value::des(&buf.unwrap());
-            if let Err(e) = value {
-                reconstruct_state
-                    .on_key_error(block_read.key, PageReconstructError::from(anyhow!(e)));
-                completed_keys.insert(block_read.key);
-                continue;
-            }
-
-            let key_situation =
-                reconstruct_state.update_key(&block_read.key, block_read.lsn, value.unwrap());
-            if key_situation == ValueReconstructSituation::Complete {
-                completed_keys.insert(block_read.key);
             }
         }
 

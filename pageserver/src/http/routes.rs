@@ -1650,7 +1650,9 @@ async fn timeline_compact_handler(
             .await
             .map_err(|e| ApiError::InternalServerError(e.into()))?;
         if wait_until_uploaded {
-            timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
+            timeline.remote_client.wait_completion().await
+            // XXX map to correct ApiError for the cases where it's due to shutdown
+            .context("wait completion").map_err(ApiError::InternalServerError)?;
         }
         json_response(StatusCode::OK, ())
     }
@@ -1709,7 +1711,9 @@ async fn timeline_checkpoint_handler(
         }
 
         if wait_until_uploaded {
-            timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;
+            timeline.remote_client.wait_completion().await
+            // XXX map to correct ApiError for the cases where it's due to shutdown
+            .context("wait completion").map_err(ApiError::InternalServerError)?;
         }
 
         json_response(StatusCode::OK, ())

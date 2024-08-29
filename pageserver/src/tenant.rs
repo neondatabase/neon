@@ -31,6 +31,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -95,14 +96,12 @@ use crate::tenant::storage_layer::ImageLayer;
 use crate::walredo;
 use crate::InitializationOrder;
 use std::collections::hash_map::Entry;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
-use std::ops::Bound::Included;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1621,7 +1620,7 @@ impl Tenant {
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(), timeline::CompactionError> {
+    ) -> Result<(), timeline::CompactionError> {
         // Don't start doing work during shutdown, or when broken, we do not need those in the logs
         if !self.is_active() {
             return Ok(());
@@ -1666,12 +1665,14 @@ impl Tenant {
                 .compact(cancel, EnumSet::empty(), ctx)
                 .instrument(info_span!("compact_timeline", %timeline_id))
                 .await
-                .map_err(|e| {
-                    self.compaction_circuit_breaker
-                        .lock()
-                        .unwrap()
-                        .fail(&CIRCUIT_BREAKERS_BROKEN, &e);
-                    e
+                .inspect_err(|e| match e {
+                    timeline::CompactionError::ShuttingDown => (),
+                    timeline::CompactionError::Other(e) => {
+                        self.compaction_circuit_breaker
+                            .lock()
+                            .unwrap()
+                            .fail(&CIRCUIT_BREAKERS_BROKEN, e);
+                    }
                 })?;
         }
 
@@ -1764,6 +1765,9 @@ impl Tenant {
             let timelines_to_activate = timelines_accessor
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
+
+            // Before activation, populate each Timeline's GcInfo with information about its children
+            self.initialize_gc_info(&timelines_accessor);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -2798,6 +2802,55 @@ impl Tenant {
             .await
     }
 
+    /// Populate all Timelines' `GcInfo` with information about their children.  We do not set the
+    /// PITR cutoffs here, because that requires I/O: this is done later, before GC, by [`Self::refresh_gc_info_internal`]
+    ///
+    /// Subsequently, parent-child relationships are updated incrementally during timeline creation/deletion.
+    fn initialize_gc_info(
+        &self,
+        timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+    ) {
+        // This function must be called before activation: after activation timeline create/delete operations
+        // might happen, and this function is not safe to run concurrently with those.
+        assert!(!self.is_active());
+
+        // Scan all timelines. For each timeline, remember the timeline ID and
+        // the branch point where it was created.
+        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> = BTreeMap::new();
+        timelines.iter().for_each(|(timeline_id, timeline_entry)| {
+            if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
+                let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
+                ancestor_children.push((timeline_entry.get_ancestor_lsn(), *timeline_id));
+            }
+        });
+
+        // The number of bytes we always keep, irrespective of PITR: this is a constant across timelines
+        let horizon = self.get_gc_horizon();
+
+        // Populate each timeline's GcInfo with information about its child branches
+        for timeline in timelines.values() {
+            let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
+                .remove(&timeline.timeline_id)
+                .unwrap_or_default();
+
+            branchpoints.sort_by_key(|b| b.0);
+
+            let mut target = timeline.gc_info.write().unwrap();
+
+            target.retain_lsns = branchpoints;
+
+            let space_cutoff = timeline
+                .get_last_record_lsn()
+                .checked_sub(horizon)
+                .unwrap_or(Lsn(0));
+
+            target.cutoffs = GcCutoffs {
+                space: space_cutoff,
+                time: Lsn::INVALID,
+            };
+        }
+    }
+
     async fn refresh_gc_info_internal(
         &self,
         target_timeline_id: Option<TimelineId>,
@@ -2819,6 +2872,11 @@ impl Tenant {
             })
             .cloned()
             .collect::<Vec<_>>();
+
+        if target_timeline_id.is_some() && timelines.is_empty() {
+            // We were to act on a particular timeline and it wasn't found
+            return Err(GcError::TimelineNotFound);
+        }
 
         let mut gc_cutoffs: HashMap<TimelineId, GcCutoffs> =
             HashMap::with_capacity(timelines.len());
@@ -2842,67 +2900,62 @@ impl Tenant {
         // because that will stall branch creation.
         let gc_cs = self.gc_cs.lock().await;
 
-        // Scan all timelines. For each timeline, remember the timeline ID and
-        // the branch point where it was created.
-        let (all_branchpoints, timelines): (BTreeSet<(TimelineId, Lsn)>, _) = {
-            let timelines = self.timelines.lock().unwrap();
-            let mut all_branchpoints = BTreeSet::new();
-            let timelines = {
-                if let Some(target_timeline_id) = target_timeline_id.as_ref() {
-                    if timelines.get(target_timeline_id).is_none() {
-                        return Err(GcError::TimelineNotFound);
+        // Paranoia check: it is critical that GcInfo's list of child timelines is correct, to avoid incorrectly GC'ing data they
+        // depend on.  So although GcInfo is updated continuously by Timeline::new and Timeline::drop, we also calculate it here
+        // and fail out if it's inaccurate.
+        // (this can be removed later, it's a risk mitigation for https://github.com/neondatabase/neon/pull/8427)
+        {
+            let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> =
+                BTreeMap::new();
+            timelines.iter().for_each(|timeline| {
+                if let Some(ancestor_timeline_id) = &timeline.get_ancestor_timeline_id() {
+                    let ancestor_children =
+                        all_branchpoints.entry(*ancestor_timeline_id).or_default();
+                    ancestor_children.push((timeline.get_ancestor_lsn(), timeline.timeline_id));
+                }
+            });
+
+            for timeline in &timelines {
+                let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
+                    .remove(&timeline.timeline_id)
+                    .unwrap_or_default();
+
+                branchpoints.sort_by_key(|b| b.0);
+
+                let target = timeline.gc_info.read().unwrap();
+
+                // We require that retain_lsns contains everything in `branchpoints`, but not that
+                // they are exactly equal: timeline deletions can race with us, so retain_lsns
+                // may contain some extra stuff.  It is safe to have extra timelines in there, because it
+                // just means that we retain slightly more data than we otherwise might.
+                let have_branchpoints = target.retain_lsns.iter().copied().collect::<HashSet<_>>();
+                for b in &branchpoints {
+                    if !have_branchpoints.contains(b) {
+                        tracing::error!(
+                            "Bug: `retain_lsns` is set incorrectly.  Expected be {:?}, but found {:?}",
+                            branchpoints,
+                            target.retain_lsns
+                        );
+                        debug_assert!(false);
+                        // Do not GC based on bad information!
+                        // (ab-use an existing GcError type rather than adding a new one, since this is a
+                        // "should never happen" check that will be removed soon).
+                        return Err(GcError::Remote(anyhow::anyhow!(
+                            "retain_lsns failed validation!"
+                        )));
                     }
-                };
-
-                timelines
-                    .iter()
-                    .map(|(_timeline_id, timeline_entry)| {
-                        if let Some(ancestor_timeline_id) =
-                            &timeline_entry.get_ancestor_timeline_id()
-                        {
-                            // If target_timeline is specified, we only need to know branchpoints of its children
-                            if let Some(timeline_id) = target_timeline_id {
-                                if ancestor_timeline_id == &timeline_id {
-                                    all_branchpoints.insert((
-                                        *ancestor_timeline_id,
-                                        timeline_entry.get_ancestor_lsn(),
-                                    ));
-                                }
-                            }
-                            // Collect branchpoints for all timelines
-                            else {
-                                all_branchpoints.insert((
-                                    *ancestor_timeline_id,
-                                    timeline_entry.get_ancestor_lsn(),
-                                ));
-                            }
-                        }
-
-                        timeline_entry.clone()
-                    })
-                    .collect::<Vec<_>>()
-            };
-            (all_branchpoints, timelines)
-        };
+                }
+            }
+        }
 
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
         let mut gc_timelines = Vec::with_capacity(timelines.len());
         for timeline in timelines {
-            // If target_timeline is specified, ignore all other timelines
+            // We filtered the timeline list above
             if let Some(target_timeline_id) = target_timeline_id {
-                if timeline.timeline_id != target_timeline_id {
-                    continue;
-                }
+                assert_eq!(target_timeline_id, timeline.timeline_id);
             }
-
-            let branchpoints: Vec<Lsn> = all_branchpoints
-                .range((
-                    Included((timeline.timeline_id, Lsn(0))),
-                    Included((timeline.timeline_id, Lsn(u64::MAX))),
-                ))
-                .map(|&x| x.1)
-                .collect();
 
             {
                 let mut target = timeline.gc_info.write().unwrap();
@@ -2941,20 +2994,12 @@ impl Tenant {
                         .0,
                 );
 
-                match gc_cutoffs.remove(&timeline.timeline_id) {
-                    Some(cutoffs) => {
-                        target.retain_lsns = branchpoints;
-                        target.cutoffs = cutoffs;
-                    }
-                    None => {
-                        // reasons for this being unavailable:
-                        // - this timeline was created while we were finding cutoffs
-                        // - lsn for timestamp search fails for this timeline repeatedly
-                        //
-                        // in both cases, refreshing the branchpoints is correct.
-                        target.retain_lsns = branchpoints;
-                    }
-                };
+                // Apply the cutoffs we found to the Timeline's GcInfo.  Why might we _not_ have cutoffs for a timeline?
+                // - this timeline was created while we were finding cutoffs
+                // - lsn for timestamp search fails for this timeline repeatedly
+                if let Some(cutoffs) = gc_cutoffs.get(&timeline.timeline_id) {
+                    target.cutoffs = cutoffs.clone();
+                }
             }
 
             gc_timelines.push(timeline);
@@ -4343,7 +4388,7 @@ mod tests {
         {
             let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
             assert_eq!(branchpoints.len(), 1);
-            assert_eq!(branchpoints[0], Lsn(0x40));
+            assert_eq!(branchpoints[0], (Lsn(0x40), NEW_TIMELINE_ID));
         }
 
         // You can read the key from the child branch even though the parent is
@@ -4525,7 +4570,7 @@ mod tests {
         let layer_map = tline.layers.read().await;
         let level0_deltas = layer_map
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .into_iter()
             .map(|desc| layer_map.get_from_desc(&desc))
             .collect::<Vec<_>>();
@@ -5744,7 +5789,7 @@ mod tests {
             .read()
             .await
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .len();
 
         tline.compact(&cancel, EnumSet::empty(), &ctx).await?;
@@ -5754,7 +5799,7 @@ mod tests {
             .read()
             .await
             .layer_map()
-            .get_level0_deltas()?
+            .get_level0_deltas()
             .len();
 
         assert!(after_num_l0_delta_files < before_num_l0_delta_files, "after_num_l0_delta_files={after_num_l0_delta_files}, before_num_l0_delta_files={before_num_l0_delta_files}");
@@ -7427,7 +7472,10 @@ mod tests {
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![Lsn(0x10), Lsn(0x20)],
+                retain_lsns: vec![
+                    (Lsn(0x10), tline.timeline_id),
+                    (Lsn(0x20), tline.timeline_id),
+                ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
                     space: Lsn(0x30),

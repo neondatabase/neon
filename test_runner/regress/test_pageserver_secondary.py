@@ -122,7 +122,12 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
             "scheduling": "Stop",
         },
     )
-    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy Stop.*")
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Scheduling is disabled by policy Stop.*",
+            ".*Skipping reconcile for policy Stop.*",
+        ]
+    )
 
     # We use a fixed seed to make the test reproducible: we want a randomly
     # chosen order, but not to change the order every time we run the test.

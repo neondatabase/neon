@@ -100,9 +100,13 @@ pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a node may be unresponsive to heartbeats before we declare it offline.
 /// This must be long enough to cover node restarts as well as normal operations: in future
-/// it should be separated into distinct timeouts for startup vs. normal operation
-/// (`<https://github.com/neondatabase/neon/issues/7552>`)
-pub const MAX_UNAVAILABLE_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
+pub const MAX_OFFLINE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
+
+/// How long a node may be unresponsive to heartbeats during start up before we declare it
+/// offline. This is much more lenient than [`MAX_OFFLINE_INTERVAL_DEFAULT`] since the pageserver's
+/// handling of the re-attach response may take a long time and blocks heartbeats from
+/// being handled on the pageserver side.
+pub const MAX_WARMING_UP_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
 
 #[derive(Clone, strum_macros::Display)]
 enum TenantOperations {
@@ -236,7 +240,12 @@ pub struct Config {
     /// Grace period within which a pageserver does not respond to heartbeats, but is still
     /// considered active. Once the grace period elapses, the next heartbeat failure will
     /// mark the pagseserver offline.
-    pub max_unavailable_interval: Duration,
+    pub max_offline_interval: Duration,
+
+    /// Extended grace period within which pageserver may not respond to heartbeats.
+    /// This extended grace period kicks in after the node has been drained for restart
+    /// and/or upon handling the re-attach request from a node.
+    pub max_warming_up_interval: Duration,
 
     /// How many Reconcilers may be spawned concurrently
     pub reconciler_concurrency: usize,
@@ -587,6 +596,9 @@ impl Service {
                         online_nodes.insert(node_id, utilization);
                     }
                     PageserverState::Offline => {}
+                    PageserverState::WarmingUp { .. } => {
+                        unreachable!("Nodes are never marked warming-up during startup reconcile")
+                    }
                 }
             }
         }
@@ -779,63 +791,54 @@ impl Service {
             let res = self.heartbeater.heartbeat(nodes).await;
             if let Ok(deltas) = res {
                 for (node_id, state) in deltas.0 {
-                    let (new_node, new_availability) = match state {
-                        PageserverState::Available {
-                            utilization, new, ..
-                        } => (
-                            new,
-                            NodeAvailability::Active(UtilizationScore(
-                                utilization.utilization_score,
-                            )),
+                    let new_availability = match state {
+                        PageserverState::Available { utilization, .. } => NodeAvailability::Active(
+                            UtilizationScore(utilization.utilization_score),
                         ),
-                        PageserverState::Offline => (false, NodeAvailability::Offline),
+                        PageserverState::WarmingUp { started_at } => {
+                            NodeAvailability::WarmingUp(started_at)
+                        }
+                        PageserverState::Offline => {
+                            // The node might have been placed in the WarmingUp state
+                            // while the heartbeat round was on-going. Hence, filter out
+                            // offline transitions for WarmingUp nodes that are still within
+                            // their grace period.
+                            if let Ok(NodeAvailability::WarmingUp(started_at)) =
+                                self.get_node(node_id).await.map(|n| n.get_availability())
+                            {
+                                let now = Instant::now();
+                                if now - started_at >= self.config.max_warming_up_interval {
+                                    NodeAvailability::Offline
+                                } else {
+                                    NodeAvailability::WarmingUp(started_at)
+                                }
+                            } else {
+                                NodeAvailability::Offline
+                            }
+                        }
                     };
 
-                    if new_node {
-                        // When the heartbeats detect a newly added node, we don't wish
-                        // to attempt to reconcile the shards assigned to it. The node
-                        // is likely handling it's re-attach response, so reconciling now
-                        // would be counterproductive.
-                        //
-                        // Instead, update the in-memory state with the details learned about the
-                        // node.
-                        let mut locked = self.inner.write().unwrap();
-                        let (nodes, _tenants, scheduler) = locked.parts_mut();
+                    // This is the code path for geniune availability transitions (i.e node
+                    // goes unavailable and/or comes back online).
+                    let res = self
+                        .node_configure(node_id, Some(new_availability), None)
+                        .await;
 
-                        let mut new_nodes = (**nodes).clone();
-
-                        if let Some(node) = new_nodes.get_mut(&node_id) {
-                            node.set_availability(new_availability);
-                            scheduler.node_upsert(node);
+                    match res {
+                        Ok(()) => {}
+                        Err(ApiError::NotFound(_)) => {
+                            // This should be rare, but legitimate since the heartbeats are done
+                            // on a snapshot of the nodes.
+                            tracing::info!("Node {} was not found after heartbeat round", node_id);
                         }
-
-                        locked.nodes = Arc::new(new_nodes);
-                    } else {
-                        // This is the code path for geniune availability transitions (i.e node
-                        // goes unavailable and/or comes back online).
-                        let res = self
-                            .node_configure(node_id, Some(new_availability), None)
-                            .await;
-
-                        match res {
-                            Ok(()) => {}
-                            Err(ApiError::NotFound(_)) => {
-                                // This should be rare, but legitimate since the heartbeats are done
-                                // on a snapshot of the nodes.
-                                tracing::info!(
-                                    "Node {} was not found after heartbeat round",
-                                    node_id
-                                );
-                            }
-                            Err(err) => {
-                                // Transition to active involves reconciling: if a node responds to a heartbeat then
-                                // becomes unavailable again, we may get an error here.
-                                tracing::error!(
-                                    "Failed to update node {} after heartbeat round: {}",
-                                    node_id,
-                                    err
-                                );
-                            }
+                        Err(err) => {
+                            // Transition to active involves reconciling: if a node responds to a heartbeat then
+                            // becomes unavailable again, we may get an error here.
+                            tracing::error!(
+                                "Failed to update node {} after heartbeat round: {}",
+                                node_id,
+                                err
+                            );
                         }
                     }
                 }
@@ -1152,7 +1155,8 @@ impl Service {
         let cancel = CancellationToken::new();
         let heartbeater = Heartbeater::new(
             config.jwt_token.clone(),
-            config.max_unavailable_interval,
+            config.max_offline_interval,
+            config.max_warming_up_interval,
             cancel.clone(),
         );
         let this = Arc::new(Self {
@@ -1664,21 +1668,23 @@ impl Service {
                     | NodeSchedulingPolicy::Filling
             );
 
-            if !node.is_available() || reset_scheduling {
-                let mut new_nodes = (**nodes).clone();
-                if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
-                    if !node.is_available() {
-                        node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
-                    }
-
-                    if reset_scheduling {
-                        node.set_scheduling(NodeSchedulingPolicy::Active);
-                    }
-
-                    scheduler.node_upsert(node);
-                    let new_nodes = Arc::new(new_nodes);
-                    *nodes = new_nodes;
+            let mut new_nodes = (**nodes).clone();
+            if let Some(node) = new_nodes.get_mut(&reattach_req.node_id) {
+                if reset_scheduling {
+                    node.set_scheduling(NodeSchedulingPolicy::Active);
                 }
+
+                tracing::info!("Marking {} warming-up on reattach", reattach_req.node_id);
+                node.set_availability(NodeAvailability::WarmingUp(std::time::Instant::now()));
+
+                scheduler.node_upsert(node);
+                let new_nodes = Arc::new(new_nodes);
+                *nodes = new_nodes;
+            } else {
+                tracing::error!(
+                    "Reattaching node {} was removed while processing the request",
+                    reattach_req.node_id
+                );
             }
         }
 
@@ -4718,6 +4724,15 @@ impl Service {
                 }
 
                 // TODO: in the background, we should balance work back onto this pageserver
+            }
+            // No action required for the intermediate unavailable state.
+            // When we transition into active or offline from the unavailable state,
+            // the correct handling above will kick in.
+            AvailabilityTransition::ToWarmingUpFromActive => {
+                tracing::info!("Node {} transition to unavailable from active", node_id);
+            }
+            AvailabilityTransition::ToWarmingUpFromOffline => {
+                tracing::info!("Node {} transition to unavailable from offline", node_id);
             }
             AvailabilityTransition::Unchanged => {
                 tracing::debug!("Node {} no availability change during config", node_id);

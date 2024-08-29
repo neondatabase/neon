@@ -261,8 +261,7 @@ jobs:
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb"},
-                                                     { "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-aurora",   "db_size": "50gb"}]')
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb"}]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT

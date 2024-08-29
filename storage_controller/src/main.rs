@@ -10,7 +10,8 @@ use storage_controller::http::make_router;
 use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::{
-    Config, Service, MAX_UNAVAILABLE_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
+    Config, Service, MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
+    RECONCILER_CONCURRENCY_DEFAULT,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
@@ -61,7 +62,12 @@ struct Cli {
 
     /// Grace period before marking unresponsive pageserver offline
     #[arg(long)]
-    max_unavailable_interval: Option<humantime::Duration>,
+    max_offline_interval: Option<humantime::Duration>,
+
+    /// More tolerant grace period before marking unresponsive pagserver offline used
+    /// around pageserver restarts
+    #[arg(long)]
+    max_warming_up_interval: Option<humantime::Duration>,
 
     /// Size threshold for automatically splitting shards (disabled by default)
     #[arg(long)]
@@ -254,10 +260,14 @@ async fn async_main() -> anyhow::Result<()> {
         jwt_token: secrets.jwt_token,
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         compute_hook_url: args.compute_hook_url,
-        max_unavailable_interval: args
-            .max_unavailable_interval
+        max_offline_interval: args
+            .max_offline_interval
             .map(humantime::Duration::into)
-            .unwrap_or(MAX_UNAVAILABLE_INTERVAL_DEFAULT),
+            .unwrap_or(MAX_OFFLINE_INTERVAL_DEFAULT),
+        max_warming_up_interval: args
+            .max_warming_up_interval
+            .map(humantime::Duration::into)
+            .unwrap_or(MAX_WARMING_UP_INTERVAL_DEFAULT),
         reconciler_concurrency: args
             .reconciler_concurrency
             .unwrap_or(RECONCILER_CONCURRENCY_DEFAULT),
