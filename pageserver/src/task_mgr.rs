@@ -146,6 +146,12 @@ impl FromStr for TokioRuntimeMode {
     }
 }
 
+static TOKIO_THREAD_STACK_SIZE: Lazy<NonZeroUsize> = Lazy::new(|| {
+    env::var("NEON_PAGESERVER_TOKIO_THREAD_STACK_SIZE")
+        // the default 2MiB are insufficent, especially in debug mode
+        .unwrap_or_else(|| NonZeroUsize::new(4 * 1024 * 1024).unwrap())
+});
+
 static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
     let thread_name = "pageserver-tokio";
     let Some(mode) = env::var("NEON_PAGESERVER_USE_ONE_RUNTIME") else {
@@ -164,6 +170,7 @@ static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
             tokio::runtime::Builder::new_current_thread()
                 .thread_name(thread_name)
                 .enable_all()
+                .thread_stack_size(TOKIO_THREAD_STACK_SIZE.get())
                 .build()
                 .expect("failed to create one single runtime")
         }
@@ -173,6 +180,7 @@ static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
                 .thread_name(thread_name)
                 .enable_all()
                 .worker_threads(num_workers.get())
+                .thread_stack_size(TOKIO_THREAD_STACK_SIZE.get())
                 .build()
                 .expect("failed to create one multi-threaded runtime")
         }
@@ -199,6 +207,7 @@ macro_rules! pageserver_runtime {
                     .thread_name($name)
                     .worker_threads(TOKIO_WORKER_THREADS.get())
                     .enable_all()
+                    .thread_stack_size(TOKIO_THREAD_STACK_SIZE.get())
                     .build()
                     .expect(std::concat!("Failed to create runtime ", $name))
             });
