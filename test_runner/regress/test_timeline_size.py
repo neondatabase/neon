@@ -656,7 +656,7 @@ def get_physical_size_values(
     client = env.pageserver.http_client()
 
     res.layer_map_file_size_sum = sum(
-        layer.layer_file_size or 0
+        layer.layer_file_size
         for layer in client.layer_map_info(tenant_id, timeline_id).historic_layers
     )
 

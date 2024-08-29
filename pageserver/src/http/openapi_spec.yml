@@ -257,6 +257,37 @@ paths:
               schema:
                 $ref: "#/components/schemas/LsnByTimestampResponse"
 
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/lsn_lease:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Obtain lease for the given LSN
+      parameters:
+        - name: lsn
+          in: query
+          required: true
+          schema:
+            type: string
+            format: hex
+          description: A LSN to obtain the lease for
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LsnLease"
+
   /v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc:
     parameters:
       - name: tenant_id
@@ -979,6 +1010,15 @@ components:
         kind:
           type: string
           enum: [past, present, future, nodata]
+
+    LsnLease:
+      type: object
+      required:
+        - valid_until
+      properties:
+        valid_until:
+          type: string
+          format: date-time
 
     PageserverUtilization:
       type: object

@@ -147,6 +147,7 @@ async fn publish(client: Option<BrokerClientChannel>, n_keys: u64) {
                 http_connstr: "zenith-1-sk-1.local:7677".to_owned(),
                 local_start_lsn: 0,
                 availability_zone: None,
+                standby_horizon: 0,
             };
             counter += 1;
             yield info;

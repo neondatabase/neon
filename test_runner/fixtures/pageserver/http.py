@@ -56,20 +56,30 @@ class InMemoryLayerInfo:
 class HistoricLayerInfo:
     kind: str
     layer_file_name: str
-    layer_file_size: Optional[int]
+    layer_file_size: int
     lsn_start: str
     lsn_end: Optional[str]
     remote: bool
+    # None for image layers, true if pageserver thinks this is an L0 delta layer
+    l0: Optional[bool]
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
+        # instead of parsing the key range lets keep the definition of "L0" in pageserver
+        l0_ness = d.get("l0")
+        assert l0_ness is None or isinstance(l0_ness, bool)
+
+        size = d["layer_file_size"]
+        assert isinstance(size, int)
+
         return HistoricLayerInfo(
             kind=d["kind"],
             layer_file_name=d["layer_file_name"],
-            layer_file_size=d.get("layer_file_size"),
+            layer_file_size=size,
             lsn_start=d["lsn_start"],
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
+            l0=l0_ness,
         )
 
 
@@ -583,6 +593,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        wait_until_uploaded=False,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -590,6 +601,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if wait_until_uploaded:
+            query["wait_until_uploaded"] = "true"
 
         log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(
@@ -656,6 +669,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        wait_until_uploaded=False,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -663,6 +677,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if wait_until_uploaded:
+            query["wait_until_uploaded"] = "true"
 
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(

@@ -705,6 +705,7 @@ impl ConnectionManagerState {
                     commit_lsn: info.commit_lsn,
                     safekeeper_connstr: info.safekeeper_connstr,
                     availability_zone: info.availability_zone,
+                    standby_horizon: info.standby_horizon,
                 }
             }
             MessageType::SafekeeperDiscoveryResponse => {
@@ -724,6 +725,21 @@ impl ConnectionManagerState {
         };
 
         WALRECEIVER_BROKER_UPDATES.inc();
+
+        trace!(
+            "safekeeper info update: standby_horizon(cutoff)={}",
+            timeline_update.standby_horizon
+        );
+        if timeline_update.standby_horizon != 0 {
+            // ignore reports from safekeepers not connected to replicas
+            self.timeline
+                .standby_horizon
+                .store(Lsn(timeline_update.standby_horizon));
+            self.timeline
+                .metrics
+                .standby_horizon_gauge
+                .set(timeline_update.standby_horizon as i64);
+        }
 
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
         let old_entry = self.wal_stream_candidates.insert(
@@ -1094,6 +1110,7 @@ mod tests {
                 commit_lsn,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,
+                standby_horizon: 0,
             },
             latest_update,
         }

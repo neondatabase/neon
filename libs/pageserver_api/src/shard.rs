@@ -559,6 +559,14 @@ impl ShardIdentity {
         }
     }
 
+    /// Obtains the shard number and count combined into a `ShardIndex`.
+    pub fn shard_index(&self) -> ShardIndex {
+        ShardIndex {
+            shard_count: self.count,
+            shard_number: self.number,
+        }
+    }
+
     pub fn shard_slug(&self) -> String {
         if self.count > ShardCount(0) {
             format!("-{:02x}{:02x}", self.number.0, self.count.0)

@@ -525,6 +525,15 @@ static LAST_RECORD_LSN: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static STANDBY_HORIZON: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_standby_horizon",
+        "Standby apply LSN for which GC is hold off, by timeline.",
+        &["tenant_id", "shard_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
 static RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_resident_physical_size",
@@ -1858,7 +1867,6 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_received: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
-    pub(crate) time_spent_on_ingest: Histogram,
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
@@ -1880,12 +1888,6 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     records_filtered: register_int_counter!(
         "pageserver_wal_ingest_records_filtered",
         "Number of WAL records filtered out due to sharding"
-    )
-    .expect("failed to define a metric"),
-    time_spent_on_ingest: register_histogram!(
-        "pageserver_wal_ingest_put_value_seconds",
-        "Actual time spent on ingesting a record",
-        redo_histogram_time_buckets!(),
     )
     .expect("failed to define a metric"),
 });
@@ -2098,6 +2100,7 @@ pub(crate) struct TimelineMetrics {
     pub garbage_collect_histo: StorageTimeMetrics,
     pub find_gc_cutoffs_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
+    pub standby_horizon_gauge: IntGauge,
     pub resident_physical_size_gauge: UIntGauge,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
@@ -2167,6 +2170,9 @@ impl TimelineMetrics {
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
+        let standby_horizon_gauge = STANDBY_HORIZON
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
         let resident_physical_size_gauge = RESIDENT_PHYSICAL_SIZE
             .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
             .unwrap();
@@ -2212,6 +2218,7 @@ impl TimelineMetrics {
             find_gc_cutoffs_histo,
             load_layer_map_histo,
             last_record_gauge,
+            standby_horizon_gauge,
             resident_physical_size_gauge,
             current_logical_size_gauge,
             aux_file_size_gauge,
@@ -2246,6 +2253,7 @@ impl TimelineMetrics {
         let timeline_id = &self.timeline_id;
         let shard_id = &self.shard_id;
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = STANDBY_HORIZON.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         {
             RESIDENT_PHYSICAL_SIZE_GLOBAL.sub(self.resident_physical_size_get());
             let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);

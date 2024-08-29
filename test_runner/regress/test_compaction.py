@@ -165,7 +165,6 @@ def test_sharding_compaction(
                 image_layer_sizes[layer.layer_file_name] = layer.layer_file_size
 
                 # Pageserver should assert rather than emit an empty layer file, but double check here
-                assert layer.layer_file_size is not None
                 assert layer.layer_file_size > 0
 
         shard_has_image_layers.append(len(image_layer_sizes) > 1)
@@ -178,7 +177,7 @@ def test_sharding_compaction(
             #
             # We only do this check with tiny stripes, because large stripes may not give all shards enough
             # data to have statistically significant image layers
-            avg_size = sum(v for v in image_layer_sizes.values()) / len(image_layer_sizes)  # type: ignore
+            avg_size = sum(v for v in image_layer_sizes.values()) / len(image_layer_sizes)
             log.info(f"Shard {shard_id} average image layer size: {avg_size}")
             assert avg_size > compaction_target_size / 2
 

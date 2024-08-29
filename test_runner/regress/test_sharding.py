@@ -632,7 +632,6 @@ def test_sharding_ingest_layer_sizes(
         historic_layers = sorted(layer_map.historic_layers, key=lambda layer: layer.lsn_start)
 
         for layer in historic_layers:
-            assert layer.layer_file_size is not None
             if layer.layer_file_size < expect_layer_size // 2:
                 classification = "Small"
                 small_layer_count += 1

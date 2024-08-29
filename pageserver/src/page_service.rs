@@ -19,6 +19,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::shard::ShardNumber;
+use pageserver_api::shard::TenantShardId;
 use postgres_backend::{is_expected_io_error, AuthType, PostgresBackend, QueryError};
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
@@ -33,6 +34,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
@@ -903,6 +905,39 @@ impl PageServerHandler {
             // stick to that for now.
             Ok(std::cmp::min(last_record_lsn, request_lsn))
         }
+    }
+
+    #[instrument(skip_all, fields(shard_id, %lsn))]
+    async fn handle_make_lsn_lease<IO>(
+        &self,
+        pgb: &mut PostgresBackend<IO>,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), QueryError>
+    where
+        IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        let shard_selector = ShardSelector::Known(tenant_shard_id.to_index());
+        let timeline = self
+            .get_active_tenant_timeline(tenant_shard_id.tenant_id, timeline_id, shard_selector)
+            .await?;
+        let lease = timeline.make_lsn_lease(lsn, ctx)?;
+        let valid_until = lease
+            .valid_until
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|e| QueryError::Other(e.into()))?;
+
+        pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+            b"valid_until",
+        )]))?
+        .write_message_noflush(&BeMessage::DataRow(&[Some(
+            &valid_until.as_millis().to_be_bytes(),
+        )]))?
+        .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+
+        Ok(())
     }
 
     #[instrument(skip_all, fields(shard_id))]
@@ -1802,6 +1837,44 @@ where
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        } else if query_string.starts_with("lease lsn ") {
+            let (_, params_raw) = query_string.split_at("lease lsn ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+            if params.len() != 3 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number {} for lease lsn command",
+                    params.len()
+                )));
+            }
+
+            let tenant_shard_id = TenantShardId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_shard_id))
+                .record("timeline_id", field::display(timeline_id));
+
+            self.check_permission(Some(tenant_shard_id.tenant_id))?;
+
+            // The caller is responsible for providing correct lsn.
+            let lsn = Lsn::from_str(params[2])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
+
+            match self
+                .handle_make_lsn_lease(pgb, tenant_shard_id, timeline_id, lsn, &ctx)
+                .await
+            {
+                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
+                Err(e) => {
+                    error!("error obtaining lsn lease for {lsn}: {e:?}");
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(
+                        &e.to_string(),
+                        Some(e.pg_error_code()),
+                    ))?
+                }
+            };
         } else if query_string.starts_with("show ") {
             // show <tenant_id>
             let (_, params_raw) = query_string.split_at("show ".len());

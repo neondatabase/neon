@@ -540,7 +540,6 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
 
     for layer in layers.historic_layers:
         log.info(f"pre-compact:  {layer}")
-        assert layer.layer_file_size is not None, "we must know layer file sizes"
         layer_sizes += layer.layer_file_size
         pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
 

@@ -254,8 +254,8 @@ files:
           select
             case
               when pg_catalog.pg_is_in_recovery()
-              then pg_last_wal_replay_lsn()
-              else pg_current_wal_lsn()
+              then (pg_last_wal_replay_lsn() - '0/0')::FLOAT8
+              else (pg_current_wal_lsn() - '0/0')::FLOAT8
             end as lsn;
 
       - metric_name: replication_delay_bytes
@@ -294,6 +294,9 @@ files:
         query: |
           SELECT checkpoints_timed FROM pg_stat_bgwriter;
 
+      # In all the below metrics, we cast LSNs to floats because Prometheus only supports floats.
+      # It's probably fine because float64 can store integers from -2^53 to +2^53 exactly.
+
       # Number of slots is limited by max_replication_slots, so collecting position for all of them shouldn't be bad.
       - metric_name: logical_slot_restart_lsn
         type: gauge
@@ -302,7 +305,32 @@ files:
           - slot_name
         values: [restart_lsn]
         query: |
-          select slot_name, restart_lsn from pg_replication_slots where slot_type = 'logical';
+          select slot_name, (restart_lsn - '0/0')::FLOAT8 from pg_replication_slots where slot_type = 'logical';
+
+      - metric_name: retained_wal
+        type: gauge
+        help: 'Retained WAL in inactive replication slots'
+        key_labels:
+          - slot_name
+        values: [retained_wal]
+        query: |
+          SELECT slot_name, pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::FLOAT8 AS retained_wal
+          FROM pg_replication_slots
+          WHERE active = false;
+
+      - metric_name: wal_is_lost
+        type: gauge
+        help: 'Whether or not the replication slot\'s wal_status is lost'
+        key_labels:
+          - slot_name
+        values: [wal_status_is_lost]
+        query: |
+          SELECT slot_name,
+          CASE
+            WHEN wal_status = 'lost' THEN 1
+            ELSE 0
+          END AS wal_status_is_lost
+          FROM pg_replication_slots;
   - filename: neon_collector_autoscaling.yml
     content: |
       collector_name: neon_collector_autoscaling
