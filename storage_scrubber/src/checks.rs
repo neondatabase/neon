@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::Context;
+use itertools::Itertools;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
@@ -45,6 +46,39 @@ impl TimelineAnalysis {
     pub(crate) fn is_healthy(&self) -> bool {
         self.errors.is_empty() && self.warnings.is_empty()
     }
+}
+
+fn check_valid_layermap(metadata: &HashMap<LayerName, LayerFileMetadata>) -> Option<String> {
+    let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
+    let mut all_delta_layers = Vec::new();
+    for (name, _) in metadata.iter() {
+        if let LayerName::Delta(layer) = name {
+            all_delta_layers.push(layer.clone());
+        }
+    }
+    for layer in &all_delta_layers {
+        if layer.key_range.start.next() != layer.key_range.end {
+            let lsn_range = &layer.lsn_range;
+            lsn_split_point.insert(lsn_range.start);
+            lsn_split_point.insert(lsn_range.end);
+        }
+    }
+    for layer in &all_delta_layers {
+        let key_range = &layer.key_range;
+        if key_range.start.next() != key_range.end {
+            let lsn_range = layer.lsn_range.clone();
+            let intersects = lsn_split_point.range(lsn_range).collect_vec();
+            if intersects.len() > 1 {
+                let err = format!(
+                        "layer violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
+                        layer,
+                        intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
+                    );
+                return Some(err);
+            }
+        }
+    }
+    None
 }
 
 pub(crate) async fn branch_cleanup_and_check_errors(
@@ -124,6 +158,12 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                             // Not an error, can happen for branches with zero writes, but notice that
                             info!("index_part.json has no layers (ancestor_timeline exists)");
                         }
+                    }
+
+                    if let Some(err) = check_valid_layermap(&index_part.layer_metadata) {
+                        result.errors.push(format!(
+                            "index_part.json contains invalid layer map structure: {err}"
+                        ));
                     }
 
                     for (layer, metadata) in index_part.layer_metadata {
