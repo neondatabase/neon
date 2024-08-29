@@ -842,7 +842,7 @@ Retry:
 			Assert(slot->status != PRFS_UNUSED);
 			Assert(MyPState->ring_last <= ring_index &&
 				   ring_index < MyPState->ring_unused);
-			Assert(BUFFERTAGS_EQUAL(slot->buftag, tag));
+			Assert(BUFFERTAGS_EQUAL(slot->buftag, req.buftag));
 
 			/*
 			 * If the caller specified a request LSN to use, only accept
@@ -2709,7 +2709,7 @@ static void
 neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neon_request_lsns *request_lsns,
 				  char **buffers, BlockNumber nblocks, const bits8 *mask)
 #else
-neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neon_request_lsns *request_lsns,
+neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_blockno, neon_request_lsns *request_lsns,
 				  void **buffers, BlockNumber nblocks, const bits8 *mask)
 #endif
 {
@@ -2724,7 +2724,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neo
 
 	CopyNRelFileInfoToBufTag(buftag, rinfo);
 	buftag.forkNum = forkNum;
-	buftag.blockNum = blkno;
+	buftag.blockNum = base_blockno;
 
 	/*
 	 * The redo process does not lock pages that it needs to replay but are
@@ -2747,7 +2747,11 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neo
 	for (int i = 0; i < nblocks; i++)
 	{
 		void	   *buffer = buffers[i];
+		BlockNumber blockno = base_blockno + i;
 		neon_request_lsns *reqlsns = &request_lsns[i];
+
+		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
+			continue;
 
 		if (RecoveryInProgress() && MyBackendType != B_STARTUP)
 			XLogWaitForReplayOf(reqlsns[0].request_lsn);
@@ -2756,6 +2760,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, neo
 		 * Try to find prefetched page in the list of received pages.
 		 */
 Retry:
+		buftag.blockNum = blockno;
 		entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
 
 		if (entry != NULL)
@@ -2820,6 +2825,8 @@ Retry:
 		} while (!prefetch_wait_for(ring_index));
 
 		Assert(slot->status == PRFS_RECEIVED);
+		Assert(memcmp(&buftag, &slot->buftag, sizeof(BufferTag)) == 0);
+		Assert(buftag.blockNum == base_blockno + i);
 
 		resp = slot->response;
 
@@ -2827,14 +2834,14 @@ Retry:
 		{
 			case T_NeonGetPageResponse:
 				memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
-				lfc_write(rinfo, forkNum, blkno, buffer);
+				lfc_write(rinfo, forkNum, blockno, buffer);
 				break;
 
 			case T_NeonErrorResponse:
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
 						 errmsg(NEON_TAG "[shard %d] could not read block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
-								slot->shard_no, blkno, RelFileInfoFmt(rinfo),
+								slot->shard_no, blockno, RelFileInfoFmt(rinfo),
 								forkNum, LSN_FORMAT_ARGS(reqlsns->effective_request_lsn)),
 						 errdetail("page server returned error: %s",
 								   ((NeonErrorResponse *) resp)->message)));
@@ -3008,6 +3015,10 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			neon_log(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
+	if (nblocks > PG_IOV_MAX)
+		neon_log(ERROR, "Read request too large: %d is larger than max %d",
+				 nblocks, PG_IOV_MAX);
+
 	memset(read, 0, sizeof(read));
 
 	/* Try to read from local file cache */
@@ -3017,10 +3028,6 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	/* Read all blocks from LFC, so we're done */
 	if (lfc_result == nblocks)
 		return;
-
-	if (nblocks > PG_IOV_MAX)
-		neon_log(ERROR, "Read request too large: %d is larger than max %d",
-				 nblocks, PG_IOV_MAX);
 
 	if (lfc_result == -1)
 	{
