@@ -734,6 +734,14 @@ struct ImageLayerWriterInner {
     // Total uncompressed bytes passed into put_image
     uncompressed_bytes: u64,
 
+    // Like `uncompressed_bytes`,
+    // but only of images we might consider for compression
+    uncompressed_bytes_eligible: u64,
+
+    // Like `uncompressed_bytes`, but only of images
+    // where we have chosen their compressed form
+    uncompressed_bytes_chosen: u64,
+
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 }
@@ -790,6 +798,8 @@ impl ImageLayerWriterInner {
             tree: tree_builder,
             blob_writer,
             uncompressed_bytes: 0,
+            uncompressed_bytes_eligible: 0,
+            uncompressed_bytes_chosen: 0,
         };
 
         Ok(writer)
@@ -808,13 +818,22 @@ impl ImageLayerWriterInner {
     ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
         let compression = self.conf.image_compression;
-        self.uncompressed_bytes += img.len() as u64;
+        let uncompressed_len = img.len() as u64;
+        self.uncompressed_bytes += uncompressed_len;
         let (_img, res) = self
             .blob_writer
             .write_blob_maybe_compressed(img, ctx, compression)
             .await;
         // TODO: re-use the buffer for `img` further upstack
-        let off = res?;
+        let (off, compression_info) = res?;
+        if compression_info.compressed_size.is_some() {
+            // The image has been considered for compression at least
+            self.uncompressed_bytes_eligible += uncompressed_len;
+        }
+        if compression_info.written_compressed {
+            // The image has been compressed
+            self.uncompressed_bytes_chosen += uncompressed_len;
+        }
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
@@ -837,6 +856,9 @@ impl ImageLayerWriterInner {
         // Calculate compression ratio
         let compressed_size = self.blob_writer.size() - PAGE_SZ as u64; // Subtract PAGE_SZ for header
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES.inc_by(self.uncompressed_bytes);
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED
+            .inc_by(self.uncompressed_bytes_eligible);
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
         crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
         let mut file = self.blob_writer.into_inner();

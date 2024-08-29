@@ -467,7 +467,7 @@ impl DeltaLayerWriterInner {
             .write_blob_maybe_compressed(val, ctx, compression)
             .await;
         let off = match res {
-            Ok(off) => off,
+            Ok((off, _)) => off,
             Err(e) => return (val, Err(anyhow::anyhow!(e))),
         };
 

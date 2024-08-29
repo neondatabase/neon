@@ -449,6 +449,7 @@ class TokenScope(str, Enum):
     GENERATIONS_API = "generations_api"
     SAFEKEEPER_DATA = "safekeeperdata"
     TENANT = "tenant"
+    SCRUBBER = "scrubber"
 
 
 class NeonEnvBuilder:
@@ -2585,6 +2586,51 @@ class NeonStorageController(MetricsGetter, LogUtils):
                     raise e
 
                 time.sleep(backoff)
+
+    def metadata_health_update(self, healthy: List[TenantShardId], unhealthy: List[TenantShardId]):
+        body: Dict[str, Any] = {
+            "healthy_tenant_shards": [str(t) for t in healthy],
+            "unhealthy_tenant_shards": [str(t) for t in unhealthy],
+        }
+
+        self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/update",
+            json=body,
+            headers=self.headers(TokenScope.SCRUBBER),
+        )
+
+    def metadata_health_list_unhealthy(self):
+        response = self.request(
+            "GET",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/unhealthy",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def metadata_health_list_outdated(self, duration: str):
+        body: Dict[str, Any] = {"not_scrubbed_for": duration}
+
+        response = self.request(
+            "POST",
+            f"{self.env.storage_controller_api}/control/v1/metadata_health/outdated",
+            json=body,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return response.json()
+
+    def metadata_health_is_healthy(self, outdated_duration: str = "1h") -> bool:
+        """Metadata is healthy if there is no unhealthy or outdated health records."""
+
+        unhealthy = self.metadata_health_list_unhealthy()
+        outdated = self.metadata_health_list_outdated(outdated_duration)
+
+        healthy = (
+            len(unhealthy["unhealthy_tenant_shards"]) == 0 and len(outdated["health_records"]) == 0
+        )
+        if not healthy:
+            log.info(f"{unhealthy=}, {outdated=}")
+        return healthy
 
     def step_down(self):
         log.info("Asking storage controller to step down")

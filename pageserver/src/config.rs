@@ -176,7 +176,7 @@ pub struct PageServerConf {
     /// Setting this to zero disables limits on total ephemeral layer size.
     pub ephemeral_bytes_per_memory_kb: usize,
 
-    pub l0_flush: pageserver_api::models::L0FlushConfig,
+    pub l0_flush: crate::l0_flush::L0FlushConfig,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -381,7 +381,6 @@ impl PageServerConf {
             validate_vectored_get,
             image_compression,
             ephemeral_bytes_per_memory_kb,
-            l0_flush,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -417,6 +416,9 @@ impl PageServerConf {
                     }
                 },
             },
+            l0_flush: l0_flush
+                .map(crate::l0_flush::L0FlushConfig::from)
+                .unwrap_or_default(),
         };
 
         // ------------------------------------------------------------

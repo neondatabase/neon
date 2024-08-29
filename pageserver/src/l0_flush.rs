@@ -1,8 +1,32 @@
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 use crate::tenant::ephemeral_file;
 
-use pageserver_api::models::L0FlushConfig;
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum L0FlushConfig {
+    PageCached,
+    Direct { max_concurrency: NonZeroUsize },
+}
+
+impl Default for L0FlushConfig {
+    fn default() -> Self {
+        Self::Direct {
+            // TODO: using num_cpus results in different peak memory usage on different instance types.
+            max_concurrency: NonZeroUsize::new(usize::max(1, num_cpus::get())).unwrap(),
+        }
+    }
+}
+
+impl From<pageserver_api::models::L0FlushConfig> for L0FlushConfig {
+    fn from(config: pageserver_api::models::L0FlushConfig) -> Self {
+        match config {
+            pageserver_api::models::L0FlushConfig::PageCached => Self::PageCached,
+            pageserver_api::models::L0FlushConfig::Direct { max_concurrency } => {
+                Self::Direct { max_concurrency }
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct L0FlushGlobalState(Arc<Inner>);

@@ -14,8 +14,8 @@ use std::{
 };
 use utils::logging::LogFormat;
 
+use crate::models::ImageCompressionAlgorithm;
 use crate::models::LsnLease;
-use crate::models::{ImageCompressionAlgorithm, L0FlushConfig};
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
 // as a separate structure.  This information is not neeed by the pageserver
@@ -80,7 +80,7 @@ pub struct ConfigToml {
     pub validate_vectored_get: bool,
     pub image_compression: ImageCompressionAlgorithm,
     pub ephemeral_bytes_per_memory_kb: usize,
-    pub l0_flush: crate::models::L0FlushConfig,
+    pub l0_flush: Option<crate::models::L0FlushConfig>,
 
     pub tenant_config: TenantConfigToml,
 
@@ -401,7 +401,7 @@ impl Default for ConfigToml {
             validate_vectored_get: (DEFAULT_VALIDATE_VECTORED_GET),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
-            l0_flush: L0FlushConfig::default(),
+            l0_flush: None,
 
             tenant_config: TenantConfigToml::default(),
         }

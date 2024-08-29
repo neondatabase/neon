@@ -355,7 +355,8 @@ impl RemoteStorage for AzureBlobStorage {
                     .blobs()
                     .map(|k| ListingObject{
                         key: self.name_to_relative_path(&k.name),
-                        last_modified: k.properties.last_modified.into()
+                        last_modified: k.properties.last_modified.into(),
+                        size: k.properties.content_length,
                     }
                     );
 
