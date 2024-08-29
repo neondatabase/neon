@@ -9,6 +9,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
+    str::FromStr,
     sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
@@ -437,18 +438,7 @@ pub enum CompactionAlgorithm {
     Tiered,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    strum_macros::FromRepr,
-    strum_macros::EnumString,
-)]
-#[strum(serialize_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageCompressionAlgorithm {
     /// Disabled for writes, and never decompress during reading.
     /// Never set this after you've enabled compression once!
@@ -465,6 +455,31 @@ pub enum ImageCompressionAlgorithm {
 impl ImageCompressionAlgorithm {
     pub fn allow_decompression(&self) -> bool {
         !matches!(self, ImageCompressionAlgorithm::DisabledNoDecompress)
+    }
+}
+
+impl FromStr for ImageCompressionAlgorithm {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut components = s.split(['(', ')']);
+        let first = components
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("empty string"))?;
+        match first {
+            "disabled-no-decompress" => Ok(ImageCompressionAlgorithm::DisabledNoDecompress),
+            "disabled" => Ok(ImageCompressionAlgorithm::Disabled),
+            "zstd" => {
+                let level = if let Some(v) = components.next() {
+                    let v: i8 = v.parse()?;
+                    Some(v)
+                } else {
+                    None
+                };
+
+                Ok(ImageCompressionAlgorithm::Zstd { level })
+            }
+            _ => anyhow::bail!("invalid specifier '{first}'"),
+        }
     }
 }
 
@@ -1667,6 +1682,31 @@ mod tests {
         assert_eq!(
             AuxFilePolicy::from_str("cross-validation").unwrap(),
             AuxFilePolicy::CrossValidation
+        );
+    }
+
+    #[test]
+    fn test_image_compression_algorithm_parsing() {
+        use ImageCompressionAlgorithm::*;
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("disabled").unwrap(),
+            Disabled
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("disabled-no-decompress").unwrap(),
+            DisabledNoDecompress
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd").unwrap(),
+            Zstd { level: None }
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd(18)").unwrap(),
+            Zstd { level: Some(18) }
+        );
+        assert_eq!(
+            ImageCompressionAlgorithm::from_str("zstd(-3)").unwrap(),
+            Zstd { level: Some(-3) }
         );
     }
 }

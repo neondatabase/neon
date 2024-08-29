@@ -140,7 +140,7 @@ async fn find_garbage_inner(
     node_kind: NodeKind,
 ) -> anyhow::Result<GarbageList> {
     // Construct clients for S3 and for Console API
-    let (s3_client, target) = init_remote(bucket_config.clone(), node_kind)?;
+    let (s3_client, target) = init_remote(bucket_config.clone(), node_kind).await?;
     let cloud_admin_api_client = Arc::new(CloudAdminApiClient::new(console_config));
 
     // Build a set of console-known tenants, for quickly eliminating known-active tenants without having
@@ -432,7 +432,7 @@ pub async fn purge_garbage(
     );
 
     let (s3_client, target) =
-        init_remote(garbage_list.bucket_config.clone(), garbage_list.node_kind)?;
+        init_remote(garbage_list.bucket_config.clone(), garbage_list.node_kind).await?;
 
     // Sanity checks on the incoming list
     if garbage_list.active_tenant_count == 0 {

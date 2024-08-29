@@ -78,6 +78,8 @@ enum Command {
         min_size: u64,
         #[arg(short, long, default_value_t = false)]
         ignore_deltas: bool,
+        #[arg(long = "concurrency", short = 'j', default_value_t = 64)]
+        concurrency: usize,
     },
 }
 
@@ -194,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
             concurrency,
         } => {
             let downloader =
-                SnapshotDownloader::new(bucket_config, tenant_id, output_path, concurrency)?;
+                SnapshotDownloader::new(bucket_config, tenant_id, output_path, concurrency).await?;
             downloader.download().await
         }
         Command::PageserverPhysicalGc {
@@ -210,10 +212,15 @@ async fn main() -> anyhow::Result<()> {
         Command::FindLargeObjects {
             min_size,
             ignore_deltas,
+            concurrency,
         } => {
-            let summary =
-                find_large_objects::find_large_objects(bucket_config, min_size, ignore_deltas)
-                    .await?;
+            let summary = find_large_objects::find_large_objects(
+                bucket_config,
+                min_size,
+                ignore_deltas,
+                concurrency,
+            )
+            .await?;
             println!("{}", serde_json::to_string(&summary).unwrap());
             Ok(())
         }

@@ -26,7 +26,7 @@ use tracing::{debug, error, info, trace, warn, Instrument};
 use super::TaskStateUpdate;
 use crate::{
     context::RequestContext,
-    metrics::{LIVE_CONNECTIONS_COUNT, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
+    metrics::{LIVE_CONNECTIONS, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
@@ -208,14 +208,9 @@ pub(super) async fn handle_walreceiver_connection(
         .instrument(tracing::info_span!("poller")),
     );
 
-    // Immediately increment the gauge, then create a job to decrement it on task exit.
-    // One of the pros of `defer!` is that this will *most probably*
-    // get called, even in presence of panics.
-    let gauge = LIVE_CONNECTIONS_COUNT.with_label_values(&["wal_receiver"]);
-    gauge.inc();
-    scopeguard::defer! {
-        gauge.dec();
-    }
+    let _guard = LIVE_CONNECTIONS
+        .with_label_values(&["wal_receiver"])
+        .guard();
 
     let identify = identify_system(&replication_client).await?;
     info!("{identify:?}");
