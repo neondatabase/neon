@@ -867,6 +867,11 @@ impl Timeline {
             .map(|ancestor| ancestor.timeline_id)
     }
 
+    /// Get the ancestor timeline
+    pub(crate) fn ancestor_timeline(&self) -> Option<&Arc<Timeline>> {
+        self.ancestor_timeline.as_ref()
+    }
+
     /// Get the bytes written since the PITR cutoff on this branch, and
     /// whether this branch's ancestor_lsn is within its parent's PITR.
     pub(crate) fn get_pitr_history_stats(&self) -> (u64, bool) {
