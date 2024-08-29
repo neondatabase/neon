@@ -20,7 +20,6 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::TopTenantShardItem;
@@ -694,10 +693,6 @@ impl Tenant {
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
-            // This could be derived from ancestor branch + index part. Though the only caller of `timeline_init_and_sync` is `load_remote_timeline`,
-            // there will potentially be other caller of this function in the future, and we don't know whether `index_part` or `ancestor` takes precedence.
-            // Therefore, we pass this field explicitly for now, and remove it once we fully migrate to aux file v2.
-            last_aux_file_policy,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -1282,15 +1277,12 @@ impl Tenant {
             None
         };
 
-        let last_aux_file_policy = index_part.last_aux_file_policy();
-
         self.timeline_init_and_sync(
             timeline_id,
             resources,
             Some(index_part),
             remote_metadata,
             ancestor,
-            last_aux_file_policy,
             ctx,
         )
         .await
@@ -1506,7 +1498,6 @@ impl Tenant {
             &new_metadata,
             create_guard,
             initdb_lsn,
-            None,
             None,
         )
         .await
@@ -2669,7 +2660,6 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
-        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -2698,7 +2688,6 @@ impl Tenant {
             resources,
             pg_version,
             state,
-            last_aux_file_policy,
             self.cancel.child_token(),
         );
 
@@ -3600,7 +3589,6 @@ impl Tenant {
                 ancestor,
                 resources,
                 CreateTimelineCause::Load,
-                last_aux_file_policy,
             )
             .context("Failed to create timeline data structure")?;
 
@@ -4189,7 +4177,6 @@ mod tests {
 
     use super::*;
     use crate::keyspace::KeySpaceAccum;
-    use crate::pgdatadir_mapping::AuxFilesDirectory;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
@@ -4198,7 +4185,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use itertools::Itertools;
-    use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
+    use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use rand::{thread_rng, Rng};
@@ -4207,7 +4194,6 @@ mod tests {
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{DeltaLayerTestDesc, GcInfo};
-    use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
     static TEST_KEY: Lazy<Key> =

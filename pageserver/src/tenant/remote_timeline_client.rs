@@ -187,7 +187,7 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
-use pageserver_api::models::{AuxFilePolicy, TimelineArchivalState};
+use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -625,18 +625,6 @@ impl RemoteTimelineClient {
 
         self.schedule_index_upload(upload_queue)?;
 
-        Ok(())
-    }
-
-    /// Launch an index-file upload operation in the background, with only the `aux_file_policy` flag updated.
-    pub(crate) fn schedule_index_upload_for_aux_file_policy_update(
-        self: &Arc<Self>,
-        last_aux_file_policy: Option<AuxFilePolicy>,
-    ) -> anyhow::Result<()> {
-        let mut guard = self.upload_queue.lock().unwrap();
-        let upload_queue = guard.initialized_mut()?;
-        upload_queue.dirty.last_aux_file_policy = last_aux_file_policy;
-        self.schedule_index_upload(upload_queue)?;
         Ok(())
     }
 

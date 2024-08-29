@@ -19,10 +19,9 @@ use pageserver_api::key::{
     dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
     relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
-    CompactKey, AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+    CompactKey, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -1023,9 +1022,6 @@ impl<'a> DatadirModification<'a> {
         self.pending_directory_entries.push((DirectoryKind::Db, 0));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
-        // Create AuxFilesDirectory
-        self.init_aux_dir()?;
-
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
         })?;
@@ -1138,9 +1134,6 @@ impl<'a> DatadirModification<'a> {
             // 'true', now write the updated 'dbdirs' map back.
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
-
-            // Create AuxFilesDirectory as well
-            self.init_aux_dir()?;
         }
         if r.is_none() {
             // Create RelDirectory
@@ -1501,19 +1494,6 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
-    pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
-        if let AuxFilePolicy::V2 = self.tline.get_switch_aux_file_policy() {
-            return Ok(());
-        }
-        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-            files: HashMap::new(),
-        })?;
-        self.pending_directory_entries
-            .push((DirectoryKind::AuxFiles, 0));
-        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
-        Ok(())
-    }
-
     pub async fn put_file(
         &mut self,
         path: &str,
@@ -1730,12 +1710,6 @@ impl<'a> DatadirModification<'a> {
         self.tline.get(key, lsn, ctx).await
     }
 
-    /// Only used during unit tests, force putting a key into the modification.
-    #[cfg(test)]
-    pub(crate) fn put_for_test(&mut self, key: Key, val: Value) {
-        self.put(key, val);
-    }
-
     fn put(&mut self, key: Key, val: Value) {
         let values = self.pending_updates.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
@@ -1811,21 +1785,6 @@ struct RelDirectory {
     // TODO: Store it as a btree or radix tree or something else that spans multiple
     // key-value pairs, if you have a lot of relations
     rels: HashSet<(Oid, u8)>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
-pub(crate) struct AuxFilesDirectory {
-    pub(crate) files: HashMap<String, Bytes>,
-}
-
-impl AuxFilesDirectory {
-    pub(crate) fn upsert(&mut self, key: String, value: Option<Bytes>) {
-        if let Some(value) = value {
-            self.files.insert(key, value);
-        } else {
-            self.files.remove(&key);
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

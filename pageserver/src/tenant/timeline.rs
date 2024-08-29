@@ -27,7 +27,7 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
+        AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
         DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
         InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
     },
@@ -96,12 +96,12 @@ use crate::{
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
-use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
-use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use crate::{
-    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
+    pgdatadir_mapping::DirectoryKind,
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
@@ -1938,7 +1938,7 @@ impl Timeline {
     }
 
     // TODO(yuchen): remove unused flag after implementing https://github.com/neondatabase/neon/issues/8072
-    #[allow(unused)]
+    #[allow(dead_code)]
     pub(crate) fn get_lsn_lease_length_for_ts(&self) -> Duration {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -1947,6 +1947,7 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2087,7 +2088,6 @@ impl Timeline {
         resources: TimelineResources,
         pg_version: u32,
         state: TimelineState,
-        aux_file_policy: Option<AuxFilePolicy>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2223,10 +2223,6 @@ impl Timeline {
 
                 handles: Default::default(),
             };
-
-            if aux_file_policy == Some(AuxFilePolicy::V1) {
-                warn!("this timeline is using deprecated aux file policy V1");
-            }
 
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
