@@ -6222,9 +6222,13 @@ impl Service {
         node_id: NodeId,
         cancel: CancellationToken,
     ) -> Result<(), OperationError> {
-        // TODO(vlad): Currently this operates on the assumption that all
-        // secondaries are warm. This is not always true (e.g. we just migrated the
-        // tenant). Take that into consideration by checking the secondary status.
+        const SECONDARY_WARMUP_TIMEOUT: Duration = Duration::from_secs(20);
+        const SECONDARY_DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+        let reconciler_config = ReconcilerConfigBuilder::new()
+            .secondary_warmup_timeout(SECONDARY_WARMUP_TIMEOUT)
+            .secondary_download_request_timeout(SECONDARY_DOWNLOAD_REQUEST_TIMEOUT)
+            .build();
+
         let mut tids_to_promote = self.fill_node_plan(node_id);
         let mut waiters = Vec::new();
 
@@ -6292,9 +6296,11 @@ impl Service {
                                         node_id
                                     );
 
-                                    if let Some(waiter) =
-                                        self.maybe_reconcile_shard(tenant_shard, nodes)
-                                    {
+                                    if let Some(waiter) = self.maybe_configured_reconcile_shard(
+                                        tenant_shard,
+                                        nodes,
+                                        reconciler_config,
+                                    ) {
                                         waiters.push(waiter);
                                     }
                                 }
