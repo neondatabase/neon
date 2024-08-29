@@ -324,9 +324,8 @@ impl From<crate::tenant::TimelineArchivalError> for ApiError {
         match value {
             NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
             Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
-            HasArchivedParent(parent) => ApiError::PreconditionFailed(
-                format!("Cannot unarchive timeline which has archived ancestor: {parent:?}")
-                    .into_boxed_str(),
+            e @ HasArchivedParent(_) => ApiError::PreconditionFailed(
+                e.to_string().into_boxed_str(),
             ),
             HasUnarchivedChildren(children) => ApiError::PreconditionFailed(
                 format!(
