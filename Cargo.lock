@@ -1333,7 +1333,6 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "camino",
  "clap",
  "comfy-table",
@@ -3790,7 +3789,6 @@ name = "pageserver_client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytes",
  "futures",
  "pageserver_api",
@@ -5952,7 +5950,6 @@ name = "storage_controller_client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytes",
  "futures",
  "pageserver_api",
@@ -6955,7 +6952,6 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-compression",
- "async-trait",
  "bincode",
  "byteorder",
  "bytes",
