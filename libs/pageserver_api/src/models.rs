@@ -660,6 +660,17 @@ pub struct TenantDetails {
     pub timelines: Vec<TimelineId>,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TimelineArchivalState {
+    Archived,
+    Unarchived,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct TimelineArchivalConfigRequest {
+    pub state: TimelineArchivalState,
+}
+
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {

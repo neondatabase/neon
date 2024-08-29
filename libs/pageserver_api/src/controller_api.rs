@@ -87,7 +87,7 @@ pub struct TenantLocateResponse {
     pub shard_params: ShardParameters,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TenantDescribeResponse {
     pub tenant_id: TenantId,
     pub shards: Vec<TenantDescribeResponseShard>,
@@ -110,7 +110,7 @@ pub struct NodeDescribeResponse {
     pub listen_pg_port: u16,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TenantDescribeResponseShard {
     pub tenant_shard_id: TenantShardId,
 

@@ -136,19 +136,20 @@ pub mod statvfs {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "args")]
 pub enum EvictionOrder {
-    #[default]
-    AbsoluteAccessed,
     RelativeAccessed {
-        #[serde(default = "default_highest_layer_count_loses_first")]
         highest_layer_count_loses_first: bool,
     },
 }
 
-fn default_highest_layer_count_loses_first() -> bool {
-    true
+impl Default for EvictionOrder {
+    fn default() -> Self {
+        Self::RelativeAccessed {
+            highest_layer_count_loses_first: true,
+        }
+    }
 }
 
 #[derive(

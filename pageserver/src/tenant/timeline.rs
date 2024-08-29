@@ -6013,8 +6013,9 @@ mod tests {
 
     #[tokio::test]
     async fn two_layer_eviction_attempts_at_the_same_time() {
-        let harness =
-            TenantHarness::create("two_layer_eviction_attempts_at_the_same_time").unwrap();
+        let harness = TenantHarness::create("two_layer_eviction_attempts_at_the_same_time")
+            .await
+            .unwrap();
 
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant

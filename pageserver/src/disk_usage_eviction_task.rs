@@ -68,13 +68,6 @@ use crate::{
 /// partitioning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvictionOrder {
-    /// Order the layers to be evicted by how recently they have been accessed in absolute
-    /// time.
-    ///
-    /// This strategy is unfair when some tenants grow faster than others towards the slower
-    /// growing.
-    AbsoluteAccessed,
-
     /// Order the layers to be evicted by how recently they have been accessed relatively within
     /// the set of resident layers of a tenant.
     RelativeAccessed {
@@ -91,7 +84,6 @@ pub enum EvictionOrder {
 impl From<pageserver_api::config::EvictionOrder> for EvictionOrder {
     fn from(value: pageserver_api::config::EvictionOrder) -> Self {
         match value {
-            pageserver_api::config::EvictionOrder::AbsoluteAccessed => Self::AbsoluteAccessed,
             pageserver_api::config::EvictionOrder::RelativeAccessed {
                 highest_layer_count_loses_first,
             } => Self::RelativeAccessed {
@@ -106,11 +98,6 @@ impl EvictionOrder {
         use EvictionOrder::*;
 
         match self {
-            AbsoluteAccessed => {
-                candidates.sort_unstable_by_key(|(partition, candidate)| {
-                    (*partition, candidate.last_activity_ts)
-                });
-            }
             RelativeAccessed { .. } => candidates.sort_unstable_by_key(|(partition, candidate)| {
                 (*partition, candidate.relative_last_activity)
             }),
@@ -123,7 +110,6 @@ impl EvictionOrder {
         use EvictionOrder::*;
 
         match self {
-            AbsoluteAccessed => finite_f32::FiniteF32::ZERO,
             RelativeAccessed {
                 highest_layer_count_loses_first,
             } => {

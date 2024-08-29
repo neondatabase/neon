@@ -430,7 +430,7 @@ async fn handle_tenant_describe(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Scrubber)?;
 
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)

@@ -21,6 +21,7 @@ use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
@@ -1226,6 +1227,14 @@ impl Tenant {
         }
 
         Ok(timeline_preloads)
+    }
+
+    pub async fn apply_timeline_archival_config(
+        &self,
+        _timeline_id: TimelineId,
+        _config: TimelineArchivalState,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
@@ -3788,7 +3797,7 @@ pub(crate) mod harness {
     }
 
     impl TenantHarness {
-        pub fn create_custom(
+        pub async fn create_custom(
             test_name: &'static str,
             tenant_conf: TenantConf,
             tenant_id: TenantId,
@@ -3824,7 +3833,7 @@ pub(crate) mod harness {
                 },
                 timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
             };
-            let remote_storage = GenericRemoteStorage::from_config(&config).unwrap();
+            let remote_storage = GenericRemoteStorage::from_config(&config).await.unwrap();
             let deletion_queue = MockDeletionQueue::new(Some(remote_storage.clone()));
 
             Ok(Self {
@@ -3839,7 +3848,7 @@ pub(crate) mod harness {
             })
         }
 
-        pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
+        pub async fn create(test_name: &'static str) -> anyhow::Result<Self> {
             // Disable automatic GC and compaction to make the unit tests more deterministic.
             // The tests perform them manually if needed.
             let tenant_conf = TenantConf {
@@ -3856,6 +3865,7 @@ pub(crate) mod harness {
                 shard,
                 Generation::new(0xdeadbeef),
             )
+            .await
         }
 
         pub fn span(&self) -> tracing::Span {
@@ -3992,7 +4002,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_basic")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_basic").await?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4039,7 +4049,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_duplicate_timelines() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("no_duplicate_timelines")?
+        let (tenant, ctx) = TenantHarness::create("no_duplicate_timelines")
+            .await?
             .load()
             .await;
         let _ = tenant
@@ -4071,7 +4082,7 @@ mod tests {
     async fn test_branch() -> anyhow::Result<()> {
         use std::str::from_utf8;
 
-        let (tenant, ctx) = TenantHarness::create("test_branch")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_branch").await?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4193,7 +4204,8 @@ mod tests {
     #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let (tenant, ctx) =
-            TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
+            TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")
+                .await?
                 .load()
                 .await;
         let tline = tenant
@@ -4240,7 +4252,8 @@ mod tests {
     #[tokio::test]
     async fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> anyhow::Result<()> {
         let (tenant, ctx) =
-            TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?
+            TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")
+                .await?
                 .load()
                 .await;
 
@@ -4295,7 +4308,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_branchpoints_from_an_inactive_timeline() -> anyhow::Result<()> {
         let (tenant, ctx) =
-            TenantHarness::create("test_get_branchpoints_from_an_inactive_timeline")?
+            TenantHarness::create("test_get_branchpoints_from_an_inactive_timeline")
+                .await?
                 .load()
                 .await;
         let tline = tenant
@@ -4352,7 +4366,8 @@ mod tests {
     #[tokio::test]
     async fn test_retain_data_in_parent_which_is_needed_for_child() -> anyhow::Result<()> {
         let (tenant, ctx) =
-            TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
+            TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")
+                .await?
                 .load()
                 .await;
         let tline = tenant
@@ -4382,10 +4397,10 @@ mod tests {
     }
     #[tokio::test]
     async fn test_parent_keeps_data_forever_after_branching() -> anyhow::Result<()> {
-        let (tenant, ctx) =
-            TenantHarness::create("test_parent_keeps_data_forever_after_branching")?
-                .load()
-                .await;
+        let (tenant, ctx) = TenantHarness::create("test_parent_keeps_data_forever_after_branching")
+            .await?
+            .load()
+            .await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4423,7 +4438,7 @@ mod tests {
     #[tokio::test]
     async fn timeline_load() -> anyhow::Result<()> {
         const TEST_NAME: &str = "timeline_load";
-        let harness = TenantHarness::create(TEST_NAME)?;
+        let harness = TenantHarness::create(TEST_NAME).await?;
         {
             let (tenant, ctx) = harness.load().await;
             let tline = tenant
@@ -4450,7 +4465,7 @@ mod tests {
     #[tokio::test]
     async fn timeline_load_with_ancestor() -> anyhow::Result<()> {
         const TEST_NAME: &str = "timeline_load_with_ancestor";
-        let harness = TenantHarness::create(TEST_NAME)?;
+        let harness = TenantHarness::create(TEST_NAME).await?;
         // create two timelines
         {
             let (tenant, ctx) = harness.load().await;
@@ -4498,7 +4513,10 @@ mod tests {
     #[tokio::test]
     async fn delta_layer_dumping() -> anyhow::Result<()> {
         use storage_layer::AsLayerDesc;
-        let (tenant, ctx) = TenantHarness::create("test_layer_dumping")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_layer_dumping")
+            .await?
+            .load()
+            .await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4525,7 +4543,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_images() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_images")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_images").await?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -4696,7 +4714,7 @@ mod tests {
     //
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_bulk_insert")?;
+        let harness = TenantHarness::create("test_bulk_insert").await?;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
@@ -4727,7 +4745,7 @@ mod tests {
     // so the search can stop at the first delta layer and doesn't traverse any deeper.
     #[tokio::test]
     async fn test_get_vectored() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_get_vectored")?;
+        let harness = TenantHarness::create("test_get_vectored").await?;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
@@ -4805,7 +4823,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_vectored_aux_files() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_get_vectored_aux_files")?;
+        let harness = TenantHarness::create("test_get_vectored_aux_files").await?;
 
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
@@ -4891,7 +4909,8 @@ mod tests {
             TenantId::generate(),
             ShardIdentity::unsharded(),
             Generation::new(0xdeadbeef),
-        )?;
+        )
+        .await?;
         let (tenant, ctx) = harness.load().await;
 
         let mut current_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
@@ -5034,7 +5053,7 @@ mod tests {
     // ```
     #[tokio::test]
     async fn test_get_vectored_ancestor_descent() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_get_vectored_on_lsn_axis")?;
+        let harness = TenantHarness::create("test_get_vectored_on_lsn_axis").await?;
         let (tenant, ctx) = harness.load().await;
 
         let start_key = Key::from_hex("010000000033333333444444445500000000").unwrap();
@@ -5183,7 +5202,7 @@ mod tests {
         name: &'static str,
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
-        let mut harness = TenantHarness::create(name)?;
+        let mut harness = TenantHarness::create(name).await?;
         harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
             kind: compaction_algorithm,
         };
@@ -5267,7 +5286,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_traverse_branches() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_traverse_branches")?
+        let (tenant, ctx) = TenantHarness::create("test_traverse_branches")
+            .await?
             .load()
             .await;
         let mut tline = tenant
@@ -5357,7 +5377,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_traverse_ancestors() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_traverse_ancestors")?
+        let (tenant, ctx) = TenantHarness::create("test_traverse_ancestors")
+            .await?
             .load()
             .await;
         let mut tline = tenant
@@ -5423,7 +5444,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_at_initdb_lsn_takes_optimization_code_path() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_empty_test_timeline_is_usable")?
+        let (tenant, ctx) = TenantHarness::create("test_empty_test_timeline_is_usable")
+            .await?
             .load()
             .await;
 
@@ -5492,7 +5514,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_guard_crash() -> anyhow::Result<()> {
         let name = "test_create_guard_crash";
-        let harness = TenantHarness::create(name)?;
+        let harness = TenantHarness::create(name).await?;
         {
             let (tenant, ctx) = harness.load().await;
             let tline = tenant
@@ -5545,7 +5567,7 @@ mod tests {
         name: &'static str,
         compaction_algorithm: CompactionAlgorithm,
     ) -> anyhow::Result<()> {
-        let mut harness = TenantHarness::create(name)?;
+        let mut harness = TenantHarness::create(name).await?;
         harness.tenant_conf.compaction_algorithm = CompactionAlgorithmSettings {
             kind: compaction_algorithm,
         };
@@ -5569,7 +5591,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_scan() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_scan")?;
+        let harness = TenantHarness::create("test_metadata_scan").await?;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -5688,7 +5710,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_compaction_trigger() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_compaction_trigger")?;
+        let harness = TenantHarness::create("test_metadata_compaction_trigger").await?;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -5747,7 +5769,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_copies_dirty_aux_file_flag() {
-        let harness = TenantHarness::create("test_branch_copies_dirty_aux_file_flag").unwrap();
+        let harness = TenantHarness::create("test_branch_copies_dirty_aux_file_flag")
+            .await
+            .unwrap();
 
         // the default aux file policy to switch is v1 if not set by the admins
         assert_eq!(
@@ -5849,7 +5873,9 @@ mod tests {
 
     #[tokio::test]
     async fn aux_file_policy_switch() {
-        let mut harness = TenantHarness::create("aux_file_policy_switch").unwrap();
+        let mut harness = TenantHarness::create("aux_file_policy_switch")
+            .await
+            .unwrap();
         harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::CrossValidation; // set to cross-validation mode
         let (tenant, ctx) = harness.load().await;
 
@@ -6023,7 +6049,9 @@ mod tests {
 
     #[tokio::test]
     async fn aux_file_policy_force_switch() {
-        let mut harness = TenantHarness::create("aux_file_policy_force_switch").unwrap();
+        let mut harness = TenantHarness::create("aux_file_policy_force_switch")
+            .await
+            .unwrap();
         harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V1;
         let (tenant, ctx) = harness.load().await;
 
@@ -6084,7 +6112,9 @@ mod tests {
 
     #[tokio::test]
     async fn aux_file_policy_auto_detect() {
-        let mut harness = TenantHarness::create("aux_file_policy_auto_detect").unwrap();
+        let mut harness = TenantHarness::create("aux_file_policy_auto_detect")
+            .await
+            .unwrap();
         harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V2; // set to cross-validation mode
         let (tenant, ctx) = harness.load().await;
 
@@ -6147,7 +6177,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_image_creation() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_image_creation")?;
+        let harness = TenantHarness::create("test_metadata_image_creation").await?;
         let (tenant, ctx) = harness.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
@@ -6246,7 +6276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vectored_missing_data_key_reads() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
+        let harness = TenantHarness::create("test_vectored_missing_data_key_reads").await?;
         let (tenant, ctx) = harness.load().await;
 
         let base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
@@ -6318,7 +6348,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads")?;
+        let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads").await?;
         let (tenant, ctx) = harness.load().await;
 
         let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
@@ -6410,7 +6440,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_tombstone_reads() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_metadata_tombstone_reads")?;
+        let harness = TenantHarness::create("test_metadata_tombstone_reads").await?;
         let (tenant, ctx) = harness.load().await;
         let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
         let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
@@ -6490,7 +6520,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_tombstone_image_creation() {
-        let harness = TenantHarness::create("test_metadata_tombstone_image_creation").unwrap();
+        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")
+            .await
+            .unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
@@ -6562,8 +6594,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_tombstone_empty_image_creation() {
-        let harness =
-            TenantHarness::create("test_metadata_tombstone_empty_image_creation").unwrap();
+        let harness = TenantHarness::create("test_metadata_tombstone_empty_image_creation")
+            .await
+            .unwrap();
         let (tenant, ctx) = harness.load().await;
 
         let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
@@ -6626,7 +6659,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_images() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_simple_bottom_most_compaction_images")?;
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_images").await?;
         let (tenant, ctx) = harness.load().await;
 
         fn get_key(id: u32) -> Key {
@@ -6834,7 +6867,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_neon_test_record() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_neon_test_record")?;
+        let harness = TenantHarness::create("test_neon_test_record").await?;
         let (tenant, ctx) = harness.load().await;
 
         fn get_key(id: u32) -> Key {
@@ -6915,7 +6948,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lsn_lease() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_lsn_lease")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_lsn_lease").await?.load().await;
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
@@ -7004,7 +7037,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_deltas() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas")?;
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas").await?;
         let (tenant, ctx) = harness.load().await;
 
         fn get_key(id: u32) -> Key {
