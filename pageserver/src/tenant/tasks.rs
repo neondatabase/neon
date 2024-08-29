@@ -379,21 +379,28 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 let res = tenant
                     .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx)
                     .await;
-                if let Err(e) = res {
-                    let wait_duration = backoff::exponential_backoff_duration_seconds(
-                        error_run_count + 1,
-                        1.0,
-                        MAX_BACKOFF_SECS,
-                    );
-                    error_run_count += 1;
-                    let wait_duration = Duration::from_secs_f64(wait_duration);
-                    error!(
+                match res {
+                    Ok(_) => {
+                        error_run_count = 0;
+                        period
+                    }
+                    Err(crate::tenant::GcError::TenantCancelled) => {
+                        return;
+                    }
+                    Err(e) => {
+                        let wait_duration = backoff::exponential_backoff_duration_seconds(
+                            error_run_count + 1,
+                            1.0,
+                            MAX_BACKOFF_SECS,
+                        );
+                        error_run_count += 1;
+                        let wait_duration = Duration::from_secs_f64(wait_duration);
+
+                        error!(
                         "Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}",
                     );
-                    wait_duration
-                } else {
-                    error_run_count = 0;
-                    period
+                        wait_duration
+                    }
                 }
             };
 

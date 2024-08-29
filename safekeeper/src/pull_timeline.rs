@@ -17,7 +17,7 @@ use utils::{
 use crate::{
     control_file, debug_dump,
     http::routes::TimelineStatus,
-    timeline::{Timeline, TimelineError},
+    timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError},
     wal_storage::{self, Storage},
     GlobalTimelines, SafeKeeperConf,
 };
@@ -283,13 +283,13 @@ pub async fn load_temp_timeline(
     }
 
     // Move timeline dir to the correct location
-    let timeline_path = conf.timeline_dir(&ttid);
+    let timeline_path = get_timeline_dir(conf, &ttid);
 
     info!(
         "moving timeline {} from {} to {}",
         ttid, tmp_path, timeline_path
     );
-    tokio::fs::create_dir_all(conf.tenant_dir(&ttid.tenant_id)).await?;
+    tokio::fs::create_dir_all(get_tenant_dir(conf, &ttid.tenant_id)).await?;
     tokio::fs::rename(tmp_path, &timeline_path).await?;
 
     let tli = GlobalTimelines::load_timeline(&guard, ttid)

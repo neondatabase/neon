@@ -3,7 +3,7 @@
 //! all from the disk on startup and keeping them in memory.
 
 use crate::safekeeper::ServerInfo;
-use crate::timeline::{Timeline, TimelineError};
+use crate::timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError};
 use crate::timelines_set::TimelinesSet;
 use crate::SafeKeeperConf;
 use anyhow::{bail, Context, Result};
@@ -127,7 +127,7 @@ impl GlobalTimelines {
             state.get_dependencies()
         };
 
-        let timelines_dir = conf.tenant_dir(&tenant_id);
+        let timelines_dir = get_tenant_dir(&conf, &tenant_id);
         for timelines_dir_entry in std::fs::read_dir(&timelines_dir)
             .with_context(|| format!("failed to list timelines dir {}", timelines_dir))?
         {
@@ -348,11 +348,7 @@ impl GlobalTimelines {
             }
             Err(_) => {
                 // Timeline is not memory, but it may still exist on disk in broken state.
-                let dir_path = TIMELINES_STATE
-                    .lock()
-                    .unwrap()
-                    .get_conf()
-                    .timeline_dir(ttid);
+                let dir_path = get_timeline_dir(TIMELINES_STATE.lock().unwrap().get_conf(), ttid);
                 let dir_existed = delete_dir(dir_path)?;
 
                 Ok(TimelineDeleteForceResult {
@@ -401,13 +397,10 @@ impl GlobalTimelines {
         // Note that we could concurrently create new timelines while we were deleting them,
         // so the directory may be not empty. In this case timelines will have bad state
         // and timeline background jobs can panic.
-        delete_dir(
-            TIMELINES_STATE
-                .lock()
-                .unwrap()
-                .get_conf()
-                .tenant_dir(tenant_id),
-        )?;
+        delete_dir(get_tenant_dir(
+            TIMELINES_STATE.lock().unwrap().get_conf(),
+            tenant_id,
+        ))?;
 
         // FIXME: we temporarily disabled removing timelines from the map, see `delete_force`
         // let tlis_after_delete = Self::get_all_for_tenant(*tenant_id);

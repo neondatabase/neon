@@ -2919,6 +2919,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01cda141df6706de531b6c46c3a33ecca755538219bd484262fa09410c13539c"
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0b5399f6804fbab912acbd8878ed3532d506b7c951b8f9f164ef90fef39e3f4"
+
+[[package]]
 name = "lock_api"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3567,6 +3573,7 @@ dependencies = [
  "serde",
  "serde_json",
  "svg_fmt",
+ "thiserror",
  "tokio",
  "tokio-util",
  "toml_edit",
@@ -6166,7 +6173,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#342ddd197a060a8354e8f11f4d12994419fff939"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#08ccfa94ff5507727bf4d8d006666b5b192e04c6"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6678,11 +6685,12 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#342ddd197a060a8354e8f11f4d12994419fff939"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=main#08ccfa94ff5507727bf4d8d006666b5b192e04c6"
 dependencies = [
  "bytes",
  "io-uring",
  "libc",
+ "linux-raw-sys 0.6.4",
 ]
 
 [[package]]

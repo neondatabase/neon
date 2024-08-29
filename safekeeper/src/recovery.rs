@@ -2,7 +2,7 @@
 //! provide it, i.e. safekeeper lags too much.
 
 use std::time::SystemTime;
-use std::{fmt, pin::pin, sync::Arc};
+use std::{fmt, pin::pin};
 
 use anyhow::{bail, Context};
 use futures::StreamExt;
@@ -21,6 +21,7 @@ use utils::{id::NodeId, lsn::Lsn, postgres_client::wal_stream_connection_config}
 
 use crate::receive_wal::{WalAcceptor, REPLY_QUEUE_SIZE};
 use crate::safekeeper::{AppendRequest, AppendRequestHeader};
+use crate::timeline::FullAccessTimeline;
 use crate::{
     http::routes::TimelineStatus,
     receive_wal::MSG_QUEUE_SIZE,
@@ -28,14 +29,14 @@ use crate::{
         AcceptorProposerMessage, ProposerAcceptorMessage, ProposerElected, Term, TermHistory,
         TermLsn, VoteRequest,
     },
-    timeline::{PeerInfo, Timeline},
+    timeline::PeerInfo,
     SafeKeeperConf,
 };
 
 /// Entrypoint for per timeline task which always runs, checking whether
 /// recovery for this safekeeper is needed and starting it if so.
 #[instrument(name = "recovery task", skip_all, fields(ttid = %tli.ttid))]
-pub async fn recovery_main(tli: Arc<Timeline>, conf: SafeKeeperConf) {
+pub async fn recovery_main(tli: FullAccessTimeline, conf: SafeKeeperConf) {
     info!("started");
 
     let cancel = tli.cancel.clone();
@@ -47,6 +48,87 @@ pub async fn recovery_main(tli: Arc<Timeline>, conf: SafeKeeperConf) {
     }
 }
 
+/// Should we start fetching WAL from a peer safekeeper, and if yes, from
+/// which? Answer is yes, i.e. .donors is not empty if 1) there is something
+/// to fetch, and we can do that without running elections; 2) there is no
+/// actively streaming compute, as we don't want to compete with it.
+///
+/// If donor(s) are choosen, theirs last_log_term is guaranteed to be equal
+/// to its last_log_term so we are sure such a leader ever had been elected.
+///
+/// All possible donors are returned so that we could keep connection to the
+/// current one if it is good even if it slightly lags behind.
+///
+/// Note that term conditions above might be not met, but safekeepers are
+/// still not aligned on last flush_lsn. Generally in this case until
+/// elections are run it is not possible to say which safekeeper should
+/// recover from which one -- history which would be committed is different
+/// depending on assembled quorum (e.g. classic picture 8 from Raft paper).
+/// Thus we don't try to predict it here.
+async fn recovery_needed(
+    tli: &FullAccessTimeline,
+    heartbeat_timeout: Duration,
+) -> RecoveryNeededInfo {
+    let ss = tli.read_shared_state().await;
+    let term = ss.sk.state.acceptor_state.term;
+    let last_log_term = ss.sk.get_last_log_term();
+    let flush_lsn = ss.sk.flush_lsn();
+    // note that peers contain myself, but that's ok -- we are interested only in peers which are strictly ahead of us.
+    let mut peers = ss.get_peers(heartbeat_timeout);
+    // Sort by <last log term, lsn> pairs.
+    peers.sort_by(|p1, p2| {
+        let tl1 = TermLsn {
+            term: p1.last_log_term,
+            lsn: p1.flush_lsn,
+        };
+        let tl2 = TermLsn {
+            term: p2.last_log_term,
+            lsn: p2.flush_lsn,
+        };
+        tl2.cmp(&tl1) // desc
+    });
+    let num_streaming_computes = tli.get_walreceivers().get_num_streaming();
+    let donors = if num_streaming_computes > 0 {
+        vec![] // If there is a streaming compute, don't try to recover to not intervene.
+    } else {
+        peers
+            .iter()
+            .filter_map(|candidate| {
+                // Are we interested in this candidate?
+                let candidate_tl = TermLsn {
+                    term: candidate.last_log_term,
+                    lsn: candidate.flush_lsn,
+                };
+                let my_tl = TermLsn {
+                    term: last_log_term,
+                    lsn: flush_lsn,
+                };
+                if my_tl < candidate_tl {
+                    // Yes, we are interested. Can we pull from it without
+                    // (re)running elections? It is possible if 1) his term
+                    // is equal to his last_log_term so we could act on
+                    // behalf of leader of this term (we must be sure he was
+                    // ever elected) and 2) our term is not higher, or we'll refuse data.
+                    if candidate.term == candidate.last_log_term && candidate.term >= term {
+                        Some(Donor::from(candidate))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    RecoveryNeededInfo {
+        term,
+        last_log_term,
+        flush_lsn,
+        peers,
+        num_streaming_computes,
+        donors,
+    }
+}
 /// Result of Timeline::recovery_needed, contains donor(s) if recovery needed and
 /// fields to explain the choice.
 #[derive(Debug)]
@@ -113,10 +195,10 @@ impl From<&PeerInfo> for Donor {
 const CHECK_INTERVAL_MS: u64 = 2000;
 
 /// Check regularly whether we need to start recovery.
-async fn recovery_main_loop(tli: Arc<Timeline>, conf: SafeKeeperConf) {
+async fn recovery_main_loop(tli: FullAccessTimeline, conf: SafeKeeperConf) {
     let check_duration = Duration::from_millis(CHECK_INTERVAL_MS);
     loop {
-        let recovery_needed_info = tli.recovery_needed(conf.heartbeat_timeout).await;
+        let recovery_needed_info = recovery_needed(&tli, conf.heartbeat_timeout).await;
         match recovery_needed_info.donors.first() {
             Some(donor) => {
                 info!(
@@ -146,7 +228,7 @@ async fn recovery_main_loop(tli: Arc<Timeline>, conf: SafeKeeperConf) {
 /// Recover from the specified donor. Returns message explaining normal finish
 /// reason or error.
 async fn recover(
-    tli: Arc<Timeline>,
+    tli: FullAccessTimeline,
     donor: &Donor,
     conf: &SafeKeeperConf,
 ) -> anyhow::Result<String> {
@@ -232,7 +314,7 @@ async fn recover(
 
 // Pull WAL from donor, assuming handshake is already done.
 async fn recovery_stream(
-    tli: Arc<Timeline>,
+    tli: FullAccessTimeline,
     donor: &Donor,
     start_streaming_at: Lsn,
     conf: &SafeKeeperConf,
@@ -316,7 +398,7 @@ async fn network_io(
     physical_stream: ReplicationStream,
     msg_tx: Sender<ProposerAcceptorMessage>,
     donor: Donor,
-    tli: Arc<Timeline>,
+    tli: FullAccessTimeline,
     conf: SafeKeeperConf,
 ) -> anyhow::Result<Option<String>> {
     let mut physical_stream = pin!(physical_stream);
@@ -337,7 +419,7 @@ async fn network_io(
             ReplicationMessage::XLogData(xlog_data) => {
                 let ar_hdr = AppendRequestHeader {
                     term: donor.term,
-                    epoch_start_lsn: Lsn::INVALID, // unused
+                    term_start_lsn: Lsn::INVALID, // unused
                     begin_lsn: Lsn(xlog_data.wal_start()),
                     end_lsn: Lsn(xlog_data.wal_start()) + xlog_data.data().len() as u64,
                     commit_lsn: Lsn::INVALID, // do not attempt to advance, peer communication anyway does it
@@ -365,7 +447,7 @@ async fn network_io(
             }
             ReplicationMessage::PrimaryKeepAlive(_) => {
                 // keepalive means nothing is being streamed for a while. Check whether we need to stop.
-                let recovery_needed_info = tli.recovery_needed(conf.heartbeat_timeout).await;
+                let recovery_needed_info = recovery_needed(&tli, conf.heartbeat_timeout).await;
                 // do current donors still contain one we currently connected to?
                 if !recovery_needed_info
                     .donors

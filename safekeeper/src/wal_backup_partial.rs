@@ -18,22 +18,21 @@
 //! This way control file stores information about all potentially existing
 //! remote partial segments and can clean them up after uploading a newer version.
 
-use std::sync::Arc;
-
 use camino::Utf8PathBuf;
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use rand::Rng;
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 use utils::lsn::Lsn;
 
 use crate::{
     metrics::{PARTIAL_BACKUP_UPLOADED_BYTES, PARTIAL_BACKUP_UPLOADS},
     safekeeper::Term,
-    timeline::Timeline,
-    wal_backup, SafeKeeperConf,
+    timeline::FullAccessTimeline,
+    wal_backup::{self, remote_timeline_path},
+    SafeKeeperConf,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,10 +82,10 @@ impl State {
 
 struct PartialBackup {
     wal_seg_size: usize,
-    tli: Arc<Timeline>,
+    tli: FullAccessTimeline,
     conf: SafeKeeperConf,
     local_prefix: Utf8PathBuf,
-    remote_prefix: Utf8PathBuf,
+    remote_timeline_path: RemotePath,
 
     state: State,
 }
@@ -153,7 +152,7 @@ impl PartialBackup {
         let backup_bytes = flush_lsn.segment_offset(self.wal_seg_size);
 
         let local_path = self.local_prefix.join(self.local_segment_name(segno));
-        let remote_path = RemotePath::new(self.remote_prefix.join(&prepared.name).as_ref())?;
+        let remote_path = self.remote_timeline_path.join(&prepared.name);
 
         // Upload first `backup_bytes` bytes of the segment to the remote storage.
         wal_backup::backup_partial_segment(&local_path, &remote_path, backup_bytes).await?;
@@ -253,7 +252,7 @@ impl PartialBackup {
         info!("deleting objects: {:?}", segments_to_delete);
         let mut objects_to_delete = vec![];
         for seg in segments_to_delete.iter() {
-            let remote_path = RemotePath::new(self.remote_prefix.join(seg).as_ref())?;
+            let remote_path = self.remote_timeline_path.join(seg);
             objects_to_delete.push(remote_path);
         }
 
@@ -273,7 +272,7 @@ impl PartialBackup {
 }
 
 #[instrument(name = "Partial backup", skip_all, fields(ttid = %tli.ttid))]
-pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
+pub async fn main_task(tli: FullAccessTimeline, conf: SafeKeeperConf) {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
 
@@ -289,11 +288,11 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
     let mut flush_lsn_rx = tli.get_term_flush_lsn_watch_rx();
     let wal_seg_size = tli.get_wal_seg_size().await;
 
-    let local_prefix = tli.timeline_dir.clone();
-    let remote_prefix = match tli.timeline_dir.strip_prefix(&conf.workdir) {
-        Ok(path) => path.to_owned(),
+    let local_prefix = tli.get_timeline_dir();
+    let remote_timeline_path = match remote_timeline_path(&tli.ttid) {
+        Ok(path) => path,
         Err(e) => {
-            error!("failed to strip workspace dir prefix: {:?}", e);
+            error!("failed to create remote path: {:?}", e);
             return;
         }
     };
@@ -304,12 +303,28 @@ pub async fn main_task(tli: Arc<Timeline>, conf: SafeKeeperConf) {
         state: persistent_state.partial_backup,
         conf,
         local_prefix,
-        remote_prefix,
+        remote_timeline_path,
     };
 
     debug!("state: {:?}", backup.state);
 
+    // The general idea is that each safekeeper keeps only one partial segment
+    // both in remote storage and in local state. If this is not true, something
+    // went wrong.
+    const MAX_SIMULTANEOUS_SEGMENTS: usize = 10;
+
     'outer: loop {
+        if backup.state.segments.len() > MAX_SIMULTANEOUS_SEGMENTS {
+            warn!(
+                "too many segments in control_file state, running gc: {}",
+                backup.state.segments.len()
+            );
+
+            backup.gc().await.unwrap_or_else(|e| {
+                error!("failed to run gc: {:#}", e);
+            });
+        }
+
         // wait until we have something to upload
         let uploaded_segment = backup.state.uploaded_segment();
         if let Some(seg) = &uploaded_segment {

@@ -12,6 +12,7 @@
 mod azure_blob;
 mod error;
 mod local_fs;
+mod metrics;
 mod s3_bucket;
 mod simulate_failures;
 mod support;
@@ -121,8 +122,8 @@ impl RemotePath {
         self.0.file_name()
     }
 
-    pub fn join(&self, segment: &Utf8Path) -> Self {
-        Self(self.0.join(segment))
+    pub fn join(&self, path: impl AsRef<Utf8Path>) -> Self {
+        Self(self.0.join(path))
     }
 
     pub fn get_path(&self) -> &Utf8PathBuf {

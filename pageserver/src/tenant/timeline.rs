@@ -132,14 +132,17 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::secondary::heatmap::{HeatMapLayer, HeatMapTimeline};
 use super::{config::TenantConf, storage_layer::VectoredValueReconstructState};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
+use super::{
+    secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
+    GcError,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub(super) enum FlushLoopState {
+pub(crate) enum FlushLoopState {
     NotStarted,
     Running {
         #[cfg(test)]
@@ -497,14 +500,10 @@ pub(crate) enum PageReconstructError {
     Other(#[from] anyhow::Error),
 
     #[error("Ancestor LSN wait error: {0}")]
-    AncestorLsnTimeout(#[from] WaitLsnError),
+    AncestorLsnTimeout(WaitLsnError),
 
     #[error("timeline shutting down")]
     Cancelled,
-
-    /// The ancestor of this is being stopped
-    #[error("ancestor timeline {0} is being stopped")]
-    AncestorStopping(TimelineId),
 
     /// An error happened replaying WAL records
     #[error(transparent)]
@@ -570,7 +569,7 @@ impl PageReconstructError {
         match self {
             Other(_) => false,
             AncestorLsnTimeout(_) => false,
-            Cancelled | AncestorStopping(_) => true,
+            Cancelled => true,
             WalRedo(_) => false,
             MissingKey { .. } => false,
         }
@@ -578,7 +577,7 @@ impl PageReconstructError {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum CreateImageLayersError {
+pub(crate) enum CreateImageLayersError {
     #[error("timeline shutting down")]
     Cancelled,
 
@@ -592,17 +591,35 @@ enum CreateImageLayersError {
     Other(#[from] anyhow::Error),
 }
 
-#[derive(thiserror::Error, Debug)]
-enum FlushLayerError {
+#[derive(thiserror::Error, Debug, Clone)]
+pub(crate) enum FlushLayerError {
     /// Timeline cancellation token was cancelled
     #[error("timeline shutting down")]
     Cancelled,
 
+    /// We tried to flush a layer while the Timeline is in an unexpected state
+    #[error("cannot flush frozen layers when flush_loop is not running, state is {0:?}")]
+    NotRunning(FlushLoopState),
+
+    // Arc<> the following non-clonable error types: we must be Clone-able because the flush error is propagated from the flush
+    // loop via a watch channel, where we can only borrow it.
     #[error(transparent)]
-    CreateImageLayersError(CreateImageLayersError),
+    CreateImageLayersError(Arc<CreateImageLayersError>),
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(#[from] Arc<anyhow::Error>),
+}
+
+impl FlushLayerError {
+    // When crossing from generic anyhow errors to this error type, we explicitly check
+    // for timeline cancellation to avoid logging inoffensive shutdown errors as warn/err.
+    fn from_anyhow(timeline: &Timeline, err: anyhow::Error) -> Self {
+        if timeline.cancel.is_cancelled() {
+            Self::Cancelled
+        } else {
+            Self::Other(Arc::new(err))
+        }
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -628,17 +645,17 @@ pub(crate) enum GetVectoredError {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum GetReadyAncestorError {
-    #[error("ancestor timeline {0} is being stopped")]
-    AncestorStopping(TimelineId),
-
     #[error("Ancestor LSN wait error: {0}")]
     AncestorLsnTimeout(#[from] WaitLsnError),
 
+    #[error("Bad state on timeline {timeline_id}: {state:?}")]
+    BadState {
+        timeline_id: TimelineId,
+        state: TimelineState,
+    },
+
     #[error("Cancelled")]
     Cancelled,
-
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 #[derive(Clone, Copy)]
@@ -673,8 +690,8 @@ pub(crate) enum WaitLsnError {
     Shutdown,
 
     // Called on an timeline not in active state or shutting down
-    #[error("Bad state (not active)")]
-    BadState,
+    #[error("Bad timeline state: {0:?}")]
+    BadState(TimelineState),
 
     // Timeout expired while waiting for LSN to catch up with goal.
     #[error("{0}")]
@@ -697,7 +714,7 @@ impl From<CreateImageLayersError> for FlushLayerError {
     fn from(e: CreateImageLayersError) -> Self {
         match e {
             CreateImageLayersError::Cancelled => FlushLayerError::Cancelled,
-            any => FlushLayerError::CreateImageLayersError(any),
+            any => FlushLayerError::CreateImageLayersError(Arc::new(any)),
         }
     }
 }
@@ -737,10 +754,9 @@ impl From<GetReadyAncestorError> for PageReconstructError {
     fn from(e: GetReadyAncestorError) -> Self {
         use GetReadyAncestorError::*;
         match e {
-            AncestorStopping(tid) => PageReconstructError::AncestorStopping(tid),
             AncestorLsnTimeout(wait_err) => PageReconstructError::AncestorLsnTimeout(wait_err),
+            bad_state @ BadState { .. } => PageReconstructError::Other(anyhow::anyhow!(bad_state)),
             Cancelled => PageReconstructError::Cancelled,
-            Other(other) => PageReconstructError::Other(other),
         }
     }
 }
@@ -1138,9 +1154,7 @@ impl Timeline {
 
                 use PageReconstructError::*;
                 match block {
-                    Err(Cancelled | AncestorStopping(_)) => {
-                        return Err(GetVectoredError::Cancelled)
-                    }
+                    Err(Cancelled) => return Err(GetVectoredError::Cancelled),
                     Err(MissingKey(_))
                         if NON_INHERITED_RANGE.contains(&key)
                             || NON_INHERITED_SPARSE_RANGE.contains(&key) =>
@@ -1415,10 +1429,11 @@ impl Timeline {
         who_is_waiting: WaitLsnWaiter<'_>,
         ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> Result<(), WaitLsnError> {
-        if self.cancel.is_cancelled() {
+        let state = self.current_state();
+        if self.cancel.is_cancelled() || matches!(state, TimelineState::Stopping) {
             return Err(WaitLsnError::Shutdown);
-        } else if !self.is_active() {
-            return Err(WaitLsnError::BadState);
+        } else if !matches!(state, TimelineState::Active) {
+            return Err(WaitLsnError::BadState(state));
         }
 
         if cfg!(debug_assertions) {
@@ -1514,13 +1529,13 @@ impl Timeline {
 
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
-    pub(crate) async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+    pub(crate) async fn freeze_and_flush(&self) -> Result<(), FlushLayerError> {
         self.freeze_and_flush0().await
     }
 
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
-    pub(crate) async fn freeze_and_flush0(&self) -> anyhow::Result<()> {
+    pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
         let to_lsn = self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait(to_lsn).await
     }
@@ -2702,11 +2717,6 @@ impl Timeline {
             self.current_logical_size.initialized.add_permits(1);
         }
 
-        enum BackgroundCalculationError {
-            Cancelled,
-            Other(anyhow::Error),
-        }
-
         let try_once = |attempt: usize| {
             let background_ctx = &background_ctx;
             let self_ref = &self;
@@ -2724,10 +2734,10 @@ impl Timeline {
                         (Some(permit), StartCircumstances::AfterBackgroundTasksRateLimit)
                     }
                     _ = self_ref.cancel.cancelled() => {
-                        return Err(BackgroundCalculationError::Cancelled);
+                        return Err(CalculateLogicalSizeError::Cancelled);
                     }
                     _ = cancel.cancelled() => {
-                        return Err(BackgroundCalculationError::Cancelled);
+                        return Err(CalculateLogicalSizeError::Cancelled);
                     },
                     () = skip_concurrency_limiter.cancelled() => {
                         // Some action that is part of a end user interaction requested logical size
@@ -2754,18 +2764,7 @@ impl Timeline {
                     .await
                 {
                     Ok(calculated_size) => Ok((calculated_size, metrics_guard)),
-                    Err(CalculateLogicalSizeError::Cancelled) => {
-                        Err(BackgroundCalculationError::Cancelled)
-                    }
-                    Err(CalculateLogicalSizeError::Other(err)) => {
-                        if let Some(PageReconstructError::AncestorStopping(_)) =
-                            err.root_cause().downcast_ref()
-                        {
-                            Err(BackgroundCalculationError::Cancelled)
-                        } else {
-                            Err(BackgroundCalculationError::Other(err))
-                        }
-                    }
+                    Err(e) => Err(e),
                 }
             }
         };
@@ -2777,8 +2776,11 @@ impl Timeline {
 
                 match try_once(attempt).await {
                     Ok(res) => return ControlFlow::Continue(res),
-                    Err(BackgroundCalculationError::Cancelled) => return ControlFlow::Break(()),
-                    Err(BackgroundCalculationError::Other(e)) => {
+                    Err(CalculateLogicalSizeError::Cancelled) => return ControlFlow::Break(()),
+                    Err(
+                        e @ (CalculateLogicalSizeError::Decode(_)
+                        | CalculateLogicalSizeError::PageRead(_)),
+                    ) => {
                         warn!(attempt, "initial size calculation failed: {e:?}");
                         // exponential back-off doesn't make sense at these long intervals;
                         // use fixed retry interval with generous jitter instead
@@ -3155,17 +3157,21 @@ impl Timeline {
             }
 
             // Recurse into ancestor if needed
-            if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
-                trace!(
-                    "going into ancestor {}, cont_lsn is {}",
-                    timeline.ancestor_lsn,
-                    cont_lsn
-                );
+            if let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() {
+                if is_inherited_key(key) && Lsn(cont_lsn.0 - 1) <= timeline.ancestor_lsn {
+                    trace!(
+                        "going into ancestor {}, cont_lsn is {}",
+                        timeline.ancestor_lsn,
+                        cont_lsn
+                    );
 
-                timeline_owned = timeline.get_ready_ancestor_timeline(ctx).await?;
-                timeline = &*timeline_owned;
-                prev_lsn = None;
-                continue 'outer;
+                    timeline_owned = timeline
+                        .get_ready_ancestor_timeline(ancestor_timeline, ctx)
+                        .await?;
+                    timeline = &*timeline_owned;
+                    prev_lsn = None;
+                    continue 'outer;
+                }
             }
 
             let guard = timeline.layers.read().await;
@@ -3314,10 +3320,10 @@ impl Timeline {
                 break None;
             }
 
-            // Not fully retrieved but no ancestor timeline.
-            if timeline.ancestor_timeline.is_none() {
+            let Some(ancestor_timeline) = timeline.ancestor_timeline.as_ref() else {
+                // Not fully retrieved but no ancestor timeline.
                 break Some(keyspace);
-            }
+            };
 
             // Now we see if there are keys covered by the image layer but does not exist in the
             // image layer, which means that the key does not exist.
@@ -3337,7 +3343,7 @@ impl Timeline {
             // Take the min to avoid reconstructing a page with data newer than request Lsn.
             cont_lsn = std::cmp::min(Lsn(request_lsn.0 + 1), Lsn(timeline.ancestor_lsn.0 + 1));
             timeline_owned = timeline
-                .get_ready_ancestor_timeline(ctx)
+                .get_ready_ancestor_timeline(ancestor_timeline, ctx)
                 .await
                 .map_err(GetVectoredError::GetReadyAncestorError)?;
             timeline = &*timeline_owned;
@@ -3509,13 +3515,9 @@ impl Timeline {
 
     async fn get_ready_ancestor_timeline(
         &self,
+        ancestor: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, GetReadyAncestorError> {
-        let ancestor = match self.get_ancestor_timeline() {
-            Ok(timeline) => timeline,
-            Err(e) => return Err(GetReadyAncestorError::from(e)),
-        };
-
         // It's possible that the ancestor timeline isn't active yet, or
         // is active but hasn't yet caught up to the branch point. Wait
         // for it.
@@ -3543,16 +3545,14 @@ impl Timeline {
         match ancestor.wait_to_become_active(ctx).await {
             Ok(()) => {}
             Err(TimelineState::Stopping) => {
-                return Err(GetReadyAncestorError::AncestorStopping(
-                    ancestor.timeline_id,
-                ));
+                // If an ancestor is stopping, it means the tenant is stopping: handle this the same as if this timeline was stopping.
+                return Err(GetReadyAncestorError::Cancelled);
             }
             Err(state) => {
-                return Err(GetReadyAncestorError::Other(anyhow::anyhow!(
-                    "Timeline {} will not become active. Current state: {:?}",
-                    ancestor.timeline_id,
-                    &state,
-                )));
+                return Err(GetReadyAncestorError::BadState {
+                    timeline_id: ancestor.timeline_id,
+                    state,
+                });
             }
         }
         ancestor
@@ -3561,21 +3561,17 @@ impl Timeline {
             .map_err(|e| match e {
                 e @ WaitLsnError::Timeout(_) => GetReadyAncestorError::AncestorLsnTimeout(e),
                 WaitLsnError::Shutdown => GetReadyAncestorError::Cancelled,
-                e @ WaitLsnError::BadState => GetReadyAncestorError::Other(anyhow::anyhow!(e)),
+                WaitLsnError::BadState(state) => GetReadyAncestorError::BadState {
+                    timeline_id: ancestor.timeline_id,
+                    state,
+                },
             })?;
 
-        Ok(ancestor)
+        Ok(ancestor.clone())
     }
 
-    pub(crate) fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
-        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
-            format!(
-                "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
-                self.timeline_id,
-                self.get_ancestor_timeline_id(),
-            )
-        })?;
-        Ok(Arc::clone(ancestor))
+    pub(crate) fn get_ancestor_timeline(&self) -> Option<Arc<Timeline>> {
+        self.ancestor_timeline.clone()
     }
 
     pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
@@ -3684,7 +3680,9 @@ impl Timeline {
                         return;
                     }
                     err @ Err(
-                        FlushLayerError::Other(_) | FlushLayerError::CreateImageLayersError(_),
+                        FlushLayerError::NotRunning(_)
+                        | FlushLayerError::Other(_)
+                        | FlushLayerError::CreateImageLayersError(_),
                     ) => {
                         error!("could not flush frozen layer: {err:?}");
                         break err.map(|_| ());
@@ -3730,7 +3728,10 @@ impl Timeline {
     /// `last_record_lsn` may be higher than the highest LSN of a frozen layer: if this is the case,
     /// it means no data will be written between the top of the highest frozen layer and to_lsn,
     /// e.g. because this tenant shard has ingested up to to_lsn and not written any data locally for that part of the WAL.
-    async fn flush_frozen_layers_and_wait(&self, last_record_lsn: Lsn) -> anyhow::Result<()> {
+    async fn flush_frozen_layers_and_wait(
+        &self,
+        last_record_lsn: Lsn,
+    ) -> Result<(), FlushLayerError> {
         let mut rx = self.layer_flush_done_tx.subscribe();
 
         // Increment the flush cycle counter and wake up the flush task.
@@ -3741,7 +3742,7 @@ impl Timeline {
 
         let flush_loop_state = { *self.flush_loop_state.lock().unwrap() };
         if !matches!(flush_loop_state, FlushLoopState::Running { .. }) {
-            anyhow::bail!("cannot flush frozen layers when flush_loop is not running, state is {flush_loop_state:?}")
+            return Err(FlushLayerError::NotRunning(flush_loop_state));
         }
 
         self.layer_flush_start_tx.send_modify(|(counter, lsn)| {
@@ -3754,14 +3755,11 @@ impl Timeline {
             {
                 let (last_result_counter, last_result) = &*rx.borrow();
                 if *last_result_counter >= my_flush_request {
-                    if let Err(_err) = last_result {
+                    if let Err(err) = last_result {
                         // We already logged the original error in
                         // flush_loop. We cannot propagate it to the caller
                         // here, because it might not be Cloneable
-                        anyhow::bail!(
-                            "Could not flush frozen layer. Request id: {}",
-                            my_flush_request
-                        );
+                        return Err(err.clone());
                     } else {
                         return Ok(());
                     }
@@ -3770,7 +3768,7 @@ impl Timeline {
             trace!("waiting for flush to complete");
             tokio::select! {
                 rx_e = rx.changed() => {
-                    rx_e?;
+                    rx_e.map_err(|_| FlushLayerError::NotRunning(*self.flush_loop_state.lock().unwrap()))?;
                 },
                 // Cancellation safety: we are not leaving an I/O in-flight for the flush, we're just ignoring
                 // the notification from [`flush_loop`] that it completed.
@@ -3842,7 +3840,8 @@ impl Timeline {
                     EnumSet::empty(),
                     ctx,
                 )
-                .await?;
+                .await
+                .map_err(|e| FlushLayerError::from_anyhow(self, e))?;
 
             if self.cancel.is_cancelled() {
                 return Err(FlushLayerError::Cancelled);
@@ -3866,7 +3865,8 @@ impl Timeline {
                     Some(metadata_keyspace.0.ranges[0].clone()),
                     ctx,
                 )
-                .await?
+                .await
+                .map_err(|e| FlushLayerError::from_anyhow(self, e))?
             } else {
                 None
             };
@@ -3893,7 +3893,11 @@ impl Timeline {
             // Normal case, write out a L0 delta layer file.
             // `create_delta_layer` will not modify the layer map.
             // We will remove frozen layer and add delta layer in one atomic operation later.
-            let Some(layer) = self.create_delta_layer(&frozen_layer, None, ctx).await? else {
+            let Some(layer) = self
+                .create_delta_layer(&frozen_layer, None, ctx)
+                .await
+                .map_err(|e| FlushLayerError::from_anyhow(self, e))?
+            else {
                 panic!("delta layer cannot be empty if no filter is applied");
             };
             (
@@ -3926,7 +3930,8 @@ impl Timeline {
 
             if self.set_disk_consistent_lsn(disk_consistent_lsn) {
                 // Schedule remote uploads that will reflect our new disk_consistent_lsn
-                self.schedule_uploads(disk_consistent_lsn, layers_to_upload)?;
+                self.schedule_uploads(disk_consistent_lsn, layers_to_upload)
+                    .map_err(|e| FlushLayerError::from_anyhow(self, e))?;
             }
             // release lock on 'layers'
         };
@@ -4274,6 +4279,7 @@ impl Timeline {
         ctx: &RequestContext,
         img_range: Range<Key>,
         mode: ImageLayerCreationMode,
+        start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         assert!(!matches!(mode, ImageLayerCreationMode::Initial));
 
@@ -4282,39 +4288,43 @@ impl Timeline {
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
             .await?;
-        let (data, total_kb_retrieved, total_key_retrieved) = {
+        let (data, total_kb_retrieved, total_keys_retrieved) = {
             let mut new_data = BTreeMap::new();
             let mut total_kb_retrieved = 0;
-            let mut total_key_retrieved = 0;
+            let mut total_keys_retrieved = 0;
             for (k, v) in data {
                 let v = v.map_err(CreateImageLayersError::PageReconstructError)?;
                 total_kb_retrieved += KEY_SIZE + v.len();
-                total_key_retrieved += 1;
+                total_keys_retrieved += 1;
                 new_data.insert(k, v);
             }
-            (new_data, total_kb_retrieved / 1024, total_key_retrieved)
+            (new_data, total_kb_retrieved / 1024, total_keys_retrieved)
         };
-        let delta_file_accessed = reconstruct_state.get_delta_layers_visited();
+        let delta_files_accessed = reconstruct_state.get_delta_layers_visited();
 
-        let trigger_generation = delta_file_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
+        let trigger_generation = delta_files_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
         debug!(
-            "generate image layers for metadata keys: trigger_generation={trigger_generation}, \
-                delta_file_accessed={delta_file_accessed}, total_kb_retrieved={total_kb_retrieved}, \
-                total_key_retrieved={total_key_retrieved}"
+            trigger_generation,
+            delta_files_accessed,
+            total_kb_retrieved,
+            total_keys_retrieved,
+            "generate metadata images"
         );
+
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
             return Ok(ImageLayerCreationOutcome {
                 image: None,
                 next_start_key: img_range.end,
             });
         }
-        let has_keys = !data.is_empty();
+        let mut wrote_any_image = false;
         for (k, v) in data {
-            // Even if the value is empty (deleted), we do not delete it for now until we can ensure vectored get
-            // considers this situation properly.
-            // if v.is_empty() {
-            //     continue;
-            // }
+            if v.is_empty() {
+                // the key has been deleted, it does not need an image
+                // in metadata keyspace, an empty image == tombstone
+                continue;
+            }
+            wrote_any_image = true;
 
             // No need to handle sharding b/c metadata keys are always on the 0-th shard.
 
@@ -4322,16 +4332,26 @@ impl Timeline {
             // on the normal data path either.
             image_layer_writer.put_image(k, v, ctx).await?;
         }
-        Ok(ImageLayerCreationOutcome {
-            image: if has_keys {
-                let image_layer = image_layer_writer.finish(self, ctx).await?;
-                Some(image_layer)
-            } else {
-                tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
-                None
-            },
-            next_start_key: img_range.end,
-        })
+
+        if wrote_any_image {
+            // Normal path: we have written some data into the new image layer for this
+            // partition, so flush it to disk.
+            let image_layer = image_layer_writer.finish(self, ctx).await?;
+            Ok(ImageLayerCreationOutcome {
+                image: Some(image_layer),
+                next_start_key: img_range.end,
+            })
+        } else {
+            // Special case: the image layer may be empty if this is a sharded tenant and the
+            // partition does not cover any keys owned by this shard. In this case, to ensure
+            // we don't leave gaps between image layers, leave `start` where it is, so that the next
+            // layer we write will cover the key range that we just scanned.
+            tracing::debug!("no data in range {}-{}", img_range.start, img_range.end);
+            Ok(ImageLayerCreationOutcome {
+                image: None,
+                next_start_key: start,
+            })
+        }
     }
 
     #[tracing::instrument(skip_all, fields(%lsn, %mode))]
@@ -4441,6 +4461,7 @@ impl Timeline {
                         ctx,
                         img_range,
                         mode,
+                        start,
                     )
                     .await?;
                 start = next_start_key;
@@ -4802,7 +4823,7 @@ impl Timeline {
     /// Currently, we don't make any attempt at removing unneeded page versions
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
-    pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+    pub(super) async fn gc(&self) -> Result<GcResult, GcError> {
         // this is most likely the background tasks, but it might be the spawned task from
         // immediate_gc
         let _g = tokio::select! {
@@ -4815,7 +4836,7 @@ impl Timeline {
 
         // Is the timeline being deleted?
         if self.is_stopping() {
-            anyhow::bail!("timeline is Stopping");
+            return Err(GcError::TimelineCancelled);
         }
 
         let (horizon_cutoff, pitr_cutoff, retain_lsns) = {
@@ -4873,7 +4894,7 @@ impl Timeline {
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
-    ) -> anyhow::Result<GcResult> {
+    ) -> Result<GcResult, GcError> {
         // FIXME: if there is an ongoing detach_from_ancestor, we should just skip gc
 
         let now = SystemTime::now();
@@ -4895,12 +4916,15 @@ impl Timeline {
         // The GC cutoff should only ever move forwards.
         let waitlist = {
             let write_guard = self.latest_gc_cutoff_lsn.lock_for_write();
-            ensure!(
-                *write_guard <= new_gc_cutoff,
-                "Cannot move GC cutoff LSN backwards (was {}, new {})",
-                *write_guard,
-                new_gc_cutoff
-            );
+            if *write_guard > new_gc_cutoff {
+                return Err(GcError::BadLsn {
+                    why: format!(
+                        "Cannot move GC cutoff LSN backwards (was {}, new {})",
+                        *write_guard, new_gc_cutoff
+                    ),
+                });
+            }
+
             write_guard.store_and_unlock(new_gc_cutoff)
         };
         waitlist.wait().await;
@@ -5009,7 +5033,14 @@ impl Timeline {
             // This unconditionally schedules also an index_part.json update, even though, we will
             // be doing one a bit later with the unlinked gc'd layers.
             let disk_consistent_lsn = self.disk_consistent_lsn.load();
-            self.schedule_uploads(disk_consistent_lsn, None)?;
+            self.schedule_uploads(disk_consistent_lsn, None)
+                .map_err(|e| {
+                    if self.cancel.is_cancelled() {
+                        GcError::TimelineCancelled
+                    } else {
+                        GcError::Remote(e)
+                    }
+                })?;
 
             let gc_layers = layers_to_remove
                 .iter()
@@ -5018,7 +5049,15 @@ impl Timeline {
 
             result.layers_removed = gc_layers.len() as u64;
 
-            self.remote_client.schedule_gc_update(&gc_layers)?;
+            self.remote_client
+                .schedule_gc_update(&gc_layers)
+                .map_err(|e| {
+                    if self.cancel.is_cancelled() {
+                        GcError::TimelineCancelled
+                    } else {
+                        GcError::Remote(e)
+                    }
+                })?;
 
             guard.finish_gc_timeline(&gc_layers);
 
@@ -5033,7 +5072,7 @@ impl Timeline {
             result.layers_removed, new_gc_cutoff
         );
 
-        result.elapsed = now.elapsed()?;
+        result.elapsed = now.elapsed().unwrap_or(Duration::ZERO);
         Ok(result)
     }
 
@@ -5324,6 +5363,133 @@ impl Timeline {
             shard_number: self.tenant_shard_id.shard_number,
             shard_count: self.tenant_shard_id.shard_count,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn force_advance_lsn(self: &Arc<Timeline>, new_lsn: Lsn) {
+        self.last_record_lsn.advance(new_lsn);
+    }
+
+    /// Force create an image layer and place it into the layer map.
+    ///
+    /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
+    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are placed into the layer map in one run.
+    #[cfg(test)]
+    pub(super) async fn force_create_image_layer(
+        self: &Arc<Timeline>,
+        lsn: Lsn,
+        mut images: Vec<(Key, Bytes)>,
+        check_start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let last_record_lsn = self.get_last_record_lsn();
+        assert!(
+            lsn <= last_record_lsn,
+            "advance last record lsn before inserting a layer, lsn={lsn}, last_record_lsn={last_record_lsn}"
+        );
+        if let Some(check_start_lsn) = check_start_lsn {
+            assert!(lsn >= check_start_lsn);
+        }
+        images.sort_unstable_by(|(ka, _), (kb, _)| ka.cmp(kb));
+        let min_key = *images.first().map(|(k, _)| k).unwrap();
+        let max_key = images.last().map(|(k, _)| k).unwrap().next();
+        let mut image_layer_writer = ImageLayerWriter::new(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            &(min_key..max_key),
+            lsn,
+            ctx,
+        )
+        .await?;
+        for (key, img) in images {
+            image_layer_writer.put_image(key, img, ctx).await?;
+        }
+        let image_layer = image_layer_writer.finish(self, ctx).await?;
+
+        {
+            let mut guard = self.layers.write().await;
+            guard.force_insert_layer(image_layer);
+        }
+
+        Ok(())
+    }
+
+    /// Force create a delta layer and place it into the layer map.
+    ///
+    /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
+    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are placed into the layer map in one run.
+    #[cfg(test)]
+    pub(super) async fn force_create_delta_layer(
+        self: &Arc<Timeline>,
+        mut deltas: Vec<(Key, Lsn, Value)>,
+        check_start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let last_record_lsn = self.get_last_record_lsn();
+        deltas.sort_unstable_by(|(ka, la, _), (kb, lb, _)| (ka, la).cmp(&(kb, lb)));
+        let min_key = *deltas.first().map(|(k, _, _)| k).unwrap();
+        let max_key = deltas.last().map(|(k, _, _)| k).unwrap().next();
+        let min_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).min().unwrap();
+        let max_lsn = *deltas.iter().map(|(_, lsn, _)| lsn).max().unwrap();
+        assert!(
+            max_lsn <= last_record_lsn,
+            "advance last record lsn before inserting a layer, max_lsn={max_lsn}, last_record_lsn={last_record_lsn}"
+        );
+        let end_lsn = Lsn(max_lsn.0 + 1);
+        if let Some(check_start_lsn) = check_start_lsn {
+            assert!(min_lsn >= check_start_lsn);
+        }
+        let mut delta_layer_writer = DeltaLayerWriter::new(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            min_key,
+            min_lsn..end_lsn,
+            ctx,
+        )
+        .await?;
+        for (key, lsn, val) in deltas {
+            delta_layer_writer.put_value(key, lsn, val, ctx).await?;
+        }
+        let delta_layer = delta_layer_writer.finish(max_key, self, ctx).await?;
+
+        {
+            let mut guard = self.layers.write().await;
+            guard.force_insert_layer(delta_layer);
+        }
+
+        Ok(())
+    }
+
+    /// Return all keys at the LSN in the image layers
+    #[cfg(test)]
+    pub(crate) async fn inspect_image_layers(
+        self: &Arc<Timeline>,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Vec<(Key, Bytes)>> {
+        let mut all_data = Vec::new();
+        let guard = self.layers.read().await;
+        for layer in guard.layer_map().iter_historic_layers() {
+            if !layer.is_delta() && layer.image_layer_lsn() == lsn {
+                let layer = guard.get_from_desc(&layer);
+                let mut reconstruct_data = ValuesReconstructState::default();
+                layer
+                    .get_values_reconstruct_data(
+                        KeySpace::single(Key::MIN..Key::MAX),
+                        lsn..Lsn(lsn.0 + 1),
+                        &mut reconstruct_data,
+                        ctx,
+                    )
+                    .await?;
+                for (k, v) in reconstruct_data.keys {
+                    all_data.push((k, v?.img.unwrap().1));
+                }
+            }
+        }
+        all_data.sort();
+        Ok(all_data)
     }
 }
 

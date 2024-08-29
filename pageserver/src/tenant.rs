@@ -487,6 +487,33 @@ enum CreateTimelineCause {
     Delete,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum GcError {
+    // The tenant is shutting down
+    #[error("tenant shutting down")]
+    TenantCancelled,
+
+    // The tenant is shutting down
+    #[error("timeline shutting down")]
+    TimelineCancelled,
+
+    // The tenant is in a state inelegible to run GC
+    #[error("not active")]
+    NotActive,
+
+    // A requested GC cutoff LSN was invalid, for example it tried to move backwards
+    #[error("not active")]
+    BadLsn { why: String },
+
+    // A remote storage error while scheduling updates after compaction
+    #[error(transparent)]
+    Remote(anyhow::Error),
+
+    // If GC was invoked for a particular timeline, this error means it didn't exist
+    #[error("timeline not found")]
+    TimelineNotFound,
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     ///
@@ -1393,6 +1420,36 @@ impl Tenant {
         Ok(tl)
     }
 
+    /// Helper for unit tests to create a timeline with some pre-loaded states.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_test_timeline_with_layers(
+        &self,
+        new_timeline_id: TimelineId,
+        initdb_lsn: Lsn,
+        pg_version: u32,
+        ctx: &RequestContext,
+        delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
+        image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
+        end_lsn: Lsn,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let tline = self
+            .create_test_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
+            .await?;
+        tline.force_advance_lsn(end_lsn);
+        for deltas in delta_layer_desc {
+            tline
+                .force_create_delta_layer(deltas, Some(initdb_lsn), ctx)
+                .await?;
+        }
+        for (lsn, images) in image_layer_desc {
+            tline
+                .force_create_image_layer(lsn, images, Some(initdb_lsn), ctx)
+                .await?;
+        }
+        Ok(tline)
+    }
+
     /// Create a new timeline.
     ///
     /// Returns the new timeline ID and reference to its Timeline object.
@@ -1507,7 +1564,7 @@ impl Tenant {
                         .wait_lsn(*lsn, timeline::WaitLsnWaiter::Tenant, ctx)
                         .await
                         .map_err(|e| match e {
-                            e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState) => {
+                            e @ (WaitLsnError::Timeout(_) | WaitLsnError::BadState { .. }) => {
                                 CreateTimelineError::AncestorLsn(anyhow::anyhow!(e))
                             }
                             WaitLsnError::Shutdown => CreateTimelineError::ShuttingDown,
@@ -1575,24 +1632,23 @@ impl Tenant {
     /// GC cutoff point is determined conservatively by either `horizon` and `pitr`, whichever
     /// requires more history to be retained.
     //
-    pub async fn gc_iteration(
+    pub(crate) async fn gc_iteration(
         &self,
         target_timeline_id: Option<TimelineId>,
         horizon: u64,
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<GcResult> {
+    ) -> Result<GcResult, GcError> {
         // Don't start doing work during shutdown
         if let TenantState::Stopping { .. } = self.current_state() {
             return Ok(GcResult::default());
         }
 
         // there is a global allowed_error for this
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot run GC iteration on inactive tenant"
-        );
+        if !self.is_active() {
+            return Err(GcError::NotActive);
+        }
 
         {
             let conf = self.tenant_conf.load();
@@ -2760,28 +2816,13 @@ impl Tenant {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<GcResult> {
+    ) -> Result<GcResult, GcError> {
         let mut totals: GcResult = Default::default();
         let now = Instant::now();
 
-        let gc_timelines = match self
+        let gc_timelines = self
             .refresh_gc_info_internal(target_timeline_id, horizon, pitr, cancel, ctx)
-            .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                if let Some(PageReconstructError::Cancelled) =
-                    e.downcast_ref::<PageReconstructError>()
-                {
-                    // Handle cancellation
-                    totals.elapsed = now.elapsed();
-                    return Ok(totals);
-                } else {
-                    // Propagate other errors
-                    return Err(e);
-                }
-            }
-        };
+            .await?;
 
         failpoint_support::sleep_millis_async!("gc_iteration_internal_after_getting_gc_timelines");
 
@@ -2806,7 +2847,19 @@ impl Tenant {
                 // made.
                 break;
             }
-            let result = timeline.gc().await?;
+            let result = match timeline.gc().await {
+                Err(GcError::TimelineCancelled) => {
+                    if target_timeline_id.is_some() {
+                        // If we were targetting this specific timeline, surface cancellation to caller
+                        return Err(GcError::TimelineCancelled);
+                    } else {
+                        // A timeline may be shutting down independently of the tenant's lifecycle: we should
+                        // skip past this and proceed to try GC on other timelines.
+                        continue;
+                    }
+                }
+                r => r?,
+            };
             totals += result;
         }
 
@@ -2819,11 +2872,11 @@ impl Tenant {
     /// [`Tenant::get_gc_horizon`].
     ///
     /// This is usually executed as part of periodic gc, but can now be triggered more often.
-    pub async fn refresh_gc_info(
+    pub(crate) async fn refresh_gc_info(
         &self,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<Arc<Timeline>>> {
+    ) -> Result<Vec<Arc<Timeline>>, GcError> {
         // since this method can now be called at different rates than the configured gc loop, it
         // might be that these configuration values get applied faster than what it was previously,
         // since these were only read from the gc task.
@@ -2844,7 +2897,7 @@ impl Tenant {
         pitr: Duration,
         cancel: &CancellationToken,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<Arc<Timeline>>> {
+    ) -> Result<Vec<Arc<Timeline>>, GcError> {
         // before taking the gc_cs lock, do the heavier weight finding of gc_cutoff points for
         // currently visible timelines.
         let timelines = self
@@ -2881,8 +2934,8 @@ impl Tenant {
             }
         }
 
-        if !self.is_active() {
-            anyhow::bail!("shutting down");
+        if !self.is_active() || self.cancel.is_cancelled() {
+            return Err(GcError::TenantCancelled);
         }
 
         // grab mutex to prevent new timelines from being created here; avoid doing long operations
@@ -2891,19 +2944,19 @@ impl Tenant {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let (all_branchpoints, timeline_ids): (BTreeSet<(TimelineId, Lsn)>, _) = {
+        let (all_branchpoints, timelines): (BTreeSet<(TimelineId, Lsn)>, _) = {
             let timelines = self.timelines.lock().unwrap();
             let mut all_branchpoints = BTreeSet::new();
-            let timeline_ids = {
+            let timelines = {
                 if let Some(target_timeline_id) = target_timeline_id.as_ref() {
                     if timelines.get(target_timeline_id).is_none() {
-                        bail!("gc target timeline does not exist")
+                        return Err(GcError::TimelineNotFound);
                     }
                 };
 
                 timelines
                     .iter()
-                    .map(|(timeline_id, timeline_entry)| {
+                    .map(|(_timeline_id, timeline_entry)| {
                         if let Some(ancestor_timeline_id) =
                             &timeline_entry.get_ancestor_timeline_id()
                         {
@@ -2925,33 +2978,28 @@ impl Tenant {
                             }
                         }
 
-                        *timeline_id
+                        timeline_entry.clone()
                     })
                     .collect::<Vec<_>>()
             };
-            (all_branchpoints, timeline_ids)
+            (all_branchpoints, timelines)
         };
 
         // Ok, we now know all the branch points.
         // Update the GC information for each timeline.
-        let mut gc_timelines = Vec::with_capacity(timeline_ids.len());
-        for timeline_id in timeline_ids {
-            // Timeline is known to be local and loaded.
-            let timeline = self
-                .get_timeline(timeline_id, false)
-                .with_context(|| format!("Timeline {timeline_id} was not found"))?;
-
+        let mut gc_timelines = Vec::with_capacity(timelines.len());
+        for timeline in timelines {
             // If target_timeline is specified, ignore all other timelines
             if let Some(target_timeline_id) = target_timeline_id {
-                if timeline_id != target_timeline_id {
+                if timeline.timeline_id != target_timeline_id {
                     continue;
                 }
             }
 
             let branchpoints: Vec<Lsn> = all_branchpoints
                 .range((
-                    Included((timeline_id, Lsn(0))),
-                    Included((timeline_id, Lsn(u64::MAX))),
+                    Included((timeline.timeline_id, Lsn(0))),
+                    Included((timeline.timeline_id, Lsn(u64::MAX))),
                 ))
                 .map(|&x| x.1)
                 .collect();
@@ -2959,7 +3007,7 @@ impl Tenant {
             {
                 let mut target = timeline.gc_info.write().unwrap();
 
-                match gc_cutoffs.remove(&timeline_id) {
+                match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
                         *target = GcInfo {
                             retain_lsns: branchpoints,
@@ -2992,15 +3040,51 @@ impl Tenant {
         &self,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
-        start_lsn: Option<Lsn>,
+        ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let create_guard = self.create_timeline_create_guard(dst_id).unwrap();
         let tl = self
-            .branch_timeline_impl(src_timeline, dst_id, start_lsn, create_guard, ctx)
+            .branch_timeline_impl(src_timeline, dst_id, ancestor_lsn, create_guard, ctx)
             .await?;
         tl.set_state(TimelineState::Active);
         Ok(tl)
+    }
+
+    /// Helper for unit tests to branch a timeline with some pre-loaded states.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn branch_timeline_test_with_layers(
+        &self,
+        src_timeline: &Arc<Timeline>,
+        dst_id: TimelineId,
+        ancestor_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+        delta_layer_desc: Vec<Vec<(pageserver_api::key::Key, Lsn, crate::repository::Value)>>,
+        image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
+        end_lsn: Lsn,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let tline = self
+            .branch_timeline_test(src_timeline, dst_id, ancestor_lsn, ctx)
+            .await?;
+        let ancestor_lsn = if let Some(ancestor_lsn) = ancestor_lsn {
+            ancestor_lsn
+        } else {
+            tline.get_last_record_lsn()
+        };
+        assert!(end_lsn >= ancestor_lsn);
+        tline.force_advance_lsn(end_lsn);
+        for deltas in delta_layer_desc {
+            tline
+                .force_create_delta_layer(deltas, Some(ancestor_lsn), ctx)
+                .await?;
+        }
+        for (lsn, images) in image_layer_desc {
+            tline
+                .force_create_image_layer(lsn, images, Some(ancestor_lsn), ctx)
+                .await?;
+        }
+        Ok(tline)
     }
 
     /// Branch an existing timeline.
@@ -4154,7 +4238,7 @@ mod tests {
                 .await?;
             writer.finish_write(lsn);
         }
-        tline.freeze_and_flush().await
+        tline.freeze_and_flush().await.map_err(|e| e.into())
     }
 
     #[tokio::test]
@@ -4308,9 +4392,10 @@ mod tests {
 
         // This needs to traverse to the parent, and fails.
         let err = newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("will not become active. Current state: Broken"));
+        assert!(err.to_string().starts_with(&format!(
+            "Bad state on timeline {}: Broken",
+            tline.timeline_id
+        )));
 
         Ok(())
     }
@@ -6205,74 +6290,35 @@ mod tests {
     async fn test_vectored_missing_data_key_reads() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
         let (tenant, ctx) = harness.load().await;
-        let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
-            .await?;
-
-        let cancel = CancellationToken::new();
 
         let base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
         let base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
         let base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
 
-        let mut lsn = Lsn(0x20);
-
-        {
-            let mut writer = tline.writer().await;
-            writer
-                .put(base_key, lsn, &Value::Image(test_img("data key 1")), &ctx)
-                .await?;
-            writer.finish_write(lsn);
-            drop(writer);
-
-            tline.freeze_and_flush().await?; // this will create a image layer
-        }
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                Vec::new(), // delta layers
+                vec![(Lsn(0x20), vec![(base_key, test_img("data key 1"))])], // image layers
+                Lsn(0x20), // it's fine to not advance LSN to 0x30 while using 0x30 to get below because `get_vectored_impl` does not wait for LSN
+            )
+            .await?;
 
         let child = tenant
-            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+            .branch_timeline_test_with_layers(
+                &tline,
+                NEW_TIMELINE_ID,
+                Some(Lsn(0x20)),
+                &ctx,
+                Vec::new(), // delta layers
+                vec![(Lsn(0x30), vec![(base_key_child, test_img("data key 2"))])], // image layers
+                Lsn(0x30),
+            )
             .await
             .unwrap();
-
-        lsn.0 += 0x10;
-
-        {
-            let mut writer = child.writer().await;
-            writer
-                .put(
-                    base_key_child,
-                    lsn,
-                    &Value::Image(test_img("data key 2")),
-                    &ctx,
-                )
-                .await?;
-            writer.finish_write(lsn);
-            drop(writer);
-
-            child.freeze_and_flush().await?; // this will create a delta
-
-            {
-                // update the partitioning to include the test key space, otherwise they
-                // will be dropped by image layer creation
-                let mut guard = child.partitioning.lock().await;
-                let ((partitioning, _), partition_lsn) = &mut *guard;
-                partitioning
-                    .parts
-                    .push(KeySpace::single(base_key..base_key_nonexist)); // exclude the nonexist key
-                *partition_lsn = lsn;
-            }
-
-            child
-                .compact(
-                    &cancel,
-                    {
-                        let mut set = EnumSet::empty();
-                        set.insert(CompactFlags::ForceImageLayerCreation);
-                        set
-                    },
-                    &ctx,
-                )
-                .await?; // force create an image layer for the keys, TODO: check if the image layer is created
-        }
 
         async fn get_vectored_impl_wrapper(
             tline: &Arc<Timeline>,
@@ -6294,6 +6340,8 @@ mod tests {
                 v.unwrap()
             }))
         }
+
+        let lsn = Lsn(0x30);
 
         // test vectored get on parent timeline
         assert_eq!(
@@ -6332,93 +6380,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_vectored_missing_metadata_key_reads() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_vectored_missing_metadata_key_reads")?;
+        let harness = TenantHarness::create("test_vectored_missing_data_key_reads")?;
         let (tenant, ctx) = harness.load().await;
+
+        let base_key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        let base_key_child = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let base_key_nonexist = Key::from_hex("620000000033333333444444445500000002").unwrap();
+        assert_eq!(base_key.field1, AUX_KEY_PREFIX); // in case someone accidentally changed the prefix...
+
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                Vec::new(), // delta layers
+                vec![(Lsn(0x20), vec![(base_key, test_img("metadata key 1"))])], // image layers
+                Lsn(0x20), // it's fine to not advance LSN to 0x30 while using 0x30 to get below because `get_vectored_impl` does not wait for LSN
+            )
             .await?;
 
-        let cancel = CancellationToken::new();
-
-        let mut base_key = Key::from_hex("000000000033333333444444445500000000").unwrap();
-        let mut base_key_child = Key::from_hex("000000000033333333444444445500000001").unwrap();
-        let mut base_key_nonexist = Key::from_hex("000000000033333333444444445500000002").unwrap();
-        base_key.field1 = AUX_KEY_PREFIX;
-        base_key_child.field1 = AUX_KEY_PREFIX;
-        base_key_nonexist.field1 = AUX_KEY_PREFIX;
-
-        let mut lsn = Lsn(0x20);
-
-        {
-            let mut writer = tline.writer().await;
-            writer
-                .put(
-                    base_key,
-                    lsn,
-                    &Value::Image(test_img("metadata key 1")),
-                    &ctx,
-                )
-                .await?;
-            writer.finish_write(lsn);
-            drop(writer);
-
-            tline.freeze_and_flush().await?; // this will create an image layer
-
-            tline
-                .compact(
-                    &cancel,
-                    {
-                        let mut set = EnumSet::empty();
-                        set.insert(CompactFlags::ForceImageLayerCreation);
-                        set.insert(CompactFlags::ForceRepartition);
-                        set
-                    },
-                    &ctx,
-                )
-                .await?; // force create an image layer for metadata keys
-            tenant
-                .gc_iteration(Some(tline.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
-                .await?;
-        }
-
         let child = tenant
-            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(lsn), &ctx)
+            .branch_timeline_test_with_layers(
+                &tline,
+                NEW_TIMELINE_ID,
+                Some(Lsn(0x20)),
+                &ctx,
+                Vec::new(), // delta layers
+                vec![(
+                    Lsn(0x30),
+                    vec![(base_key_child, test_img("metadata key 2"))],
+                )], // image layers
+                Lsn(0x30),
+            )
             .await
             .unwrap();
-
-        lsn.0 += 0x10;
-
-        {
-            let mut writer = child.writer().await;
-            writer
-                .put(
-                    base_key_child,
-                    lsn,
-                    &Value::Image(test_img("metadata key 2")),
-                    &ctx,
-                )
-                .await?;
-            writer.finish_write(lsn);
-            drop(writer);
-
-            child.freeze_and_flush().await?;
-
-            child
-                .compact(
-                    &cancel,
-                    {
-                        let mut set = EnumSet::empty();
-                        set.insert(CompactFlags::ForceImageLayerCreation);
-                        set.insert(CompactFlags::ForceRepartition);
-                        set
-                    },
-                    &ctx,
-                )
-                .await?; // force create an image layer for metadata keys
-            tenant
-                .gc_iteration(Some(child.timeline_id), 0, Duration::ZERO, &cancel, &ctx)
-                .await?;
-        }
 
         async fn get_vectored_impl_wrapper(
             tline: &Arc<Timeline>,
@@ -6440,6 +6436,8 @@ mod tests {
                 v.unwrap()
             }))
         }
+
+        let lsn = Lsn(0x30);
 
         // test vectored get on parent timeline
         assert_eq!(
@@ -6468,6 +6466,210 @@ mod tests {
             get_vectored_impl_wrapper(&child, base_key_nonexist, lsn, &ctx).await?,
             None
         );
+
+        Ok(())
+    }
+
+    async fn get_vectored_impl_wrapper(
+        tline: &Arc<Timeline>,
+        key: Key,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Option<Bytes>, GetVectoredError> {
+        let mut reconstruct_state = ValuesReconstructState::new();
+        let mut res = tline
+            .get_vectored_impl(
+                KeySpace::single(key..key.next()),
+                lsn,
+                &mut reconstruct_state,
+                ctx,
+            )
+            .await?;
+        Ok(res.pop_last().map(|(k, v)| {
+            assert_eq!(k, key);
+            v.unwrap()
+        }))
+    }
+
+    #[tokio::test]
+    async fn test_metadata_tombstone_reads() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_tombstone_reads")?;
+        let (tenant, ctx) = harness.load().await;
+        let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
+        let key3 = Key::from_hex("620000000033333333444444445500000003").unwrap();
+
+        // We emulate the situation that the compaction algorithm creates an image layer that removes the tombstones
+        // Lsn 0x30 key0, key3, no key1+key2
+        // Lsn 0x20 key1+key2 tomestones
+        // Lsn 0x10 key1 in image, key2 in delta
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                // delta layers
+                vec![
+                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                ],
+                // image layers
+                vec![
+                    (Lsn(0x10), vec![(key1, test_img("metadata key 1"))]),
+                    (
+                        Lsn(0x30),
+                        vec![
+                            (key0, test_img("metadata key 0")),
+                            (key3, test_img("metadata key 3")),
+                        ],
+                    ),
+                ],
+                Lsn(0x30),
+            )
+            .await?;
+
+        let lsn = Lsn(0x30);
+        let old_lsn = Lsn(0x20);
+
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key0, lsn, &ctx).await?,
+            Some(test_img("metadata key 0"))
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key1, lsn, &ctx).await?,
+            None,
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key2, lsn, &ctx).await?,
+            None,
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key1, old_lsn, &ctx).await?,
+            Some(Bytes::new()),
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key2, old_lsn, &ctx).await?,
+            Some(Bytes::new()),
+        );
+        assert_eq!(
+            get_vectored_impl_wrapper(&tline, key3, lsn, &ctx).await?,
+            Some(test_img("metadata key 3"))
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_tombstone_image_creation() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")?;
+        let (tenant, ctx) = harness.load().await;
+
+        let key0 = Key::from_hex("620000000033333333444444445500000000").unwrap();
+        let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
+        let key3 = Key::from_hex("620000000033333333444444445500000003").unwrap();
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                // delta layers
+                vec![
+                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![
+                        (key0, Lsn(0x30), Value::Image(test_img("metadata key 0"))),
+                        (key3, Lsn(0x30), Value::Image(test_img("metadata key 3"))),
+                    ],
+                ],
+                // image layers
+                vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
+                Lsn(0x30),
+            )
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        tline
+            .compact(
+                &cancel,
+                {
+                    let mut flags = EnumSet::new();
+                    flags.insert(CompactFlags::ForceImageLayerCreation);
+                    flags.insert(CompactFlags::ForceRepartition);
+                    flags
+                },
+                &ctx,
+            )
+            .await?;
+
+        // Image layers are created at last_record_lsn
+        let images = tline
+            .inspect_image_layers(Lsn(0x30), &ctx)
+            .await?
+            .into_iter()
+            .filter(|(k, _)| k.is_metadata_key())
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 2); // the image layer should only contain two existing keys, tombstones should be removed.
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_tombstone_empty_image_creation() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_metadata_tombstone_image_creation")?;
+        let (tenant, ctx) = harness.load().await;
+
+        let key1 = Key::from_hex("620000000033333333444444445500000001").unwrap();
+        let key2 = Key::from_hex("620000000033333333444444445500000002").unwrap();
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                // delta layers
+                vec![
+                    vec![(key2, Lsn(0x10), Value::Image(test_img("metadata key 2")))],
+                    vec![(key1, Lsn(0x20), Value::Image(Bytes::new()))],
+                    vec![(key2, Lsn(0x20), Value::Image(Bytes::new()))],
+                ],
+                // image layers
+                vec![(Lsn(0x10), vec![(key1, test_img("metadata key 1"))])],
+                Lsn(0x30),
+            )
+            .await?;
+
+        let cancel = CancellationToken::new();
+
+        tline
+            .compact(
+                &cancel,
+                {
+                    let mut flags = EnumSet::new();
+                    flags.insert(CompactFlags::ForceImageLayerCreation);
+                    flags.insert(CompactFlags::ForceRepartition);
+                    flags
+                },
+                &ctx,
+            )
+            .await?;
+
+        // Image layers are created at last_record_lsn
+        let images = tline
+            .inspect_image_layers(Lsn(0x30), &ctx)
+            .await?
+            .into_iter()
+            .filter(|(k, _)| k.is_metadata_key())
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 0); // the image layer should not contain tombstones, or it is not created
 
         Ok(())
     }

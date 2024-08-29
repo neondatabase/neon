@@ -85,11 +85,11 @@ impl From<TermSwitchApiEntry> for TermLsn {
     }
 }
 
-/// Augment AcceptorState with epoch for convenience
+/// Augment AcceptorState with last_log_term for convenience
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AcceptorStateStatus {
     pub term: Term,
-    pub epoch: Term,
+    pub epoch: Term, // aka last_log_term
     pub term_history: Vec<TermSwitchApiEntry>,
 }
 
@@ -130,7 +130,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     let (inmem, state) = tli.get_state().await;
     let flush_lsn = tli.get_flush_lsn().await;
 
-    let epoch = state.acceptor_state.get_epoch(flush_lsn);
+    let last_log_term = state.acceptor_state.get_last_log_term(flush_lsn);
     let term_history = state
         .acceptor_state
         .term_history
@@ -143,7 +143,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         .collect();
     let acc_state = AcceptorStateStatus {
         term: state.acceptor_state.term,
-        epoch,
+        epoch: last_log_term,
         term_history,
     };
 
@@ -249,6 +249,10 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
     };
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let tli = tli
+        .full_access_guard()
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     let response = debug_dump::calculate_digest(&tli, request)
         .await
@@ -268,8 +272,12 @@ async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>
     let filename: String = parse_request_param(&request, "filename")?;
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let tli = tli
+        .full_access_guard()
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
-    let filepath = tli.timeline_dir.join(filename);
+    let filepath = tli.get_timeline_dir().join(filename);
     let mut file = File::open(&filepath)
         .await
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
@@ -287,7 +295,7 @@ async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>
         .map_err(|e| ApiError::InternalServerError(e.into()))
 }
 
-/// Force persist control file and remove old WAL.
+/// Force persist control file.
 async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
@@ -297,13 +305,13 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     );
 
     let tli = GlobalTimelines::get(ttid)?;
-    tli.maybe_persist_control_file(true)
+    tli.write_shared_state()
+        .await
+        .sk
+        .state
+        .flush()
         .await
         .map_err(ApiError::InternalServerError)?;
-    tli.remove_old_wal()
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
     json_response(StatusCode::OK, ())
 }
 
