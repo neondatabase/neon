@@ -782,7 +782,7 @@ broker_endpoint = '{broker_endpoint}'
             assert_eq!(
                 parsed_remote_storage_config,
                 RemoteStorageConfig {
-                    storage: RemoteStorageKind::LocalFs(local_storage_path.clone()),
+                    storage: RemoteStorageKind::LocalFs { local_path: local_storage_path.clone() },
                     timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
                 },
                 "Remote storage config should correctly parse the local FS config and fill other storage defaults"

@@ -4656,6 +4656,7 @@ dependencies = [
  "futures-util",
  "http-types",
  "humantime",
+ "humantime-serde",
  "hyper 0.14.26",
  "itertools",
  "metrics",

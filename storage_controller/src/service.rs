@@ -4541,7 +4541,8 @@ impl Service {
                 self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Draining))
                     .await?;
 
-                let cancel = CancellationToken::new();
+                let cancel = self.cancel.child_token();
+                let gate_guard = self.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
 
                 self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
                     operation: Operation::Drain(Drain { node_id }),
@@ -4552,6 +4553,8 @@ impl Service {
                     let service = self.clone();
                     let cancel = cancel.clone();
                     async move {
+                        let _gate_guard = gate_guard;
+
                         scopeguard::defer! {
                             let prev = service.inner.write().unwrap().ongoing_operation.take();
 
@@ -4591,6 +4594,44 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn cancel_node_drain(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let (node_available, node_policy) = {
+            let locked = self.inner.read().unwrap();
+            let nodes = &locked.nodes;
+            let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
+                anyhow::anyhow!("Node {} not registered", node_id).into(),
+            ))?;
+
+            (node.is_available(), node.get_scheduling())
+        };
+
+        if !node_available {
+            return Err(ApiError::ResourceUnavailable(
+                format!("Node {node_id} is currently unavailable").into(),
+            ));
+        }
+
+        if !matches!(node_policy, NodeSchedulingPolicy::Draining) {
+            return Err(ApiError::PreconditionFailed(
+                format!("Node {node_id} has no drain in progress").into(),
+            ));
+        }
+
+        if let Some(op_handler) = self.inner.read().unwrap().ongoing_operation.as_ref() {
+            if let Operation::Drain(drain) = op_handler.operation {
+                if drain.node_id == node_id {
+                    tracing::info!("Cancelling background drain operation for node {node_id}");
+                    op_handler.cancel.cancel();
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(ApiError::PreconditionFailed(
+            format!("Node {node_id} has no drain in progress").into(),
+        ))
     }
 
     pub(crate) async fn start_node_fill(self: &Arc<Self>, node_id: NodeId) -> Result<(), ApiError> {
@@ -4635,7 +4676,8 @@ impl Service {
                 self.node_configure(node_id, None, Some(NodeSchedulingPolicy::Filling))
                     .await?;
 
-                let cancel = CancellationToken::new();
+                let cancel = self.cancel.child_token();
+                let gate_guard = self.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
 
                 self.inner.write().unwrap().ongoing_operation = Some(OperationHandler {
                     operation: Operation::Fill(Fill { node_id }),
@@ -4646,6 +4688,8 @@ impl Service {
                     let service = self.clone();
                     let cancel = cancel.clone();
                     async move {
+                        let _gate_guard = gate_guard;
+
                         scopeguard::defer! {
                             let prev = service.inner.write().unwrap().ongoing_operation.take();
 
@@ -4685,6 +4729,44 @@ impl Service {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn cancel_node_fill(&self, node_id: NodeId) -> Result<(), ApiError> {
+        let (node_available, node_policy) = {
+            let locked = self.inner.read().unwrap();
+            let nodes = &locked.nodes;
+            let node = nodes.get(&node_id).ok_or(ApiError::NotFound(
+                anyhow::anyhow!("Node {} not registered", node_id).into(),
+            ))?;
+
+            (node.is_available(), node.get_scheduling())
+        };
+
+        if !node_available {
+            return Err(ApiError::ResourceUnavailable(
+                format!("Node {node_id} is currently unavailable").into(),
+            ));
+        }
+
+        if !matches!(node_policy, NodeSchedulingPolicy::Filling) {
+            return Err(ApiError::PreconditionFailed(
+                format!("Node {node_id} has no fill in progress").into(),
+            ));
+        }
+
+        if let Some(op_handler) = self.inner.read().unwrap().ongoing_operation.as_ref() {
+            if let Operation::Fill(fill) = op_handler.operation {
+                if fill.node_id == node_id {
+                    tracing::info!("Cancelling background drain operation for node {node_id}");
+                    op_handler.cancel.cancel();
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(ApiError::PreconditionFailed(
+            format!("Node {node_id} has no fill in progress").into(),
+        ))
     }
 
     /// Helper for methods that will try and call pageserver APIs for
@@ -5282,11 +5364,24 @@ impl Service {
         let mut last_inspected_shard: Option<TenantShardId> = None;
         let mut inspected_all_shards = false;
         let mut waiters = Vec::new();
-        let mut schedule_context = ScheduleContext::default();
 
         while !inspected_all_shards {
             if cancel.is_cancelled() {
-                return Err(OperationError::Cancelled);
+                match self
+                    .node_configure(node_id, None, Some(NodeSchedulingPolicy::Active))
+                    .await
+                {
+                    Ok(()) => return Err(OperationError::Cancelled),
+                    Err(err) => {
+                        return Err(OperationError::FinalizeError(
+                            format!(
+                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
+                                node_id, err
+                            )
+                            .into(),
+                        ));
+                    }
+                }
             }
 
             {
@@ -5323,28 +5418,32 @@ impl Service {
                         }
                     };
 
-                    if tenant_shard.intent.demote_attached(scheduler, node_id) {
-                        match tenant_shard.schedule(scheduler, &mut schedule_context) {
-                            Err(e) => {
-                                tracing::warn!(
-                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                    "Scheduling error when draining pageserver {} : {e}", node_id
-                                );
-                            }
-                            Ok(()) => {
-                                let scheduled_to = tenant_shard.intent.get_attached();
-                                tracing::info!(
-                                    tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
-                                    "Rescheduled shard while draining node {}: {} -> {:?}",
-                                    node_id,
-                                    node_id,
-                                    scheduled_to
-                                );
+                    // If the shard is not attached to the node being drained, skip it.
+                    if *tenant_shard.intent.get_attached() != Some(node_id) {
+                        last_inspected_shard = Some(*tid);
+                        continue;
+                    }
 
-                                let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
-                                if let Some(some) = waiter {
-                                    waiters.push(some);
-                                }
+                    match tenant_shard.reschedule_to_secondary(None, scheduler) {
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                "Scheduling error when draining pageserver {} : {e}", node_id
+                            );
+                        }
+                        Ok(()) => {
+                            let scheduled_to = tenant_shard.intent.get_attached();
+                            tracing::info!(
+                                tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
+                                "Rescheduled shard while draining node {}: {} -> {:?}",
+                                node_id,
+                                node_id,
+                                scheduled_to
+                            );
+
+                            let waiter = self.maybe_reconcile_shard(tenant_shard, nodes);
+                            if let Some(some) = waiter {
+                                waiters.push(some);
                             }
                         }
                     }
@@ -5356,9 +5455,29 @@ impl Service {
             waiters = self
                 .await_waiters_remainder(waiters, SHORT_RECONCILE_TIMEOUT)
                 .await;
+
+            failpoint_support::sleep_millis_async!("sleepy-drain-loop");
         }
 
         while !waiters.is_empty() {
+            if cancel.is_cancelled() {
+                match self
+                    .node_configure(node_id, None, Some(NodeSchedulingPolicy::Active))
+                    .await
+                {
+                    Ok(()) => return Err(OperationError::Cancelled),
+                    Err(err) => {
+                        return Err(OperationError::FinalizeError(
+                            format!(
+                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
+                                node_id, err
+                            )
+                            .into(),
+                        ));
+                    }
+                }
+            }
+
             tracing::info!("Awaiting {} pending drain reconciliations", waiters.len());
 
             waiters = self
@@ -5487,15 +5606,27 @@ impl Service {
         // secondaries are warm. This is not always true (e.g. we just migrated the
         // tenant). Take that into consideration by checking the secondary status.
         let mut tids_to_promote = self.fill_node_plan(node_id);
-
         let mut waiters = Vec::new();
-        let mut schedule_context = ScheduleContext::default();
 
         // Execute the plan we've composed above. Before aplying each move from the plan,
         // we validate to ensure that it has not gone stale in the meantime.
         while !tids_to_promote.is_empty() {
             if cancel.is_cancelled() {
-                return Err(OperationError::Cancelled);
+                match self
+                    .node_configure(node_id, None, Some(NodeSchedulingPolicy::Active))
+                    .await
+                {
+                    Ok(()) => return Err(OperationError::Cancelled),
+                    Err(err) => {
+                        return Err(OperationError::FinalizeError(
+                            format!(
+                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
+                                node_id, err
+                            )
+                            .into(),
+                        ));
+                    }
+                }
             }
 
             {
@@ -5525,9 +5656,7 @@ impl Service {
                             }
 
                             let previously_attached_to = *tenant_shard.intent.get_attached();
-
-                            tenant_shard.intent.promote_attached(scheduler, node_id);
-                            match tenant_shard.schedule(scheduler, &mut schedule_context) {
+                            match tenant_shard.reschedule_to_secondary(Some(node_id), scheduler) {
                                 Err(e) => {
                                     tracing::warn!(
                                         tenant_id=%tid.tenant_id, shard_id=%tid.shard_slug(),
@@ -5563,6 +5692,24 @@ impl Service {
         }
 
         while !waiters.is_empty() {
+            if cancel.is_cancelled() {
+                match self
+                    .node_configure(node_id, None, Some(NodeSchedulingPolicy::Active))
+                    .await
+                {
+                    Ok(()) => return Err(OperationError::Cancelled),
+                    Err(err) => {
+                        return Err(OperationError::FinalizeError(
+                            format!(
+                                "Failed to finalise drain cancel of {} by setting scheduling policy to Active: {}",
+                                node_id, err
+                            )
+                            .into(),
+                        ));
+                    }
+                }
+            }
+
             tracing::info!("Awaiting {} pending fill reconciliations", waiters.len());
 
             waiters = self
