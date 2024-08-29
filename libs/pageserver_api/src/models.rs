@@ -455,6 +455,15 @@ pub struct CompactionAlgorithmSettings {
     pub kind: CompactionAlgorithm,
 }
 
+#[derive(Default, Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum L0FlushConfig {
+    #[default]
+    PageCached,
+    #[serde(rename_all = "snake_case")]
+    Direct { max_concurrency: NonZeroUsize },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvictionPolicyLayerAccessThreshold {
     #[serde(with = "humantime_serde")]

@@ -66,7 +66,6 @@ use std::{
     ops::{Deref, Range},
 };
 
-use crate::metrics::GetKind;
 use crate::pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS;
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -90,6 +89,10 @@ use crate::{
 };
 use crate::{
     disk_usage_eviction_task::EvictionCandidate, tenant::storage_layer::delta_layer::DeltaEntry,
+};
+use crate::{
+    l0_flush::{self, L0FlushGlobalState},
+    metrics::GetKind,
 };
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
@@ -209,6 +212,7 @@ pub struct TimelineResources {
     pub timeline_get_throttle: Arc<
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
+    pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
 pub(crate) struct AuxFilesState {
@@ -434,6 +438,8 @@ pub struct Timeline {
     /// in the future, add `extra_test_sparse_keyspace` if necessary.
     #[cfg(test)]
     pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
+
+    pub(crate) l0_flush_global_state: L0FlushGlobalState,
 }
 
 pub struct WalReceiverInfo {
@@ -2359,6 +2365,8 @@ impl Timeline {
 
                 #[cfg(test)]
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
+
+                l0_flush_global_state: resources.l0_flush_global_state,
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;

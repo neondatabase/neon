@@ -21,6 +21,7 @@ pub struct EphemeralFile {
 }
 
 mod page_caching;
+pub(crate) use page_caching::PrewarmOnWrite as PrewarmPageCacheOnWrite;
 mod zero_padded_read_write;
 
 impl EphemeralFile {
@@ -53,7 +54,7 @@ impl EphemeralFile {
         Ok(EphemeralFile {
             _tenant_shard_id: tenant_shard_id,
             _timeline_id: timeline_id,
-            rw: page_caching::RW::new(file),
+            rw: page_caching::RW::new(file, crate::l0_flush::prewarm_on_write(&conf.l0_flush)),
         })
     }
 
@@ -63,6 +64,11 @@ impl EphemeralFile {
 
     pub(crate) fn page_cache_file_id(&self) -> page_cache::FileId {
         self.rw.page_cache_file_id()
+    }
+
+    /// See [`self::page_caching::RW::load_to_vec`].
+    pub(crate) async fn load_to_vec(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
+        self.rw.load_to_vec(ctx).await
     }
 
     pub(crate) async fn read_blk(

@@ -427,11 +427,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		values[n_pgsql_params] = NULL;
 
 		shard->conn = PQconnectStartParams(keywords, values, 1);
-		if (!shard->conn)
-		{
-			neon_shard_log(shard_no, elevel, "Failed to connect to pageserver: out of memory");
-			return false;
-		}
 		if (PQstatus(shard->conn) == CONNECTION_BAD)
 		{
 			char	   *msg = pchomp(PQerrorMessage(shard->conn));

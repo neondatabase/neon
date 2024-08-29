@@ -29,7 +29,7 @@ pub const KEY_SIZE: usize = 18;
 /// See [`Key::to_i128`] for more information on the encoding.
 pub const METADATA_KEY_SIZE: usize = 16;
 
-/// The key prefix start range for the metadata keys. All keys with the first byte >= 0x40 is a metadata key.
+/// The key prefix start range for the metadata keys. All keys with the first byte >= 0x60 is a metadata key.
 pub const METADATA_KEY_BEGIN_PREFIX: u8 = 0x60;
 pub const METADATA_KEY_END_PREFIX: u8 = 0x7F;
 

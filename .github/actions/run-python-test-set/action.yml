@@ -179,7 +179,15 @@ runs:
 
         # Wake up the cluster if we use remote neon instance
         if [ "${{ inputs.build_type }}" = "remote" ] && [ -n "${BENCHMARK_CONNSTR}" ]; then
-          ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/psql ${BENCHMARK_CONNSTR} -c "SELECT version();"
+          QUERIES=("SELECT version()")
+          if [[ "${PLATFORM}" = "neon"* ]]; then
+            QUERIES+=("SHOW neon.tenant_id")
+            QUERIES+=("SHOW neon.timeline_id")
+          fi
+
+          for q in "${QUERIES[@]}"; do
+            ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/psql ${BENCHMARK_CONNSTR} -c "${q}"
+          done
         fi
 
         # Run the tests.

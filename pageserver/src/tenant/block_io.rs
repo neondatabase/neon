@@ -37,6 +37,7 @@ where
 pub enum BlockLease<'a> {
     PageReadGuard(PageReadGuard<'static>),
     EphemeralFileMutableTail(&'a [u8; PAGE_SZ]),
+    Slice(&'a [u8; PAGE_SZ]),
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
     #[cfg(test)]
@@ -63,6 +64,7 @@ impl<'a> Deref for BlockLease<'a> {
         match self {
             BlockLease::PageReadGuard(v) => v.deref(),
             BlockLease::EphemeralFileMutableTail(v) => v,
+            BlockLease::Slice(v) => v,
             #[cfg(test)]
             BlockLease::Arc(v) => v.deref(),
             #[cfg(test)]
@@ -81,6 +83,7 @@ pub(crate) enum BlockReaderRef<'a> {
     FileBlockReader(&'a FileBlockReader<'a>),
     EphemeralFile(&'a EphemeralFile),
     Adapter(Adapter<&'a DeltaLayerInner>),
+    Slice(&'a [u8]),
     #[cfg(test)]
     TestDisk(&'a super::disk_btree::tests::TestDisk),
     #[cfg(test)]
@@ -99,11 +102,30 @@ impl<'a> BlockReaderRef<'a> {
             FileBlockReader(r) => r.read_blk(blknum, ctx).await,
             EphemeralFile(r) => r.read_blk(blknum, ctx).await,
             Adapter(r) => r.read_blk(blknum, ctx).await,
+            Slice(s) => Self::read_blk_slice(s, blknum),
             #[cfg(test)]
             TestDisk(r) => r.read_blk(blknum),
             #[cfg(test)]
             VirtualFile(r) => r.read_blk(blknum, ctx).await,
         }
+    }
+}
+
+impl<'a> BlockReaderRef<'a> {
+    fn read_blk_slice(slice: &[u8], blknum: u32) -> std::io::Result<BlockLease> {
+        let start = (blknum as usize).checked_mul(PAGE_SZ).unwrap();
+        let end = start.checked_add(PAGE_SZ).unwrap();
+        if end > slice.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("slice too short, len={} end={}", slice.len(), end),
+            ));
+        }
+        let slice = &slice[start..end];
+        let page_sized: &[u8; PAGE_SZ] = slice
+            .try_into()
+            .expect("we add PAGE_SZ to start, so the slice must have PAGE_SZ");
+        Ok(BlockLease::Slice(page_sized))
     }
 }
 

@@ -239,11 +239,6 @@ jobs:
         path: /tmp/neon/
         prefix: latest
 
-    - name: Add Postgres binaries to PATH
-      run: |
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
-
     - name: Create Neon Project
       if: contains(fromJson('["neon-captest-new", "neon-captest-freetier", "neonvm-captest-new", "neonvm-captest-freetier"]'), matrix.platform)
       id: create-neon-project
@@ -281,16 +276,6 @@ jobs:
         esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
-
-        QUERIES=("SELECT version()")
-        if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERIES+=("SHOW neon.tenant_id")
-          QUERIES+=("SHOW neon.timeline_id")
-        fi
-
-        for q in "${QUERIES[@]}"; do
-          psql ${CONNSTR} -c "${q}"
-        done
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -377,29 +362,12 @@ jobs:
         path: /tmp/neon/
         prefix: latest
 
-    - name: Add Postgres binaries to PATH
-      run: |
-        LD_LIBRARY_PATH="${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/lib"
-        export LD_LIBRARY_PATH
-        echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
-
     - name: Set up Connection String
       id: set-up-connstr
       run: |
         CONNSTR=${{ secrets.BENCHMARK_PGVECTOR_CONNSTR }}
-        
-        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-        QUERIES=("SELECT version()")
-        QUERIES+=("SHOW neon.tenant_id")
-        QUERIES+=("SHOW neon.timeline_id")
-        
-        for q in "${QUERIES[@]}"; do
-          psql ${CONNSTR} -c "${q}"
-        done
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
     - name: Benchmark pgvector hnsw indexing
       uses: ./.github/actions/run-python-test-set
@@ -421,12 +389,12 @@ jobs:
         test_selection: performance/test_perf_pgvector_queries.py
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 
+        extra_params: -m remote_cluster --timeout 21600
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-    
+
     - name: Create Allure report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
@@ -481,11 +449,6 @@ jobs:
         path: /tmp/neon/
         prefix: latest
 
-    - name: Add Postgres binaries to PATH
-      run: |
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
-
     - name: Set up Connection String
       id: set-up-connstr
       run: |
@@ -506,16 +469,6 @@ jobs:
         esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
-
-        QUERIES=("SELECT version()")
-        if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERIES+=("SHOW neon.tenant_id")
-          QUERIES+=("SHOW neon.timeline_id")
-        fi
-
-        for q in "${QUERIES[@]}"; do
-          psql ${CONNSTR} -c "${q}"
-        done
 
     - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
@@ -584,11 +537,6 @@ jobs:
         path: /tmp/neon/
         prefix: latest
 
-    - name: Add Postgres binaries to PATH
-      run: |
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
-
     - name: Get Connstring Secret Name
       run: |
         case "${PLATFORM}" in
@@ -616,16 +564,6 @@ jobs:
         CONNSTR=${{ secrets[env.CONNSTR_SECRET_NAME] }}
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
-
-        QUERIES=("SELECT version()")
-        if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERIES+=("SHOW neon.tenant_id")
-          QUERIES+=("SHOW neon.timeline_id")
-        fi
-
-        for q in "${QUERIES[@]}"; do
-          psql ${CONNSTR} -c "${q}"
-        done
 
     - name: Run TPC-H benchmark
       uses: ./.github/actions/run-python-test-set
@@ -685,11 +623,6 @@ jobs:
         path: /tmp/neon/
         prefix: latest
 
-    - name: Add Postgres binaries to PATH
-      run: |
-        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
-        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
-
     - name: Set up Connection String
       id: set-up-connstr
       run: |
@@ -710,16 +643,6 @@ jobs:
         esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
-
-        QUERIES=("SELECT version()")
-        if [[ "${PLATFORM}" = "neon"* ]]; then
-          QUERIES+=("SHOW neon.tenant_id")
-          QUERIES+=("SHOW neon.timeline_id")
-        fi
-
-        for q in "${QUERIES[@]}"; do
-          psql ${CONNSTR} -c "${q}"
-        done
 
     - name: Run user examples
       uses: ./.github/actions/run-python-test-set

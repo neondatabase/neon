@@ -425,6 +425,10 @@ fn start_pageserver(
         background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
+    info!(config=?conf.l0_flush, "using l0_flush config");
+    let l0_flush_global_state =
+        pageserver::l0_flush::L0FlushGlobalState::new(conf.l0_flush.clone());
+
     // Scan the local 'tenants/' directory and start loading the tenants
     let deletion_queue_client = deletion_queue.new_client();
     let tenant_manager = BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
@@ -433,6 +437,7 @@ fn start_pageserver(
             broker_client: broker_client.clone(),
             remote_storage: remote_storage.clone(),
             deletion_queue_client,
+            l0_flush_global_state,
         },
         order,
         shutdown_pageserver.clone(),
