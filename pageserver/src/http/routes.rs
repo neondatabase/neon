@@ -1676,6 +1676,10 @@ async fn timeline_checkpoint_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "force_image_layer_creation")? {
         flags |= CompactFlags::ForceImageLayerCreation;
     }
+
+    // By default, checkpoints come with a compaction, but this may be optionally disabled by tests that just want to flush + upload.
+    let compact = parse_query_param::<_, bool>(&request, "compact")?.unwrap_or(true);
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
@@ -1692,15 +1696,17 @@ async fn timeline_checkpoint_handler(
 
                 }
             })?;
-        timeline
-            .compact(&cancel, flags, &ctx)
-            .await
-            .map_err(|e|
-                match e {
-                    CompactionError::ShuttingDown => ApiError::ShuttingDown,
-                    CompactionError::Other(e) => ApiError::InternalServerError(e)
-                }
-            )?;
+        if compact {
+            timeline
+                .compact(&cancel, flags, &ctx)
+                .await
+                .map_err(|e|
+                    match e {
+                        CompactionError::ShuttingDown => ApiError::ShuttingDown,
+                        CompactionError::Other(e) => ApiError::InternalServerError(e)
+                    }
+                )?;
+        }
 
         if wait_until_uploaded {
             timeline.remote_client.wait_completion().await.map_err(ApiError::InternalServerError)?;

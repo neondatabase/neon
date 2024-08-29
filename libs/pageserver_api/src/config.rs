@@ -55,7 +55,6 @@ pub struct ConfigToml {
     pub pg_auth_type: AuthType,
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
     pub remote_storage_config: Option<RemoteStorageConfig>,
-    pub id: String, // TODO can we get more type safety?
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub broker_endpoint: storage_broker::Uri,
     pub broker_keepalive_interval: Duration,
@@ -348,7 +347,6 @@ impl Default for ConfigToml {
             pg_auth_type: (AuthType::Trust),
             auth_validation_public_key_path: (None),
             remote_storage_config: (None),
-            id: "".to_string(), // TODO: can we get more type safety?
             broker_endpoint: (storage_broker::DEFAULT_ENDPOINT
                 .parse()
                 .expect("failed to parse default broker endpoint")),

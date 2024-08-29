@@ -295,6 +295,7 @@ impl PageServerConf {
     ///
     /// This leaves any options not present in the file in the built-in defaults.
     pub fn parse_and_validate(
+        id: NodeId,
         config_toml: pageserver_api::config::ConfigToml,
         workdir: &Utf8Path,
     ) -> anyhow::Result<Self> {
@@ -312,7 +313,6 @@ impl PageServerConf {
             pg_auth_type,
             auth_validation_public_key_path,
             remote_storage_config,
-            id,
             broker_endpoint,
             broker_keepalive_interval,
             log_format,
@@ -394,7 +394,7 @@ impl PageServerConf {
                     .expect("current_dir() is not a valid Utf8Path")
             }),
             control_plane_api_token: control_plane_api_token.map(SecretString::from),
-            id: id.parse().context("parse `id` field")?,
+            id,
             default_tenant_conf: tenant_config,
             concurrent_tenant_warmup: ConfigurableSemaphore::new(concurrent_tenant_warmup),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
@@ -448,7 +448,6 @@ impl PageServerConf {
         let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
         let config_toml = pageserver_api::config::ConfigToml {
-            id: "0".to_string(),
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
             pg_distrib_dir: Some(pg_distrib_dir),
@@ -457,8 +456,14 @@ impl PageServerConf {
             background_task_maximum_delay: Duration::ZERO,
             ..Default::default()
         };
-        PageServerConf::parse_and_validate(config_toml, &repo_dir).unwrap()
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
     }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageserverIdentity {
+    pub id: NodeId,
 }
 
 /// Configurable semaphore permits setting.
@@ -568,7 +573,7 @@ background_task_maximum_delay = '334 s'
         );
         let toml: pageserver_api::config::ConfigToml = toml_edit::de::from_str(&config_string)?;
 
-        let parsed_config = PageServerConf::parse_and_validate(toml, &workdir)
+        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
             .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
@@ -650,7 +655,7 @@ background_task_maximum_delay = '334 s'
         );
         let toml = config_string.parse()?;
 
-        let parsed_config = PageServerConf::parse_and_validate(&toml, &workdir)
+        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
             .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
 
         assert_eq!(
@@ -740,12 +745,13 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for the local FS");
+            let parsed_remote_storage_config =
+                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
+                    })
+                    .remote_storage_config
+                    .expect("Should have remote storage config for the local FS");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -801,12 +807,13 @@ broker_endpoint = '{broker_endpoint}'
 
             let toml = config_string.parse()?;
 
-            let parsed_remote_storage_config = PageServerConf::parse_and_validate(&toml, &workdir)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                })
-                .remote_storage_config
-                .expect("Should have remote storage config for S3");
+            let parsed_remote_storage_config =
+                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
+                    })
+                    .remote_storage_config
+                    .expect("Should have remote storage config for S3");
 
             assert_eq!(
                 parsed_remote_storage_config,
@@ -885,7 +892,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse()?;
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+        let conf = PageServerConf::parse_and_validate(NodeId(333), &toml, &workdir)?;
 
         assert_eq!(conf.pg_distrib_dir, pg_distrib_dir);
         assert_eq!(
@@ -901,7 +908,11 @@ threshold = "20m"
                 .evictions_low_residence_duration_metric_threshold,
             Duration::from_secs(20 * 60)
         );
-        assert_eq!(conf.id, NodeId(222));
+
+        // Assert that the node id provided by the indentity file (threaded
+        // through the call to [`PageServerConf::parse_and_validate`] is
+        // used.
+        assert_eq!(conf.id, NodeId(333));
         assert_eq!(
             conf.disk_usage_based_eviction,
             Some(DiskUsageEvictionTaskConfig {
@@ -946,7 +957,7 @@ threshold = "20m"
 "#,
         );
         let toml: Document = pageserver_conf_toml.parse().unwrap();
-        let conf = PageServerConf::parse_and_validate(&toml, &workdir).unwrap();
+        let conf = PageServerConf::parse_and_validate(NodeId(222), &toml, &workdir).unwrap();
 
         match &conf.default_tenant_conf.eviction_policy {
             EvictionPolicy::OnlyImitiate(t) => {
@@ -965,7 +976,7 @@ threshold = "20m"
 remote_storage = {}
         "#;
         let doc = toml_edit::Document::from_str(input).unwrap();
-        let err = PageServerConf::parse_and_validate(&doc, &workdir)
+        let err = PageServerConf::parse_and_validate(NodeId(222), &doc, &workdir)
             .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
         assert!(format!("{err}").contains("remote_storage"), "{err}");
     }

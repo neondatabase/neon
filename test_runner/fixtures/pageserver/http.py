@@ -662,6 +662,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_repartition=False,
         force_image_layer_creation=False,
         wait_until_uploaded=False,
+        compact: Optional[bool] = None,
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -671,6 +672,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_image_layer_creation"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
+
+        if compact is not None:
+            query["compact"] = "true" if compact else "false"
 
         log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
         res = self.put(

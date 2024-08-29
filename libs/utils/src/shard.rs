@@ -49,6 +49,7 @@ pub struct TenantShardId {
 
 impl ShardCount {
     pub const MAX: Self = Self(u8::MAX);
+    pub const MIN: Self = Self(0);
 
     /// The internal value of a ShardCount may be zero, which means "1 shard, but use
     /// legacy format for TenantShardId that excludes the shard suffix", also known

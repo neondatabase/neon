@@ -65,7 +65,6 @@ impl Timeline {
                 "layer eviction for {}/{}",
                 self.tenant_shard_id, self.timeline_id
             ),
-            false,
             async move {
                 tokio::select! {
                     _ = self_clone.cancel.cancelled() => { return Ok(()); }
