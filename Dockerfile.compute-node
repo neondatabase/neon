@@ -933,7 +933,8 @@ COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
 #COPY --from=pg-tiktoken-pg-build /home/nonroot/pg_tiktoken.tar.gz /ext-src
 COPY --from=hypopg-pg-build /hypopg.tar.gz /ext-src
 COPY --from=pg-hashids-pg-build /pg_hashids.tar.gz /ext-src
-#COPY --from=rum-pg-build /rum.tar.gz /ext-src
+COPY --from=rum-pg-build /rum.tar.gz /ext-src
+COPY patches/rum.patch /ext-src
 #COPY --from=pgtap-pg-build /pgtap.tar.gz /ext-src
 COPY --from=ip4r-pg-build /ip4r.tar.gz /ext-src
 COPY --from=prefix-pg-build /prefix.tar.gz /ext-src
@@ -945,7 +946,7 @@ COPY patches/pg_hintplan.patch /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
 COPY patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
-COPY --from=rdkit-pg-build /rdkit.tar.gz /ext-src
+#COPY --from=rdkit-pg-build /rdkit.tar.gz /ext-src
 COPY --from=pg-uuidv7-pg-build /pg_uuidv7.tar.gz /ext-src
 COPY --from=pg-roaringbitmap-pg-build /pg_roaringbitmap.tar.gz /ext-src
 COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
@@ -960,6 +961,7 @@ RUN cd /ext-src/ && for f in *.tar.gz; \
     rm -rf $dname; mkdir $dname; tar xzf $f --strip-components=1 -C $dname \
     || exit 1; rm -f $f; done
 RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
+RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
 # cmake is required for the h3 test
 RUN apt-get update && apt-get install -y cmake
 RUN patch -p1 < /ext-src/pg_hintplan.patch

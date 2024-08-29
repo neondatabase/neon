@@ -308,6 +308,45 @@ paths:
             application/json:
               schema:
                 type: string
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/block_gc:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Persistently add a gc blocking at the tenant level because of this timeline
+      responses:
+        "200":
+          description: OK
+
+  /v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/unblock_gc:
+    parameters:
+      - name: tenant_shard_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: Persistently remove a tenant level gc blocking for this timeline
+      responses:
+        "200":
+          description: OK
+
   /v1/tenant/{tenant_shard_id}/location_config:
     parameters:
       - name: tenant_shard_id
@@ -893,7 +932,7 @@ components:
           description: Whether to poll remote storage for layers to download.  If false, secondary locations don't download anything.
     ArchivalConfigRequest:
       type: object
-      required
+      required:
         - state
       properties:
         state:

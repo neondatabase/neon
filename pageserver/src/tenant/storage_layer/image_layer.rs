@@ -32,9 +32,6 @@ use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
-use crate::tenant::storage_layer::{
-    LayerAccessStats, ValueReconstructResult, ValueReconstructState,
-};
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
@@ -137,7 +134,6 @@ pub struct ImageLayer {
     pub desc: PersistentLayerDesc,
     // This entry contains an image of all pages as of this LSN, should be the same as desc.lsn
     pub lsn: Lsn,
-    access_stats: LayerAccessStats,
     inner: OnceCell<ImageLayerInner>,
 }
 
@@ -255,7 +251,6 @@ impl ImageLayer {
     /// not loaded already.
     ///
     async fn load(&self, ctx: &RequestContext) -> Result<&ImageLayerInner> {
-        self.access_stats.record_access(ctx);
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
             .await
@@ -306,7 +301,6 @@ impl ImageLayer {
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
-            access_stats: Default::default(),
             inner: OnceCell::new(),
         })
     }
@@ -427,46 +421,6 @@ impl ImageLayerInner {
             max_vectored_read_bytes,
             key_range: actual_summary.key_range,
         })
-    }
-
-    pub(super) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader =
-            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
-
-        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-        key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader
-            .get(
-                &keybuf,
-                &RequestContextBuilder::extend(ctx)
-                    .page_content_kind(PageContentKind::ImageLayerBtreeNode)
-                    .build(),
-            )
-            .await?
-        {
-            let blob = block_reader
-                .block_cursor()
-                .read_blob(
-                    offset,
-                    &RequestContextBuilder::extend(ctx)
-                        .page_content_kind(PageContentKind::ImageLayerValue)
-                        .build(),
-                )
-                .await
-                .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
-
-            reconstruct_state.img = Some((self.lsn, value));
-            Ok(ValueReconstructResult::Complete)
-        } else {
-            Ok(ValueReconstructResult::Missing)
-        }
     }
 
     // Look up the keys in the provided keyspace and update
@@ -753,6 +707,10 @@ struct ImageLayerWriterInner {
 }
 
 impl ImageLayerWriterInner {
+    fn size(&self) -> u64 {
+        self.tree.borrow_writer().size() + self.blob_writer.size()
+    }
+
     ///
     /// Start building a new image layer.
     ///
@@ -1043,6 +1001,10 @@ impl ImageLayerWriter {
             .unwrap()
             .finish(timeline, ctx, Some(end_key))
             .await
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.inner.as_ref().unwrap().size()
     }
 }
 

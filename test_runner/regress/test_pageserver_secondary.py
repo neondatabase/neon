@@ -2,10 +2,11 @@ import json
 import os
 import random
 import time
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
 
 import pytest
-from fixtures.common_types import TenantId, TimelineId
+from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonPageserver
 from fixtures.pageserver.common_types import parse_layer_file_name
@@ -437,6 +438,35 @@ def test_heatmap_uploads(neon_env_builder: NeonEnvBuilder):
     validate_heatmap(heatmap_second)
 
 
+def list_elegible_layers(
+    pageserver, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
+) -> list[Path]:
+    """
+    The subset of layer filenames that are elegible for secondary download: at time of writing this
+    is all resident layers which are also visible.
+    """
+    candidates = pageserver.list_layers(tenant_id, timeline_id)
+
+    layer_map = pageserver.http_client().layer_map_info(tenant_id, timeline_id)
+
+    # Map of layer filenames to their visibility the "layer name" is not the same as the filename: add suffix to resolve one to the other
+    visible_map = dict(
+        (f"{layer.layer_file_name}-v1-00000001", layer.visible)
+        for layer in layer_map.historic_layers
+    )
+
+    def is_visible(layer_file_name):
+        try:
+            return visible_map[str(layer_file_name)]
+        except KeyError:
+            # Unexpected: tests should call this when pageservers are in a quiet state such that the layer map
+            # matches what's on disk.
+            log.warn(f"Lookup {layer_file_name} from {list(visible_map.keys())}")
+            raise
+
+    return list(c for c in candidates if is_visible(c))
+
+
 def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     """
     Test the overall data flow in secondary mode:
@@ -491,7 +521,7 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
 
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
+    assert list_elegible_layers(ps_attached, tenant_id, timeline_id) == ps_secondary.list_layers(
         tenant_id, timeline_id
     )
 
@@ -509,9 +539,9 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
     try:
-        assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
-            tenant_id, timeline_id
-        )
+        assert list_elegible_layers(
+            ps_attached, tenant_id, timeline_id
+        ) == ps_secondary.list_layers(tenant_id, timeline_id)
     except:
         # Do a full listing of the secondary location on errors, to help debug of
         # https://github.com/neondatabase/neon/issues/6966
@@ -532,8 +562,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # ==================================================================
     try:
         log.info("Evicting a layer...")
-        layer_to_evict = ps_attached.list_layers(tenant_id, timeline_id)[0]
-        some_other_layer = ps_attached.list_layers(tenant_id, timeline_id)[1]
+        layer_to_evict = list_elegible_layers(ps_attached, tenant_id, timeline_id)[0]
+        some_other_layer = list_elegible_layers(ps_attached, tenant_id, timeline_id)[1]
         log.info(f"Victim layer: {layer_to_evict.name}")
         ps_attached.http_client().evict_layer(
             tenant_id, timeline_id, layer_name=layer_to_evict.name
@@ -551,9 +581,9 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
         ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
         assert layer_to_evict not in ps_attached.list_layers(tenant_id, timeline_id)
-        assert ps_attached.list_layers(tenant_id, timeline_id) == ps_secondary.list_layers(
-            tenant_id, timeline_id
-        )
+        assert list_elegible_layers(
+            ps_attached, tenant_id, timeline_id
+        ) == ps_secondary.list_layers(tenant_id, timeline_id)
     except:
         # On assertion failures, log some details to help with debugging
         heatmap = env.pageserver_remote_storage.heatmap_content(tenant_id)
@@ -563,7 +593,8 @@ def test_secondary_downloads(neon_env_builder: NeonEnvBuilder):
     # Scrub the remote storage
     # ========================
     # This confirms that the scrubber isn't upset by the presence of the heatmap
-    env.storage_scrubber.scan_metadata()
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
 
     # Detach secondary and delete tenant
     # ===================================

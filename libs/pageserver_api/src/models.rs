@@ -647,6 +647,13 @@ pub struct TenantInfo {
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub attachment_status: TenantAttachmentStatus,
     pub generation: u32,
+
+    /// Opaque explanation if gc is being blocked.
+    ///
+    /// Only looked up for the individual tenant detail, not the listing. This is purely for
+    /// debugging, not included in openapi.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gc_blocking: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1437,6 +1444,7 @@ mod tests {
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
             generation: 1,
+            gc_blocking: None,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -1459,6 +1467,7 @@ mod tests {
             current_physical_size: Some(42),
             attachment_status: TenantAttachmentStatus::Attached,
             generation: 1,
+            gc_blocking: None,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
