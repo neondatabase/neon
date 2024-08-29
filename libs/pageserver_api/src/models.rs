@@ -5,7 +5,6 @@ pub mod utilization;
 pub use utilization::PageserverUtilization;
 
 use std::{
-    borrow::Cow,
     collections::HashMap,
     io::{BufRead, Read},
     num::{NonZeroU64, NonZeroUsize},
@@ -20,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use utils::{
     completion,
-    history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
     serde_system_time,
@@ -735,58 +733,7 @@ pub struct LayerMapInfo {
     pub historic_layers: Vec<HistoricLayerInfo>,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, enum_map::Enum)]
-#[repr(usize)]
-pub enum LayerAccessKind {
-    GetValueReconstructData,
-    Iter,
-    KeyIter,
-    Dump,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayerAccessStatFullDetails {
-    pub when_millis_since_epoch: u64,
-    pub task_kind: Cow<'static, str>,
-    pub access_kind: LayerAccessKind,
-}
-
-/// An event that impacts the layer's residence status.
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayerResidenceEvent {
-    /// The time when the event occurred.
-    /// NB: this timestamp is captured while the residence status changes.
-    /// So, it might be behind/ahead of the actual residence change by a short amount of time.
-    ///
-    #[serde(rename = "timestamp_millis_since_epoch")]
-    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
-    pub timestamp: SystemTime,
-    /// The new residence status of the layer.
-    pub status: LayerResidenceStatus,
-    /// The reason why we had to record this event.
-    pub reason: LayerResidenceEventReason,
-}
-
-/// The reason for recording a given [`LayerResidenceEvent`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum LayerResidenceEventReason {
-    /// The layer map is being populated, e.g. during timeline load or attach.
-    /// This includes [`RemoteLayer`] objects created in [`reconcile_with_remote`].
-    /// We need to record such events because there is no persistent storage for the events.
-    ///
-    // https://github.com/rust-lang/rust/issues/74481
-    /// [`RemoteLayer`]: ../../tenant/storage_layer/struct.RemoteLayer.html
-    /// [`reconcile_with_remote`]: ../../tenant/struct.Timeline.html#method.reconcile_with_remote
-    LayerLoad,
-    /// We just created the layer (e.g., freeze_and_flush or compaction).
-    /// Such layers are always [`LayerResidenceStatus::Resident`].
-    LayerCreate,
-    /// We on-demand downloaded or evicted the given layer.
-    ResidenceChange,
-}
-
-/// The residence status of the layer, after the given [`LayerResidenceEvent`].
+/// The residence status of a layer
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LayerResidenceStatus {
     /// Residence status for a layer file that exists locally.
@@ -796,23 +743,16 @@ pub enum LayerResidenceStatus {
     Evicted,
 }
 
-impl LayerResidenceEvent {
-    pub fn new(status: LayerResidenceStatus, reason: LayerResidenceEventReason) -> Self {
-        Self {
-            status,
-            reason,
-            timestamp: SystemTime::now(),
-        }
-    }
-}
-
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerAccessStats {
-    pub access_count_by_access_kind: HashMap<LayerAccessKind, u64>,
-    pub task_kind_access_flag: Vec<Cow<'static, str>>,
-    pub first: Option<LayerAccessStatFullDetails>,
-    pub accesses_history: HistoryBufferWithDropCounter<LayerAccessStatFullDetails, 16>,
-    pub residence_events_history: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
+    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    pub access_time: SystemTime,
+
+    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    pub residence_time: SystemTime,
+
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
