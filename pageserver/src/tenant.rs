@@ -1372,9 +1372,7 @@ impl Tenant {
             };
 
             if state == TimelineArchivalState::Unarchived {
-                let ancestor_timeline = timeline.get_ancestor_timeline();
-
-                if let Some(ancestor_timeline) = ancestor_timeline {
+                if let Some(ancestor_timeline) = timeline.ancestor_timeline() {
                     if ancestor_timeline.is_archived() == Some(true) {
                         return Err(TimelineArchivalError::HasArchivedParent(
                             ancestor_timeline.timeline_id,

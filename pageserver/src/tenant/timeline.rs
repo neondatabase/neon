@@ -868,7 +868,7 @@ impl Timeline {
     }
 
     /// Get the ancestor timeline
-    pub(crate) fn get_ancestor_timeline(&self) -> Option<&Arc<Timeline>> {
+    pub(crate) fn ancestor_timeline(&self) -> Option<&Arc<Timeline>> {
         self.ancestor_timeline.as_ref()
     }
 
