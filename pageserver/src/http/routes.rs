@@ -1733,6 +1733,10 @@ async fn timeline_compact_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
+    if Some(true) == parse_query_param::<_, bool>(&request, "dry_run")? {
+        flags |= CompactFlags::DryRun;
+    }
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
