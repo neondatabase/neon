@@ -213,10 +213,7 @@ impl UploadQueue {
 
         let mut files = HashMap::with_capacity(index_part.layer_metadata.len());
         for (layer_name, layer_metadata) in &index_part.layer_metadata {
-            files.insert(
-                layer_name.to_owned(),
-                LayerFileMetadata::from(layer_metadata),
-            );
+            files.insert(layer_name.to_owned(), layer_metadata.clone());
         }
 
         info!(
@@ -322,9 +319,7 @@ impl std::fmt::Display for UploadOp {
                 write!(
                     f,
                     "UploadLayer({}, size={:?}, gen={:?})",
-                    layer,
-                    metadata.file_size(),
-                    metadata.generation
+                    layer, metadata.file_size, metadata.generation
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => {

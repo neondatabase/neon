@@ -651,7 +651,7 @@ impl ImageLayerWriterInner {
                 lsn,
             },
         );
-        info!("new image layer {path}");
+        trace!("creating image layer {}", path);
         let mut file = {
             VirtualFile::open_with_options(
                 &path,
@@ -771,7 +771,7 @@ impl ImageLayerWriterInner {
         // FIXME: why not carry the virtualfile here, it supports renaming?
         let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
 
-        trace!("created image layer {}", layer.local_path());
+        info!("created image layer {}", layer.local_path());
 
         Ok(layer)
     }

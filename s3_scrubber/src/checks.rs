@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use aws_sdk_s3::{types::ObjectIdentifier, Client};
-use pageserver::tenant::remote_timeline_client::index::IndexLayerMetadata;
+use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use tracing::{error, info, warn};
 use utils::generation::Generation;
@@ -208,7 +208,7 @@ impl TenantObjectListing {
         &mut self,
         timeline_id: TimelineId,
         layer_file: &LayerName,
-        metadata: &IndexLayerMetadata,
+        metadata: &LayerFileMetadata,
     ) -> bool {
         let Some(shard_tl) = self.shard_timelines.get_mut(&(metadata.shard, timeline_id)) else {
             return false;

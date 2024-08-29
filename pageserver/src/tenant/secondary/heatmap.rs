@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::tenant::{remote_timeline_client::index::IndexLayerMetadata, storage_layer::LayerName};
+use crate::tenant::{remote_timeline_client::index::LayerFileMetadata, storage_layer::LayerName};
 
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, TimestampSeconds};
@@ -38,7 +38,7 @@ pub(crate) struct HeatMapTimeline {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HeatMapLayer {
     pub(super) name: LayerName,
-    pub(super) metadata: IndexLayerMetadata,
+    pub(super) metadata: LayerFileMetadata,
 
     #[serde_as(as = "TimestampSeconds<i64>")]
     pub(super) access_time: SystemTime,
@@ -49,7 +49,7 @@ pub(crate) struct HeatMapLayer {
 impl HeatMapLayer {
     pub(crate) fn new(
         name: LayerName,
-        metadata: IndexLayerMetadata,
+        metadata: LayerFileMetadata,
         access_time: SystemTime,
     ) -> Self {
         Self {

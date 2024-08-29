@@ -238,9 +238,12 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         io_buf,
                         Err(Error::new(
                             ErrorKind::Other,
-                            format!("blob too large ({} bytes)", len),
+                            format!("blob too large ({len} bytes)"),
                         )),
                     );
+                }
+                if len > 0x0fff_ffff {
+                    tracing::warn!("writing blob above future limit ({len} bytes)");
                 }
                 let mut len_buf = (len as u32).to_be_bytes();
                 len_buf[0] |= 0x80;

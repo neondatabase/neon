@@ -1192,7 +1192,7 @@ impl RemoteTimelineClient {
                     &self.storage_impl,
                     uploaded.local_path(),
                     &remote_path,
-                    uploaded.metadata().file_size(),
+                    uploaded.metadata().file_size,
                     cancel,
                 )
                 .await
@@ -1573,7 +1573,7 @@ impl RemoteTimelineClient {
                         &self.storage_impl,
                         local_path,
                         &remote_path,
-                        layer_metadata.file_size(),
+                        layer_metadata.file_size,
                         &self.cancel,
                     )
                     .measure_remote_op(
@@ -1768,7 +1768,7 @@ impl RemoteTimelineClient {
             UploadOp::UploadLayer(_, m) => (
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Upload,
-                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size()),
+                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size),
             ),
             UploadOp::UploadMetadata(_, _) => (
                 RemoteOpFileKind::Index,

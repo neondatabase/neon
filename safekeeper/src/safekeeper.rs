@@ -827,10 +827,10 @@ where
 
     /// Persist control file if there is something to save and enough time
     /// passed after the last save.
-    pub async fn maybe_persist_inmem_control_file(&mut self) -> Result<()> {
+    pub async fn maybe_persist_inmem_control_file(&mut self) -> Result<bool> {
         const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
         if self.state.pers.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
-            return Ok(());
+            return Ok(false);
         }
         let need_persist = self.state.inmem.commit_lsn > self.state.commit_lsn
             || self.state.inmem.backup_lsn > self.state.backup_lsn
@@ -840,7 +840,7 @@ where
             self.state.flush().await?;
             trace!("saved control file: {CF_SAVE_INTERVAL:?} passed");
         }
-        Ok(())
+        Ok(need_persist)
     }
 
     /// Handle request to append WAL.

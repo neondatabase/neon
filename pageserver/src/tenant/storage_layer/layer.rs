@@ -161,7 +161,7 @@ impl Layer {
             timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
-            metadata.file_size(),
+            metadata.file_size,
         );
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted);
@@ -194,7 +194,7 @@ impl Layer {
             timeline.tenant_shard_id,
             timeline.timeline_id,
             file_name,
-            metadata.file_size(),
+            metadata.file_size,
         );
 
         let access_stats = LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident);
@@ -227,7 +227,7 @@ impl Layer {
 
         timeline
             .metrics
-            .resident_physical_size_add(metadata.file_size());
+            .resident_physical_size_add(metadata.file_size);
 
         ResidentLayer { downloaded, owner }
     }

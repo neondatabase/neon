@@ -355,7 +355,7 @@ async fn upload_parquet(
         "{year:04}/{month:02}/{day:02}/{hour:02}/requests_{id}.parquet"
     ))?;
     let cancel = CancellationToken::new();
-    backoff::retry(
+    let maybe_err = backoff::retry(
         || async {
             let stream = futures::stream::once(futures::future::ready(Ok(data.clone())));
             storage
@@ -372,7 +372,12 @@ async fn upload_parquet(
     .await
     .ok_or_else(|| anyhow::Error::new(TimeoutOrCancel::Cancel))
     .and_then(|x| x)
-    .context("request_data_upload")?;
+    .context("request_data_upload")
+    .err();
+
+    if let Some(err) = maybe_err {
+        tracing::warn!(%id, %err, "failed to upload request data");
+    }
 
     Ok(buffer.writer())
 }

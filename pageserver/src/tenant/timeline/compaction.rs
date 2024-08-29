@@ -9,7 +9,10 @@ use std::ops::{Deref, Range};
 use std::sync::Arc;
 
 use super::layer_manager::LayerManager;
-use super::{CompactFlags, DurationRecorder, ImageLayerCreationMode, RecordedDuration, Timeline};
+use super::{
+    CompactFlags, CreateImageLayersError, DurationRecorder, ImageLayerCreationMode,
+    RecordedDuration, Timeline,
+};
 
 use anyhow::{anyhow, Context};
 use enumset::EnumSet;
@@ -22,14 +25,13 @@ use tracing::{debug, info, info_span, trace, warn, Instrument};
 use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
+use crate::page_cache;
 use crate::tenant::storage_layer::{AsLayerDesc, PersistentLayerDesc};
-use crate::tenant::timeline::{drop_rlock, is_rel_fsm_block_key, is_rel_vm_block_key, Hole};
+use crate::tenant::timeline::{drop_rlock, Hole, ImageLayerCreationOutcome};
 use crate::tenant::timeline::{DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::DeltaLayer;
-use crate::tenant::PageReconstructError;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
-use crate::{page_cache, ZERO_PAGE};
 
 use crate::keyspace::KeySpace;
 use crate::repository::Key;
@@ -1150,10 +1152,10 @@ impl TimelineAdaptor {
         lsn: Lsn,
         key_range: &Range<Key>,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<(), CreateImageLayersError> {
         let timer = self.timeline.metrics.create_images_time_histo.start_timer();
 
-        let mut image_layer_writer = ImageLayerWriter::new(
+        let image_layer_writer = ImageLayerWriter::new(
             self.timeline.conf,
             self.timeline.timeline_id,
             self.timeline.tenant_shard_id,
@@ -1164,47 +1166,34 @@ impl TimelineAdaptor {
         .await?;
 
         fail_point!("image-layer-writer-fail-before-finish", |_| {
-            Err(PageReconstructError::Other(anyhow::anyhow!(
+            Err(CreateImageLayersError::Other(anyhow::anyhow!(
                 "failpoint image-layer-writer-fail-before-finish"
             )))
         });
-        let keyspace_ranges = self.get_keyspace(key_range, lsn, ctx).await?;
-        for range in &keyspace_ranges {
-            let mut key = range.start;
-            while key < range.end {
-                let img = match self.timeline.get(key, lsn, ctx).await {
-                    Ok(img) => img,
-                    Err(err) => {
-                        // If we fail to reconstruct a VM or FSM page, we can zero the
-                        // page without losing any actual user data. That seems better
-                        // than failing repeatedly and getting stuck.
-                        //
-                        // We had a bug at one point, where we truncated the FSM and VM
-                        // in the pageserver, but the Postgres didn't know about that
-                        // and continued to generate incremental WAL records for pages
-                        // that didn't exist in the pageserver. Trying to replay those
-                        // WAL records failed to find the previous image of the page.
-                        // This special case allows us to recover from that situation.
-                        // See https://github.com/neondatabase/neon/issues/2601.
-                        //
-                        // Unfortunately we cannot do this for the main fork, or for
-                        // any metadata keys, keys, as that would lead to actual data
-                        // loss.
-                        if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
-                            warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
-                            ZERO_PAGE.clone()
-                        } else {
-                            return Err(err);
-                        }
-                    }
-                };
-                image_layer_writer.put_image(key, img, ctx).await?;
-                key = key.next();
-            }
-        }
-        let image_layer = image_layer_writer.finish(&self.timeline, ctx).await?;
 
-        self.new_images.push(image_layer);
+        let keyspace = KeySpace {
+            ranges: self.get_keyspace(key_range, lsn, ctx).await?,
+        };
+        // TODO set proper (stateful) start. The create_image_layer_for_rel_blocks function mostly
+        let start = Key::MIN;
+        let ImageLayerCreationOutcome {
+            image,
+            next_start_key: _,
+        } = self
+            .timeline
+            .create_image_layer_for_rel_blocks(
+                &keyspace,
+                image_layer_writer,
+                lsn,
+                ctx,
+                key_range.clone(),
+                start,
+            )
+            .await?;
+
+        if let Some(image_layer) = image {
+            self.new_images.push(image_layer);
+        }
 
         timer.stop_and_record();
 
