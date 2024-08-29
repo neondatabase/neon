@@ -1124,9 +1124,10 @@ impl Timeline {
                     );
                 }
             }
-            if let Value::WalRecord(rec) = &history[0].2 {
-                assert!(rec.will_init(), "no base image");
-            }
+            // There was an assertion for no base image that checks if the first
+            // record in the history is `will_init` before, but it was removed.
+            // This is explained in the test cases for generate_key_retention.
+            // Search "incomplete history" for more information.
             for lsn in retain_lsn_below_horizon {
                 assert!(lsn < &horizon, "retain lsn must be below horizon")
             }
@@ -1202,15 +1203,15 @@ impl Timeline {
                 false
             };
             replay_history.extend(split_for_lsn.iter().map(|x| (*x).clone()));
-            if let Some((_, _, val)) = replay_history.first() {
-                assert!(val.will_init(), "invalid history, no base image");
-            }
             // Only retain the items after the last image record
             for idx in (0..replay_history.len()).rev() {
                 if replay_history[idx].2.will_init() {
                     replay_history = replay_history[idx..].to_vec();
                     break;
                 }
+            }
+            if let Some((_, _, val)) = replay_history.first() {
+                assert!(val.will_init(), "invalid history, no base image");
             }
             if generate_image && records_since_last_image > 0 {
                 records_since_last_image = 0;

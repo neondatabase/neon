@@ -138,7 +138,7 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::config::TenantConf;
+use super::{config::TenantConf, upload_queue::NotInitialized};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{remote_timeline_client::RemoteTimelineClient, storage_layer::ReadableLayer};
@@ -643,7 +643,13 @@ impl FlushLayerError {
     // When crossing from generic anyhow errors to this error type, we explicitly check
     // for timeline cancellation to avoid logging inoffensive shutdown errors as warn/err.
     fn from_anyhow(timeline: &Timeline, err: anyhow::Error) -> Self {
-        if timeline.cancel.is_cancelled() {
+        let cancelled = timeline.cancel.is_cancelled()
+            // The upload queue might have been shut down before the official cancellation of the timeline.
+            || err
+                .downcast_ref::<NotInitialized>()
+                .map(NotInitialized::is_stopping)
+                .unwrap_or_default();
+        if cancelled {
             Self::Cancelled
         } else {
             Self::Other(Arc::new(err))
@@ -3382,7 +3388,6 @@ impl Timeline {
         }
     }
 
-    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///

@@ -13,7 +13,6 @@ from fixtures.utils import wait_until
 # running.
 def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
 
     # We inject a delay of 15 seconds for tenant activation below.
     # Hence, bump the max delay here to not skip over the activation.
@@ -161,7 +160,6 @@ def test_pageserver_chaos(
         pytest.skip("times out in debug builds")
 
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
 
