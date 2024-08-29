@@ -19,6 +19,10 @@ on:
         description: 'debug or release'
         required: true
         type: string
+      pg-versions:
+        description: 'a json array of postgres versions to run regression tests on'
+        required: true
+        type: string
 
 defaults:
   run:
@@ -219,9 +223,9 @@ jobs:
           # Run separate tests for real Azure Blob Storage
           # XXX: replace region with `eu-central-1`-like region
           export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
-          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
-          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
-          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
+          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV_NEW }}"
+          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV_NEW }}"
+          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER_NEW }}"
           export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
           ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
@@ -254,7 +258,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [ v14, v15, v16 ]
+        pg_version: ${{ fromJson(inputs.pg-versions) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -284,5 +288,5 @@ jobs:
       - name: Merge and upload coverage data
         if: |
           false &&
-          inputs.build-type == 'debug' && matrix.pg_version == 'v14'
+          inputs.build-type == 'debug' && matrix.pg_version == 'v16'
         uses: ./.github/actions/save-coverage-data

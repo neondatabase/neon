@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -304,8 +305,8 @@ pub struct MetadataHealthRecord {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MetadataHealthUpdateRequest {
-    pub healthy_tenant_shards: Vec<TenantShardId>,
-    pub unhealthy_tenant_shards: Vec<TenantShardId>,
+    pub healthy_tenant_shards: HashSet<TenantShardId>,
+    pub unhealthy_tenant_shards: HashSet<TenantShardId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

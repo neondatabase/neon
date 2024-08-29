@@ -3,6 +3,7 @@ pub(crate) mod compaction;
 pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
+pub(crate) mod handle;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
@@ -17,6 +18,7 @@ use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     config::{GetImpl, GetVectoredImpl},
@@ -59,7 +61,7 @@ use std::{
     sync::atomic::AtomicU64,
 };
 use std::{
-    cmp::{max, min, Ordering},
+    cmp::{max, min},
     ops::ControlFlow,
 };
 use std::{
@@ -175,25 +177,6 @@ pub enum ImageLayerCreationMode {
 impl std::fmt::Display for ImageLayerCreationMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
-    }
-}
-
-/// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Hole {
-    key_range: Range<Key>,
-    coverage_size: usize,
-}
-
-impl Ord for Hole {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.coverage_size.cmp(&self.coverage_size) // inverse order
-    }
-}
-
-impl PartialOrd for Hole {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -444,6 +427,8 @@ pub struct Timeline {
     pub(crate) extra_test_dense_keyspace: ArcSwap<KeySpace>,
 
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
+
+    pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 }
 
 pub struct WalReceiverInfo {
@@ -549,7 +534,6 @@ impl GetVectoredError {
     }
 }
 
-#[derive(Debug)]
 pub struct MissingKeyError {
     key: Key,
     shard: ShardNumber,
@@ -558,6 +542,12 @@ pub struct MissingKeyError {
     ancestor_lsn: Option<Lsn>,
     traversal_path: Vec<TraversalPathItem>,
     backtrace: Option<std::backtrace::Backtrace>,
+}
+
+impl std::fmt::Debug for MissingKeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
 }
 
 impl std::fmt::Display for MissingKeyError {
@@ -1896,6 +1886,9 @@ impl Timeline {
         tracing::debug!("Cancelling CancellationToken");
         self.cancel.cancel();
 
+        // Ensure Prevent new page service requests from starting.
+        self.handles.shutdown();
+
         // Transition the remote_client into a state where it's only useful for timeline deletion.
         // (The deletion use case is why we can't just hook up remote_client to Self::cancel).)
         self.remote_client.stop();
@@ -2421,6 +2414,8 @@ impl Timeline {
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
 
                 l0_flush_global_state: resources.l0_flush_global_state,
+
+                handles: Default::default(),
             };
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -3688,6 +3683,17 @@ impl Timeline {
 
     pub(crate) fn get_shard_identity(&self) -> &ShardIdentity {
         &self.shard_identity
+    }
+
+    #[inline(always)]
+    pub(crate) fn shard_timeline_id(&self) -> ShardTimelineId {
+        ShardTimelineId {
+            shard_index: ShardIndex {
+                shard_number: self.shard_identity.number,
+                shard_count: self.shard_identity.count,
+            },
+            timeline_id: self.timeline_id,
+        }
     }
 
     ///

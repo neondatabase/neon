@@ -116,8 +116,6 @@ pub(crate) enum ShardSelector {
     /// Only return the 0th shard, if it is present.  If a non-0th shard is present,
     /// ignore it.
     Zero,
-    /// Pick the first shard we find for the TenantId
-    First,
     /// Pick the shard that holds this key
     Page(Key),
     /// The shard ID is known: pick the given shard
@@ -2088,7 +2086,6 @@ impl TenantManager {
                     };
 
                     match selector {
-                        ShardSelector::First => return ShardResolveResult::Found(tenant.clone()),
                         ShardSelector::Zero if slot.0.shard_number == ShardNumber(0) => {
                             return ShardResolveResult::Found(tenant.clone())
                         }
@@ -2170,6 +2167,9 @@ pub(crate) enum GetActiveTenantError {
     /// never happen.
     #[error("Tenant is broken: {0}")]
     Broken(String),
+
+    #[error("reconnect to switch tenant id")]
+    SwitchedTenant,
 }
 
 #[derive(Debug, thiserror::Error)]
