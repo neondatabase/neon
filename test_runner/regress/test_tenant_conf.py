@@ -1,5 +1,6 @@
 import json
 from contextlib import closing
+from typing import Any, Dict
 
 import psycopg2.extras
 from fixtures.common_types import Lsn
@@ -14,16 +15,22 @@ from fixtures.utils import wait_until
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     """Test per tenant configuration"""
-    # set some non-default global config
-    neon_env_builder.pageserver_config_override = """
-page_cache_size=444;
-wait_lsn_timeout='111 s';
-[tenant_config]
-checkpoint_distance = 10000
-compaction_target_size = 1048576
-evictions_low_residence_duration_metric_threshold = "2 days"
-eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold = "23 hours" }
-"""
+
+    def set_some_nondefault_global_config(ps_cfg: Dict[str, Any]):
+        ps_cfg["page_cache_size"] = 444
+        ps_cfg["wait_lsn_timeout"] = "111 s"
+
+        tenant_config = ps_cfg.setdefault("tenant_config", {})
+        tenant_config["checkpoint_distance"] = 10000
+        tenant_config["compaction_target_size"] = 1048576
+        tenant_config["evictions_low_residence_duration_metric_threshold"] = "2 days"
+        tenant_config["eviction_policy"] = {
+            "kind": "LayerAccessThreshold",
+            "period": "20s",
+            "threshold": "23 hours",
+        }
+
+    neon_env_builder.pageserver_config_override = set_some_nondefault_global_config
 
     env = neon_env_builder.init_start()
     # we configure eviction but no remote storage, there might be error lines

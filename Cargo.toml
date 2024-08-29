@@ -122,8 +122,8 @@ opentelemetry = "0.20.0"
 opentelemetry-otlp = { version = "0.13.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions = "0.12.0"
 parking_lot = "0.12"
-parquet = { version = "49.0.0", default-features = false, features = ["zstd"] }
-parquet_derive = "49.0.0"
+parquet = { version = "51.0.0", default-features = false, features = ["zstd"] }
+parquet_derive = "51.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
 procfs = "0.14"
@@ -244,8 +244,8 @@ tonic-build = "0.9"
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 
 # bug fixes for UUID
-parquet = { git = "https://github.com/neondatabase/arrow-rs", branch = "neon-fix-bugs" }
-parquet_derive = { git = "https://github.com/neondatabase/arrow-rs", branch = "neon-fix-bugs" }
+parquet = { git = "https://github.com/apache/arrow-rs", branch = "master" }
+parquet_derive = { git = "https://github.com/apache/arrow-rs", branch = "master" }
 
 ################# Binary contents sections
 

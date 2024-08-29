@@ -1108,6 +1108,7 @@ impl LayerInner {
             .download_layer_file(
                 &self.desc.layer_name(),
                 &self.metadata(),
+                &self.path,
                 &timeline.cancel,
                 ctx,
             )

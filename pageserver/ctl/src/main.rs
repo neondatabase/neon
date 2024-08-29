@@ -219,6 +219,7 @@ fn handle_metadata(
     let mut meta = TimelineMetadata::from_bytes(&metadata_bytes)?;
     println!("Current metadata:\n{meta:?}");
     let mut update_meta = false;
+    // TODO: simplify this part
     if let Some(disk_consistent_lsn) = disk_consistent_lsn {
         meta = TimelineMetadata::new(
             *disk_consistent_lsn,

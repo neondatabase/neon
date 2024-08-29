@@ -35,12 +35,16 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::vec_map::{VecMap, VecMapOrdering};
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
-const MAX_AUX_FILE_DELTAS: usize = 1024;
+/// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
+pub const MAX_AUX_FILE_DELTAS: usize = 1024;
+
+/// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -718,10 +722,11 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        match self.get_switch_aux_file_policy() {
-            AuxFilePolicy::V1 => self.list_aux_files_v1(lsn, ctx).await,
-            AuxFilePolicy::V2 => self.list_aux_files_v2(lsn, ctx).await,
-            AuxFilePolicy::CrossValidation => {
+        let current_policy = self.last_aux_file_policy.load();
+        match current_policy {
+            Some(AuxFilePolicy::V1) | None => self.list_aux_files_v1(lsn, ctx).await,
+            Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
+            Some(AuxFilePolicy::CrossValidation) => {
                 let v1_result = self.list_aux_files_v1(lsn, ctx).await;
                 let v2_result = self.list_aux_files_v2(lsn, ctx).await;
                 match (v1_result, v2_result) {
@@ -1469,7 +1474,27 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let policy = self.tline.get_switch_aux_file_policy();
+        let switch_policy = self.tline.get_switch_aux_file_policy();
+
+        let policy = {
+            let current_policy = self.tline.last_aux_file_policy.load();
+            // Allowed switch path:
+            // * no aux files -> v1/v2/cross-validation
+            // * cross-validation->v2
+            if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
+                self.tline.last_aux_file_policy.store(Some(switch_policy));
+                self.tline
+                    .remote_client
+                    .schedule_index_upload_for_aux_file_policy_update(Some(switch_policy))?;
+                info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
+                switch_policy
+            } else {
+                // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
+                // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
+                current_policy.unwrap_or(AuxFilePolicy::default_tenant_config())
+            }
+        };
+
         if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
             let key = aux_file::encode_aux_file_key(path);
             // retrieve the key from the engine

@@ -56,7 +56,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             rewrite_concurrency: std::num::NonZeroUsize::new(2).unwrap(),
-            copy_concurrency: std::num::NonZeroUsize::new(10).unwrap(),
+            copy_concurrency: std::num::NonZeroUsize::new(100).unwrap(),
         }
     }
 }

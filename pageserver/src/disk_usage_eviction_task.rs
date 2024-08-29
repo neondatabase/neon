@@ -524,17 +524,11 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 }
                 EvictionLayer::Secondary(layer) => {
                     let file_size = layer.metadata.file_size();
-                    let tenant_manager = tenant_manager.clone();
 
                     js.spawn(async move {
                         layer
                             .secondary_tenant
-                            .evict_layer(
-                                tenant_manager.get_conf(),
-                                layer.timeline_id,
-                                layer.name,
-                                layer.metadata,
-                            )
+                            .evict_layer(layer.timeline_id, layer.name)
                             .await;
                         Ok(file_size)
                     });

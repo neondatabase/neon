@@ -189,6 +189,7 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
@@ -317,7 +318,7 @@ pub struct RemoteTimelineClient {
 
     upload_queue: Mutex<UploadQueue>,
 
-    metrics: Arc<RemoteTimelineClientMetrics>,
+    pub(crate) metrics: Arc<RemoteTimelineClientMetrics>,
 
     storage_impl: GenericRemoteStorage,
 
@@ -461,11 +462,11 @@ impl RemoteTimelineClient {
         } else {
             0
         };
-        self.metrics.remote_physical_size_set(size);
+        self.metrics.remote_physical_size_gauge.set(size);
     }
 
     pub fn get_remote_physical_size(&self) -> u64 {
-        self.metrics.remote_physical_size_get()
+        self.metrics.remote_physical_size_gauge.get()
     }
 
     //
@@ -518,6 +519,7 @@ impl RemoteTimelineClient {
         &self,
         layer_file_name: &LayerName,
         layer_metadata: &LayerFileMetadata,
+        local_path: &Utf8Path,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> anyhow::Result<u64> {
@@ -536,6 +538,7 @@ impl RemoteTimelineClient {
                 self.timeline_id,
                 layer_file_name,
                 layer_metadata,
+                local_path,
                 cancel,
                 ctx,
             )
@@ -609,6 +612,17 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Launch an index-file upload operation in the background, with only aux_file_policy flag updated.
+    pub(crate) fn schedule_index_upload_for_aux_file_policy_update(
+        self: &Arc<Self>,
+        last_aux_file_policy: Option<AuxFilePolicy>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        upload_queue.last_aux_file_policy = last_aux_file_policy;
+        self.schedule_index_upload(upload_queue);
+        Ok(())
+    }
     ///
     /// Launch an index-file upload operation in the background, if necessary.
     ///
@@ -1849,6 +1863,7 @@ impl RemoteTimelineClient {
                         dangling_files: HashMap::default(),
                         shutting_down: false,
                         shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
+                        last_aux_file_policy: initialized.last_aux_file_policy,
                     };
 
                     let upload_queue = std::mem::replace(

@@ -1075,9 +1075,9 @@ dependencies = [
 
 [[package]]
 name = "chrono"
-version = "0.4.31"
+version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f2c685bad3eb3d45a01354cedb7d5faa66194d1d58ba6e267a8de788f79db38"
+checksum = "a21f936df1771bf62b77f047b726c4625ff2e8aa607c01ec06e5a05bd8463401"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
@@ -1085,7 +1085,7 @@ dependencies = [
  "num-traits",
  "serde",
  "wasm-bindgen",
- "windows-targets 0.48.0",
+ "windows-targets 0.52.4",
 ]
 
 [[package]]
@@ -1112,7 +1112,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "defaa24ecc093c77630e6c15e17c51f5e187bf35ee514f4e2d67baaa96dae22b"
 dependencies = [
  "ciborium-io",
- "half",
+ "half 1.8.2",
 ]
 
 [[package]]
@@ -2280,6 +2280,17 @@ name = "half"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eabb4a44450da02c90444cf74558da904edde8fb4e9035a9a6a4e15445af0bd7"
+
+[[package]]
+name = "half"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dd08c532ae367adf81c312a4580bc67f1d0fe8bc9c460520283f4c0ff277888"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "num-traits",
+]
 
 [[package]]
 name = "hash32"
@@ -3928,11 +3939,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "parquet_derive"
-version = "49.0.0"
-source = "git+https://github.com/neondatabase/arrow-rs?branch=neon-fix-bugs#8a0bc58aa67b98aabbd8eee7c6ca4281967ff9e9"
+name = "parquet"
+version = "51.0.0"
+source = "git+https://github.com/apache/arrow-rs?branch=master#2534976a564be3d2d56312dc88fb1b6ed4cef829"
 dependencies = [
- "parquet",
+ "ahash",
+ "bytes",
+ "chrono",
+ "half 2.4.1",
+ "hashbrown 0.14.5",
+ "num",
+ "num-bigint",
+ "paste",
+ "seq-macro",
+ "thrift",
+ "twox-hash",
+ "zstd",
+ "zstd-sys",
+]
+
+[[package]]
+name = "parquet_derive"
+version = "51.0.0"
+source = "git+https://github.com/apache/arrow-rs?branch=master#2534976a564be3d2d56312dc88fb1b6ed4cef829"
+dependencies = [
+ "parquet 51.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.52",
@@ -4426,7 +4457,7 @@ dependencies = [
  "once_cell",
  "opentelemetry",
  "parking_lot 0.12.1",
- "parquet",
+ "parquet 51.0.0",
  "parquet_derive",
  "pbkdf2",
  "pin-project-lite",
@@ -7509,7 +7540,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "once_cell",
- "parquet",
+ "parquet 49.0.0",
  "prost",
  "rand 0.8.5",
  "regex",

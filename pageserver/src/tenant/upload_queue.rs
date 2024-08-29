@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
 use chrono::NaiveDateTime;
+use pageserver_api::models::AuxFilePolicy;
 use std::sync::Arc;
 use tracing::info;
 use utils::lsn::AtomicLsn;
@@ -59,6 +60,9 @@ pub(crate) struct UploadQueueInitialized {
 
     /// Part of the flattened "next" `index_part.json`.
     pub(crate) latest_lineage: Lineage,
+
+    /// The last aux file policy used on this timeline.
+    pub(crate) last_aux_file_policy: Option<AuxFilePolicy>,
 
     /// `disk_consistent_lsn` from the last metadata file that was successfully
     /// uploaded. `Lsn(0)` if nothing was uploaded yet.
@@ -189,6 +193,7 @@ impl UploadQueue {
             dangling_files: HashMap::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
+            last_aux_file_policy: Default::default(),
         };
 
         *self = UploadQueue::Initialized(state);
@@ -239,6 +244,7 @@ impl UploadQueue {
             dangling_files: HashMap::new(),
             shutting_down: false,
             shutdown_ready: Arc::new(tokio::sync::Semaphore::new(0)),
+            last_aux_file_policy: index_part.last_aux_file_policy(),
         };
 
         *self = UploadQueue::Initialized(state);

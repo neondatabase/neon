@@ -283,6 +283,8 @@ pub struct TenantConfigToml {
 
     /// Switch to a new aux file policy. Switching this flag requires the user has not written any aux file into
     /// the storage before, and this flag cannot be switched back. Otherwise there will be data corruptions.
+    /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
+    /// file is written.
     pub switch_aux_file_policy: crate::models::AuxFilePolicy,
 }
 
@@ -497,7 +499,7 @@ impl Default for TenantConfigToml {
             lazy_slru_download: false,
             timeline_get_throttle: crate::models::ThrottleConfig::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
-            switch_aux_file_policy: crate::models::AuxFilePolicy::V1,
+            switch_aux_file_policy: crate::models::AuxFilePolicy::default_tenant_config(),
         }
     }
 }

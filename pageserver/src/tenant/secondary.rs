@@ -6,11 +6,9 @@ mod scheduler;
 use std::{sync::Arc, time::SystemTime};
 
 use crate::{
-    config::PageServerConf,
     context::RequestContext,
     disk_usage_eviction_task::DiskUsageEvictionInfo,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    virtual_file::MaybeFatalIo,
 };
 
 use self::{
@@ -21,9 +19,8 @@ use self::{
 use super::{
     config::{SecondaryLocationConfig, TenantConfOpt},
     mgr::TenantManager,
-    remote_timeline_client::LayerFileMetadata,
     span::debug_assert_current_span_has_tenant_id,
-    storage_layer::{layer::local_layer_path, LayerName},
+    storage_layer::LayerName,
 };
 
 use pageserver_api::{
@@ -178,13 +175,7 @@ impl SecondaryTenant {
 
     /// Cancellation safe, but on cancellation the eviction will go through
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline_id, name=%name))]
-    pub(crate) async fn evict_layer(
-        self: &Arc<Self>,
-        conf: &PageServerConf,
-        timeline_id: TimelineId,
-        name: LayerName,
-        metadata: LayerFileMetadata,
-    ) {
+    pub(crate) async fn evict_layer(self: &Arc<Self>, timeline_id: TimelineId, name: LayerName) {
         debug_assert_current_span_has_tenant_id();
 
         let guard = match self.gate.enter() {
@@ -197,41 +188,11 @@ impl SecondaryTenant {
 
         let now = SystemTime::now();
 
-        let local_path = local_layer_path(
-            conf,
-            &self.tenant_shard_id,
-            &timeline_id,
-            &name,
-            &metadata.generation,
-        );
-
         let this = self.clone();
 
         // spawn it to be cancellation safe
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            // We tolerate ENOENT, because between planning eviction and executing
-            // it, the secondary downloader could have seen an updated heatmap that
-            // resulted in a layer being deleted.
-            // Other local I/O errors are process-fatal: these should never happen.
-            let deleted = std::fs::remove_file(local_path);
-
-            let not_found = deleted
-                .as_ref()
-                .is_err_and(|x| x.kind() == std::io::ErrorKind::NotFound);
-
-            let deleted = if not_found {
-                false
-            } else {
-                deleted
-                    .map(|()| true)
-                    .fatal_err("Deleting layer during eviction")
-            };
-
-            if !deleted {
-                // skip updating accounting and putting perhaps later timestamp
-                return;
-            }
 
             // Update the timeline's state.  This does not have to be synchronized with
             // the download process, because:
@@ -250,8 +211,15 @@ impl SecondaryTenant {
             // of the cache.
             let mut detail = this.detail.lock().unwrap();
             if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
-                timeline_detail.on_disk_layers.remove(&name);
-                timeline_detail.evicted_at.insert(name, now);
+                let removed = timeline_detail.on_disk_layers.remove(&name);
+
+                // We might race with removal of the same layer during downloads, if it was removed
+                // from the heatmap.  If we see that the OnDiskState is gone, then no need to
+                // do a physical deletion or store in evicted_at.
+                if let Some(removed) = removed {
+                    removed.remove_blocking();
+                    timeline_detail.evicted_at.insert(name, now);
+                }
             }
         })
         .await
