@@ -178,7 +178,8 @@ impl AuxFileSizeEstimator {
         }
     }
 
-    pub fn on_base_backup(&self, new_size: usize) {
+    /// When generating base backup or doing initial logical size calculation
+    pub fn on_initial(&self, new_size: usize) {
         let mut guard = self.size.lock().unwrap();
         *guard = Some(new_size as isize);
         self.report(new_size as isize);

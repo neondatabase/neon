@@ -480,6 +480,23 @@ impl DeltaLayerWriterInner {
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
+        let temp_path = self.path.clone();
+        let result = self.finish0(key_end, timeline, ctx).await;
+        if result.is_err() {
+            tracing::info!(%temp_path, "cleaning up temporary file after error during writing");
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
+            }
+        }
+        result
+    }
+
+    async fn finish0(
+        self,
+        key_end: Key,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ResidentLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -652,19 +669,11 @@ impl DeltaLayerWriter {
         timeline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<ResidentLayer> {
-        let inner = self.inner.take().unwrap();
-        let temp_path = inner.path.clone();
-        let result = inner.finish(key_end, timeline, ctx).await;
-        // The delta layer files can sometimes be really large. Clean them up.
-        if result.is_err() {
-            tracing::warn!(
-                "Cleaning up temporary delta file {temp_path} after error during writing"
-            );
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                tracing::warn!("Error cleaning up temporary delta layer file {temp_path}: {e:?}")
-            }
-        }
-        result
+        self.inner
+            .take()
+            .unwrap()
+            .finish(key_end, timeline, ctx)
+            .await
     }
 }
 

@@ -3865,6 +3865,9 @@ pub(crate) mod harness {
         pub fn create_custom(
             test_name: &'static str,
             tenant_conf: TenantConf,
+            tenant_id: TenantId,
+            shard_identity: ShardIdentity,
+            generation: Generation,
         ) -> anyhow::Result<Self> {
             setup_logging();
 
@@ -3877,8 +3880,12 @@ pub(crate) mod harness {
             // OK in a test.
             let conf: &'static PageServerConf = Box::leak(Box::new(conf));
 
-            let tenant_id = TenantId::generate();
-            let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+            let shard = shard_identity.shard_index();
+            let tenant_shard_id = TenantShardId {
+                tenant_id,
+                shard_number: shard.shard_number,
+                shard_count: shard.shard_count,
+            };
             fs::create_dir_all(conf.tenant_path(&tenant_shard_id))?;
             fs::create_dir_all(conf.timelines_path(&tenant_shard_id))?;
 
@@ -3896,8 +3903,8 @@ pub(crate) mod harness {
                 conf,
                 tenant_conf,
                 tenant_shard_id,
-                generation: Generation::new(0xdeadbeef),
-                shard: ShardIndex::unsharded(),
+                generation,
+                shard,
                 remote_storage,
                 remote_fs_dir,
                 deletion_queue,
@@ -3912,8 +3919,15 @@ pub(crate) mod harness {
                 compaction_period: Duration::ZERO,
                 ..TenantConf::default()
             };
-
-            Self::create_custom(test_name, tenant_conf)
+            let tenant_id = TenantId::generate();
+            let shard = ShardIdentity::unsharded();
+            Self::create_custom(
+                test_name,
+                tenant_conf,
+                tenant_id,
+                shard,
+                Generation::new(0xdeadbeef),
+            )
         }
 
         pub fn span(&self) -> tracing::Span {
@@ -4037,6 +4051,7 @@ mod tests {
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use utils::bin_ser::BeSer;
+    use utils::id::TenantId;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -4936,7 +4951,13 @@ mod tests {
             ..TenantConf::default()
         };
 
-        let harness = TenantHarness::create_custom("test_get_vectored_key_gap", tenant_conf)?;
+        let harness = TenantHarness::create_custom(
+            "test_get_vectored_key_gap",
+            tenant_conf,
+            TenantId::generate(),
+            ShardIdentity::unsharded(),
+            Generation::new(0xdeadbeef),
+        )?;
         let (tenant, ctx) = harness.load().await;
 
         let mut current_key = Key::from_hex("010000000033333333444444445500000000").unwrap();

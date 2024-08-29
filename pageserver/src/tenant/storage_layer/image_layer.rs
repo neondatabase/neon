@@ -918,26 +918,57 @@ impl Drop for ImageLayerWriter {
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use bytes::Bytes;
     use pageserver_api::{
         key::Key,
         shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
     };
-    use utils::{id::TimelineId, lsn::Lsn};
+    use utils::{
+        generation::Generation,
+        id::{TenantId, TimelineId},
+        lsn::Lsn,
+    };
 
-    use crate::{tenant::harness::TenantHarness, DEFAULT_PG_VERSION};
+    use crate::{
+        tenant::{config::TenantConf, harness::TenantHarness},
+        DEFAULT_PG_VERSION,
+    };
 
     use super::ImageLayerWriter;
 
     #[tokio::test]
     async fn image_layer_rewrite() {
-        let harness = TenantHarness::create("test_image_layer_rewrite").unwrap();
-        let (tenant, ctx) = harness.load().await;
-
+        let tenant_conf = TenantConf {
+            gc_period: Duration::ZERO,
+            compaction_period: Duration::ZERO,
+            ..TenantConf::default()
+        };
+        let tenant_id = TenantId::generate();
+        let mut gen = Generation::new(0xdead0001);
+        let mut get_next_gen = || {
+            let ret = gen;
+            gen = gen.next();
+            ret
+        };
         // The LSN at which we will create an image layer to filter
         let lsn = Lsn(0xdeadbeef0000);
-
         let timeline_id = TimelineId::generate();
+
+        //
+        // Create an unsharded parent with a layer.
+        //
+
+        let harness = TenantHarness::create_custom(
+            "test_image_layer_rewrite--parent",
+            tenant_conf.clone(),
+            tenant_id,
+            ShardIdentity::unsharded(),
+            get_next_gen(),
+        )
+        .unwrap();
+        let (tenant, ctx) = harness.load().await;
         let timeline = tenant
             .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
             .await
@@ -972,9 +1003,47 @@ mod test {
         };
         let original_size = resident.metadata().file_size;
 
+        //
+        // Create child shards and do the rewrite, exercising filter().
+        // TODO: abstraction in TenantHarness for splits.
+        //
+
         // Filter for various shards: this exercises cases like values at start of key range, end of key
         // range, middle of key range.
-        for shard_number in 0..4 {
+        let shard_count = ShardCount::new(4);
+        for shard_number in 0..shard_count.count() {
+            //
+            // mimic the shard split
+            //
+            let shard_identity = ShardIdentity::new(
+                ShardNumber(shard_number),
+                shard_count,
+                ShardStripeSize(0x8000),
+            )
+            .unwrap();
+            let harness = TenantHarness::create_custom(
+                Box::leak(Box::new(format!(
+                    "test_image_layer_rewrite--child{}",
+                    shard_identity.shard_slug()
+                ))),
+                tenant_conf.clone(),
+                tenant_id,
+                shard_identity,
+                // NB: in reality, the shards would each fork off their own gen number sequence from the parent.
+                // But here, all we care about is that the gen number is unique.
+                get_next_gen(),
+            )
+            .unwrap();
+            let (tenant, ctx) = harness.load().await;
+            let timeline = tenant
+                .create_test_timeline(timeline_id, lsn, DEFAULT_PG_VERSION, &ctx)
+                .await
+                .unwrap();
+
+            //
+            // use filter() and make assertions
+            //
+
             let mut filtered_writer = ImageLayerWriter::new(
                 harness.conf,
                 timeline_id,
@@ -984,15 +1053,6 @@ mod test {
                 &ctx,
             )
             .await
-            .unwrap();
-
-            // TenantHarness gave us an unsharded tenant, but we'll use a sharded ShardIdentity
-            // to exercise filter()
-            let shard_identity = ShardIdentity::new(
-                ShardNumber(shard_number),
-                ShardCount::new(4),
-                ShardStripeSize(0x8000),
-            )
             .unwrap();
 
             let wrote_keys = resident
