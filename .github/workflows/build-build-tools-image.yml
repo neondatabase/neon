@@ -78,7 +78,7 @@ jobs:
           pull: true
           file: Dockerfile.build-tools
           cache-from: type=registry,ref=neondatabase/build-tools:cache-${{ matrix.arch }}
-          cache-to: type=registry,ref=neondatabase/build-tools:cache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=neondatabase/build-tools:cache-{0},mode=max', matrix.arch) || '' }}
           tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
 
       - name: Remove custom docker config directory

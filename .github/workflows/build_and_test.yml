@@ -763,7 +763,7 @@ jobs:
           pull: true
           file: Dockerfile
           cache-from: type=registry,ref=neondatabase/neon:cache-${{ matrix.arch }}
-          cache-to: type=registry,ref=neondatabase/neon:cache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=neondatabase/neon:cache-{0},mode=max', matrix.arch) || '' }}
           tags: |
             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -855,7 +855,7 @@ jobs:
           pull: true
           file: Dockerfile.compute-node
           cache-from: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
-          cache-to: type=registry,ref=neondatabase/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=neondatabase/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
           tags: |
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -875,7 +875,7 @@ jobs:
           file: Dockerfile.compute-node
           target: neon-pg-ext-test
           cache-from: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
-          cache-to: type=registry,ref=neondatabase/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=neondatabase/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 

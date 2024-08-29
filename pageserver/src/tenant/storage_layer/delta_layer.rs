@@ -942,7 +942,7 @@ impl DeltaLayerInner {
         );
         let mut result = Vec::new();
         let mut stream =
-            Box::pin(self.stream_index_forwards(&index_reader, &[0; DELTA_KEY_SIZE], ctx));
+            Box::pin(self.stream_index_forwards(index_reader, &[0; DELTA_KEY_SIZE], ctx));
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let cursor = block_reader.block_cursor();
         let mut buf = Vec::new();
@@ -977,7 +977,7 @@ impl DeltaLayerInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>>
     where
-        Reader: BlockReader,
+        Reader: BlockReader + Clone,
     {
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
@@ -987,7 +987,7 @@ impl DeltaLayerInner {
             let mut range_end_handled = false;
 
             let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
-            let index_stream = index_reader.get_stream_from(&start_key.0, &ctx);
+            let index_stream = index_reader.clone().into_stream(&start_key.0, &ctx);
             let mut index_stream = std::pin::pin!(index_stream);
 
             while let Some(index_entry) = index_stream.next().await {
@@ -1242,7 +1242,7 @@ impl DeltaLayerInner {
             block_reader,
         );
 
-        let stream = self.stream_index_forwards(&tree_reader, &[0u8; DELTA_KEY_SIZE], ctx);
+        let stream = self.stream_index_forwards(tree_reader, &[0u8; DELTA_KEY_SIZE], ctx);
         let stream = stream.map_ok(|(key, lsn, pos)| Item::Actual(key, lsn, pos));
         // put in a sentinel value for getting the end offset for last item, and not having to
         // repeat the whole read part
@@ -1301,7 +1301,7 @@ impl DeltaLayerInner {
                         offsets.start.pos(),
                         offsets.end.pos(),
                         meta,
-                        max_read_size,
+                        Some(max_read_size),
                     ))
                 }
             } else {
@@ -1460,17 +1460,17 @@ impl DeltaLayerInner {
 
     fn stream_index_forwards<'a, R>(
         &'a self,
-        reader: &'a DiskBtreeReader<R, DELTA_KEY_SIZE>,
+        reader: DiskBtreeReader<R, DELTA_KEY_SIZE>,
         start: &'a [u8; DELTA_KEY_SIZE],
         ctx: &'a RequestContext,
     ) -> impl futures::stream::Stream<
         Item = Result<(Key, Lsn, BlobRef), crate::tenant::disk_btree::DiskBtreeError>,
     > + 'a
     where
-        R: BlockReader,
+        R: BlockReader + 'a,
     {
         use futures::stream::TryStreamExt;
-        let stream = reader.get_stream_from(start, ctx);
+        let stream = reader.into_stream(start, ctx);
         stream.map_ok(|(key, value)| {
             let key = DeltaKey::from_slice(&key);
             let (key, lsn) = (key.key(), key.lsn());
@@ -1858,7 +1858,7 @@ mod test {
             .finish(entries_meta.key_range.end, &timeline, &ctx)
             .await?;
 
-        let inner = resident.as_delta(&ctx).await?;
+        let inner = resident.get_as_delta(&ctx).await?;
 
         let file_size = inner.file.metadata().await?.len();
         tracing::info!(
@@ -2045,11 +2045,11 @@ mod test {
 
             let copied_layer = writer.finish(Key::MAX, &branch, ctx).await.unwrap();
 
-            copied_layer.as_delta(ctx).await.unwrap();
+            copied_layer.get_as_delta(ctx).await.unwrap();
 
             assert_keys_and_values_eq(
-                new_layer.as_delta(ctx).await.unwrap(),
-                copied_layer.as_delta(ctx).await.unwrap(),
+                new_layer.get_as_delta(ctx).await.unwrap(),
+                copied_layer.get_as_delta(ctx).await.unwrap(),
                 truncate_at,
                 ctx,
             )
@@ -2074,7 +2074,7 @@ mod test {
             source.index_root_blk,
             &source_reader,
         );
-        let source_stream = source.stream_index_forwards(&source_tree, &start_key, ctx);
+        let source_stream = source.stream_index_forwards(source_tree, &start_key, ctx);
         let source_stream = source_stream.filter(|res| match res {
             Ok((_, lsn, _)) => ready(lsn < &truncated_at),
             _ => ready(true),
@@ -2087,7 +2087,7 @@ mod test {
             truncated.index_root_blk,
             &truncated_reader,
         );
-        let truncated_stream = truncated.stream_index_forwards(&truncated_tree, &start_key, ctx);
+        let truncated_stream = truncated.stream_index_forwards(truncated_tree, &start_key, ctx);
         let mut truncated_stream = std::pin::pin!(truncated_stream);
 
         let mut scratch_left = Vec::new();

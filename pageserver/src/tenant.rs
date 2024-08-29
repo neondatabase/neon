@@ -2960,6 +2960,11 @@ impl Tenant {
                 let now = SystemTime::now();
                 target.leases.retain(|_, lease| !lease.is_expired(&now));
 
+                timeline
+                    .metrics
+                    .valid_lsn_lease_count_gauge
+                    .set(target.leases.len() as u64);
+
                 match gc_cutoffs.remove(&timeline.timeline_id) {
                     Some(cutoffs) => {
                         target.retain_lsns = branchpoints;
@@ -4007,6 +4012,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
+    use timeline::GcInfo;
     use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
@@ -6684,49 +6690,48 @@ mod tests {
 
         // img layer at 0x10
         let img_layer = (0..10)
-            .map(|id| (get_key(id), test_img(&format!("value {id}@0x10"))))
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
             .collect_vec();
 
         let delta1 = vec![
-            // TODO: we should test a real delta record here, which requires us to add a variant of NeonWalRecord for testing purpose.
             (
                 get_key(1),
                 Lsn(0x20),
-                Value::Image(test_img("value 1@0x20")),
+                Value::Image(Bytes::from("value 1@0x20")),
             ),
             (
                 get_key(2),
                 Lsn(0x30),
-                Value::Image(test_img("value 2@0x30")),
+                Value::Image(Bytes::from("value 2@0x30")),
             ),
             (
                 get_key(3),
                 Lsn(0x40),
-                Value::Image(test_img("value 3@0x40")),
+                Value::Image(Bytes::from("value 3@0x40")),
             ),
         ];
         let delta2 = vec![
             (
                 get_key(5),
                 Lsn(0x20),
-                Value::Image(test_img("value 5@0x20")),
+                Value::Image(Bytes::from("value 5@0x20")),
             ),
             (
                 get_key(6),
                 Lsn(0x20),
-                Value::Image(test_img("value 6@0x20")),
+                Value::Image(Bytes::from("value 6@0x20")),
             ),
         ];
         let delta3 = vec![
             (
                 get_key(8),
                 Lsn(0x40),
-                Value::Image(test_img("value 8@0x40")),
+                Value::Image(Bytes::from("value 8@0x40")),
             ),
             (
                 get_key(9),
                 Lsn(0x40),
-                Value::Image(test_img("value 9@0x40")),
+                Value::Image(Bytes::from("value 9@0x40")),
             ),
         ];
 
@@ -6748,8 +6753,41 @@ mod tests {
             guard.cutoffs.horizon = Lsn(0x30);
         }
 
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x20"),
+            Bytes::from_static(b"value 2@0x30"),
+            Bytes::from_static(b"value 3@0x40"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x20"),
+            Bytes::from_static(b"value 6@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x40"),
+            Bytes::from_static(b"value 9@0x40"),
+        ];
+
+        for (idx, expected) in expected_result.iter().enumerate() {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+
         let cancel = CancellationToken::new();
         tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+
+        for (idx, expected) in expected_result.iter().enumerate() {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
 
         // Check if the image layer at the GC horizon contains exactly what we want
         let image_at_gc_horizon = tline
@@ -6761,14 +6799,22 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(image_at_gc_horizon.len(), 10);
-        let expected_lsn = [0x10, 0x20, 0x30, 0x10, 0x10, 0x20, 0x20, 0x10, 0x10, 0x10];
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x20"),
+            Bytes::from_static(b"value 2@0x30"),
+            Bytes::from_static(b"value 3@0x10"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x20"),
+            Bytes::from_static(b"value 6@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
         for idx in 0..10 {
             assert_eq!(
                 image_at_gc_horizon[idx],
-                (
-                    get_key(idx as u32),
-                    test_img(&format!("value {idx}@{:#x}", expected_lsn[idx]))
-                )
+                (get_key(idx as u32), expected_result[idx].clone())
             );
         }
 
@@ -6801,7 +6847,7 @@ mod tests {
                 },
                 // The delta layer that is cut in the middle
                 PersistentLayerKey {
-                    key_range: Key::MIN..get_key(9),
+                    key_range: get_key(3)..get_key(4),
                     lsn_range: Lsn(0x30)..Lsn(0x41),
                     is_delta: true
                 },
@@ -6886,6 +6932,9 @@ mod tests {
             tline.get(get_key(2), Lsn(0x50), &ctx).await?,
             Bytes::from_static(b"0x10,0x20,0x30")
         );
+
+        // Need to remove the limit of "Neon WAL redo requires base image".
+
         // assert_eq!(tline.get(get_key(3), Lsn(0x50), &ctx).await?, Bytes::new());
         // assert_eq!(tline.get(get_key(4), Lsn(0x50), &ctx).await?, Bytes::new());
 
@@ -6977,6 +7026,166 @@ mod tests {
         // Assumption: original lease to is still valid for 0/50.
         let _ =
             timeline.make_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_simple_bottom_most_compaction_deltas() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas")?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        // We create one bottom-most image layer, a delta layer D1 crossing the GC horizon, D2 below the horizon, and D3 above the horizon.
+        //
+        //  | D1 |                       | D3 |
+        // -|    |-- gc horizon -----------------
+        //  |    |                | D2 |
+        // --------- img layer ------------------
+        //
+        // What we should expact from this compaction is:
+        //  | Part of D1 |               | D3 |
+        // --------- img layer with D1+D2 at GC horizon------------------
+
+        // img layer at 0x10
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+        ];
+        let delta2 = vec![
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+            (
+                get_key(6),
+                Lsn(0x20),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x20")),
+            ),
+        ];
+        let delta3 = vec![
+            (
+                get_key(8),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+            (
+                get_key(9),
+                Lsn(0x40),
+                Value::WalRecord(NeonWalRecord::wal_append("@0x40")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![delta1, delta2, delta3], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            *guard = GcInfo {
+                retain_lsns: vec![],
+                cutoffs: GcCutoffs {
+                    pitr: Lsn(0x30),
+                    horizon: Lsn(0x30),
+                },
+                leases: Default::default(),
+            };
+        }
+
+        let expected_result = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10@0x30"),
+            Bytes::from_static(b"value 3@0x10@0x40"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10@0x40"),
+            Bytes::from_static(b"value 9@0x10@0x40"),
+        ];
+
+        let expected_result_at_gc_horizon = [
+            Bytes::from_static(b"value 0@0x10"),
+            Bytes::from_static(b"value 1@0x10@0x20"),
+            Bytes::from_static(b"value 2@0x10@0x30"),
+            Bytes::from_static(b"value 3@0x10"),
+            Bytes::from_static(b"value 4@0x10"),
+            Bytes::from_static(b"value 5@0x10@0x20"),
+            Bytes::from_static(b"value 6@0x10@0x20"),
+            Bytes::from_static(b"value 7@0x10"),
+            Bytes::from_static(b"value 8@0x10"),
+            Bytes::from_static(b"value 9@0x10"),
+        ];
+
+        for idx in 0..10 {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result[idx]
+            );
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result_at_gc_horizon[idx]
+            );
+        }
+
+        let cancel = CancellationToken::new();
+        tline.compact_with_gc(&cancel, &ctx).await.unwrap();
+
+        for idx in 0..10 {
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x50), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result[idx]
+            );
+            assert_eq!(
+                tline
+                    .get(get_key(idx as u32), Lsn(0x30), &ctx)
+                    .await
+                    .unwrap(),
+                &expected_result_at_gc_horizon[idx]
+            );
+        }
 
         Ok(())
     }

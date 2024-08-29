@@ -212,6 +212,7 @@ impl<'a, const L: usize> OnDiskNode<'a, L> {
 ///
 /// Public reader object, to search the tree.
 ///
+#[derive(Clone)]
 pub struct DiskBtreeReader<R, const L: usize>
 where
     R: BlockReader,
@@ -259,27 +260,38 @@ where
         Ok(result)
     }
 
-    pub fn iter<'a>(
-        &'a self,
-        start_key: &'a [u8; L],
-        ctx: &'a RequestContext,
-    ) -> DiskBtreeIterator<'a> {
+    pub fn iter<'a>(self, start_key: &'a [u8; L], ctx: &'a RequestContext) -> DiskBtreeIterator<'a>
+    where
+        R: 'a,
+    {
         DiskBtreeIterator {
-            stream: Box::pin(self.get_stream_from(start_key, ctx)),
+            stream: Box::pin(self.into_stream(start_key, ctx)),
         }
     }
 
     /// Return a stream which yields all key, value pairs from the index
     /// starting from the first key greater or equal to `start_key`.
     ///
-    /// Note that this is a copy of [`Self::visit`].
+    /// Note 1: that this is a copy of [`Self::visit`].
     /// TODO: Once the sequential read path is removed this will become
     /// the only index traversal method.
-    pub fn get_stream_from<'a>(
-        &'a self,
+    ///
+    /// Note 2: this function used to take `&self` but it now consumes `self`. This is due to
+    /// the lifetime constraints of the reader and the stream / iterator it creates. Using `&self`
+    /// requires the reader to be present when the stream is used, and this creates a lifetime
+    /// dependency between the reader and the stream. Now if we want to create an iterator that
+    /// holds the stream, someone will need to keep a reference to the reader, which is inconvenient
+    /// to use from the image/delta layer APIs.
+    ///
+    /// Feel free to add the `&self` variant back if it's necessary.
+    pub fn into_stream<'a>(
+        self,
         start_key: &'a [u8; L],
         ctx: &'a RequestContext,
-    ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a {
+    ) -> impl Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a
+    where
+        R: 'a,
+    {
         try_stream! {
             let mut stack = Vec::new();
             stack.push((self.root_blk, None));

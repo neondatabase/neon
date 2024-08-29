@@ -545,6 +545,15 @@ static AUX_FILE_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static VALID_LSN_LEASE_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_valid_lsn_lease_count",
+        "The number of valid leases after refreshing gc info.",
+        &["tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
 pub(crate) mod initial_logical_size {
     use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
     use once_cell::sync::Lazy;
@@ -2055,6 +2064,8 @@ pub(crate) struct TimelineMetrics {
     pub directory_entries_count_gauge: Lazy<UIntGauge, Box<dyn Send + Fn() -> UIntGauge>>,
     pub evictions: IntCounter,
     pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
+    /// Number of valid LSN leases.
+    pub valid_lsn_lease_count_gauge: UIntGauge,
     shutdown: std::sync::atomic::AtomicBool,
 }
 
@@ -2153,6 +2164,10 @@ impl TimelineMetrics {
         let evictions_with_low_residence_duration = evictions_with_low_residence_duration_builder
             .build(&tenant_id, &shard_id, &timeline_id);
 
+        let valid_lsn_lease_count_gauge = VALID_LSN_LEASE_COUNT
+            .get_metric_with_label_values(&[&tenant_id, &shard_id, &timeline_id])
+            .unwrap();
+
         TimelineMetrics {
             tenant_id,
             shard_id,
@@ -2175,6 +2190,7 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
+            valid_lsn_lease_count_gauge,
             shutdown: std::sync::atomic::AtomicBool::default(),
         }
     }
@@ -2224,6 +2240,7 @@ impl TimelineMetrics {
         }
         let _ = EVICTIONS.remove_label_values(&[tenant_id, shard_id, timeline_id]);
         let _ = AUX_FILE_SIZE.remove_label_values(&[tenant_id, shard_id, timeline_id]);
+        let _ = VALID_LSN_LEASE_COUNT.remove_label_values(&[tenant_id, shard_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()

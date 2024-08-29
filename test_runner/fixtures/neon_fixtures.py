@@ -2684,7 +2684,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         self,
         tenant_id: TenantId,
         config: None | Dict[str, Any] = None,
-        config_null: bool = False,
         generation: Optional[int] = None,
         override_storage_controller_generation: bool = False,
     ):
@@ -2702,7 +2701,6 @@ class NeonPageserver(PgProtocol, LogUtils):
         return client.tenant_attach(
             tenant_id,
             config,
-            config_null,
             generation=generation,
         )
 
