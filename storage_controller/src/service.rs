@@ -3006,8 +3006,13 @@ impl Service {
                         Error::ApiError(StatusCode::BAD_REQUEST, msg) => {
                             ApiError::BadRequest(anyhow::anyhow!("{node}: {msg}"))
                         }
+                        Error::ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg) => {
+                            // avoid turning these into conflicts to remain compatible with
+                            // pageservers, 500 errors are sadly retryable with timeline ancestor
+                            // detach
+                            ApiError::InternalServerError(anyhow::anyhow!("{node}: {msg}"))
+                        }
                         // rest can be mapped as usual
-                        // FIXME: this converts some 500 to 409 which is not per openapi
                         other => passthrough_api_error(&node, other),
                     }
                 })
@@ -3041,6 +3046,8 @@ impl Service {
                 ?mismatching,
                 "shards returned different results"
             );
+
+            return Err(ApiError::InternalServerError(anyhow::anyhow!("pageservers returned mixed results for ancestor detach; manual intervention is required.")));
         }
 
         Ok(any.1)

@@ -178,10 +178,8 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 impl From<PageReconstructError> for ApiError {
     fn from(pre: PageReconstructError) -> ApiError {
         match pre {
-            PageReconstructError::Other(pre) => ApiError::InternalServerError(pre),
-            PageReconstructError::MissingKey(e) => {
-                ApiError::InternalServerError(anyhow::anyhow!("{e}"))
-            }
+            PageReconstructError::Other(other) => ApiError::InternalServerError(other),
+            PageReconstructError::MissingKey(e) => ApiError::InternalServerError(e.into()),
             PageReconstructError::Cancelled => ApiError::Cancelled,
             PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
@@ -1787,9 +1785,11 @@ async fn timeline_checkpoint_handler(
         }
 
         if wait_until_uploaded {
+            tracing::info!("Waiting for uploads to complete...");
             timeline.remote_client.wait_completion().await
             // XXX map to correct ApiError for the cases where it's due to shutdown
             .context("wait completion").map_err(ApiError::InternalServerError)?;
+            tracing::info!("Uploads completed up to {}", timeline.get_remote_consistent_lsn_projected().unwrap_or(Lsn(0)));
         }
 
         json_response(StatusCode::OK, ())
@@ -1898,8 +1898,7 @@ async fn timeline_detach_ancestor_handler(
                         attempt,
                         ctx,
                     )
-                    .await
-                    .map_err(ApiError::InternalServerError)?;
+                    .await?;
 
                 AncestorDetached {
                     reparented_timelines,
