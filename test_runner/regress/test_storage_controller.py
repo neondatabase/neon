@@ -2331,6 +2331,7 @@ def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder)
         )
     ).timeline_create(PgVersion.NOT_SET, tenant_id, create_timeline_id)
 
+
 def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_configs()
     env.start()
@@ -2361,13 +2362,16 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert inserted is not None
     assert eq_safekeeper_records(body, inserted)
 
-    # error out if pk is changed
+    # error out if pk is changed (unexpected)
     with pytest.raises(StorageControllerApiException) as exc:
         different_pk = dict(body)
         different_pk["id"] = 4
         assert different_pk["id"] != body["id"]
         target.on_safekeeper_deploy(fake_id, different_pk)
     assert exc.value.status_code == 500
+    target.allowed_errors.append(
+        ".*Error processing HTTP request: InternalServerError\\(unsupported: surrogate id update \\(old=5, new=4\\)"
+    )
 
     inserted_again = target.get_safekeeper(fake_id)
     assert inserted_again is not None

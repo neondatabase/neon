@@ -2852,7 +2852,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "POST",
             f"{self.api}/v1/safekeeper/{instance_id}",
             headers=self.headers(TokenScope.ADMIN),
-            body=json.dumps(body),
+            json=body,
         )
 
     def get_safekeeper(self, instance_id: str) -> Optional[dict[str, Any]]:
