@@ -118,6 +118,9 @@ pub const MAX_OFFLINE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
 /// being handled on the pageserver side.
 pub const MAX_WARMING_UP_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
 
+/// How often to send heartbeats to registered nodes?
+pub const HEARTBEAT_INTERVAL_DEFAULT: Duration = Duration::from_secs(5);
+
 #[derive(Clone, strum_macros::Display)]
 enum TenantOperations {
     Create,
@@ -321,6 +324,8 @@ pub struct Config {
     // by more than the configured amount, then the secondary is not
     // upgraded to primary.
     pub max_secondary_lag_bytes: Option<u64>,
+
+    pub heartbeat_interval: Duration,
 
     pub address_for_peers: Option<Uri>,
 
@@ -905,9 +910,7 @@ impl Service {
     async fn spawn_heartbeat_driver(&self) {
         self.startup_complete.clone().wait().await;
 
-        const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-
-        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let mut interval = tokio::time::interval(self.config.heartbeat_interval);
         while !self.cancel.is_cancelled() {
             tokio::select! {
               _ = interval.tick() => { }

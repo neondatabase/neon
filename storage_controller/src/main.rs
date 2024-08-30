@@ -11,8 +11,8 @@ use storage_controller::metrics::preinitialize_metrics;
 use storage_controller::persistence::Persistence;
 use storage_controller::service::chaos_injector::ChaosInjector;
 use storage_controller::service::{
-    Config, Service, MAX_OFFLINE_INTERVAL_DEFAULT, MAX_WARMING_UP_INTERVAL_DEFAULT,
-    RECONCILER_CONCURRENCY_DEFAULT,
+    Config, Service, HEARTBEAT_INTERVAL_DEFAULT, MAX_OFFLINE_INTERVAL_DEFAULT,
+    MAX_WARMING_UP_INTERVAL_DEFAULT, RECONCILER_CONCURRENCY_DEFAULT,
 };
 use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
@@ -104,6 +104,10 @@ struct Cli {
     // a pageserver
     #[arg(long)]
     max_secondary_lag_bytes: Option<u64>,
+
+    // Period with which to send heartbeats to registered nodes
+    #[arg(long)]
+    heartbeat_interval: Option<humantime::Duration>,
 }
 
 enum StrictMode {
@@ -285,6 +289,10 @@ async fn async_main() -> anyhow::Result<()> {
         split_threshold: args.split_threshold,
         neon_local_repo_dir: args.neon_local_repo_dir,
         max_secondary_lag_bytes: args.max_secondary_lag_bytes,
+        heartbeat_interval: args
+            .heartbeat_interval
+            .map(humantime::Duration::into)
+            .unwrap_or(HEARTBEAT_INTERVAL_DEFAULT),
         address_for_peers: args.address_for_peers,
         start_as_candidate: args.start_as_candidate,
         http_service_port: args.listen.port() as i32,
