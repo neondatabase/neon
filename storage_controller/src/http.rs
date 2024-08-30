@@ -1179,7 +1179,7 @@ pub fn make_router(
             )
         })
         .post(
-            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/archival_config",
             |r| {
                 tenant_service_handler(
                     r,
