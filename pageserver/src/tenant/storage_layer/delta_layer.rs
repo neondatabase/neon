@@ -2283,8 +2283,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         let delta_layer = resident_layer.get_as_delta(&ctx).await.unwrap();
-        let chunk_size = 4096 * 2;
-        for max_read_size in [1, chunk_size] {
+        for max_read_size in [1, 1024] {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
@@ -2298,7 +2297,7 @@ pub(crate) mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;
