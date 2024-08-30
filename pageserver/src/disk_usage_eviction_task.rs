@@ -1238,7 +1238,6 @@ mod filesystem_level_usage {
 
     #[test]
     fn max_usage_pct_pressure() {
-        use super::EvictionOrder;
         use super::Usage as _;
         use std::time::Duration;
         use utils::serde_percent::Percent;
@@ -1250,7 +1249,7 @@ mod filesystem_level_usage {
                 period: Duration::MAX,
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
-                eviction_order: EvictionOrder::default(),
+                eviction_order: pageserver_api::config::EvictionOrder::default(),
             },
             total_bytes: 100_000,
             avail_bytes: 0,
