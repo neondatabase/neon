@@ -648,6 +648,19 @@ index 126f7047fed..a6c685787f3 100644
  grant select on ec0 to regress_user_ectest;
  grant select on ec1 to regress_user_ectest;
  -- without any RLS, we'll treat {a.ff, b.ff, 43} as an EquivalenceClass
+diff --git a/src/test/regress/expected/event_trigger.out b/src/test/regress/expected/event_trigger.out
+index 5a10958df52..5c6c8b1a532 100644
+--- a/src/test/regress/expected/event_trigger.out
++++ b/src/test/regress/expected/event_trigger.out
+@@ -85,7 +85,7 @@ create event trigger regress_event_trigger2 on ddl_command_start
+ -- OK
+ comment on event trigger regress_event_trigger is 'test comment';
+ -- drop as non-superuser should fail
+-create role regress_evt_user;
++create role regress_evt_user PASSWORD 'eib5tai9Oachootiex';
+ set role regress_evt_user;
+ create event trigger regress_event_trigger_noperms on ddl_command_start
+    execute procedure test_event_trigger();
 diff --git a/src/test/regress/expected/foreign_data.out b/src/test/regress/expected/foreign_data.out
 index 6ed50fdcfa0..047112b168d 100644
 --- a/src/test/regress/expected/foreign_data.out
@@ -1105,6 +1118,153 @@ index 84752317356..3d678d232b8 100644
  -- all entries should have been removed
  SELECT rolname, rolpassword
      FROM pg_authid
+diff --git a/src/test/regress/expected/privileges.out b/src/test/regress/expected/privileges.out
+index fbb0489a4ff..ff1c555eac8 100644
+--- a/src/test/regress/expected/privileges.out
++++ b/src/test/regress/expected/privileges.out
+@@ -20,19 +20,19 @@ SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid >= 1000 AND oid < 3
+ 
+ RESET client_min_messages;
+ -- test proper begins here
+-CREATE USER regress_priv_user1;
+-CREATE USER regress_priv_user2;
+-CREATE USER regress_priv_user3;
+-CREATE USER regress_priv_user4;
+-CREATE USER regress_priv_user5;
+-CREATE USER regress_priv_user5;	-- duplicate
++CREATE USER regress_priv_user1 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user2 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user3 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user4 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user5 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user5 PASSWORD 'eib5tai9Oachootiex';	-- duplicate
+ ERROR:  role "regress_priv_user5" already exists
+-CREATE USER regress_priv_user6;
+-CREATE USER regress_priv_user7;
+-CREATE USER regress_priv_user8;
+-CREATE USER regress_priv_user9;
+-CREATE USER regress_priv_user10;
+-CREATE ROLE regress_priv_role;
++CREATE USER regress_priv_user6 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user7 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user8 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user9 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user10 PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_priv_role PASSWORD 'eib5tai9Oachootiex';
+ -- circular ADMIN OPTION grants should be disallowed
+ GRANT regress_priv_user1 TO regress_priv_user2 WITH ADMIN OPTION;
+ GRANT regress_priv_user1 TO regress_priv_user3 WITH ADMIN OPTION GRANTED BY regress_priv_user2;
+@@ -108,11 +108,11 @@ ERROR:  role "regress_priv_user5" cannot be dropped because some objects depend
+ DETAIL:  privileges for membership of role regress_priv_user6 in role regress_priv_user1
+ DROP ROLE regress_priv_user1, regress_priv_user5; -- ok, despite order
+ -- recreate the roles we just dropped
+-CREATE USER regress_priv_user1;
+-CREATE USER regress_priv_user2;
+-CREATE USER regress_priv_user3;
+-CREATE USER regress_priv_user4;
+-CREATE USER regress_priv_user5;
++CREATE USER regress_priv_user1 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user2 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user3 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user4 PASSWORD 'eib5tai9Oachootiex';
++CREATE USER regress_priv_user5 PASSWORD 'eib5tai9Oachootiex';
+ GRANT pg_read_all_data TO regress_priv_user6;
+ GRANT pg_write_all_data TO regress_priv_user7;
+ GRANT pg_read_all_settings TO regress_priv_user8 WITH ADMIN OPTION;
+@@ -145,8 +145,8 @@ REVOKE pg_read_all_settings FROM regress_priv_user8;
+ DROP USER regress_priv_user10;
+ DROP USER regress_priv_user9;
+ DROP USER regress_priv_user8;
+-CREATE GROUP regress_priv_group1;
+-CREATE GROUP regress_priv_group2 WITH ADMIN regress_priv_user1 USER regress_priv_user2;
++CREATE GROUP regress_priv_group1 PASSWORD 'eib5tai9Oachootiex';
++CREATE GROUP regress_priv_group2 WITH ADMIN regress_priv_user1 PASSWORD 'eib5tai9Oachootiex' USER regress_priv_user2;
+ ALTER GROUP regress_priv_group1 ADD USER regress_priv_user4;
+ GRANT regress_priv_group2 TO regress_priv_user2 GRANTED BY regress_priv_user1;
+ SET SESSION AUTHORIZATION regress_priv_user1;
+@@ -172,12 +172,16 @@ GRANT regress_priv_role TO regress_priv_user1 WITH ADMIN OPTION GRANTED BY regre
+ ERROR:  permission denied to grant privileges as role "regress_priv_role"
+ DETAIL:  The grantor must have the ADMIN option on role "regress_priv_role".
+ GRANT regress_priv_role TO regress_priv_user1 WITH ADMIN OPTION GRANTED BY CURRENT_ROLE;
++ERROR:  permission denied to grant privileges as role "neondb_owner"
++DETAIL:  The grantor must have the ADMIN option on role "regress_priv_role".
+ REVOKE ADMIN OPTION FOR regress_priv_role FROM regress_priv_user1 GRANTED BY foo; -- error
+ ERROR:  role "foo" does not exist
+ REVOKE ADMIN OPTION FOR regress_priv_role FROM regress_priv_user1 GRANTED BY regress_priv_user2; -- warning, noop
+ WARNING:  role "regress_priv_user1" has not been granted membership in role "regress_priv_role" by role "regress_priv_user2"
+ REVOKE ADMIN OPTION FOR regress_priv_role FROM regress_priv_user1 GRANTED BY CURRENT_USER;
++WARNING:  role "regress_priv_user1" has not been granted membership in role "regress_priv_role" by role "neondb_owner"
+ REVOKE regress_priv_role FROM regress_priv_user1 GRANTED BY CURRENT_ROLE;
++WARNING:  role "regress_priv_user1" has not been granted membership in role "regress_priv_role" by role "neondb_owner"
+ DROP ROLE regress_priv_role;
+ SET SESSION AUTHORIZATION regress_priv_user1;
+ SELECT session_user, current_user;
+@@ -1709,7 +1713,7 @@ SELECT has_table_privilege('regress_priv_user1', 'atest4', 'SELECT WITH GRANT OP
+ 
+ -- security-restricted operations
+ \c -
+-CREATE ROLE regress_sro_user;
++CREATE ROLE regress_sro_user PASSWORD 'eib5tai9Oachootiex';
+ -- Check that index expressions and predicates are run as the table's owner
+ -- A dummy index function checking current_user
+ CREATE FUNCTION sro_ifun(int) RETURNS int AS $$
+@@ -2601,8 +2605,8 @@ drop cascades to function testns.priv_testagg(integer)
+ drop cascades to function testns.priv_testproc(integer)
+ -- Change owner of the schema & and rename of new schema owner
+ \c -
+-CREATE ROLE regress_schemauser1 superuser login;
+-CREATE ROLE regress_schemauser2 superuser login;
++CREATE ROLE regress_schemauser1 superuser login PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_schemauser2 superuser login PASSWORD 'eib5tai9Oachootiex';
+ SET SESSION ROLE regress_schemauser1;
+ CREATE SCHEMA testns;
+ SELECT nspname, rolname FROM pg_namespace, pg_roles WHERE pg_namespace.nspname = 'testns' AND pg_namespace.nspowner = pg_roles.oid;
+@@ -2725,7 +2729,7 @@ DROP USER regress_priv_user7;
+ DROP USER regress_priv_user8; -- does not exist
+ ERROR:  role "regress_priv_user8" does not exist
+ -- permissions with LOCK TABLE
+-CREATE USER regress_locktable_user;
++CREATE USER regress_locktable_user PASSWORD 'eib5tai9Oachootiex';
+ CREATE TABLE lock_table (a int);
+ -- LOCK TABLE and SELECT permission
+ GRANT SELECT ON lock_table TO regress_locktable_user;
+@@ -2807,7 +2811,7 @@ DROP USER regress_locktable_user;
+ -- pg_backend_memory_contexts.
+ -- switch to superuser
+ \c -
+-CREATE ROLE regress_readallstats;
++CREATE ROLE regress_readallstats PASSWORD 'eib5tai9Oachootiex';
+ SELECT has_table_privilege('regress_readallstats','pg_backend_memory_contexts','SELECT'); -- no
+  has_table_privilege 
+ ---------------------
+@@ -2851,10 +2855,10 @@ RESET ROLE;
+ -- clean up
+ DROP ROLE regress_readallstats;
+ -- test role grantor machinery
+-CREATE ROLE regress_group;
+-CREATE ROLE regress_group_direct_manager;
+-CREATE ROLE regress_group_indirect_manager;
+-CREATE ROLE regress_group_member;
++CREATE ROLE regress_group PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_group_direct_manager PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_group_indirect_manager PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_group_member PASSWORD 'eib5tai9Oachootiex';
+ GRANT regress_group TO regress_group_direct_manager WITH INHERIT FALSE, ADMIN TRUE;
+ GRANT regress_group_direct_manager TO regress_group_indirect_manager;
+ SET SESSION AUTHORIZATION regress_group_direct_manager;
+@@ -2883,9 +2887,9 @@ DROP ROLE regress_group_direct_manager;
+ DROP ROLE regress_group_indirect_manager;
+ DROP ROLE regress_group_member;
+ -- test SET and INHERIT options with object ownership changes
+-CREATE ROLE regress_roleoption_protagonist;
+-CREATE ROLE regress_roleoption_donor;
+-CREATE ROLE regress_roleoption_recipient;
++CREATE ROLE regress_roleoption_protagonist PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_roleoption_donor PASSWORD 'eib5tai9Oachootiex';
++CREATE ROLE regress_roleoption_recipient PASSWORD 'eib5tai9Oachootiex';
+ CREATE SCHEMA regress_roleoption;
+ GRANT CREATE, USAGE ON SCHEMA regress_roleoption TO PUBLIC;
+ GRANT regress_roleoption_donor TO regress_roleoption_protagonist WITH INHERIT TRUE, SET FALSE;
 diff --git a/src/test/regress/expected/psql.out b/src/test/regress/expected/psql.out
 index 7cd0c27cca8..b9f9fb35b1e 100644
 --- a/src/test/regress/expected/psql.out
@@ -1256,6 +1416,388 @@ index a9420850b87..9221bd3ace0 100644
  -- without schemaname
  SELECT regoper('||/');
   regoper 
+diff --git a/src/test/regress/expected/roleattributes.out b/src/test/regress/expected/roleattributes.out
+index 5e6969b173e..4ff5a2ad53c 100644
+--- a/src/test/regress/expected/roleattributes.out
++++ b/src/test/regress/expected/roleattributes.out
+@@ -1,233 +1,233 @@
+ -- default for superuser is false
+-CREATE ROLE regress_test_def_superuser;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_superuser';
+-          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_def_superuser | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_def_superuser PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_superuser';
++          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_def_superuser | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+-CREATE ROLE regress_test_superuser WITH SUPERUSER;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
+-        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_superuser | t        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_superuser WITH SUPERUSER PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
++        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_superuser | t        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_superuser WITH NOSUPERUSER;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
+-        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_superuser | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
++        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_superuser | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_superuser WITH SUPERUSER;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
+-        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_superuser | t        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
++        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_superuser | t        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ -- default for inherit is true
+-CREATE ROLE regress_test_def_inherit;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_inherit';
+-         rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+---------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_def_inherit | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_def_inherit PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_inherit';
++         rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++--------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_def_inherit | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+-CREATE ROLE regress_test_inherit WITH NOINHERIT;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
+-       rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_inherit | f        | f          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_inherit WITH NOINHERIT PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
++       rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_inherit | f        | f          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_inherit WITH INHERIT;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
+-       rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_inherit | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
++       rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_inherit | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_inherit WITH NOINHERIT;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
+-       rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_inherit | f        | f          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
++       rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_inherit | f        | f          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ -- default for create role is false
+-CREATE ROLE regress_test_def_createrole;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_createrole';
+-           rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+------------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_def_createrole | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_def_createrole PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_createrole';
++           rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_def_createrole | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+-CREATE ROLE regress_test_createrole WITH CREATEROLE;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
+-         rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+--------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_createrole | f        | t          | t             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_createrole WITH CREATEROLE PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
++         rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_createrole | f        | t          | t             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_createrole WITH NOCREATEROLE;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
+-         rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+--------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_createrole | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
++         rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_createrole | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_createrole WITH CREATEROLE;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
+-         rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+--------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_createrole | f        | t          | t             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
++         rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_createrole | f        | t          | t             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ -- default for create database is false
+-CREATE ROLE regress_test_def_createdb;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_createdb';
+-          rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_def_createdb | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_def_createdb PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_createdb';
++          rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++---------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_def_createdb | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+-CREATE ROLE regress_test_createdb WITH CREATEDB;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
+-        rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_createdb | f        | t          | f             | t           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_createdb WITH CREATEDB PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
++        rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++-----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_createdb | f        | t          | f             | t           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_createdb WITH NOCREATEDB;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
+-        rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_createdb | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
++        rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++-----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_createdb | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_createdb WITH CREATEDB;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
+-        rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_createdb | f        | t          | f             | t           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
++        rolname        | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++-----------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_createdb | f        | t          | f             | t           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ -- default for can login is false for role
+-CREATE ROLE regress_test_def_role_canlogin;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_role_canlogin';
+-            rolname             | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+---------------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_def_role_canlogin | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_def_role_canlogin PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_role_canlogin';
++            rolname             | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++--------------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_def_role_canlogin | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+-CREATE ROLE regress_test_role_canlogin WITH LOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
+-          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_role_canlogin | f        | t          | f             | f           | t           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_role_canlogin WITH LOGIN PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
++          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_role_canlogin | f        | t          | f             | f           | t           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_role_canlogin WITH NOLOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
+-          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_role_canlogin | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
++          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_role_canlogin | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_role_canlogin WITH LOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
+-          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_role_canlogin | f        | t          | f             | f           | t           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
++          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_role_canlogin | f        | t          | f             | f           | t           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ -- default for can login is true for user
+-CREATE USER regress_test_def_user_canlogin;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_user_canlogin';
+-            rolname             | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+---------------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_def_user_canlogin | f        | t          | f             | f           | t           | f              | f            |           -1 |             | 
++CREATE USER regress_test_def_user_canlogin PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_user_canlogin';
++            rolname             | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++--------------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_def_user_canlogin | f        | t          | f             | f           | t           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+-CREATE USER regress_test_user_canlogin WITH NOLOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
+-          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_user_canlogin | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE USER regress_test_user_canlogin WITH NOLOGIN PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
++          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_user_canlogin | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER USER regress_test_user_canlogin WITH LOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
+-          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_user_canlogin | f        | t          | f             | f           | t           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
++          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_user_canlogin | f        | t          | f             | f           | t           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER USER regress_test_user_canlogin WITH NOLOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
+-          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_user_canlogin | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
++          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_user_canlogin | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ -- default for replication is false
+-CREATE ROLE regress_test_def_replication;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_replication';
+-           rolname            | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-------------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_def_replication | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_def_replication PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_replication';
++           rolname            | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++------------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_def_replication | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+-CREATE ROLE regress_test_replication WITH REPLICATION;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
+-         rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+---------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_replication | f        | t          | f             | f           | f           | t              | f            |           -1 |             | 
++CREATE ROLE regress_test_replication WITH REPLICATION PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
++         rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++--------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_replication | f        | t          | f             | f           | f           | t              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_replication WITH NOREPLICATION;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
+-         rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+---------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_replication | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
++         rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++--------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_replication | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_replication WITH REPLICATION;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
+-         rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+---------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_replication | f        | t          | f             | f           | f           | t              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
++         rolname          | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++--------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_replication | f        | t          | f             | f           | f           | t              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ -- default for bypassrls is false
+-CREATE ROLE regress_test_def_bypassrls;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_bypassrls';
+-          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_def_bypassrls | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++CREATE ROLE regress_test_def_bypassrls PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_bypassrls';
++          rolname           | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++----------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_def_bypassrls | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+-CREATE ROLE regress_test_bypassrls WITH BYPASSRLS;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
+-        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_bypassrls | f        | t          | f             | f           | f           | f              | t            |           -1 |             | 
++CREATE ROLE regress_test_bypassrls WITH BYPASSRLS PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
++        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_bypassrls | f        | t          | f             | f           | f           | f              | t            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_bypassrls WITH NOBYPASSRLS;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
+-        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_bypassrls | f        | t          | f             | f           | f           | f              | f            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
++        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_bypassrls | f        | t          | f             | f           | f           | f              | f            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ ALTER ROLE regress_test_bypassrls WITH BYPASSRLS;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
+-        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit | rolpassword | rolvaliduntil 
+-------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+-------------+---------------
+- regress_test_bypassrls | f        | t          | f             | f           | f           | f              | t            |           -1 |             | 
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
++        rolname         | rolsuper | rolinherit | rolcreaterole | rolcreatedb | rolcanlogin | rolreplication | rolbypassrls | rolconnlimit |                  regexp_replace                   | rolvaliduntil 
++------------------------+----------+------------+---------------+-------------+-------------+----------------+--------------+--------------+---------------------------------------------------+---------------
++ regress_test_bypassrls | f        | t          | f             | f           | f           | f              | t            |           -1 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey> | 
+ (1 row)
+ 
+ -- clean up roles
 diff --git a/src/test/regress/expected/rowsecurity.out b/src/test/regress/expected/rowsecurity.out
 index 97ca9bf72c5..268b4ace190 100644
 --- a/src/test/regress/expected/rowsecurity.out
@@ -1374,6 +1916,28 @@ index 1aeed8452bd..34dcf88b4ab 100644
  CREATE FUNCTION f_leak (text)
         RETURNS bool LANGUAGE 'plpgsql' COST 0.0000001
         AS 'BEGIN RAISE NOTICE ''f_leak => %'', $1; RETURN true; END';
+diff --git a/src/test/regress/expected/sequence.out b/src/test/regress/expected/sequence.out
+index f02f0205427..14aa640e7ad 100644
+--- a/src/test/regress/expected/sequence.out
++++ b/src/test/regress/expected/sequence.out
+@@ -22,7 +22,7 @@ CREATE SEQUENCE sequence_testx OWNED BY pg_class_oid_index.oid;  -- not a table
+ ERROR:  sequence cannot be owned by relation "pg_class_oid_index"
+ DETAIL:  This operation is not supported for indexes.
+ CREATE SEQUENCE sequence_testx OWNED BY pg_class.relname;  -- not same schema
+-ERROR:  sequence must be in same schema as table it is linked to
++ERROR:  sequence must have same owner as table it is linked to
+ CREATE TABLE sequence_test_table (a int);
+ CREATE SEQUENCE sequence_testx OWNED BY sequence_test_table.b;  -- wrong column
+ ERROR:  column "b" of relation "sequence_test_table" does not exist
+@@ -639,7 +639,7 @@ SELECT setval('sequence_test2', 1);  -- error
+ ERROR:  cannot execute setval() in a read-only transaction
+ ROLLBACK;
+ -- privileges tests
+-CREATE USER regress_seq_user;
++CREATE USER regress_seq_user PASSWORD 'eib5tai9Oachootiex';
+ -- nextval
+ BEGIN;
+ SET LOCAL SESSION AUTHORIZATION regress_seq_user;
 diff --git a/src/test/regress/expected/stats.out b/src/test/regress/expected/stats.out
 index 94187e59cfb..97189594579 100644
 --- a/src/test/regress/expected/stats.out
@@ -1608,6 +2172,38 @@ index 4def90b8057..211d61f8e7b 100644
  SET ROLE regress_vacuum;
  -- Simple table
  VACUUM vacowned;
+diff --git a/src/test/regress/expected/xml.out b/src/test/regress/expected/xml.out
+index 398345ca67f..15d99185794 100644
+--- a/src/test/regress/expected/xml.out
++++ b/src/test/regress/expected/xml.out
+@@ -254,17 +254,11 @@ ERROR:  invalid XML content
+ DETAIL:  line 1: xmlParseEntityRef: no name
+ <invalidentity>&</invalidentity>
+                 ^
+-line 1: chunk is not well balanced
+-<invalidentity>&</invalidentity>
+-                                ^
+ SELECT xmlparse(content '<undefinedentity>&idontexist;</undefinedentity>');
+ ERROR:  invalid XML content
+ DETAIL:  line 1: Entity 'idontexist' not defined
+ <undefinedentity>&idontexist;</undefinedentity>
+                              ^
+-line 1: chunk is not well balanced
+-<undefinedentity>&idontexist;</undefinedentity>
+-                                               ^
+ SELECT xmlparse(content '<invalidns xmlns=''&lt;''/>');
+          xmlparse          
+ ---------------------------
+@@ -283,9 +277,6 @@ DETAIL:  line 1: Entity 'idontexist' not defined
+ <twoerrors>&idontexist;</unbalanced>
+                        ^
+ line 1: Opening and ending tag mismatch: twoerrors line 1 and unbalanced
+-<twoerrors>&idontexist;</unbalanced>
+-                                    ^
+-line 1: chunk is not well balanced
+ <twoerrors>&idontexist;</unbalanced>
+                                     ^
+ SELECT xmlparse(content '<nosuchprefix:tag/>');
 diff --git a/src/test/regress/parallel_schedule b/src/test/regress/parallel_schedule
 index cf46fa33593..709602df283 100644
 --- a/src/test/regress/parallel_schedule
@@ -2877,56 +3473,141 @@ index de2aa881a8d..6f2dd0f6ace 100644
  -- without schemaname
  
 diff --git a/src/test/regress/sql/roleattributes.sql b/src/test/regress/sql/roleattributes.sql
-index c961b2d7303..35b69029b7d 100644
+index c961b2d7303..181a09ebfd3 100644
 --- a/src/test/regress/sql/roleattributes.sql
 +++ b/src/test/regress/sql/roleattributes.sql
-@@ -1,8 +1,8 @@
+@@ -1,83 +1,83 @@
  -- default for superuser is false
 -CREATE ROLE regress_test_def_superuser;
 +CREATE ROLE regress_test_def_superuser PASSWORD 'eib5tai9Oachootiex';
  
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_superuser';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_superuser';
 -CREATE ROLE regress_test_superuser WITH SUPERUSER;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_superuser';
 +CREATE ROLE regress_test_superuser WITH SUPERUSER PASSWORD 'eib5tai9Oachootiex';
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
  ALTER ROLE regress_test_superuser WITH NOSUPERUSER;
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
-@@ -50,9 +50,9 @@ ALTER ROLE regress_test_role_canlogin WITH LOGIN;
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
+ ALTER ROLE regress_test_superuser WITH SUPERUSER;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_superuser';
+ 
+ -- default for inherit is true
+-CREATE ROLE regress_test_def_inherit;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_inherit';
+-CREATE ROLE regress_test_inherit WITH NOINHERIT;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
++CREATE ROLE regress_test_def_inherit PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_inherit';
++CREATE ROLE regress_test_inherit WITH NOINHERIT PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
+ ALTER ROLE regress_test_inherit WITH INHERIT;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
+ ALTER ROLE regress_test_inherit WITH NOINHERIT;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_inherit';
+ 
+ -- default for create role is false
+-CREATE ROLE regress_test_def_createrole;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_createrole';
+-CREATE ROLE regress_test_createrole WITH CREATEROLE;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
++CREATE ROLE regress_test_def_createrole PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_createrole';
++CREATE ROLE regress_test_createrole WITH CREATEROLE PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
+ ALTER ROLE regress_test_createrole WITH NOCREATEROLE;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
+ ALTER ROLE regress_test_createrole WITH CREATEROLE;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createrole';
+ 
+ -- default for create database is false
+-CREATE ROLE regress_test_def_createdb;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_createdb';
+-CREATE ROLE regress_test_createdb WITH CREATEDB;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
++CREATE ROLE regress_test_def_createdb PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_createdb';
++CREATE ROLE regress_test_createdb WITH CREATEDB PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
+ ALTER ROLE regress_test_createdb WITH NOCREATEDB;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
+ ALTER ROLE regress_test_createdb WITH CREATEDB;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_createdb';
+ 
+ -- default for can login is false for role
+-CREATE ROLE regress_test_def_role_canlogin;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_role_canlogin';
+-CREATE ROLE regress_test_role_canlogin WITH LOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
++CREATE ROLE regress_test_def_role_canlogin PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_role_canlogin';
++CREATE ROLE regress_test_role_canlogin WITH LOGIN PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
+ ALTER ROLE regress_test_role_canlogin WITH NOLOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
+ ALTER ROLE regress_test_role_canlogin WITH LOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_role_canlogin';
  
  -- default for can login is true for user
 -CREATE USER regress_test_def_user_canlogin;
-+CREATE USER regress_test_def_user_canlogin PASSWORD 'eib5tai9Oachootiex';
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_user_canlogin';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_user_canlogin';
 -CREATE USER regress_test_user_canlogin WITH NOLOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
++CREATE USER regress_test_def_user_canlogin PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_user_canlogin';
 +CREATE USER regress_test_user_canlogin WITH NOLOGIN PASSWORD 'eib5tai9Oachootiex';
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
  ALTER USER regress_test_user_canlogin WITH LOGIN;
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
-@@ -60,9 +60,9 @@ ALTER USER regress_test_user_canlogin WITH NOLOGIN;
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
+ ALTER USER regress_test_user_canlogin WITH NOLOGIN;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_user_canlogin';
  
  -- default for replication is false
 -CREATE ROLE regress_test_def_replication;
-+CREATE ROLE regress_test_def_replication PASSWORD 'eib5tai9Oachootiex';
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_replication';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_replication';
 -CREATE ROLE regress_test_replication WITH REPLICATION;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
++CREATE ROLE regress_test_def_replication PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_replication';
 +CREATE ROLE regress_test_replication WITH REPLICATION PASSWORD 'eib5tai9Oachootiex';
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
  ALTER ROLE regress_test_replication WITH NOREPLICATION;
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
-@@ -70,9 +70,9 @@ ALTER ROLE regress_test_replication WITH REPLICATION;
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
+ ALTER ROLE regress_test_replication WITH REPLICATION;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_replication';
  
  -- default for bypassrls is false
 -CREATE ROLE regress_test_def_bypassrls;
-+CREATE ROLE regress_test_def_bypassrls PASSWORD 'eib5tai9Oachootiex';
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_bypassrls';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_bypassrls';
 -CREATE ROLE regress_test_bypassrls WITH BYPASSRLS;
-+CREATE ROLE regress_test_bypassrls PASSWORD 'eib5tai9Oachootiex' WITH BYPASSRLS;
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
++CREATE ROLE regress_test_def_bypassrls PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_def_bypassrls';
++CREATE ROLE regress_test_bypassrls WITH BYPASSRLS PASSWORD 'eib5tai9Oachootiex';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
  ALTER ROLE regress_test_bypassrls WITH NOBYPASSRLS;
- SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
+ ALTER ROLE regress_test_bypassrls WITH BYPASSRLS;
+-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolpassword, rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
++SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, regexp_replace(rolpassword, '(SCRAM-SHA-256)\$(\d+):([a-zA-Z0-9+/=]+)\$([a-zA-Z0-9+=/]+):([a-zA-Z0-9+/=]+)', '\1$\2:<salt>$<storedkey>:<serverkey>'), rolvaliduntil FROM pg_authid WHERE rolname = 'regress_test_bypassrls';
+ 
+ -- clean up roles
+ DROP ROLE regress_test_def_superuser;
 diff --git a/src/test/regress/sql/rowsecurity.sql b/src/test/regress/sql/rowsecurity.sql
 index dec7340538c..2a579008096 100644
 --- a/src/test/regress/sql/rowsecurity.sql
