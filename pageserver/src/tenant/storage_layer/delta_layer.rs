@@ -2283,7 +2283,8 @@ pub(crate) mod test {
             .await
             .unwrap();
         let delta_layer = resident_layer.get_as_delta(&ctx).await.unwrap();
-        for max_read_size in [1, 2048] {
+        let chunk_size = 4096 * 2;
+        for max_read_size in [1, chunk_size] {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined

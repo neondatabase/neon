@@ -734,27 +734,32 @@ mod tests {
     fn planner_chunked_coalesce_all_test() {
         use crate::virtual_file;
 
-        const CHUNK_SIZE: u64 = 512;
-        virtual_file::set_io_buffer_alignment(CHUNK_SIZE as usize).unwrap();
-        let max_read_size = CHUNK_SIZE as usize * 8;
+        let chunk_size = virtual_file::get_io_buffer_alignment() as u64;
+
+        // The test explicitly does not check chunk size < 512
+        if chunk_size < 512 {
+            return;
+        }
+
+        let max_read_size = chunk_size as usize * 8;
         let key = Key::MIN;
         let lsn = Lsn(0);
 
         let blob_descriptions = [
-            (key, lsn, CHUNK_SIZE / 8, BlobFlag::None), // Read 1 BEGIN
-            (key, lsn, CHUNK_SIZE / 4, BlobFlag::Ignore), // Gap
-            (key, lsn, CHUNK_SIZE / 2, BlobFlag::None),
-            (key, lsn, CHUNK_SIZE - 2, BlobFlag::Ignore), // Gap
-            (key, lsn, CHUNK_SIZE, BlobFlag::None),
-            (key, lsn, CHUNK_SIZE * 2 - 1, BlobFlag::None),
-            (key, lsn, CHUNK_SIZE * 2 + 1, BlobFlag::Ignore), // Gap
-            (key, lsn, CHUNK_SIZE * 3 + 1, BlobFlag::None),
-            (key, lsn, CHUNK_SIZE * 5 + 1, BlobFlag::None),
-            (key, lsn, CHUNK_SIZE * 6 + 1, BlobFlag::Ignore), // skipped chunk size, but not a chunk: should coalesce.
-            (key, lsn, CHUNK_SIZE * 7 + 1, BlobFlag::None),
-            (key, lsn, CHUNK_SIZE * 8, BlobFlag::None), // Read 2 BEGIN (b/c max_read_size)
-            (key, lsn, CHUNK_SIZE * 9, BlobFlag::Ignore), // ==== skipped a chunk
-            (key, lsn, CHUNK_SIZE * 10, BlobFlag::None), // Read 3 BEGIN (cannot coalesce)
+            (key, lsn, chunk_size / 8, BlobFlag::None), // Read 1 BEGIN
+            (key, lsn, chunk_size / 4, BlobFlag::Ignore), // Gap
+            (key, lsn, chunk_size / 2, BlobFlag::None),
+            (key, lsn, chunk_size - 2, BlobFlag::Ignore), // Gap
+            (key, lsn, chunk_size, BlobFlag::None),
+            (key, lsn, chunk_size * 2 - 1, BlobFlag::None),
+            (key, lsn, chunk_size * 2 + 1, BlobFlag::Ignore), // Gap
+            (key, lsn, chunk_size * 3 + 1, BlobFlag::None),
+            (key, lsn, chunk_size * 5 + 1, BlobFlag::None),
+            (key, lsn, chunk_size * 6 + 1, BlobFlag::Ignore), // skipped chunk size, but not a chunk: should coalesce.
+            (key, lsn, chunk_size * 7 + 1, BlobFlag::None),
+            (key, lsn, chunk_size * 8, BlobFlag::None), // Read 2 BEGIN (b/c max_read_size)
+            (key, lsn, chunk_size * 9, BlobFlag::Ignore), // ==== skipped a chunk
+            (key, lsn, chunk_size * 10, BlobFlag::None), // Read 3 BEGIN (cannot coalesce)
         ];
 
         let ranges = [
@@ -833,18 +838,19 @@ mod tests {
 
     #[test]
     fn planner_replacement_test() {
-        let max_read_size = 128 * 1024;
+        let chunk_size = virtual_file::get_io_buffer_alignment() as u64;
+        let max_read_size = 128 * chunk_size as usize;
         let first_key = Key::MIN;
         let second_key = first_key.next();
         let lsn = Lsn(0);
 
         let blob_descriptions = vec![
-            (first_key, lsn, 0, BlobFlag::None),    // First in read 1
-            (first_key, lsn, 1024, BlobFlag::None), // Last in read 1
-            (second_key, lsn, 2 * 1024, BlobFlag::ReplaceAll),
-            (second_key, lsn, 3 * 1024, BlobFlag::None),
-            (second_key, lsn, 4 * 1024, BlobFlag::ReplaceAll), // First in read 2
-            (second_key, lsn, 5 * 1024, BlobFlag::None),       // Last in read 2
+            (first_key, lsn, 0, BlobFlag::None),          // First in read 1
+            (first_key, lsn, chunk_size, BlobFlag::None), // Last in read 1
+            (second_key, lsn, 2 * chunk_size, BlobFlag::ReplaceAll),
+            (second_key, lsn, 3 * chunk_size, BlobFlag::None),
+            (second_key, lsn, 4 * chunk_size, BlobFlag::ReplaceAll), // First in read 2
+            (second_key, lsn, 5 * chunk_size, BlobFlag::None),       // Last in read 2
         ];
 
         let ranges = [&blob_descriptions[0..2], &blob_descriptions[4..]];
@@ -854,7 +860,7 @@ mod tests {
             planner.handle(key, lsn, offset, flag);
         }
 
-        planner.handle_range_end(6 * 1024);
+        planner.handle_range_end(6 * chunk_size);
 
         let reads = planner.finish();
         assert_eq!(reads.len(), 2);

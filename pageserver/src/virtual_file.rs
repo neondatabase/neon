@@ -1196,15 +1196,11 @@ pub(crate) fn get_io_buffer_alignment_raw() -> usize {
 
     if cfg!(test) {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
-        if align == DEFAULT_IO_BUFFER_ALIGNMENT {
-            if let Some(test_align) = utils::env::var(env_var_name) {
-                if is_zero_or_power_of_two(test_align) {
-                    test_align
-                } else {
-                    panic!("IO buffer alignment ({test_align}) is not a power of two");
-                }
+        if let Some(test_align) = utils::env::var(env_var_name) {
+            if is_zero_or_power_of_two(test_align) {
+                test_align
             } else {
-                crate::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT
+                panic!("IO buffer alignment ({test_align}) is not a power of two");
             }
         } else {
             align
