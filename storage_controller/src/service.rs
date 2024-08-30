@@ -2955,8 +2955,8 @@ impl Service {
                 req: TimelineArchivalConfigRequest,
             ) -> Result<(), ApiError> {
                 tracing::info!(
-                "Setting archival config of timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
-            );
+                    "Setting archival config of timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
+                );
 
                 let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
                 client

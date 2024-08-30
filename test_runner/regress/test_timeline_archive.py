@@ -68,7 +68,6 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
     assert exc.value.status_code == 412 if unsharded else 409
 
-    # Test timeline_detail
     if shard_count != 0:
         leaf_detail = ps_http.timeline_detail(
             tenant_id=env.initial_tenant,
