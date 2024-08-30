@@ -216,9 +216,13 @@ jobs:
           #nextest does not yet support running doctests
           ${cov_prefix} cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
 
+          # run all tests
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+
+          # run pageserver tests with different settings
           for io_engine in std-fs tokio-epoll-uring ; do
             for io_buffer_alignment in 0 1 512 ; do
-              NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT=$io_buffer_alignment ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+              NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT=$io_buffer_alignment ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -p pageserver
             done
           done
 
