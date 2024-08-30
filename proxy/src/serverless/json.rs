@@ -55,7 +55,7 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(",");
 
-            Some(format!("{{{}}}", vals))
+            Some(format!("{{{vals}}}"))
         }
     }
 }

@@ -3002,7 +3002,10 @@ impl Timeline {
         // - For L1 & image layers, download most recent LSNs first: the older the LSN, the sooner
         //   the layer is likely to be covered by an image layer during compaction.
         layers.sort_by_key(|(desc, _meta, _atime)| {
-            std::cmp::Reverse((!LayerMap::is_l0(&desc.key_range), desc.lsn_range.end))
+            std::cmp::Reverse((
+                !LayerMap::is_l0(&desc.key_range, desc.is_delta),
+                desc.lsn_range.end,
+            ))
         });
 
         let layers = layers
@@ -4585,7 +4588,7 @@ impl Timeline {
                 // for compact_level0_phase1 creating an L0, which does not happen in practice
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
-            } else if LayerMap::is_l0(&l.layer_desc().key_range) {
+            } else if LayerMap::is_l0(&l.layer_desc().key_range, l.layer_desc().is_delta) {
                 return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
                 insert_layers.push(l.clone());
@@ -5441,12 +5444,17 @@ impl Timeline {
                 !(a.end <= b.start || b.end <= a.start)
             }
 
-            let guard = self.layers.read().await;
-            for layer in guard.layer_map()?.iter_historic_layers() {
-                if layer.is_delta()
-                    && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
-                    && layer.lsn_range != deltas.lsn_range
-                {
+            if deltas.key_range.start.next() != deltas.key_range.end {
+                let guard = self.layers.read().await;
+                let mut invalid_layers =
+                    guard.layer_map()?.iter_historic_layers().filter(|layer| {
+                        layer.is_delta()
+                        && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
+                        && layer.lsn_range != deltas.lsn_range
+                        // skip single-key layer files
+                        && layer.key_range.start.next() != layer.key_range.end
+                    });
+                if let Some(layer) = invalid_layers.next() {
                     // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
                     panic!(
                         "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",
@@ -5877,7 +5885,7 @@ mod tests {
             };
 
             // Apart from L0s, newest Layers should come first
-            if !LayerMap::is_l0(layer.name.key_range()) {
+            if !LayerMap::is_l0(layer.name.key_range(), layer.name.is_delta()) {
                 assert!(layer_lsn <= last_lsn);
                 last_lsn = layer_lsn;
             }

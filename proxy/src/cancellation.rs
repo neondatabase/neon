@@ -220,7 +220,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_session_noop_regression() {
-        let handler = CancellationHandler::<()>::new(Default::default(), CancellationSource::Local);
+        let handler =
+            CancellationHandler::<()>::new(CancelMap::default(), CancellationSource::Local);
         handler
             .cancel_session(
                 CancelKeyData {

@@ -254,7 +254,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
     let metrics = &Metrics::get().proxy;
     let proto = ctx.protocol();
-    let _request_gauge = metrics.connection_requests.guard(proto);
+    let request_gauge = metrics.connection_requests.guard(proto);
 
     let tls = config.tls_config.as_ref();
 
@@ -283,7 +283,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let result = config
         .auth_backend
         .as_ref()
-        .map(|_| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
+        .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
         .transpose();
 
     let user_info = match result {
@@ -340,7 +340,7 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         client: stream,
         aux: node.aux.clone(),
         compute: node,
-        req: _request_gauge,
+        req: request_gauge,
         conn: conn_gauge,
         cancel: session,
     }))

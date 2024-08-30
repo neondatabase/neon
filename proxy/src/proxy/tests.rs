@@ -433,7 +433,7 @@ impl ReportableError for TestConnectError {
 
 impl std::fmt::Display for TestConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -475,7 +475,7 @@ impl ConnectMechanism for TestConnectMechanism {
                 retryable: false,
                 kind: ErrorKind::Compute,
             }),
-            x => panic!("expecting action {:?}, connect is called instead", x),
+            x => panic!("expecting action {x:?}, connect is called instead"),
         }
     }
 
@@ -515,7 +515,7 @@ impl TestBackend for TestConnectMechanism {
                 assert!(err.could_retry());
                 Err(console::errors::WakeComputeError::ApiError(err))
             }
-            x => panic!("expecting action {:?}, wake_compute is called instead", x),
+            x => panic!("expecting action {x:?}, wake_compute is called instead"),
         }
     }
 

@@ -318,6 +318,24 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
     }
 }
 
+impl From<crate::tenant::TimelineArchivalError> for ApiError {
+    fn from(value: crate::tenant::TimelineArchivalError) -> Self {
+        use crate::tenant::TimelineArchivalError::*;
+        match value {
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
+            Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            HasUnarchivedChildren(children) => ApiError::PreconditionFailed(
+                format!(
+                    "Cannot archive timeline which has non-archived child timelines: {children:?}"
+                )
+                .into_boxed_str(),
+            ),
+            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
+            Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
 impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::mgr::DeleteTimelineError) -> Self {
         use crate::tenant::mgr::DeleteTimelineError::*;
@@ -405,6 +423,8 @@ async fn build_timeline_info_common(
     let current_logical_size = timeline.get_current_logical_size(logical_size_task_priority, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
+    // Report is_archived = false if the timeline is still loading
+    let is_archived = timeline.is_archived().unwrap_or(false);
     let remote_consistent_lsn_projected = timeline
         .get_remote_consistent_lsn_projected()
         .unwrap_or(Lsn(0));
@@ -445,6 +465,7 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
+        is_archived,
 
         walreceiver_status,
 
@@ -686,9 +707,7 @@ async fn timeline_archival_config_handler(
 
         tenant
             .apply_timeline_archival_config(timeline_id, request_data.state)
-            .await
-            .context("applying archival config")
-            .map_err(ApiError::InternalServerError)?;
+            .await?;
         Ok::<_, ApiError>(())
     }
     .instrument(info_span!("timeline_archival_config",
@@ -1706,11 +1725,6 @@ async fn timeline_compact_handler(
         flags |= CompactFlags::ForceImageLayerCreation;
     }
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
-        if !cfg!(feature = "testing") {
-            return Err(ApiError::InternalServerError(anyhow!(
-                "enhanced_gc_bottom_most_compaction is only available in testing mode"
-            )));
-        }
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
     let wait_until_uploaded =
@@ -2942,7 +2956,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
-            |r| testing_api_handler("run timeline compaction", r, timeline_compact_handler),
+            |r| api_handler(r, timeline_compact_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",

@@ -115,9 +115,7 @@ where
     let mut buf = [0];
     stream.read_exact(&mut buf).await.unwrap();
 
-    if buf[0] != b'S' {
-        panic!("ssl not supported by server");
-    }
+    assert!(buf[0] == b'S', "ssl not supported by server");
 
     tls.connect(stream).await.unwrap()
 }

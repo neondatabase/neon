@@ -82,13 +82,7 @@ mod tests {
         let stored_key = "D5h6KTMBlUvDJk2Y8ELfC1Sjtc6k9YHjRyuRZyBNJns=";
         let server_key = "Pi3QHbcluX//NDfVkKlFl88GGzlJ5LkyPwcdlN/QBvI=";
 
-        let secret = format!(
-            "SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}",
-            iterations = iterations,
-            salt = salt,
-            stored_key = stored_key,
-            server_key = server_key,
-        );
+        let secret = format!("SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}");
 
         let parsed = ServerSecret::parse(&secret).unwrap();
         assert_eq!(parsed.iterations, iterations);

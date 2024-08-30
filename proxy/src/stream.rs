@@ -67,7 +67,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
             FeMessage::PasswordMessage(msg) => Ok(msg),
             bad => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unexpected message type: {:?}", bad),
+                format!("unexpected message type: {bad:?}"),
             )),
         }
     }
