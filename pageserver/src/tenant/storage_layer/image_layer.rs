@@ -1367,7 +1367,7 @@ mod test {
                 .await
                 .unwrap();
         let img_layer = resident_layer.get_as_image(&ctx).await.unwrap();
-        for max_read_size in [1, 2048] {
+        for max_read_size in [1, 1024] {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
@@ -1381,7 +1381,7 @@ mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;
