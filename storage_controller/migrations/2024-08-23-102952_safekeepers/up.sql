@@ -13,5 +13,5 @@ CREATE TABLE safekeepers (
 	active BOOLEAN NOT NULL DEFAULT false,
 	-- projects_count INTEGER NOT NULL DEFAULT 0,
 	http_port INTEGER NOT NULL,
-	availability_zone_id TEXT NOT NULL,
+	availability_zone_id TEXT NOT NULL
 );
