@@ -152,6 +152,9 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
         # This write includes remote upload, will generate an index in this generation
         workload.write_rows(1)
 
+    # We will use a min_age_secs=1 threshold for deletion, let it pass
+    time.sleep(2)
+
     # With a high min_age, the scrubber should decline to delete anything
     gc_summary = env.storage_scrubber.pageserver_physical_gc(min_age_secs=3600)
     assert gc_summary["remote_storage_errors"] == 0
