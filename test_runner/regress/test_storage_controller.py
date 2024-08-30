@@ -31,7 +31,7 @@ from fixtures.pageserver.utils import (
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
-from fixtures.pg_version import PgVersion
+from fixtures.pg_version import PgVersion, run_only_on_default_postgres
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
@@ -2332,6 +2332,7 @@ def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder)
     ).timeline_create(PgVersion.NOT_SET, tenant_id, create_timeline_id)
 
 
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
 def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_configs()
     env.start()
