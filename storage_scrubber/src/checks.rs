@@ -107,7 +107,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 ) -> TimelineAnalysis {
     let mut result = TimelineAnalysis::new();
 
-    info!("Checking timeline {id}");
+    info!("Checking timeline");
 
     if let Some(s3_active_branch) = s3_active_branch {
         info!(
