@@ -3917,6 +3917,10 @@ impl Timeline {
                         .get_vectored(key_request_accum.consume_keyspace(), lsn, ctx)
                         .await?;
 
+                    if self.cancel.is_cancelled() {
+                        return Err(CreateImageLayersError::Cancelled);
+                    }
+
                     for (img_key, img) in results {
                         let img = match img {
                             Ok(img) => img,
@@ -4023,6 +4027,9 @@ impl Timeline {
                 image: None,
                 next_start_key: img_range.end,
             });
+        }
+        if self.cancel.is_cancelled() {
+            return Err(CreateImageLayersError::Cancelled);
         }
         let mut wrote_any_image = false;
         for (k, v) in data {
@@ -4138,6 +4145,10 @@ impl Timeline {
         let check_for_image_layers = self.should_check_if_image_layers_required(lsn);
 
         for partition in partitioning.parts.iter() {
+            if self.cancel.is_cancelled() {
+                return Err(CreateImageLayersError::Cancelled);
+            }
+
             let img_range = start..partition.ranges.last().unwrap().end;
             let compact_metadata = partition.overlaps(&Key::metadata_key_range());
             if compact_metadata {
@@ -4317,18 +4328,34 @@ impl Timeline {
         detach_ancestor::prepare(self, tenant, options, ctx).await
     }
 
-    /// Completes the ancestor detach. This method is to be called while holding the
-    /// TenantManager's tenant slot, so during this method we cannot be deleted nor can any
-    /// timeline be deleted. After this method returns successfully, tenant must be reloaded.
+    /// Second step of detach from ancestor; detaches the `self` from it's current ancestor and
+    /// reparents any reparentable children of previous ancestor.
     ///
-    /// Pageserver receiving a SIGKILL during this operation is not supported (yet).
-    pub(crate) async fn complete_detaching_timeline_ancestor(
+    /// This method is to be called while holding the TenantManager's tenant slot, so during this
+    /// method we cannot be deleted nor can any timeline be deleted. After this method returns
+    /// successfully, tenant must be reloaded.
+    ///
+    /// Final step will be to [`Self::complete_detaching_timeline_ancestor`] after optionally
+    /// resetting the tenant.
+    pub(crate) async fn detach_from_ancestor_and_reparent(
         self: &Arc<Timeline>,
         tenant: &crate::tenant::Tenant,
         prepared: detach_ancestor::PreparedTimelineDetach,
         ctx: &RequestContext,
-    ) -> Result<HashSet<TimelineId>, anyhow::Error> {
-        detach_ancestor::complete(self, tenant, prepared, ctx).await
+    ) -> Result<detach_ancestor::DetachingAndReparenting, anyhow::Error> {
+        detach_ancestor::detach_and_reparent(self, tenant, prepared, ctx).await
+    }
+
+    /// Final step which unblocks the GC.
+    ///
+    /// The tenant must've been reset if ancestry was modified previously (in tenant manager).
+    pub(crate) async fn complete_detaching_timeline_ancestor(
+        self: &Arc<Timeline>,
+        tenant: &crate::tenant::Tenant,
+        attempt: detach_ancestor::Attempt,
+        ctx: &RequestContext,
+    ) -> Result<(), detach_ancestor::Error> {
+        detach_ancestor::complete(self, tenant, attempt, ctx).await
     }
 
     /// Switch aux file policy and schedule upload to the index part.

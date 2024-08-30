@@ -1887,7 +1887,7 @@ async fn timeline_detach_ancestor_handler(
         // drop(tenant);
 
         let resp = match progress {
-            detach_ancestor::Progress::Prepared(_guard, prepared) => {
+            detach_ancestor::Progress::Prepared(attempt, prepared) => {
                 // it would be great to tag the guard on to the tenant activation future
                 let reparented_timelines = state
                     .tenant_manager
@@ -1895,10 +1895,10 @@ async fn timeline_detach_ancestor_handler(
                         tenant_shard_id,
                         timeline_id,
                         prepared,
+                        attempt,
                         ctx,
                     )
                     .await
-                    .context("timeline detach ancestor completion")
                     .map_err(ApiError::InternalServerError)?;
 
                 AncestorDetached {

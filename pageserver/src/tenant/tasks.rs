@@ -365,14 +365,13 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             if first {
                 first = false;
 
-                if delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
+                let delays = async {
+                    delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel).await?;
+                    random_init_delay(period, &cancel).await?;
+                    Ok::<_, Cancelled>(())
+                };
 
-                if random_init_delay(period, &cancel).await.is_err() {
+                if delays.await.is_err() {
                     break;
                 }
             }
@@ -424,7 +423,6 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 
             warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
 
-            // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
                 .await
                 .is_ok()

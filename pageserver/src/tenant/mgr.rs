@@ -54,7 +54,7 @@ use utils::id::{TenantId, TimelineId};
 
 use super::remote_timeline_client::remote_tenant_path;
 use super::secondary::SecondaryTenant;
-use super::timeline::detach_ancestor::PreparedTimelineDetach;
+use super::timeline::detach_ancestor::{self, PreparedTimelineDetach};
 use super::{GlobalShutDown, TenantSharedResources};
 
 /// For a tenant that appears in TenantsMap, it may either be
@@ -1927,8 +1927,10 @@ impl TenantManager {
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         prepared: PreparedTimelineDetach,
+        mut attempt: detach_ancestor::Attempt,
         ctx: &RequestContext,
     ) -> Result<HashSet<TimelineId>, anyhow::Error> {
+        use crate::tenant::timeline::detach_ancestor::Error;
         // FIXME: this is unnecessary, slotguard already has these semantics
         struct RevertOnDropSlot(Option<SlotGuard>);
 
@@ -1977,43 +1979,98 @@ impl TenantManager {
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
-        let reparented = timeline
-            .complete_detaching_timeline_ancestor(&tenant, prepared, ctx)
+        let resp = timeline
+            .detach_from_ancestor_and_reparent(&tenant, prepared, ctx)
             .await?;
 
         let mut slot_guard = slot_guard.into_inner();
 
-        let (_guard, progress) = utils::completion::channel();
-        match tenant.shutdown(progress, ShutdownMode::Hard).await {
-            Ok(()) => {
-                slot_guard.drop_old_value()?;
+        let tenant = if resp.reset_tenant_required() {
+            attempt.before_reset_tenant();
+
+            let (_guard, progress) = utils::completion::channel();
+            match tenant.shutdown(progress, ShutdownMode::Hard).await {
+                Ok(()) => {
+                    slot_guard.drop_old_value()?;
+                }
+                Err(_barrier) => {
+                    slot_guard.revert();
+                    // this really should not happen, at all, unless shutdown was already going?
+                    anyhow::bail!("Cannot restart Tenant, already shutting down");
+                }
             }
-            Err(_barrier) => {
-                slot_guard.revert();
-                // this really should not happen, at all, unless shutdown was already going?
-                anyhow::bail!("Cannot restart Tenant, already shutting down");
+
+            let tenant_path = self.conf.tenant_path(&tenant_shard_id);
+            let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
+
+            let shard_identity = config.shard;
+            let tenant = tenant_spawn(
+                self.conf,
+                tenant_shard_id,
+                &tenant_path,
+                self.resources.clone(),
+                AttachedTenantConf::try_from(config)?,
+                shard_identity,
+                None,
+                SpawnMode::Eager,
+                ctx,
+            )?;
+
+            {
+                let mut g = tenant.ongoing_timeline_detach.lock().unwrap();
+                assert!(
+                    g.is_none(),
+                    "there cannot be any new timeline detach ancestor on newly created tenant"
+                );
+                *g = Some((attempt.timeline_id, attempt.new_barrier()));
             }
+
+            slot_guard.upsert(TenantSlot::Attached(tenant.clone()))?;
+            tenant
+        } else {
+            tracing::info!("skipping tenant_reset as no changes made required it");
+            tenant
+        };
+
+        if let Some(reparented) = resp.completed() {
+            // finally ask the restarted tenant to complete the detach
+            //
+            // rationale for 9999s: we don't really have a timetable here; if retried, the caller
+            // will get an 503.
+            tenant
+                .wait_to_become_active(std::time::Duration::from_secs(9999))
+                .await
+                .map_err(|e| {
+                    use pageserver_api::models::TenantState;
+                    use GetActiveTenantError::{Cancelled, WillNotBecomeActive};
+                    match e {
+                        Cancelled | WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                            Error::ShuttingDown
+                        }
+                        other => Error::Unexpected(other.into()),
+                    }
+                })?;
+
+            utils::pausable_failpoint!(
+                "timeline-detach-ancestor::after_activating_before_finding-pausable"
+            );
+
+            let timeline = tenant
+                .get_timeline(attempt.timeline_id, true)
+                .map_err(|_| Error::DetachedNotFoundAfterRestart)?;
+
+            timeline
+                .complete_detaching_timeline_ancestor(&tenant, attempt, ctx)
+                .await
+                .map(|()| reparented)
+                .map_err(|e| e.into())
+        } else {
+            // at least the latest versions have now been downloaded and refreshed; be ready to
+            // retry another time.
+            Err(anyhow::anyhow!(
+                "failed to reparent all candidate timelines, please retry"
+            ))
         }
-
-        let tenant_path = self.conf.tenant_path(&tenant_shard_id);
-        let config = Tenant::load_tenant_config(self.conf, &tenant_shard_id)?;
-
-        let shard_identity = config.shard;
-        let tenant = tenant_spawn(
-            self.conf,
-            tenant_shard_id,
-            &tenant_path,
-            self.resources.clone(),
-            AttachedTenantConf::try_from(config)?,
-            shard_identity,
-            None,
-            SpawnMode::Eager,
-            ctx,
-        )?;
-
-        slot_guard.upsert(TenantSlot::Attached(tenant))?;
-
-        Ok(reparented)
     }
 
     /// A page service client sends a TenantId, and to look up the correct Tenant we must

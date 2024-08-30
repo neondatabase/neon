@@ -62,7 +62,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server
-    cur.execute("SELECT clear_buffer_cache()")
+    endpoint.clear_shared_buffers(cursor=cur)
 
     # Check that an index-only scan doesn't see the deleted row. If the
     # clearing of the VM bit was not replayed correctly, this would incorrectly

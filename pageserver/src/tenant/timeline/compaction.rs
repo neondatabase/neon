@@ -751,6 +751,9 @@ impl Timeline {
         let all_keys = {
             let mut all_keys = Vec::new();
             for l in deltas_to_compact.iter() {
+                if self.cancel.is_cancelled() {
+                    return Err(CompactionError::ShuttingDown);
+                }
                 all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
             }
             // The current stdlib sorting implementation is designed in a way where it is
@@ -833,6 +836,11 @@ impl Timeline {
         };
         stats.read_lock_held_compute_holes_micros = stats.read_lock_held_key_sort_micros.till_now();
         drop_rlock(guard);
+
+        if self.cancel.is_cancelled() {
+            return Err(CompactionError::ShuttingDown);
+        }
+
         stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
 
         // This iterator walks through all key-value pairs from all the layers

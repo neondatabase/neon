@@ -2159,7 +2159,7 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
         # generate some data to commit WAL on safekeepers
         endpoint.safe_psql("insert into t select generate_series(1,100), 'action'")
         # clear the buffers
-        endpoint.safe_psql("select clear_buffer_cache()")
+        endpoint.clear_shared_buffers()
         # read data to fetch pages from pageserver
         endpoint.safe_psql("select sum(i) from t")
 
