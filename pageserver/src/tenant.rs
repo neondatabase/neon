@@ -3732,6 +3732,19 @@ impl Tenant {
     pub(crate) fn get_tenant_conf(&self) -> TenantConfOpt {
         self.tenant_conf.load().tenant_conf.clone()
     }
+
+    /// How much local storage would this tenant like to have?  It can cope with
+    /// less than this (via eviction and on-demand downloads), but this function enables
+    /// the Tenant to advertise how much storage it would prefer to have to provide fast I/O
+    /// by keeping important things on local disk.
+    pub(crate) fn local_storage_wanted(&self) -> u64 {
+        let mut wanted = 0;
+        let timelines = self.timelines.lock().unwrap();
+        for timeline in timelines.values() {
+            wanted += timeline.metrics.visible_physical_size_gauge.get();
+        }
+        wanted
+    }
 }
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository

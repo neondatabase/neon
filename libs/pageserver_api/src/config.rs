@@ -74,10 +74,7 @@ pub struct ConfigToml {
     pub heatmap_upload_concurrency: usize,
     pub secondary_download_concurrency: usize,
     pub ingest_batch_size: u64,
-    pub get_vectored_impl: GetVectoredImpl,
-    pub get_impl: GetImpl,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
-    pub validate_vectored_get: bool,
     pub image_compression: ImageCompressionAlgorithm,
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
@@ -352,16 +349,10 @@ pub mod defaults {
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 
-    pub const DEFAULT_GET_VECTORED_IMPL: &str = "vectored";
-
-    pub const DEFAULT_GET_IMPL: &str = "vectored";
-
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Disabled;
-
-    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 }
@@ -432,12 +423,9 @@ impl Default for ConfigToml {
 
             virtual_file_io_engine: None,
 
-            get_vectored_impl: (DEFAULT_GET_VECTORED_IMPL.parse().unwrap()),
-            get_impl: (DEFAULT_GET_IMPL.parse().unwrap()),
             max_vectored_read_bytes: (MaxVectoredReadBytes(
                 NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
             )),
-            validate_vectored_get: (DEFAULT_VALIDATE_VECTORED_GET),
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,

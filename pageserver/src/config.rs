@@ -159,13 +159,7 @@ pub struct PageServerConf {
 
     pub virtual_file_io_engine: virtual_file::IoEngineKind,
 
-    pub get_vectored_impl: pageserver_api::config::GetVectoredImpl,
-
-    pub get_impl: pageserver_api::config::GetImpl,
-
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
-
-    pub validate_vectored_get: bool,
 
     pub image_compression: ImageCompressionAlgorithm,
 
@@ -337,10 +331,7 @@ impl PageServerConf {
             heatmap_upload_concurrency,
             secondary_download_concurrency,
             ingest_batch_size,
-            get_vectored_impl,
-            get_impl,
             max_vectored_read_bytes,
-            validate_vectored_get,
             image_compression,
             ephemeral_bytes_per_memory_kb,
             compact_level0_phase1_value_access,
@@ -384,10 +375,7 @@ impl PageServerConf {
             heatmap_upload_concurrency,
             secondary_download_concurrency,
             ingest_batch_size,
-            get_vectored_impl,
-            get_impl,
             max_vectored_read_bytes,
-            validate_vectored_get,
             image_compression,
             ephemeral_bytes_per_memory_kb,
             compact_level0_phase1_value_access,
@@ -638,13 +626,10 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
                 virtual_file_io_engine: None,
-                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
@@ -714,13 +699,10 @@ background_task_maximum_delay = '334 s'
                 secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
                 ingest_batch_size: 100,
                 virtual_file_io_engine: None,
-                get_vectored_impl: defaults::DEFAULT_GET_VECTORED_IMPL.parse().unwrap(),
-                get_impl: defaults::DEFAULT_GET_IMPL.parse().unwrap(),
                 max_vectored_read_bytes: MaxVectoredReadBytes(
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                validate_vectored_get: defaults::DEFAULT_VALIDATE_VECTORED_GET,
                 image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),

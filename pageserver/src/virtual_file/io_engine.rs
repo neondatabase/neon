@@ -84,9 +84,12 @@ pub(crate) fn get() -> IoEngine {
                         }
                     },
                     Err(std::env::VarError::NotPresent) => {
-                        if cfg!(target_os = "linux") {
+                        #[cfg(target_os = "linux")]
+                        {
                             IoEngineKind::TokioEpollUring
-                        } else {
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
                             IoEngineKind::StdFs
                         }
                     }

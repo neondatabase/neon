@@ -2357,8 +2357,9 @@ async fn get_utilization(
     // regenerate at most 1Hz to allow polling at any rate.
     if !still_valid {
         let path = state.conf.tenants_path();
-        let doc = crate::utilization::regenerate(path.as_std_path())
-            .map_err(ApiError::InternalServerError)?;
+        let doc =
+            crate::utilization::regenerate(state.conf, path.as_std_path(), &state.tenant_manager)
+                .map_err(ApiError::InternalServerError)?;
 
         let mut buf = Vec::new();
         serde_json::to_writer(&mut buf, &doc)

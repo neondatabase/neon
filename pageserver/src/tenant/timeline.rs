@@ -961,11 +961,10 @@ impl Timeline {
         }
 
         trace!(
-            "get vectored request for {:?}@{} from task kind {:?} will use {} implementation",
+            "get vectored request for {:?}@{} from task kind {:?}",
             keyspace,
             lsn,
             ctx.task_kind(),
-            self.conf.get_vectored_impl
         );
 
         let start = crate::metrics::GET_VECTORED_LATENCY
@@ -5519,7 +5518,7 @@ impl<'a> TimelineWriter<'a> {
 
         let action = self.get_open_layer_action(lsn, buf_size);
         let layer = self.handle_open_layer_action(lsn, action, ctx).await?;
-        let res = layer.put_value(key, lsn, &buf, ctx).await;
+        let res = layer.put_value(key.to_compact(), lsn, &buf, ctx).await;
 
         if res.is_ok() {
             // Update the current size only when the entire write was ok.
