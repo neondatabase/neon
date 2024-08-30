@@ -14,7 +14,6 @@ testing = ["fail/failpoints"]
 arc-swap.workspace = true
 sentry.workspace = true
 async-compression.workspace = true
-async-trait.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 bytes.workspace = true

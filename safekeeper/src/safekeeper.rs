@@ -971,7 +971,6 @@ mod tests {
         persisted_state: TimelinePersistentState,
     }
 
-    #[async_trait::async_trait]
     impl control_file::Storage for InMemoryState {
         async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
             self.persisted_state = s.clone();
@@ -1003,7 +1002,6 @@ mod tests {
         lsn: Lsn,
     }
 
-    #[async_trait::async_trait]
     impl wal_storage::Storage for DummyWalStore {
         fn flush_lsn(&self) -> Lsn {
             self.lsn

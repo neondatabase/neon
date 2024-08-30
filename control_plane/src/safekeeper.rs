@@ -5,6 +5,7 @@
 //! ```text
 //!   .neon/safekeepers/<safekeeper id>
 //! ```
+use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -34,12 +35,10 @@ pub enum SafekeeperHttpError {
 
 type Result<T> = result::Result<T, SafekeeperHttpError>;
 
-#[async_trait::async_trait]
-pub trait ResponseErrorMessageExt: Sized {
-    async fn error_from_body(self) -> Result<Self>;
+pub(crate) trait ResponseErrorMessageExt: Sized {
+    fn error_from_body(self) -> impl Future<Output = Result<Self>> + Send;
 }
 
-#[async_trait::async_trait]
 impl ResponseErrorMessageExt for reqwest::Response {
     async fn error_from_body(self) -> Result<Self> {
         let status = self.status();

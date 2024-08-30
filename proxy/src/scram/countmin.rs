@@ -83,10 +83,10 @@ mod tests {
         let mut ids = vec![];
 
         for _ in 0..n {
-            // number of insert operations
-            let n = rng.gen_range(1..100);
             // number to insert at once
-            let m = rng.gen_range(1..4096);
+            let n = rng.gen_range(1..4096);
+            // number of insert operations
+            let m = rng.gen_range(1..100);
 
             let id = uuid::Builder::from_random_bytes(rng.gen()).into_uuid();
             ids.push((id, n, m));
@@ -102,17 +102,11 @@ mod tests {
         let mut ids2 = ids.clone();
         while !ids2.is_empty() {
             ids2.shuffle(&mut rng);
-
-            let mut i = 0;
-            while i < ids2.len() {
-                sketch.inc_and_return(&ids2[i].0, ids2[i].1);
-                ids2[i].2 -= 1;
-                if ids2[i].2 == 0 {
-                    ids2.remove(i);
-                } else {
-                    i += 1;
-                }
-            }
+            ids2.retain_mut(|id| {
+                sketch.inc_and_return(&id.0, id.1);
+                id.2 -= 1;
+                id.2 > 0
+            });
         }
 
         let mut within_p = 0;
@@ -144,8 +138,8 @@ mod tests {
         // probably numbers are too small to truly represent the probabilities.
         assert_eq!(eval_precision(100, 4096.0, 0.90), 100);
         assert_eq!(eval_precision(1000, 4096.0, 0.90), 1000);
-        assert_eq!(eval_precision(100, 4096.0, 0.1), 98);
-        assert_eq!(eval_precision(1000, 4096.0, 0.1), 991);
+        assert_eq!(eval_precision(100, 4096.0, 0.1), 96);
+        assert_eq!(eval_precision(1000, 4096.0, 0.1), 988);
     }
 
     // returns memory usage in bytes, and the time complexity per insert.
