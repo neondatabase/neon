@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use utils::backoff::exponential_backoff;
 use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
@@ -568,6 +569,7 @@ impl Reconciler {
 
         // During a live migration it is unhelpful to proceed if we couldn't notify compute: if we detach
         // the origin without notifying compute, we will render the tenant unavailable.
+        let mut notify_attempts = 0;
         while let Err(e) = self.compute_notify().await {
             match e {
                 NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
@@ -578,6 +580,17 @@ impl Reconciler {
                     );
                 }
             }
+
+            exponential_backoff(
+                notify_attempts,
+                // Generous waits: control plane operations which might be blocking us usually complete on the order
+                // of hundreds to thousands of milliseconds, so no point busy polling.
+                1.0,
+                10.0,
+                &self.cancel,
+            )
+            .await;
+            notify_attempts += 1;
         }
 
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
