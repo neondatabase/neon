@@ -168,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
                         DatabaseOrList::List(timeline_lsns)
                     }
                     (None, Some(dump_db_connstr)) => {
-                        let dump_db_table = dump_db_table.ok_or(anyhow::anyhow!("dump_db_table not specified"))?;
+                        let dump_db_table = dump_db_table.ok_or_else(|| anyhow::anyhow!("dump_db_table not specified"))?;
                         let tenant_ids = tenant_ids.iter().map(|tshid| tshid.tenant_id).collect();
                         DatabaseOrList::Database { tenant_ids, connstr: dump_db_connstr, table: dump_db_table }
                     }
