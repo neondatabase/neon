@@ -4,9 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::checks::{list_timeline_blobs, BlobDataParseResult};
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{
-    init_remote, BucketConfig, ControllerClientConfig, NodeKind, RootTarget, TenantShardTimelineId,
-};
+use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
 use aws_sdk_s3::Client;
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -473,8 +471,8 @@ async fn gc_ancestor(
 /// This type of GC is not necessary for correctness: rather it serves to reduce wasted storage capacity, and
 /// make sure that object listings don't get slowed down by large numbers of garbage objects.
 pub async fn pageserver_physical_gc(
-    bucket_config: BucketConfig,
-    controller_client_conf: Option<ControllerClientConfig>,
+    bucket_config: &BucketConfig,
+    controller_client: Option<&control_api::Client>,
     tenant_shard_ids: Vec<TenantShardId>,
     min_age: Duration,
     mode: GcMode,
@@ -558,7 +556,7 @@ pub async fn pageserver_physical_gc(
         let timelines = timelines.map_ok(|ttid| {
             gc_timeline(
                 &s3_client,
-                &bucket_config,
+                bucket_config,
                 &min_age,
                 &target,
                 mode,
@@ -574,7 +572,7 @@ pub async fn pageserver_physical_gc(
     }
 
     // Execute cross-shard GC, using the accumulator's full view of all the shards built in the per-shard GC
-    let Some(controller_client) = controller_client_conf.map(|c| c.build_client()) else {
+    let Some(client) = controller_client else {
         tracing::info!("Skipping ancestor layer GC, because no `--controller-api` was specified");
         return Ok(summary);
     };
@@ -583,13 +581,13 @@ pub async fn pageserver_physical_gc(
         .unwrap()
         .into_inner()
         .unwrap()
-        .into_gc_ancestors(&controller_client, &mut summary)
+        .into_gc_ancestors(client, &mut summary)
         .await;
 
     for ancestor_shard in ancestor_shards {
         gc_ancestor(
             &s3_client,
-            &bucket_config,
+            bucket_config,
             &target,
             &min_age,
             ancestor_shard,

@@ -20,7 +20,8 @@ use crate::{
     metrics,
     peer_client::{GlobalObservedState, PeerClient},
     persistence::{
-        AbortShardSplitStatus, ControllerPersistence, MetadataHealthPersistence, TenantFilter,
+        AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
+        TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
@@ -489,11 +490,6 @@ pub(crate) enum ReconcileResultRequest {
     Stop,
 }
 
-struct LeaderStepDownState {
-    observed: GlobalObservedState,
-    leader: ControllerPersistence,
-}
-
 impl Service {
     pub fn get_config(&self) -> &Config {
         &self.config
@@ -504,7 +500,8 @@ impl Service {
     #[instrument(skip_all)]
     async fn startup_reconcile(
         self: &Arc<Service>,
-        leader_step_down_state: Option<LeaderStepDownState>,
+        current_leader: Option<ControllerPersistence>,
+        leader_step_down_state: Option<GlobalObservedState>,
         bg_compute_notify_result_tx: tokio::sync::mpsc::Sender<
             Result<(), (TenantShardId, NotifyError)>,
         >,
@@ -522,17 +519,15 @@ impl Service {
             .checked_add(STARTUP_RECONCILE_TIMEOUT / 2)
             .expect("Reconcile timeout is a modest constant");
 
-        let (observed, current_leader) = if let Some(state) = leader_step_down_state {
+        let observed = if let Some(state) = leader_step_down_state {
             tracing::info!(
                 "Using observed state received from leader at {}",
-                state.leader.address,
+                current_leader.as_ref().unwrap().address
             );
-            (state.observed, Some(state.leader))
+
+            state
         } else {
-            (
-                self.build_global_observed_state(node_scan_deadline).await,
-                None,
-            )
+            self.build_global_observed_state(node_scan_deadline).await
         };
 
         // Accumulate a list of any tenant locations that ought to be detached
@@ -1382,13 +1377,32 @@ impl Service {
                 };
 
                 let leadership_status = this.inner.read().unwrap().get_leadership_status();
-                let peer_observed_state = match leadership_status {
-                    LeadershipStatus::Candidate => this.request_step_down().await,
+                let leader = match this.get_leader().await {
+                    Ok(ok) => ok,
+                    Err(err) => {
+                        tracing::error!(
+                            "Failed to query database for current leader: {err}. Aborting start-up ..."
+                        );
+                        std::process::exit(1);
+                    }
+                };
+
+                let leader_step_down_state = match leadership_status {
+                    LeadershipStatus::Candidate => {
+                        if let Some(ref leader) = leader {
+                            this.request_step_down(leader).await
+                        } else {
+                            tracing::info!(
+                                "No leader found to request step down from. Will build observed state."
+                            );
+                            None
+                        }
+                    }
                     LeadershipStatus::Leader => None,
                     LeadershipStatus::SteppedDown => unreachable!(),
                 };
 
-                this.startup_reconcile(peer_observed_state, bg_compute_notify_result_tx)
+                this.startup_reconcile(leader, leader_step_down_state, bg_compute_notify_result_tx)
                     .await;
 
                 drop(startup_completion);
@@ -4650,6 +4664,10 @@ impl Service {
             ))
     }
 
+    pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
+        self.persistence.get_leader().await
+    }
+
     pub(crate) async fn node_register(
         &self,
         register_req: NodeRegisterRequest,
@@ -6342,6 +6360,7 @@ impl Service {
 
     pub(crate) async fn step_down(&self) -> GlobalObservedState {
         tracing::info!("Received step down request from peer");
+        failpoint_support::sleep_millis_async!("sleep-on-step-down-handling");
 
         self.inner.write().unwrap().step_down();
         // TODO: would it make sense to have a time-out for this?
@@ -6367,50 +6386,31 @@ impl Service {
     ///
     /// On failures to query the database or step down error responses the process is killed
     /// and we rely on k8s to retry.
-    async fn request_step_down(&self) -> Option<LeaderStepDownState> {
-        let leader = match self.persistence.get_leader().await {
-            Ok(leader) => leader,
+    async fn request_step_down(
+        &self,
+        leader: &ControllerPersistence,
+    ) -> Option<GlobalObservedState> {
+        tracing::info!("Sending step down request to {leader:?}");
+
+        // TODO: jwt token
+        let client = PeerClient::new(
+            Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
+            self.config.jwt_token.clone(),
+        );
+        let state = client.step_down(&self.cancel).await;
+        match state {
+            Ok(state) => Some(state),
             Err(err) => {
+                // TODO: Make leaders periodically update a timestamp field in the
+                // database and, if the leader is not reachable from the current instance,
+                // but inferred as alive from the timestamp, abort start-up. This avoids
+                // a potential scenario in which we have two controllers acting as leaders.
                 tracing::error!(
-                    "Failed to query database for current leader: {err}. Aborting start-up ..."
+                    "Leader ({}) did not respond to step-down request: {}",
+                    leader.address,
+                    err
                 );
-                std::process::exit(1);
-            }
-        };
 
-        match leader {
-            Some(leader) => {
-                tracing::info!("Sending step down request to {leader:?}");
-
-                // TODO: jwt token
-                let client = PeerClient::new(
-                    Uri::try_from(leader.address.as_str()).expect("Failed to build leader URI"),
-                    self.config.jwt_token.clone(),
-                );
-                let state = client.step_down(&self.cancel).await;
-                match state {
-                    Ok(state) => Some(LeaderStepDownState {
-                        observed: state,
-                        leader: leader.clone(),
-                    }),
-                    Err(err) => {
-                        // TODO: Make leaders periodically update a timestamp field in the
-                        // database and, if the leader is not reachable from the current instance,
-                        // but inferred as alive from the timestamp, abort start-up. This avoids
-                        // a potential scenario in which we have two controllers acting as leaders.
-                        tracing::error!(
-                            "Leader ({}) did not respond to step-down request: {}",
-                            leader.address,
-                            err
-                        );
-                        None
-                    }
-                }
-            }
-            None => {
-                tracing::info!(
-                    "No leader found to request step down from. Will build observed state."
-                );
                 None
             }
         }
