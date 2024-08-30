@@ -3464,6 +3464,7 @@ def vanilla_pg(
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
+        vanilla_pg.configure(['shared_preload_libraries=neon_rmgr'])
         yield vanilla_pg
 
 
