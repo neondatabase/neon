@@ -1,10 +1,7 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-use crate::tenant::ephemeral_file;
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum L0FlushConfig {
-    PageCached,
     Direct { max_concurrency: NonZeroUsize },
 }
 
@@ -20,7 +17,6 @@ impl Default for L0FlushConfig {
 impl From<pageserver_api::models::L0FlushConfig> for L0FlushConfig {
     fn from(config: pageserver_api::models::L0FlushConfig) -> Self {
         match config {
-            pageserver_api::models::L0FlushConfig::PageCached => Self::PageCached,
             pageserver_api::models::L0FlushConfig::Direct { max_concurrency } => {
                 Self::Direct { max_concurrency }
             }
@@ -32,14 +28,12 @@ impl From<pageserver_api::models::L0FlushConfig> for L0FlushConfig {
 pub struct L0FlushGlobalState(Arc<Inner>);
 
 pub enum Inner {
-    PageCached,
     Direct { semaphore: tokio::sync::Semaphore },
 }
 
 impl L0FlushGlobalState {
     pub fn new(config: L0FlushConfig) -> Self {
         match config {
-            L0FlushConfig::PageCached => Self(Arc::new(Inner::PageCached)),
             L0FlushConfig::Direct { max_concurrency } => {
                 let semaphore = tokio::sync::Semaphore::new(max_concurrency.get());
                 Self(Arc::new(Inner::Direct { semaphore }))
@@ -49,13 +43,5 @@ impl L0FlushGlobalState {
 
     pub fn inner(&self) -> &Arc<Inner> {
         &self.0
-    }
-}
-
-pub(crate) fn prewarm_on_write(config: &L0FlushConfig) -> ephemeral_file::PrewarmPageCacheOnWrite {
-    use L0FlushConfig::*;
-    match config {
-        PageCached => ephemeral_file::PrewarmPageCacheOnWrite::Yes,
-        Direct { .. } => ephemeral_file::PrewarmPageCacheOnWrite::No,
     }
 }

@@ -12,7 +12,7 @@ impl ApiUrl {
     }
 
     /// See [`url::Url::path_segments_mut`].
-    pub fn path_segments_mut(&mut self) -> url::PathSegmentsMut {
+    pub fn path_segments_mut(&mut self) -> url::PathSegmentsMut<'_> {
         // We've already verified that it works during construction.
         self.0.path_segments_mut().expect("bad API url")
     }

@@ -97,7 +97,7 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::Compaction,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("compactor for tenant {tenant_shard_id}"),
         {
@@ -120,7 +120,7 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("garbage collector for tenant {tenant_shard_id}"),
         {
@@ -143,7 +143,7 @@ pub fn start_background_loops(
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::IngestHousekeeping,
-        Some(tenant_shard_id),
+        tenant_shard_id,
         None,
         &format!("ingest housekeeping for tenant {tenant_shard_id}"),
         {

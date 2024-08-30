@@ -195,7 +195,7 @@ impl JwkCacheEntryLock {
 
         let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)
             .context("Provided authentication token is not a valid JWT encoding")?;
-        let header = serde_json::from_slice::<JWTHeader>(&header)
+        let header = serde_json::from_slice::<JWTHeader<'_>>(&header)
             .context("Provided authentication token is not a valid JWT encoding")?;
 
         let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
@@ -340,7 +340,7 @@ impl JwkRenewalPermit<'_> {
         }
     }
 
-    async fn acquire_permit(from: &Arc<JwkCacheEntryLock>) -> JwkRenewalPermit {
+    async fn acquire_permit(from: &Arc<JwkCacheEntryLock>) -> JwkRenewalPermit<'_> {
         match from.lookup.acquire().await {
             Ok(permit) => {
                 permit.forget();
@@ -352,7 +352,7 @@ impl JwkRenewalPermit<'_> {
         }
     }
 
-    fn try_acquire_permit(from: &Arc<JwkCacheEntryLock>) -> Option<JwkRenewalPermit> {
+    fn try_acquire_permit(from: &Arc<JwkCacheEntryLock>) -> Option<JwkRenewalPermit<'_>> {
         match from.lookup.try_acquire() {
             Ok(permit) => {
                 permit.forget();

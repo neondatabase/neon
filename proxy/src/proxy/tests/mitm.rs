@@ -68,7 +68,7 @@ async fn proxy_mitm(
                                 end_client.send(Bytes::from_static(b"R\0\0\0\x17\0\0\0\x0aSCRAM-SHA-256\0\0")).await.unwrap();
                                 continue;
                             }
-                            end_client.send(message).await.unwrap()
+                            end_client.send(message).await.unwrap();
                         }
                         _ => break,
                     }
@@ -88,7 +88,7 @@ async fn proxy_mitm(
                                 end_server.send(buf.freeze()).await.unwrap();
                                 continue;
                             }
-                            end_server.send(message).await.unwrap()
+                            end_server.send(message).await.unwrap();
                         }
                         _ => break,
                     }

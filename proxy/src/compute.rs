@@ -44,11 +44,10 @@ pub enum ConnectionError {
 
 impl UserFacingError for ConnectionError {
     fn to_string_client(&self) -> String {
-        use ConnectionError::*;
         match self {
             // This helps us drop irrelevant library-specific prefixes.
             // TODO: propagate severity level and other parameters.
-            Postgres(err) => match err.as_db_error() {
+            ConnectionError::Postgres(err) => match err.as_db_error() {
                 Some(err) => {
                     let msg = err.message();
 
@@ -62,8 +61,8 @@ impl UserFacingError for ConnectionError {
                 }
                 None => err.to_string(),
             },
-            WakeComputeError(err) => err.to_string_client(),
-            TooManyConnectionAttempts(_) => {
+            ConnectionError::WakeComputeError(err) => err.to_string_client(),
+            ConnectionError::TooManyConnectionAttempts(_) => {
                 "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
             }
             _ => COULD_NOT_CONNECT.to_owned(),
@@ -366,16 +365,16 @@ static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
 struct AcceptEverythingVerifier;
 impl ServerCertVerifier for AcceptEverythingVerifier {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        use rustls::SignatureScheme::*;
+        use rustls::SignatureScheme;
         // The schemes for which `SignatureScheme::supported_in_tls13` returns true.
         vec![
-            ECDSA_NISTP521_SHA512,
-            ECDSA_NISTP384_SHA384,
-            ECDSA_NISTP256_SHA256,
-            RSA_PSS_SHA512,
-            RSA_PSS_SHA384,
-            RSA_PSS_SHA256,
-            ED25519,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::ED25519,
         ]
     }
     fn verify_server_cert(

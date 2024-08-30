@@ -630,7 +630,7 @@ background_task_maximum_delay = '334 s'
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
@@ -703,7 +703,7 @@ background_task_maximum_delay = '334 s'
                     NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
                         .expect("Invalid default constant")
                 ),
-                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION,
+                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
                 ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),

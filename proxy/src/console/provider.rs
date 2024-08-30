@@ -26,7 +26,7 @@ use tracing::info;
 pub mod errors {
     use crate::{
         console::messages::{self, ConsoleError, Reason},
-        error::{io_error, ReportableError, UserFacingError},
+        error::{io_error, ErrorKind, ReportableError, UserFacingError},
         proxy::retry::CouldRetry,
     };
     use thiserror::Error;
@@ -51,21 +51,19 @@ pub mod errors {
     impl ApiError {
         /// Returns HTTP status code if it's the reason for failure.
         pub fn get_reason(&self) -> messages::Reason {
-            use ApiError::*;
             match self {
-                Console(e) => e.get_reason(),
-                _ => messages::Reason::Unknown,
+                ApiError::Console(e) => e.get_reason(),
+                ApiError::Transport(_) => messages::Reason::Unknown,
             }
         }
     }
 
     impl UserFacingError for ApiError {
         fn to_string_client(&self) -> String {
-            use ApiError::*;
             match self {
                 // To minimize risks, only select errors are forwarded to users.
-                Console(c) => c.get_user_facing_message(),
-                _ => REQUEST_FAILED.to_owned(),
+                ApiError::Console(c) => c.get_user_facing_message(),
+                ApiError::Transport(_) => REQUEST_FAILED.to_owned(),
             }
         }
     }
@@ -73,57 +71,53 @@ pub mod errors {
     impl ReportableError for ApiError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                ApiError::Console(e) => {
-                    use crate::error::ErrorKind::*;
-                    match e.get_reason() {
-                        Reason::RoleProtected => User,
-                        Reason::ResourceNotFound => User,
-                        Reason::ProjectNotFound => User,
-                        Reason::EndpointNotFound => User,
-                        Reason::BranchNotFound => User,
-                        Reason::RateLimitExceeded => ServiceRateLimit,
-                        Reason::NonDefaultBranchComputeTimeExceeded => User,
-                        Reason::ActiveTimeQuotaExceeded => User,
-                        Reason::ComputeTimeQuotaExceeded => User,
-                        Reason::WrittenDataQuotaExceeded => User,
-                        Reason::DataTransferQuotaExceeded => User,
-                        Reason::LogicalSizeQuotaExceeded => User,
-                        Reason::ConcurrencyLimitReached => ControlPlane,
-                        Reason::LockAlreadyTaken => ControlPlane,
-                        Reason::RunningOperations => ControlPlane,
-                        Reason::Unknown => match &e {
-                            ConsoleError {
-                                http_status_code:
-                                    http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
-                                ..
-                            } => crate::error::ErrorKind::User,
-                            ConsoleError {
-                                http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
-                                error,
-                                ..
-                            } if error.contains(
-                                "compute time quota of non-primary branches is exceeded",
-                            ) =>
-                            {
-                                crate::error::ErrorKind::User
-                            }
-                            ConsoleError {
-                                http_status_code: http::StatusCode::LOCKED,
-                                error,
-                                ..
-                            } if error.contains("quota exceeded")
-                                || error.contains("the limit for current plan reached") =>
-                            {
-                                crate::error::ErrorKind::User
-                            }
-                            ConsoleError {
-                                http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
-                                ..
-                            } => crate::error::ErrorKind::ServiceRateLimit,
-                            ConsoleError { .. } => crate::error::ErrorKind::ControlPlane,
-                        },
-                    }
-                }
+                ApiError::Console(e) => match e.get_reason() {
+                    Reason::RoleProtected => ErrorKind::User,
+                    Reason::ResourceNotFound => ErrorKind::User,
+                    Reason::ProjectNotFound => ErrorKind::User,
+                    Reason::EndpointNotFound => ErrorKind::User,
+                    Reason::BranchNotFound => ErrorKind::User,
+                    Reason::RateLimitExceeded => ErrorKind::ServiceRateLimit,
+                    Reason::NonDefaultBranchComputeTimeExceeded => ErrorKind::User,
+                    Reason::ActiveTimeQuotaExceeded => ErrorKind::User,
+                    Reason::ComputeTimeQuotaExceeded => ErrorKind::User,
+                    Reason::WrittenDataQuotaExceeded => ErrorKind::User,
+                    Reason::DataTransferQuotaExceeded => ErrorKind::User,
+                    Reason::LogicalSizeQuotaExceeded => ErrorKind::User,
+                    Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
+                    Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
+                    Reason::RunningOperations => ErrorKind::ControlPlane,
+                    Reason::Unknown => match &e {
+                        ConsoleError {
+                            http_status_code:
+                                http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
+                            ..
+                        } => crate::error::ErrorKind::User,
+                        ConsoleError {
+                            http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
+                            error,
+                            ..
+                        } if error
+                            .contains("compute time quota of non-primary branches is exceeded") =>
+                        {
+                            crate::error::ErrorKind::User
+                        }
+                        ConsoleError {
+                            http_status_code: http::StatusCode::LOCKED,
+                            error,
+                            ..
+                        } if error.contains("quota exceeded")
+                            || error.contains("the limit for current plan reached") =>
+                        {
+                            crate::error::ErrorKind::User
+                        }
+                        ConsoleError {
+                            http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
+                            ..
+                        } => crate::error::ErrorKind::ServiceRateLimit,
+                        ConsoleError { .. } => crate::error::ErrorKind::ControlPlane,
+                    },
+                },
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
@@ -170,12 +164,11 @@ pub mod errors {
 
     impl UserFacingError for GetAuthInfoError {
         fn to_string_client(&self) -> String {
-            use GetAuthInfoError::*;
             match self {
                 // We absolutely should not leak any secrets!
-                BadSecret => REQUEST_FAILED.to_owned(),
+                Self::BadSecret => REQUEST_FAILED.to_owned(),
                 // However, API might return a meaningful error.
-                ApiError(e) => e.to_string_client(),
+                Self::ApiError(e) => e.to_string_client(),
             }
         }
     }
@@ -183,8 +176,8 @@ pub mod errors {
     impl ReportableError for GetAuthInfoError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                GetAuthInfoError::BadSecret => crate::error::ErrorKind::ControlPlane,
-                GetAuthInfoError::ApiError(_) => crate::error::ErrorKind::ControlPlane,
+                Self::BadSecret => crate::error::ErrorKind::ControlPlane,
+                Self::ApiError(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
     }
@@ -213,17 +206,16 @@ pub mod errors {
 
     impl UserFacingError for WakeComputeError {
         fn to_string_client(&self) -> String {
-            use WakeComputeError::*;
             match self {
                 // We shouldn't show user the address even if it's broken.
                 // Besides, user is unlikely to care about this detail.
-                BadComputeAddress(_) => REQUEST_FAILED.to_owned(),
+                Self::BadComputeAddress(_) => REQUEST_FAILED.to_owned(),
                 // However, API might return a meaningful error.
-                ApiError(e) => e.to_string_client(),
+                Self::ApiError(e) => e.to_string_client(),
 
-                TooManyConnections => self.to_string(),
+                Self::TooManyConnections => self.to_string(),
 
-                TooManyConnectionAttempts(_) => {
+                Self::TooManyConnectionAttempts(_) => {
                     "Failed to acquire permit to connect to the database. Too many database connection attempts are currently ongoing.".to_owned()
                 }
             }
@@ -233,10 +225,10 @@ pub mod errors {
     impl ReportableError for WakeComputeError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                WakeComputeError::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
-                WakeComputeError::ApiError(e) => e.get_error_kind(),
-                WakeComputeError::TooManyConnections => crate::error::ErrorKind::RateLimit,
-                WakeComputeError::TooManyConnectionAttempts(e) => e.get_error_kind(),
+                Self::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
+                Self::ApiError(e) => e.get_error_kind(),
+                Self::TooManyConnections => crate::error::ErrorKind::RateLimit,
+                Self::TooManyConnectionAttempts(e) => e.get_error_kind(),
             }
         }
     }
@@ -244,10 +236,10 @@ pub mod errors {
     impl CouldRetry for WakeComputeError {
         fn could_retry(&self) -> bool {
             match self {
-                WakeComputeError::BadComputeAddress(_) => false,
-                WakeComputeError::ApiError(e) => e.could_retry(),
-                WakeComputeError::TooManyConnections => false,
-                WakeComputeError::TooManyConnectionAttempts(_) => false,
+                Self::BadComputeAddress(_) => false,
+                Self::ApiError(e) => e.could_retry(),
+                Self::TooManyConnections => false,
+                Self::TooManyConnectionAttempts(_) => false,
             }
         }
     }
@@ -366,13 +358,14 @@ impl Api for ConsoleBackend {
         ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
-        use ConsoleBackend::*;
         match self {
-            Console(api) => api.get_role_secret(ctx, user_info).await,
+            Self::Console(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Postgres(api) => api.get_role_secret(ctx, user_info).await,
+            Self::Postgres(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(test)]
-            Test(_) => unreachable!("this function should never be called in the test backend"),
+            Self::Test(_) => {
+                unreachable!("this function should never be called in the test backend")
+            }
         }
     }
 
@@ -381,13 +374,12 @@ impl Api for ConsoleBackend {
         ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
-        use ConsoleBackend::*;
         match self {
-            Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(test)]
-            Test(api) => api.get_allowed_ips_and_secret(),
+            Self::Test(api) => api.get_allowed_ips_and_secret(),
         }
     }
 
@@ -396,14 +388,12 @@ impl Api for ConsoleBackend {
         ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
-        use ConsoleBackend::*;
-
         match self {
-            Console(api) => api.wake_compute(ctx, user_info).await,
+            Self::Console(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Postgres(api) => api.wake_compute(ctx, user_info).await,
+            Self::Postgres(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(test)]
-            Test(api) => api.wake_compute(),
+            Self::Test(api) => api.wake_compute(),
         }
     }
 }
@@ -549,7 +539,7 @@ impl WakeComputePermit {
         !self.permit.is_disabled()
     }
     pub fn release(self, outcome: Outcome) {
-        self.permit.release(outcome)
+        self.permit.release(outcome);
     }
     pub fn release_result<T, E>(self, res: Result<T, E>) -> Result<T, E> {
         match res {
