@@ -27,7 +27,7 @@ env:
 
 jobs:
   check-permissions:
-    if: false
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
     uses: ./.github/workflows/check-permissions.yml
     with:
       github-event-name: ${{ github.event_name }}
@@ -1057,8 +1057,8 @@ jobs:
 
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
-    # needs: [ deploy ]
-    # if: github.ref_name == 'release'
+    needs: [ deploy ]
+    if: github.ref_name == 'release'
 
     runs-on: ubuntu-22.04
     steps:
@@ -1066,8 +1066,6 @@ jobs:
         id: fetch-last-release-pr-info
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # the last commit in release branch
-          TEST_GITHUB_SHA: 'aa8c5d1ee9ac98778cc9ece0ca9cd49f57b651db'
         run: |
           branch_name_and_pr_number=$(gh pr list \
             --repo "${GITHUB_REPOSITORY}" \
@@ -1075,7 +1073,7 @@ jobs:
             --state merged \
             --limit 10 \
             --json mergeCommit,headRefName,number \
-            --jq ".[] | select(.mergeCommit.oid==\"${TEST_GITHUB_SHA}\") | { branch_name: .headRefName, pr_number: .number }")
+            --jq ".[] | select(.mergeCommit.oid==\"${GITHUB_SHA}\") | { branch_name: .headRefName, pr_number: .number }")
           branch_name=$(echo "${branch_name_and_pr_number}" | jq -r '.branch_name')
           pr_number=$(echo "${branch_name_and_pr_number}" | jq -r '.pr_number')
 
@@ -1099,8 +1097,8 @@ jobs:
         env:
           BUCKET: neon-github-public-dev
           AWS_REGION: eu-central-1
-          COMMIT_SHA: '37b44ba27bcbf03d9c52517cb2b90479070a60f8'
-          RUN_ID: '10622710511'
+          COMMIT_SHA: ${{ steps.fetch-last-release-pr-info.outputs.commit-sha }}
+          RUN_ID: ${{ steps.fetch-last-release-pr-info.outputs.run-id }}
         run: |
           old_prefix="artifacts/${COMMIT_SHA}/${RUN_ID}"
           new_prefix="artifacts/latest"
