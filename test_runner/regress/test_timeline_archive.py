@@ -11,14 +11,15 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
     unsharded = shard_count == 0
     if unsharded:
         env = neon_env_builder.init_start()
+        # If we run the unsharded version, talk to the pageserver directly
         ps_http = env.pageserver.http_client()
     else:
         neon_env_builder.num_pageservers = shard_count
         env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
+        # If we run the unsharded version, talk to the storage controller
         ps_http = env.storage_controller.pageserver_api()
 
-    # first try to archive non existing timeline
-    # for existing tenant:
+    # first try to archive a non existing timeline for an existing tenant:
     invalid_timeline_id = TimelineId.generate()
     with pytest.raises(PageserverApiException, match="timeline not found") as exc:
         ps_http.timeline_archival_config(
@@ -29,7 +30,7 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
     assert exc.value.status_code == 404
 
-    # for non existing tenant:
+    # for a non existing tenant:
     invalid_tenant_id = TenantId.generate()
     if unsharded:
         not_found_pattern = f"NotFound: tenant {invalid_tenant_id}"
@@ -47,7 +48,7 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
     assert exc.value.status_code == 404
 
-    # construct pair of branches to validate that pageserver prohibits
+    # construct a pair of branches to validate that pageserver prohibits
     # archival of ancestor timelines when they have non-archived child branches
     parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_archive_parent")
 
