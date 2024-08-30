@@ -328,11 +328,7 @@ async fn backup_lsn_range(
     loop {
         let added_task = match iter.next() {
             Some(s) => {
-                uploads.push_back(backup_single_segment(
-                    s,
-                    timeline_dir,
-                    &remote_timeline_path,
-                ));
+                uploads.push_back(backup_single_segment(s, timeline_dir, remote_timeline_path));
                 true
             }
             None => false,

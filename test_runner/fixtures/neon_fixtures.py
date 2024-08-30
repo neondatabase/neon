@@ -4553,6 +4553,8 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
+    # List partial uploaded segments of this safekeeper. Works only for
+    # RemoteStorageKind.LOCAL_FS.
     def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
         tline_path = (
             self.env.repo_dir
@@ -4562,9 +4564,11 @@ class Safekeeper(LogUtils):
             / str(timeline_id)
         )
         assert isinstance(self.env.safekeepers_remote_storage, LocalFsStorage)
-        return self._list_segments_in_dir(
+        segs = self._list_segments_in_dir(
             tline_path, lambda name: ".metadata" not in name and ".___temp" not in name
         )
+        mysegs = [s for s in segs if f"sk{self.id}" in s]
+        return mysegs
 
     def list_segments(self, tenant_id, timeline_id) -> List[str]:
         """

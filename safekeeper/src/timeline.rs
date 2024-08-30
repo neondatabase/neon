@@ -908,6 +908,10 @@ impl Timeline {
 
         Ok(WalResidentTimeline::new(self.clone(), guard))
     }
+
+    pub async fn backup_partial_reset(self: &Arc<Self>) -> Result<Vec<String>> {
+        self.manager_ctl.backup_partial_reset().await
+    }
 }
 
 /// This is a guard that allows to read/write disk timeline state.
