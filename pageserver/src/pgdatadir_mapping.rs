@@ -1036,7 +1036,12 @@ pub struct DatadirModification<'a> {
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
 
+    /// Metadata writes, indexed by key so that they can be read from not-yet-committed modifications
+    /// while ingesting subsequent records. See [`Self::is_data_key`] for the definition of 'metadata'.
     pending_metadata_pages: HashMap<CompactKey, Vec<(Lsn, usize, Value)>>,
+
+    /// Data writes, ready to be flushed into an ephemeral layer. See [`Self::is_data_key`] for
+    /// which keys are stored here.
     pending_data_pages: Vec<(CompactKey, Lsn, usize, Value)>,
 
     // Sometimes during ingest, for example when extending a relation, we would like to write a zero page.  However,
@@ -1086,6 +1091,17 @@ impl<'a> DatadirModification<'a> {
             self.lsn = lsn;
         }
         Ok(())
+    }
+
+    /// In this context, 'metadata' means keys that are only read by the pageserver internally, and 'data' means
+    /// keys that represent literal blocks that postgres can read.  So data includes relation blocks and
+    /// SLRU blocks, which are read directly by postgres, and everything else is considered metadata.
+    ///
+    /// The distinction is important because data keys are handled on a fast path where dirty writes are
+    /// not readable until this modification is committed, whereas metadata keys are visible for read
+    /// via [`Self::get`] as soon as their record has been ingested.
+    fn is_data_key(key: &Key) -> bool {
+        key.is_rel_block_key() || key.is_slru_block_key()
     }
 
     /// Initialize a completely new repository.
@@ -1915,7 +1931,7 @@ impl<'a> DatadirModification<'a> {
     // a cache in Self, which makes writes earlier in this modification visible to WAL records later
     // in the modification.
     async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
-        if !key.is_rel_block_key() && !key.is_slru_block_key() {
+        if !Self::is_data_key(&key) {
             // Have we already updated the same key? Read the latest pending updated
             // version in that case.
             //
@@ -1951,7 +1967,7 @@ impl<'a> DatadirModification<'a> {
     }
 
     fn put(&mut self, key: Key, val: Value) {
-        if key.is_rel_block_key() || key.is_slru_block_key() {
+        if Self::is_data_key(&key) {
             self.put_data(key.to_compact(), val)
         } else {
             self.put_metadata(key.to_compact(), val)
