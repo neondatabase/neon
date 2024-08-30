@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
+use pageserver::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -144,7 +145,11 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
-    pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+    pageserver::virtual_file::init(
+        10,
+        virtual_file::api::IoEngineKind::StdFs,
+        DEFAULT_IO_BUFFER_ALIGNMENT,
+    );
     pageserver::page_cache::init(100);
 
     let mut total_delta_layers = 0usize;

@@ -12,7 +12,7 @@ use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use crate::{aux_file, repository::*};
-use anyhow::{ensure, Context};
+use anyhow::{bail, ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use pageserver_api::key::{
@@ -1791,6 +1791,11 @@ impl<'a> DatadirModification<'a> {
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
         for (key, values) in self.pending_updates.drain() {
+            if !key.is_valid_key_on_write_path() {
+                bail!(
+                    "the request contains data not supported by pageserver at TimelineWriter::put: {}", key
+                );
+            }
             let mut write_batch = Vec::new();
             for (lsn, value_ser_size, value) in values {
                 if key.is_rel_block_key() || key.is_slru_block_key() {
@@ -1843,10 +1848,13 @@ impl<'a> DatadirModification<'a> {
                 .drain()
                 .flat_map(|(key, values)| {
                     values.into_iter().map(move |(lsn, val_ser_size, value)| {
-                        (key.to_compact(), lsn, val_ser_size, value)
+                        if !key.is_valid_key_on_write_path() {
+                            bail!("the request contains data not supported by pageserver at TimelineWriter::put: {}", key);
+                        }
+                        Ok((key.to_compact(), lsn, val_ser_size, value))
                     })
                 })
-                .collect::<Vec<_>>();
+                .collect::<anyhow::Result<Vec<_>>>()?;
 
             writer.put_batch(batch, ctx).await?;
         }

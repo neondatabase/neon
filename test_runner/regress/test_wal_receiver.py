@@ -62,6 +62,12 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
     elements_to_insert = 1_000_000
     expected_timeout_error = f"Timed out while waiting for WAL record at LSN {future_lsn} to arrive"
     env.pageserver.allowed_errors.append(f".*{expected_timeout_error}.*")
+    # we configure wait_lsn_timeout to a shorter value than the lagging_wal_timeout / walreceiver_connect_timeout
+    # => after we run into a timeout and reconnect to a different SK, more time than wait_lsn_timeout has passed
+    # ==> we log this error
+    env.pageserver.allowed_errors.append(
+        ".*ingesting record with timestamp lagging more than wait_lsn_timeout.*"
+    )
 
     insert_test_elements(env, tenant_id, start=0, count=elements_to_insert)
 

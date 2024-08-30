@@ -8,7 +8,6 @@ license.workspace = true
 pageserver_api.workspace = true
 pageserver_client.workspace = true
 thiserror.workspace = true
-async-trait.workspace = true
 reqwest.workspace = true
 utils.workspace = true
 serde.workspace = true

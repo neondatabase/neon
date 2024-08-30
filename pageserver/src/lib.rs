@@ -16,6 +16,7 @@ pub mod l0_flush;
 use futures::{stream::FuturesUnordered, StreamExt};
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
+mod assert_u64_eq_usize;
 pub mod aux_file;
 pub mod metrics;
 pub mod page_cache;

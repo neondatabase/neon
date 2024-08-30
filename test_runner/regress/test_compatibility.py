@@ -173,6 +173,11 @@ def test_backward_compatibility(
     try:
         neon_env_builder.num_safekeepers = 3
         env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
+        # check_neon_works does recovery from WAL => the compatibility snapshot's WAL is old => will log this warning
+        ingest_lag_log_line = (
+            ".*ingesting record with timestamp lagging more than wait_lsn_timeout.*"
+        )
+        env.pageserver.allowed_errors.append(ingest_lag_log_line)
         neon_env_builder.start()
 
         check_neon_works(
@@ -181,6 +186,9 @@ def test_backward_compatibility(
             sql_dump_path=compatibility_snapshot_dir / "dump.sql",
             repo_dir=env.repo_dir,
         )
+
+        env.pageserver.assert_log_contains(ingest_lag_log_line)
+
     except Exception:
         if breaking_changes_allowed:
             pytest.xfail(
