@@ -68,12 +68,11 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
     assert exc.value.status_code == 412 if unsharded else 409
 
-    if shard_count != 0:
-        leaf_detail = ps_http.timeline_detail(
-            env.initial_tenant,
-            timeline_id=leaf_timeline_id,
-        )
-        assert leaf_detail["is_archived"] is False
+    leaf_detail = ps_http.timeline_detail(
+        env.initial_tenant,
+        timeline_id=leaf_timeline_id,
+    )
+    assert leaf_detail["is_archived"] is False
 
     # Test that archiving the leaf timeline and then the parent works
     ps_http.timeline_archival_config(
@@ -81,12 +80,11 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
         leaf_timeline_id,
         state=TimelineArchivalState.ARCHIVED,
     )
-    if shard_count != 0:
-        leaf_detail = ps_http.timeline_detail(
-            env.initial_tenant,
-            leaf_timeline_id,
-        )
-        assert leaf_detail["is_archived"] is True
+    leaf_detail = ps_http.timeline_detail(
+        env.initial_tenant,
+        leaf_timeline_id,
+    )
+    assert leaf_detail["is_archived"] is True
 
     ps_http.timeline_archival_config(
         env.initial_tenant,
