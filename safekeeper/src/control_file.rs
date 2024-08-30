@@ -164,6 +164,30 @@ impl Deref for FileStorage {
     }
 }
 
+impl TimelinePersistentState {
+    pub(crate) fn write_to_buf(&self) -> Result<Vec<u8>> {
+        let mut buf: Vec<u8> = Vec::new();
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_MAGIC)?;
+
+        if self.eviction_state == EvictionState::Present {
+            // temp hack for forward compatibility
+            const PREV_FORMAT_VERSION: u32 = 8;
+            let prev = downgrade_v9_to_v8(self);
+            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, PREV_FORMAT_VERSION)?;
+            prev.ser_into(&mut buf)?;
+        } else {
+            // otherwise, we write the current format version
+            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
+            self.ser_into(&mut buf)?;
+        }
+
+        // calculate checksum before resize
+        let checksum = crc32c::crc32c(&buf);
+        buf.extend_from_slice(&checksum.to_le_bytes());
+        Ok(buf)
+    }
+}
+
 #[async_trait::async_trait]
 impl Storage for FileStorage {
     /// Persists state durably to the underlying storage.
@@ -180,24 +204,8 @@ impl Storage for FileStorage {
                 &control_partial_path
             )
         })?;
-        let mut buf: Vec<u8> = Vec::new();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_MAGIC)?;
 
-        if s.eviction_state == EvictionState::Present {
-            // temp hack for forward compatibility
-            const PREV_FORMAT_VERSION: u32 = 8;
-            let prev = downgrade_v9_to_v8(s);
-            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, PREV_FORMAT_VERSION)?;
-            prev.ser_into(&mut buf)?;
-        } else {
-            // otherwise, we write the current format version
-            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
-            s.ser_into(&mut buf)?;
-        }
-
-        // calculate checksum before resize
-        let checksum = crc32c::crc32c(&buf);
-        buf.extend_from_slice(&checksum.to_le_bytes());
+        let buf: Vec<u8> = s.write_to_buf()?;
 
         control_partial.write_all(&buf).await.with_context(|| {
             format!(

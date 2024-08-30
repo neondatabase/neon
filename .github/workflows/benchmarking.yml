@@ -96,7 +96,7 @@ jobs:
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
-        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}  
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
@@ -146,6 +146,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -154,7 +155,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic perf testing: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -176,7 +180,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    
+
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -215,6 +219,7 @@ jobs:
         NEON_API_KEY: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -365,7 +370,7 @@ jobs:
         aws-region: eu-central-1
         role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         role-duration-seconds: 18000 # 5 hours
-        
+
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -460,6 +465,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -468,7 +474,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic perf testing on ${{ matrix.platform }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -542,7 +551,7 @@ jobs:
         esac
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
-        
+
     - name: Configure AWS credentials # necessary on Azure runners to read/write from/to S3
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -577,8 +586,9 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
-    
+
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -587,7 +597,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic perf testing ${PLATFORM}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic perf testing on ${{ env.PLATFORM }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -670,6 +683,7 @@ jobs:
         TEST_OLAP_SCALE: 10
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -678,7 +692,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic OLAP perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic OLAP perf testing on ${{ matrix.platform }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -764,6 +781,7 @@ jobs:
         TEST_OLAP_SCALE: ${{ matrix.scale }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -772,7 +790,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic TPC-H perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
@@ -843,6 +864,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
+      id: create-allure-report
       if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report-generate
 
@@ -851,6 +873,10 @@ jobs:
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic User example perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: |
+          Periodic TPC-H perf testing on ${{ matrix.platform }}: ${{ job.status }}
+          <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+          <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
+
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
