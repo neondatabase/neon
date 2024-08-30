@@ -2946,7 +2946,6 @@ impl Service {
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
             }
-
             async fn config_one(
                 tenant_shard_id: TenantShardId,
                 timeline_id: TimelineId,
@@ -2959,10 +2958,16 @@ impl Service {
                 );
 
                 let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+
                 client
                     .timeline_archival_config(tenant_shard_id, timeline_id, &req)
                     .await
-                    .map_err(|e| passthrough_api_error(&node, e))
+                    .map_err(|e| match e {
+                        mgmt_api::Error::ApiError(StatusCode::PRECONDITION_FAILED, msg) => {
+                            ApiError::PreconditionFailed(msg.into_boxed_str())
+                        }
+                        _ => passthrough_api_error(&node, e),
+                    })
             }
 
             // no shard needs to go first/last; the operation should be idempotent
