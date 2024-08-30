@@ -2379,6 +2379,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     assert eq_safekeeper_records(inserted, inserted_again)
 
     # the most common case, version goes up:
+    assert isinstance(body["version"], int)
     body["version"] += 1
     target.on_safekeeper_deploy(fake_id, body)
     inserted_now = target.get_safekeeper(fake_id)

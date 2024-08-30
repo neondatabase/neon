@@ -2861,7 +2861,9 @@ class NeonStorageController(MetricsGetter, LogUtils):
                 f"{self.api}/v1/safekeeper/{instance_id}",
                 headers=self.headers(TokenScope.ADMIN),
             )
-            return response.json()
+            json = response.json()
+            assert isinstance(json, dict)
+            return json
         except StorageControllerApiException as e:
             if e.status_code == 404:
                 return None
