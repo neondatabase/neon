@@ -761,10 +761,15 @@ async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, Api
 
     let state = get_state(&req);
 
-    json_response(
-        StatusCode::OK,
-        state.service.get_safekeeper(instance_id).await?,
-    )
+    let res = state.service.get_safekeeper(instance_id).await;
+
+    match res {
+        Ok(b) => json_response(StatusCode::OK, b),
+        Err(crate::persistence::DatabaseError::Query(diesel::result::Error::NotFound)) => {
+            Err(ApiError::NotFound("unknown instance_id".into()))
+        }
+        Err(other) => Err(other.into()),
+    }
 }
 
 /// Used as part of deployment scripts.
