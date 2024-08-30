@@ -2810,6 +2810,14 @@ pub(crate) static WALRECEIVER_CANDIDATES_ADDED: Lazy<IntCounter> =
 pub(crate) static WALRECEIVER_CANDIDATES_REMOVED: Lazy<IntCounter> =
     Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["remove"]));
 
+pub(crate) static LOCAL_DATA_LOSS_SUSPECTED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "pageserver_local_data_loss_suspected",
+        "Non-zero value indicates that pageserver local data loss is suspected (and highly likely)."
+    )
+    .expect("failed to define a metric")
+});
+
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
@@ -4534,6 +4542,7 @@ pub fn preinitialize_metrics(
 
     // gauges
     WALRECEIVER_ACTIVE_MANAGERS.get();
+    LOCAL_DATA_LOSS_SUSPECTED.get();
 
     // histograms
     [
