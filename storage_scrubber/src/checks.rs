@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt::format;
 
 use anyhow::Context;
 use itertools::Itertools;
@@ -512,7 +513,10 @@ async fn list_timeline_blobs_impl(
     match index_part_object.as_ref() {
         Some(selected) => index_part_keys.retain(|k| k != selected),
         None => {
-            errors.push("S3 list response got no index_part.json file".to_string());
+            errors.push(
+                "S3 list response got no index_part.json file but still has layer files"
+                    .to_string(),
+            );
             return Ok(ListTimelineBlobsResult::MissingIndexPart(
                 RemoteTimelineBlobData {
                     blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
