@@ -280,8 +280,9 @@ jobs:
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]
         }'
 
-        if [ "$(date +%A)" = "Saturday" ]; then
-          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 14, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]')
+        if [ "$(date +%A)" = "Saturday" ] || [ ${RUN_AWS_RDS_AND_AURORA} = "true" ]; then
+          matrix=$(echo "$matrix" | jq '.include += [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "rds-postgres", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
+                                                     { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "rds-aurora", "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]')
         fi
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
@@ -321,9 +322,13 @@ jobs:
 
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
+  prepare_AWS_RDS_databases:
+    uses: ./.github/workflows/_benchmarking_preparation.yml
+    secrets: inherit
+  
   pgbench-compare:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
-    needs: [ generate-matrices ]
+    needs: [ generate-matrices, prepare_AWS_RDS_databases ]
     permissions:
       contents: write
       statuses: write
@@ -595,7 +600,7 @@ jobs:
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, pgbench-compare ]
+    needs: [ generate-matrices, pgbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
@@ -603,7 +608,7 @@ jobs:
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       TEST_OLAP_COLLECT_EXPLAIN: ${{ github.event.inputs.collect_olap_explain }}
       TEST_OLAP_COLLECT_PG_STAT_STATEMENTS: ${{ github.event.inputs.collect_pg_stat_statements }}
@@ -655,6 +660,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -684,7 +690,7 @@ jobs:
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, clickbench-compare ]
+    needs: [ generate-matrices, clickbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
@@ -692,7 +698,7 @@ jobs:
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
@@ -724,7 +730,7 @@ jobs:
             ENV_PLATFORM=RDS_AURORA_TPCH
             ;;
           rds-postgres)
-            ENV_PLATFORM=RDS_AURORA_TPCH
+            ENV_PLATFORM=RDS_POSTGRES_TPCH
             ;;
           *)
             echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neonvm-captest-reuse', 'rds-aurora', or 'rds-postgres'"
@@ -750,6 +756,7 @@ jobs:
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
         extra_params: -m remote_cluster --timeout 21600 -k test_tpch
+        pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
@@ -771,7 +778,7 @@ jobs:
 
   user-examples-compare:
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
-    needs: [ generate-matrices, tpch-compare ]
+    needs: [ generate-matrices, tpch-compare, prepare_AWS_RDS_databases ]
 
     strategy:
       fail-fast: false
@@ -779,7 +786,7 @@ jobs:
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}

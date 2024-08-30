@@ -255,6 +255,21 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
         cur.execute(
             "SELECT * FROM pg_logical_slot_peek_binary_changes('slotty_mcslotface', NULL, NULL, 'include-xids', '0')"
         )
+        cur.execute(
+            """
+INSERT INTO wal_generator (data)
+SELECT repeat('A', 1024) -- Generates a kilobyte of data per row
+FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of data
+"""
+        )
+
+    endpoint.stop_and_destroy()
+    endpoint = env.endpoints.create_start("init")
+    with endpoint.connect().cursor() as cur:
+        log.info("advance slot")
+        cur.execute(
+            "SELECT * from pg_replication_slot_advance('slotty_mcslotface', pg_current_wal_lsn())"
+        )
 
 
 # Tests that walsender correctly blocks until WAL is downloaded from safekeepers
