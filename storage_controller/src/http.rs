@@ -2,6 +2,7 @@ use crate::metrics::{
     HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, PageserverRequestLabelGroup,
     METRICS_REGISTRY,
 };
+use crate::persistence::SafekeeperPersistence;
 use crate::reconciler::ReconcileError;
 use crate::service::{LeadershipStatus, Service, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
@@ -27,7 +28,9 @@ use tokio_util::sync::CancellationToken;
 use utils::auth::{Scope, SwappableJwtAuth};
 use utils::failpoint_support::failpoints_handler;
 use utils::http::endpoint::{auth_middleware, check_permission_with, request_span};
-use utils::http::request::{must_get_query_param, parse_query_param, parse_request_param};
+use utils::http::request::{
+    get_request_param, must_get_query_param, parse_query_param, parse_request_param,
+};
 use utils::id::{TenantId, TimelineId};
 
 use utils::{
@@ -749,6 +752,50 @@ impl From<ReconcileError> for ApiError {
     }
 }
 
+/// Return the safekeeper record by instance id, or 404.
+///
+/// Not used by anything except manual testing.
+async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    // TODO: jwt -- POST handler in handle_upsert_safekeeper
+    let instance_id = get_request_param(&req, "instance_id")?.to_owned();
+
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state.service.get_safekeeper(instance_id).await?,
+    )
+}
+
+/// Used as part of deployment scripts.
+///
+/// Assume information is only relayed to storage controller after first selecting an unique id on
+/// control plane database, which means we have an id field in the payload.
+async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    // todo: jwt -- as long we don't use this for anything, it doesn't really need much security
+    // either
+
+    let body = json_request::<SafekeeperPersistence>(&mut req).await?;
+    let instance_id = get_request_param(&req, "instance_id")?;
+
+    if instance_id != body.instance_id {
+        // it should be repeated
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "instance_id mismatch: url={instance_id:?}, body={:?}",
+            body.instance_id
+        )));
+    }
+
+    let state = get_state(&req);
+
+    state.service.upsert_safekeeper(body).await?;
+
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap())
+}
+
 /// Common wrapper for request handlers that call into Service and will operate on tenants: they must only
 /// be allowed to run if Service has finished its initial reconciliation.
 async fn tenant_service_handler<R, H>(
@@ -1187,5 +1234,12 @@ pub fn make_router(
                 handle_tenant_timeline_passthrough,
                 RequestName("v1_tenant_passthrough"),
             )
+        })
+        .get("/v1/safekeeper/:instance_id", |r| {
+            named_request_span(r, handle_get_safekeeper, RequestName("v1_safekeeper"))
+        })
+        .post("/v1/safekeeper/:instance_id", |r| {
+            // id is in the body
+            named_request_span(r, handle_upsert_safekeeper, RequestName("v1_safekeeper"))
         })
 }

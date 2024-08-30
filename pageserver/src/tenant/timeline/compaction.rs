@@ -1849,7 +1849,7 @@ impl Timeline {
 
         let dry_run = flags.contains(CompactFlags::DryRun);
 
-        info!("running enhanced gc bottom-most compaction, dry_run={dry_run}");
+        info!(dry_run, "running enhanced gc bottom-most compaction");
 
         scopeguard::defer! {
             info!("done enhanced gc bottom-most compaction");

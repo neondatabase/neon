@@ -967,11 +967,12 @@ class NeonEnvBuilder:
         # Stop all the nodes.
         if self.env:
             log.info("Cleaning up all storage and compute nodes")
+            failed_already = exc_type is None
             self.env.stop(
-                immediate=False,
+                immediate=not failed_already,
                 # if the test threw an exception, don't check for errors
                 # as a failing assertion would cause the cleanup below to fail
-                ps_assert_metric_no_errors=(exc_type is None),
+                ps_assert_metric_no_errors=failed_already,
                 # do not fail on endpoint errors to allow the rest of cleanup to proceed
                 fail_on_endpoint_errors=False,
             )
@@ -2845,6 +2846,27 @@ class NeonStorageController(MetricsGetter, LogUtils):
                 return status
 
         raise AssertionError("unreachable")
+
+    def on_safekeeper_deploy(self, instance_id: str, body: dict[str, Any]):
+        self.request(
+            "POST",
+            f"{self.api}/v1/safekeeper/{instance_id}",
+            headers=self.headers(TokenScope.ADMIN),
+            body=json.dumps(body),
+        )
+
+    def get_safekeeper(self, instance_id: str) -> Optional[dict[str, Any]]:
+        try:
+            response = self.request(
+                "GET",
+                f"{self.api}/v1/safekeeper/{instance_id}",
+                headers=self.headers(TokenScope.ADMIN),
+            )
+            return response.json()
+        except StorageControllerApiException as e:
+            if e.status_code == 404:
+                return None
+            raise e
 
     def __enter__(self) -> "NeonStorageController":
         return self

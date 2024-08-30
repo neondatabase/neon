@@ -2330,3 +2330,63 @@ def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder)
             connect=0,  # Disable retries: we want to see the 503
         )
     ).timeline_create(PgVersion.NOT_SET, tenant_id, create_timeline_id)
+
+def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    fake_id = "i-fffffffffffffffff"
+
+    target = env.storage_controller
+
+    assert target.get_safekeeper(fake_id) is None
+
+    body = {
+        "active": True,
+        "id": 5,
+        "created_at": "2023-10-25T09:11:25Z",
+        "updated_at": "2024-08-28T11:32:43Z",
+        "region_id": "aws-us-east-2",
+        "host": "safekeeper-333.us-east-2.aws.neon.build",
+        "port": 6401,
+        "http_port": 7676,
+        "version": 5957,
+        "instance_id": fake_id,
+        "availability_zone_id": "us-east-2b",
+    }
+
+    target.on_safekeeper_deploy(fake_id, body)
+
+    inserted = target.get_safekeeper(fake_id)
+    assert inserted is not None
+    assert eq_safekeeper_records(body, inserted)
+
+    # error out if pk is changed
+    with pytest.raises(StorageControllerApiException) as exc:
+        different_pk = dict(body)
+        different_pk["id"] = 4
+        assert different_pk["id"] != body["id"]
+        target.on_safekeeper_deploy(fake_id, different_pk)
+    assert exc.value.status_code == 500
+
+    inserted_again = target.get_safekeeper(fake_id)
+    assert inserted_again is not None
+    assert eq_safekeeper_records(inserted, inserted_again)
+
+    # the most common case, version goes up:
+    body["version"] += 1
+    target.on_safekeeper_deploy(fake_id, body)
+    inserted_now = target.get_safekeeper(fake_id)
+    assert inserted_now is not None
+
+    assert eq_safekeeper_records(body, inserted_now)
+
+
+def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    compared = [dict(a), dict(b)]
+
+    for d in compared:
+        del d["created_at"]
+        del d["updated_at"]
+
+    return compared[0] == compared[1]
