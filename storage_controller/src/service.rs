@@ -22,7 +22,7 @@ use crate::{
     peer_client::GlobalObservedState,
     persistence::{
         AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
-        TenantFilter,
+        ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
@@ -3106,20 +3106,44 @@ impl Service {
             // will still be the latest when we're done: we will check generations again at the end of
             // this function to handle that.
             let generations = self.persistence.peek_generations(tenant_id).await?;
-            let generations = if generations.iter().any(|i| i.1.is_none()) {
-                // One or more shards is not attached to anything: maybe this is a new tenant?  Wait for
-                // it to reconcile.
-                self.ensure_attached_wait(tenant_id).await?;
-                self.persistence.peek_generations(tenant_id).await?
-            } else {
-                generations
-            };
+
+            if generations
+                .iter()
+                .any(|i| i.generation.is_none() || i.generation_pageserver.is_none())
+            {
+                // One or more shards has not been attached to a pageserver.  Check if this is because it's configured
+                // to be detached (409: caller should give up), or because it's meant to be attached but isn't yet (503: caller should retry)
+                let locked = self.inner.read().unwrap();
+                for (shard_id, shard) in
+                    locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+                {
+                    match shard.policy {
+                        PlacementPolicy::Attached(_) => {
+                            // This shard is meant to be attached: the caller is not wrong to try and
+                            // use this function, but we can't service the request right now.
+                        }
+                        PlacementPolicy::Secondary | PlacementPolicy::Detached => {
+                            return Err(ApiError::Conflict(format!(
+                                "Shard {shard_id} tenant has policy {:?}",
+                                shard.policy
+                            )));
+                        }
+                    }
+                }
+
+                return Err(ApiError::ResourceUnavailable(
+                    "One or more shards in tenant is not yet attached".into(),
+                ));
+            }
 
             let locked = self.inner.read().unwrap();
-            for (tenant_shard_id, generation, generation_pageserver) in generations {
-                let node_id = generation_pageserver.ok_or(ApiError::Conflict(
-                    "Tenant not currently attached".to_string(),
-                ))?;
+            for ShardGenerationState {
+                tenant_shard_id,
+                generation,
+                generation_pageserver,
+            } in generations
+            {
+                let node_id = generation_pageserver.expect("We checked for None above");
                 let node = locked
                     .nodes
                     .get(&node_id)
@@ -3141,7 +3165,13 @@ impl Service {
             let latest_generations = self.persistence.peek_generations(tenant_id).await?;
             if latest_generations
                 .into_iter()
-                .map(|g| (g.0, g.1))
+                .map(
+                    |ShardGenerationState {
+                         tenant_shard_id,
+                         generation,
+                         generation_pageserver: _,
+                     }| (tenant_shard_id, generation),
+                )
                 .collect::<Vec<_>>()
                 != target_gens
                     .into_iter()
@@ -5278,72 +5308,6 @@ impl Service {
         Err(ApiError::PreconditionFailed(
             format!("Node {node_id} has no fill in progress").into(),
         ))
-    }
-
-    /// Helper for methods that will try and call pageserver APIs for
-    /// a tenant, such as timeline CRUD: they cannot proceed unless the tenant
-    /// is attached somewhere.
-    fn ensure_attached_schedule(
-        &self,
-        mut locked: std::sync::RwLockWriteGuard<'_, ServiceState>,
-        tenant_id: TenantId,
-    ) -> Result<Vec<ReconcilerWaiter>, anyhow::Error> {
-        let mut waiters = Vec::new();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
-
-        let mut schedule_context = ScheduleContext::default();
-        for (tenant_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
-            shard.schedule(scheduler, &mut schedule_context)?;
-
-            // The shard's policies may not result in an attached location being scheduled: this
-            // is an error because our caller needs it attached somewhere.
-            if shard.intent.get_attached().is_none() {
-                return Err(anyhow::anyhow!(
-                    "Tenant {tenant_id} not scheduled to be attached"
-                ));
-            };
-
-            if shard.stably_attached().is_some() {
-                // We do not require the shard to be totally up to date on reconciliation: we just require
-                // that it has been attached on the intended node.   Other dirty state such as unattached secondary
-                // locations, or compute hook notifications can be ignored.
-                continue;
-            }
-
-            if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
-                tracing::info!("Waiting for shard {tenant_shard_id} to reconcile, in order to ensure it is attached");
-                waiters.push(waiter);
-            }
-        }
-        Ok(waiters)
-    }
-
-    async fn ensure_attached_wait(&self, tenant_id: TenantId) -> Result<(), ApiError> {
-        let ensure_waiters = {
-            let locked = self.inner.write().unwrap();
-
-            // Check if the tenant is splitting: in this case, even if it is attached,
-            // we must act as if it is not: this blocks e.g. timeline creation/deletion
-            // operations during the split.
-            for (_shard_id, shard) in locked.tenants.range(TenantShardId::tenant_range(tenant_id)) {
-                if !matches!(shard.splitting, SplitState::Idle) {
-                    return Err(ApiError::ResourceUnavailable(
-                        "Tenant shards are currently splitting".into(),
-                    ));
-                }
-            }
-
-            self.ensure_attached_schedule(locked, tenant_id)
-                .map_err(ApiError::InternalServerError)?
-        };
-
-        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
-        for waiter in ensure_waiters {
-            let timeout = deadline.duration_since(Instant::now());
-            waiter.wait_timeout(timeout).await?;
-        }
-
-        Ok(())
     }
 
     /// Like [`Self::maybe_configured_reconcile_shard`], but uses the default reconciler
