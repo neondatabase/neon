@@ -1494,8 +1494,9 @@ impl LayerInner {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
                     Ok(elapsed) => {
-                        let accessed = self.access_stats.accessed();
-                        if accessed {
+                        let accessed_and_visible = self.access_stats.accessed()
+                            && self.access_stats.visibility() == LayerVisibilityHint::Visible;
+                        if accessed_and_visible {
                             // Only layers used for reads contribute to our "low residence" metric that is used
                             // to detect thrashing.  Layers promoted for other reasons (e.g. compaction) are allowed
                             // to be rapidly evicted without contributing to this metric.
@@ -1509,7 +1510,7 @@ impl LayerInner {
 
                         tracing::info!(
                             residence_millis = elapsed.as_millis(),
-                            accessed,
+                            accessed_and_visible,
                             "evicted layer after known residence period"
                         );
                     }
