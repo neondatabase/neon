@@ -1219,11 +1219,7 @@ pub(crate) fn get_io_buffer_alignment_raw() -> usize {
 /// This function should be used for getting the actual alignment value to use.
 pub(crate) fn get_io_buffer_alignment() -> usize {
     let align = get_io_buffer_alignment_raw();
-    if align == DEFAULT_IO_BUFFER_ALIGNMENT {
-        1
-    } else {
-        align
-    }
+    align.max(1)
 }
 
 #[cfg(test)]
