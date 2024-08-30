@@ -756,7 +756,19 @@ impl VirtualFile {
         })
     }
 
+    /// The function aborts the process if the error is fatal.
     async fn write_at<B: IoBuf + Send>(
+        &self,
+        buf: FullSlice<B>,
+        offset: u64,
+        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+    ) -> (FullSlice<B>, Result<usize, Error>) {
+        let (slice, result) = self.write_at_inner(buf, offset, _ctx).await;
+        let result = result.maybe_fatal_err("write_at");
+        (slice, result)
+    }
+
+    async fn write_at_inner<B: IoBuf + Send>(
         &self,
         buf: FullSlice<B>,
         offset: u64,

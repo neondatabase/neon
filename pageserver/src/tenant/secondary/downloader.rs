@@ -829,6 +829,12 @@ impl<'a> TenantDownloader<'a> {
             layers_downloaded: 0,
             bytes_downloaded: 0,
         };
+
+        // Also expose heatmap bytes_total as a metric
+        self.secondary_state
+            .heatmap_total_size_metric
+            .set(heatmap_stats.bytes);
+
         // Accumulate list of things to delete while holding the detail lock, for execution after dropping the lock
         let mut delete_layers = Vec::new();
         let mut delete_timelines = Vec::new();

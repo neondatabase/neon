@@ -217,7 +217,7 @@ impl StorageController {
         Ok(exitcode.success())
     }
 
-    /// Create our database if it doesn't exist, and run migrations.
+    /// Create our database if it doesn't exist
     ///
     /// This function is equivalent to the `diesel setup` command in the diesel CLI.  We implement
     /// the same steps by hand to avoid imposing a dependency on installing diesel-cli for developers
@@ -382,7 +382,6 @@ impl StorageController {
             )
             .await?;
 
-            // Run migrations on every startup, in case something changed.
             self.setup_database(postgres_port).await?;
         }
 
@@ -454,6 +453,11 @@ impl StorageController {
             let jwt_token =
                 encode_from_key_file(&claims, private_key).expect("failed to generate jwt token");
             args.push(format!("--jwt-token={jwt_token}"));
+
+            let peer_claims = Claims::new(None, Scope::Admin);
+            let peer_jwt_token = encode_from_key_file(&peer_claims, private_key)
+                .expect("failed to generate jwt token");
+            args.push(format!("--peer-jwt-token={peer_jwt_token}"));
         }
 
         if let Some(public_key) = &self.public_key {

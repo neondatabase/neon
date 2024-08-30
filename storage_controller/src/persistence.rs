@@ -25,6 +25,9 @@ use crate::metrics::{
 };
 use crate::node::Node;
 
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
+
 /// ## What do we store?
 ///
 /// The storage controller service does not store most of its state durably.
@@ -72,6 +75,8 @@ pub(crate) enum DatabaseError {
     ConnectionPool(#[from] r2d2::Error),
     #[error("Logical error: {0}")]
     Logical(String),
+    #[error("Migration error: {0}")]
+    Migration(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -165,6 +170,19 @@ impl Persistence {
                 }
             }
         }
+    }
+
+    /// Execute the diesel migrations that are built into this binary
+    pub(crate) async fn migration_run(&self) -> DatabaseResult<()> {
+        use diesel_migrations::{HarnessWithOutput, MigrationHarness};
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            HarnessWithOutput::write_to_stdout(conn)
+                .run_pending_migrations(MIGRATIONS)
+                .map(|_| ())
+                .map_err(|e| DatabaseError::Migration(e.to_string()))
+        })
+        .await
     }
 
     /// Wraps `with_conn` in order to collect latency and error metrics

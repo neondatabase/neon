@@ -230,6 +230,7 @@ pub(crate) enum DatabaseErrorLabel {
     Connection,
     ConnectionPool,
     Logical,
+    Migration,
 }
 
 impl DatabaseError {
@@ -239,6 +240,7 @@ impl DatabaseError {
             Self::Connection(_) => DatabaseErrorLabel::Connection,
             Self::ConnectionPool(_) => DatabaseErrorLabel::ConnectionPool,
             Self::Logical(_) => DatabaseErrorLabel::Logical,
+            Self::Migration(_) => DatabaseErrorLabel::Migration,
         }
     }
 }

@@ -43,7 +43,7 @@ inputs:
   pg_version:
     description: 'Postgres version to use for tests'
     required: false
-    default: 'v14'
+    default: 'v16'
   benchmark_durations:
     description: 'benchmark durations JSON'
     required: false
@@ -169,10 +169,8 @@ runs:
           EXTRA_PARAMS="--durations-path $TEST_OUTPUT/benchmark_durations.json $EXTRA_PARAMS"
         fi
 
-        if [[ "${{ inputs.build_type }}" == "debug" ]]; then
+        if [[ $BUILD_TYPE == "debug" && $RUNNER_ARCH == 'X64' ]]; then
           cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-        elif [[ "${{ inputs.build_type }}" == "release" ]]; then
-          cov_prefix=()
         else
           cov_prefix=()
         fi
