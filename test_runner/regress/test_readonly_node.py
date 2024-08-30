@@ -1,7 +1,15 @@
+import time
+
 import pytest
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import (
+    Endpoint,
+    NeonEnv,
+    NeonEnvBuilder,
+    last_flush_lsn_upload,
+    tenant_get_shards,
+)
 from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.utils import query_scalar
 
@@ -17,7 +25,12 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch("test_readonly_node", "empty")
     endpoint_main = env.endpoints.create_start("test_readonly_node")
 
-    env.pageserver.allowed_errors.append(".*basebackup .* failed: invalid basebackup lsn.*")
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*basebackup .* failed: invalid basebackup lsn.*",
+            ".*page_service.*handle_make_lsn_lease.*.*tried to request a page version that was garbage collected",
+        ]
+    )
 
     main_pg_conn = endpoint_main.connect()
     main_cur = main_pg_conn.cursor()
@@ -103,6 +116,103 @@ def test_readonly_node(neon_simple_env: NeonEnv):
             endpoint_id="ep-readonly_node_preinitdb",
             lsn=Lsn("0/42"),
         )
+
+
+def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
+    """
+    Test static endpoint is protected from GC by acquiring and renewing lsn leases.
+    """
+
+    neon_env_builder.num_pageservers = 2
+    # GC is manual triggered.
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # small checkpointing and compaction targets to ensure we generate many upload operations
+            "checkpoint_distance": f"{128 * 1024}",
+            "compaction_threshold": "1",
+            "compaction_target_size": f"{128 * 1024}",
+            # no PITR horizon, we specify the horizon when we request on-demand GC
+            "pitr_interval": "0s",
+            # disable background compaction and GC. We invoke it manually when we want it to happen.
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            # create image layers eagerly, so that GC can remove some layers
+            "image_creation_threshold": "1",
+            "image_layer_creation_check_threshold": "0",
+            # Short lease length to fit test.
+            "lsn_lease_length": "3s",
+        },
+        initial_tenant_shard_count=2,
+    )
+
+    ROW_COUNT = 500
+
+    def generate_updates_on_main(
+        env: NeonEnv,
+        ep_main: Endpoint,
+        data: int,
+        start=1,
+        end=ROW_COUNT,
+    ) -> Lsn:
+        """
+        Generates some load on main branch that results in some uploads.
+        """
+        with ep_main.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO t0 (v0, v1) SELECT g, '{data}' FROM generate_series({start}, {end}) g ON CONFLICT (v0) DO UPDATE SET v1 = EXCLUDED.v1"
+            )
+            cur.execute("VACUUM t0")
+            last_flush_lsn = last_flush_lsn_upload(
+                env, ep_main, env.initial_tenant, env.initial_timeline
+            )
+        return last_flush_lsn
+
+    # Insert some records on main branch
+    with env.endpoints.create_start("main") as ep_main:
+        with ep_main.cursor() as cur:
+            cur.execute("CREATE TABLE t0(v0 int primary key, v1 text)")
+        lsn = None
+        for i in range(2):
+            lsn = generate_updates_on_main(env, ep_main, i)
+
+        with env.endpoints.create_start(
+            branch_name="main",
+            endpoint_id="static",
+            lsn=lsn,
+        ) as ep_static:
+            with ep_static.cursor() as cur:
+                cur.execute("SELECT count(*) FROM t0")
+                assert cur.fetchone() == (ROW_COUNT,)
+
+            time.sleep(3)
+
+            generate_updates_on_main(env, ep_main, i, end=100)
+
+            # Trigger GC
+            for shard, ps in tenant_get_shards(env, env.initial_tenant):
+                client = ps.http_client()
+                gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
+                log.info(f"{gc_result=}")
+
+                assert (
+                    gc_result["layers_removed"] == 0
+                ), "No layers should be removed, old layers are guarded by leases."
+
+            with ep_static.cursor() as cur:
+                cur.execute("SELECT count(*) FROM t0")
+                assert cur.fetchone() == (ROW_COUNT,)
+
+        # Do some update so we can increment latest_gc_cutoff
+        generate_updates_on_main(env, ep_main, i, end=100)
+
+    # Now trigger GC again, layers should be removed.
+    time.sleep(4)
+    for shard, ps in tenant_get_shards(env, env.initial_tenant):
+        client = ps.http_client()
+        gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
+        log.info(f"{gc_result=}")
+
+        assert gc_result["layers_removed"] > 0, "Old layers should be removed after leases expired."
 
 
 # Similar test, but with more data, and we force checkpoints

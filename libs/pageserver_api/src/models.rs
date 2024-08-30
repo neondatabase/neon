@@ -7,7 +7,7 @@ pub use utilization::PageserverUtilization;
 use std::{
     collections::HashMap,
     io::{BufRead, Read},
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     str::FromStr,
     sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
@@ -493,12 +493,11 @@ pub struct EvictionPolicyLayerAccessThreshold {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ThrottleConfig {
     pub task_kinds: Vec<String>, // TaskKind
-    pub initial: usize,
+    pub initial: u32,
     #[serde(with = "humantime_serde")]
     pub refill_interval: Duration,
-    pub refill_amount: NonZeroUsize,
-    pub max: usize,
-    pub fair: bool,
+    pub refill_amount: NonZeroU32,
+    pub max: u32,
 }
 
 impl ThrottleConfig {
@@ -508,9 +507,8 @@ impl ThrottleConfig {
             // other values don't matter with emtpy `task_kinds`.
             initial: 0,
             refill_interval: Duration::from_millis(1),
-            refill_amount: NonZeroUsize::new(1).unwrap(),
+            refill_amount: NonZeroU32::new(1).unwrap(),
             max: 1,
-            fair: true,
         }
     }
     /// The requests per second allowed  by the given config.
@@ -1070,7 +1068,7 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
     }
 }
 
-// In the V2 protocol version, a GetPage request contains two LSN values:
+// A GetPage request contains two LSN values:
 //
 // request_lsn: Get the page version at this point in time.  Lsn::Max is a special value that means
 // "get the latest version present". It's used by the primary server, which knows that no one else
@@ -1083,7 +1081,7 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
 // passing an earlier LSN can speed up the request, by allowing the pageserver to process the
 // request without waiting for 'request_lsn' to arrive.
 //
-// The legacy V1 interface contained only one LSN, and a boolean 'latest' flag. The V1 interface was
+// The now-defunct V1 interface contained only one LSN, and a boolean 'latest' flag. The V1 interface was
 // sufficient for the primary; the 'lsn' was equivalent to the 'not_modified_since' value, and
 // 'latest' was set to true. The V2 interface was added because there was no correct way for a
 // standby to request a page at a particular non-latest LSN, and also include the
@@ -1091,15 +1089,11 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
 // request, if the standby knows that the page hasn't been modified since, and risk getting an error
 // if that LSN has fallen behind the GC horizon, or requesting the current replay LSN, which could
 // require the pageserver unnecessarily to wait for the WAL to arrive up to that point. The new V2
-// interface allows sending both LSNs, and let the pageserver do the right thing. There is no
+// interface allows sending both LSNs, and let the pageserver do the right thing. There was no
 // difference in the responses between V1 and V2.
-//
-// The Request structs below reflect the V2 interface. If V1 is used, the parse function
-// maps the old format requests to the new format.
 //
 #[derive(Clone, Copy)]
 pub enum PagestreamProtocolVersion {
-    V1,
     V2,
 }
 
@@ -1238,36 +1232,17 @@ impl PagestreamFeMessage {
         bytes.into()
     }
 
-    pub fn parse<R: std::io::Read>(
-        body: &mut R,
-        protocol_version: PagestreamProtocolVersion,
-    ) -> anyhow::Result<PagestreamFeMessage> {
+    pub fn parse<R: std::io::Read>(body: &mut R) -> anyhow::Result<PagestreamFeMessage> {
         // these correspond to the NeonMessageTag enum in pagestore_client.h
         //
         // TODO: consider using protobuf or serde bincode for less error prone
         // serialization.
         let msg_tag = body.read_u8()?;
 
-        let (request_lsn, not_modified_since) = match protocol_version {
-            PagestreamProtocolVersion::V2 => (
-                Lsn::from(body.read_u64::<BigEndian>()?),
-                Lsn::from(body.read_u64::<BigEndian>()?),
-            ),
-            PagestreamProtocolVersion::V1 => {
-                // In the old protocol, each message starts with a boolean 'latest' flag,
-                // followed by 'lsn'. Convert that to the two LSNs, 'request_lsn' and
-                // 'not_modified_since', used in the new protocol version.
-                let latest = body.read_u8()? != 0;
-                let request_lsn = Lsn::from(body.read_u64::<BigEndian>()?);
-                if latest {
-                    (Lsn::MAX, request_lsn) // get latest version
-                } else {
-                    (request_lsn, request_lsn) // get version at specified LSN
-                }
-            }
-        };
+        // these two fields are the same for every request type
+        let request_lsn = Lsn::from(body.read_u64::<BigEndian>()?);
+        let not_modified_since = Lsn::from(body.read_u64::<BigEndian>()?);
 
-        // The rest of the messages are the same between V1 and V2
         match msg_tag {
             0 => Ok(PagestreamFeMessage::Exists(PagestreamExistsRequest {
                 request_lsn,
@@ -1475,9 +1450,7 @@ mod tests {
         ];
         for msg in messages {
             let bytes = msg.serialize();
-            let reconstructed =
-                PagestreamFeMessage::parse(&mut bytes.reader(), PagestreamProtocolVersion::V2)
-                    .unwrap();
+            let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
             assert!(msg == reconstructed);
         }
     }

@@ -22,27 +22,27 @@ const MAX_RENEW: Duration = Duration::from_secs(3600);
 const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
 
 /// How to get the JWT auth rules
-pub trait FetchAuthRules: Clone + Send + Sync + 'static {
+pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
     fn fetch_auth_rules(
         &self,
         role_name: RoleName,
     ) -> impl Future<Output = anyhow::Result<Vec<AuthRule>>> + Send;
 }
 
-pub struct AuthRule {
-    pub id: String,
-    pub jwks_url: url::Url,
-    pub audience: Option<String>,
+pub(crate) struct AuthRule {
+    pub(crate) id: String,
+    pub(crate) jwks_url: url::Url,
+    pub(crate) audience: Option<String>,
 }
 
 #[derive(Default)]
-pub struct JwkCache {
+pub(crate) struct JwkCache {
     client: reqwest::Client,
 
     map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
 }
 
-pub struct JwkCacheEntry {
+pub(crate) struct JwkCacheEntry {
     /// Should refetch at least every hour to verify when old keys have been removed.
     /// Should refetch when new key IDs are seen only every 5 minutes or so
     last_retrieved: Instant,
@@ -75,7 +75,7 @@ impl KeySet {
     }
 }
 
-pub struct JwkCacheEntryLock {
+pub(crate) struct JwkCacheEntryLock {
     cached: ArcSwapOption<JwkCacheEntry>,
     lookup: tokio::sync::Semaphore,
 }
@@ -309,7 +309,7 @@ impl JwkCacheEntryLock {
 }
 
 impl JwkCache {
-    pub async fn check_jwt<F: FetchAuthRules>(
+    pub(crate) async fn check_jwt<F: FetchAuthRules>(
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,

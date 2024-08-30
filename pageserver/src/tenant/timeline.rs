@@ -68,7 +68,7 @@ use crate::{
     tenant::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::PersistentLayerDesc,
+        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
     },
     walredo,
 };
@@ -218,7 +218,7 @@ pub(crate) struct RelSizeCache {
 }
 
 pub struct Timeline {
-    conf: &'static PageServerConf,
+    pub(crate) conf: &'static PageServerConf,
     tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
 
     myself: Weak<Self>,
@@ -865,6 +865,11 @@ impl Timeline {
         self.ancestor_timeline
             .as_ref()
             .map(|ancestor| ancestor.timeline_id)
+    }
+
+    /// Get the ancestor timeline
+    pub(crate) fn ancestor_timeline(&self) -> Option<&Arc<Timeline>> {
+        self.ancestor_timeline.as_ref()
     }
 
     /// Get the bytes written since the PITR cutoff on this branch, and
@@ -1907,6 +1912,8 @@ impl Timeline {
 
             true
         } else if projected_layer_size >= checkpoint_distance {
+            // NB: this check is relied upon by:
+            let _ = IndexEntry::validate_checkpoint_distance;
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 projected_lsn, layer_size, projected_layer_size
@@ -5702,7 +5709,7 @@ impl<'a> TimelineWriter<'a> {
             return Ok(());
         }
 
-        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch);
+        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch)?;
         let batch_max_lsn = serialized_batch.max_lsn;
         let buf_size: u64 = serialized_batch.raw.len() as u64;
 

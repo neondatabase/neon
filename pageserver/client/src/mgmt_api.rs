@@ -506,6 +506,16 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    /// Configs io buffer alignment at runtime.
+    pub async fn put_io_alignment(&self, align: usize) -> Result<()> {
+        let uri = format!("{}/v1/io_alignment", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, align)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn get_utilization(&self) -> Result<PageserverUtilization> {
         let uri = format!("{}/v1/utilization", self.mgmt_api_endpoint);
         self.get(uri)

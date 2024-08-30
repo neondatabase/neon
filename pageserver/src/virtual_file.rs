@@ -18,6 +18,7 @@ use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use owned_buffers_io::io_buf_ext::FullSlice;
+use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
@@ -1140,9 +1141,12 @@ impl OpenFiles {
 /// server startup.
 ///
 #[cfg(not(test))]
-pub fn init(num_slots: usize, engine: IoEngineKind) {
+pub fn init(num_slots: usize, engine: IoEngineKind, io_buffer_alignment: usize) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
+    }
+    if set_io_buffer_alignment(io_buffer_alignment).is_err() {
+        panic!("IO buffer alignment ({io_buffer_alignment}) is not a power of two");
     }
     io_engine::init(engine);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
@@ -1164,6 +1168,61 @@ fn get_open_files() -> &'static OpenFiles {
         OPEN_FILES.get_or_init(|| OpenFiles::new(TEST_MAX_FILE_DESCRIPTORS))
     } else {
         OPEN_FILES.get().expect("virtual_file::init not called yet")
+    }
+}
+
+static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_ALIGNMENT);
+
+/// Returns true if `x` is zero or a power of two.
+fn is_zero_or_power_of_two(x: usize) -> bool {
+    (x == 0) || ((x & (x - 1)) == 0)
+}
+
+#[allow(unused)]
+pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
+    if is_zero_or_power_of_two(align) {
+        IO_BUFFER_ALIGNMENT.store(align, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    } else {
+        Err(align)
+    }
+}
+
+/// Gets the io buffer alignment requirement. Returns 0 if there is no requirement specified.
+///
+/// This function should be used to check the raw config value.
+pub(crate) fn get_io_buffer_alignment_raw() -> usize {
+    let align = IO_BUFFER_ALIGNMENT.load(std::sync::atomic::Ordering::Relaxed);
+
+    if cfg!(test) {
+        let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
+        if align == DEFAULT_IO_BUFFER_ALIGNMENT {
+            if let Some(test_align) = utils::env::var(env_var_name) {
+                if is_zero_or_power_of_two(test_align) {
+                    test_align
+                } else {
+                    panic!("IO buffer alignment ({test_align}) is not a power of two");
+                }
+            } else {
+                pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT
+            }
+        } else {
+            align
+        }
+    } else {
+        align
+    }
+}
+
+/// Gets the io buffer alignment requirement. Returns 1 if the alignment config is set to zero.
+///
+/// This function should be used for getting the actual alignment value to use.
+pub(crate) fn get_io_buffer_alignment() -> usize {
+    let align = get_io_buffer_alignment_raw();
+    if align == DEFAULT_IO_BUFFER_ALIGNMENT {
+        1
+    } else {
+        align
     }
 }
 

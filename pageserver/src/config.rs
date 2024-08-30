@@ -29,6 +29,7 @@ use utils::{
     logging::LogFormat,
 };
 
+use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::virtual_file;
 use crate::virtual_file::io_engine;
@@ -178,6 +179,8 @@ pub struct PageServerConf {
 
     /// Direct IO settings
     pub virtual_file_direct_io: virtual_file::DirectIoMode,
+
+    pub io_buffer_alignment: usize,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -340,6 +343,7 @@ impl PageServerConf {
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
+            io_buffer_alignment,
             tenant_config,
         } = config_toml;
 
@@ -380,6 +384,7 @@ impl PageServerConf {
             ephemeral_bytes_per_memory_kb,
             compact_level0_phase1_value_access,
             virtual_file_direct_io,
+            io_buffer_alignment,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
@@ -435,6 +440,24 @@ impl PageServerConf {
                 )
             );
         }
+
+        IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
+            .map_err(|msg| anyhow::anyhow!("{msg}"))
+            .with_context(|| {
+                format!(
+                    "effective checkpoint distance is unsupported: {}",
+                    conf.default_tenant_conf.checkpoint_distance
+                )
+            })?;
+
+        IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
+            .map_err(|msg| anyhow::anyhow!("{msg}"))
+            .with_context(|| {
+                format!(
+                    "effective checkpoint distance is unsupported: {}",
+                    conf.default_tenant_conf.checkpoint_distance
+                )
+            })?;
 
         Ok(conf)
     }
@@ -635,6 +658,7 @@ background_task_maximum_delay = '334 s'
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
                 virtual_file_direct_io: virtual_file::DirectIoMode::default(),
+                io_buffer_alignment: defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -708,6 +732,7 @@ background_task_maximum_delay = '334 s'
                 l0_flush: L0FlushConfig::default(),
                 compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
                 virtual_file_direct_io: virtual_file::DirectIoMode::default(),
+                io_buffer_alignment: defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
             },
             "Should be able to parse all basic config values correctly"
         );

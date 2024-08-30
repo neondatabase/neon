@@ -21,19 +21,25 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::time::Duration;
+use std::time::SystemTime;
+
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
+use postgres_ffi::TimestampTz;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 use utils::failpoint_support;
+use utils::rate_limit::RateLimit;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::{DatadirModification, Version};
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::walrecord::*;
@@ -53,6 +59,13 @@ pub struct WalIngest {
     shard: ShardIdentity,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
+    warn_ingest_lag: WarnIngestLag,
+}
+
+struct WarnIngestLag {
+    lag_msg_ratelimit: RateLimit,
+    future_lsn_msg_ratelimit: RateLimit,
+    timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
 impl WalIngest {
@@ -71,6 +84,11 @@ impl WalIngest {
             shard: *timeline.get_shard_identity(),
             checkpoint,
             checkpoint_modified: false,
+            warn_ingest_lag: WarnIngestLag {
+                lag_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+                future_lsn_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+                timestamp_invalid_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+            },
         })
     }
 
@@ -1212,6 +1230,48 @@ impl WalIngest {
         Ok(())
     }
 
+    fn warn_on_ingest_lag(
+        &mut self,
+        conf: &crate::config::PageServerConf,
+        wal_timestmap: TimestampTz,
+    ) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        let now = SystemTime::now();
+        let rate_limits = &mut self.warn_ingest_lag;
+        match try_from_pg_timestamp(wal_timestmap) {
+            Ok(ts) => {
+                match now.duration_since(ts) {
+                    Ok(lag) => {
+                        if lag > conf.wait_lsn_timeout {
+                            rate_limits.lag_msg_ratelimit.call2(|rate_limit_stats| {
+                                let lag = humantime::format_duration(lag);
+                                warn!(%rate_limit_stats, %lag, "ingesting record with timestamp lagging more than wait_lsn_timeout");
+                            })
+                        }
+                    },
+                    Err(e) => {
+                        let delta_t = e.duration();
+                        // determined by prod victoriametrics query: 1000 * (timestamp(node_time_seconds{neon_service="pageserver"}) - node_time_seconds)
+                        // => https://www.robustperception.io/time-metric-from-the-node-exporter/
+                        const IGNORED_DRIFT: Duration = Duration::from_millis(100);
+                        if delta_t > IGNORED_DRIFT {
+                            let delta_t = humantime::format_duration(delta_t);
+                            rate_limits.future_lsn_msg_ratelimit.call2(|rate_limit_stats| {
+                                warn!(%rate_limit_stats, %delta_t, "ingesting record with timestamp from future");
+                            })
+                        }
+                    }
+                };
+
+            }
+            Err(error) => {
+                rate_limits.timestamp_invalid_msg_ratelimit.call2(|rate_limit_stats| {
+                    warn!(%rate_limit_stats, %error, "ingesting record with invalid timestamp, cannot calculate lag and will fail find-lsn-for-timestamp type queries");
+                })
+            }
+        }
+    }
+
     /// Subroutine of ingest_record(), to handle an XLOG_XACT_* records.
     ///
     async fn ingest_xact_record(
@@ -1227,6 +1287,8 @@ impl WalIngest {
         let mut segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut page_xids: Vec<TransactionId> = vec![parsed.xid];
+
+        self.warn_on_ingest_lag(modification.tline.conf, parsed.xact_time);
 
         for subxact in &parsed.subxacts {
             let subxact_pageno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
@@ -2303,6 +2365,9 @@ mod tests {
         let _endpoint = Lsn::from_hex("1FFFF98").unwrap();
 
         let harness = TenantHarness::create("test_ingest_real_wal").await.unwrap();
+        let span = harness
+            .span()
+            .in_scope(|| info_span!("timeline_span", timeline_id=%TIMELINE_ID));
         let (tenant, ctx) = harness.load().await;
 
         let remote_initdb_path =
@@ -2354,6 +2419,7 @@ mod tests {
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
                 walingest
                     .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .instrument(span.clone())
                     .await
                     .unwrap();
             }

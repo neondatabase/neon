@@ -1367,7 +1367,7 @@ mod test {
                 .await
                 .unwrap();
         let img_layer = resident_layer.get_as_image(&ctx).await.unwrap();
-        for max_read_size in [1, 1024] {
+        for max_read_size in [1, 2048] {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined

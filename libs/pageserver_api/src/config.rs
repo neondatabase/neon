@@ -80,6 +80,7 @@ pub struct ConfigToml {
     pub l0_flush: Option<crate::models::L0FlushConfig>,
     pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
     pub virtual_file_direct_io: crate::models::virtual_file::DirectIoMode,
+    pub io_buffer_alignment: usize,
 
     pub tenant_config: TenantConfigToml,
 
@@ -355,6 +356,8 @@ pub mod defaults {
         ImageCompressionAlgorithm::Disabled;
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
+
+    pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 0;
 }
 
 impl Default for ConfigToml {
@@ -431,6 +434,8 @@ impl Default for ConfigToml {
             l0_flush: None,
             compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
             virtual_file_direct_io: crate::models::virtual_file::DirectIoMode::default(),
+
+            io_buffer_alignment: DEFAULT_IO_BUFFER_ALIGNMENT,
 
             tenant_config: TenantConfigToml::default(),
         }

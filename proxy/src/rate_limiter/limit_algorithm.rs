@@ -8,13 +8,13 @@ use tokio::{
 
 use self::aimd::Aimd;
 
-pub mod aimd;
+pub(crate) mod aimd;
 
 /// Whether a job succeeded or failed as a result of congestion/overload.
 ///
 /// Errors not considered to be caused by overload should be ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// The job succeeded, or failed in a way unrelated to overload.
     Success,
     /// The job failed because of overload, e.g. it timed out or an explicit backpressure signal
@@ -23,14 +23,14 @@ pub enum Outcome {
 }
 
 /// An algorithm for controlling a concurrency limit.
-pub trait LimitAlgorithm: Send + Sync + 'static {
+pub(crate) trait LimitAlgorithm: Send + Sync + 'static {
     /// Update the concurrency limit in response to a new job completion.
     fn update(&self, old_limit: usize, sample: Sample) -> usize;
 }
 
 /// The result of a job (or jobs), including the [`Outcome`] (loss) and latency (delay).
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
-pub struct Sample {
+pub(crate) struct Sample {
     pub(crate) latency: Duration,
     /// Jobs in flight when the sample was taken.
     pub(crate) in_flight: usize,
@@ -39,7 +39,7 @@ pub struct Sample {
 
 #[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum RateLimitAlgorithm {
+pub(crate) enum RateLimitAlgorithm {
     #[default]
     Fixed,
     Aimd {
@@ -48,7 +48,7 @@ pub enum RateLimitAlgorithm {
     },
 }
 
-pub struct Fixed;
+pub(crate) struct Fixed;
 
 impl LimitAlgorithm for Fixed {
     fn update(&self, old_limit: usize, _sample: Sample) -> usize {
@@ -59,12 +59,12 @@ impl LimitAlgorithm for Fixed {
 #[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq)]
 pub struct RateLimiterConfig {
     #[serde(flatten)]
-    pub algorithm: RateLimitAlgorithm,
-    pub initial_limit: usize,
+    pub(crate) algorithm: RateLimitAlgorithm,
+    pub(crate) initial_limit: usize,
 }
 
 impl RateLimiterConfig {
-    pub fn create_rate_limit_algorithm(self) -> Box<dyn LimitAlgorithm> {
+    pub(crate) fn create_rate_limit_algorithm(self) -> Box<dyn LimitAlgorithm> {
         match self.algorithm {
             RateLimitAlgorithm::Fixed => Box::new(Fixed),
             RateLimitAlgorithm::Aimd { conf } => Box::new(conf),
@@ -72,7 +72,7 @@ impl RateLimiterConfig {
     }
 }
 
-pub struct LimiterInner {
+pub(crate) struct LimiterInner {
     alg: Box<dyn LimitAlgorithm>,
     available: usize,
     limit: usize,
@@ -114,7 +114,7 @@ impl LimiterInner {
 ///
 /// The limit will be automatically adjusted based on observed latency (delay) and/or failures
 /// caused by overload (loss).
-pub struct DynamicLimiter {
+pub(crate) struct DynamicLimiter {
     config: RateLimiterConfig,
     inner: Mutex<LimiterInner>,
     // to notify when a token is available
@@ -124,7 +124,7 @@ pub struct DynamicLimiter {
 /// A concurrency token, required to run a job.
 ///
 /// Release the token back to the [`DynamicLimiter`] after the job is complete.
-pub struct Token {
+pub(crate) struct Token {
     start: Instant,
     limiter: Option<Arc<DynamicLimiter>>,
 }
@@ -133,14 +133,14 @@ pub struct Token {
 ///
 /// Not guaranteed to be consistent under high concurrency.
 #[derive(Debug, Clone, Copy)]
-pub struct LimiterState {
+#[cfg(test)]
+struct LimiterState {
     limit: usize,
-    in_flight: usize,
 }
 
 impl DynamicLimiter {
     /// Create a limiter with a given limit control algorithm.
-    pub fn new(config: RateLimiterConfig) -> Arc<Self> {
+    pub(crate) fn new(config: RateLimiterConfig) -> Arc<Self> {
         let ready = Notify::new();
         ready.notify_one();
 
@@ -157,7 +157,10 @@ impl DynamicLimiter {
     }
 
     /// Try to acquire a concurrency [Token], waiting for `duration` if there are none available.
-    pub async fn acquire_timeout(self: &Arc<Self>, duration: Duration) -> Result<Token, Elapsed> {
+    pub(crate) async fn acquire_timeout(
+        self: &Arc<Self>,
+        duration: Duration,
+    ) -> Result<Token, Elapsed> {
         tokio::time::timeout(duration, self.acquire()).await?
     }
 
@@ -208,12 +211,10 @@ impl DynamicLimiter {
     }
 
     /// The current state of the limiter.
-    pub fn state(&self) -> LimiterState {
+    #[cfg(test)]
+    fn state(&self) -> LimiterState {
         let inner = self.inner.lock();
-        LimiterState {
-            limit: inner.limit,
-            in_flight: inner.in_flight,
-        }
+        LimiterState { limit: inner.limit }
     }
 }
 
@@ -224,22 +225,22 @@ impl Token {
             limiter: Some(limiter),
         }
     }
-    pub fn disabled() -> Self {
+    pub(crate) fn disabled() -> Self {
         Self {
             start: Instant::now(),
             limiter: None,
         }
     }
 
-    pub fn is_disabled(&self) -> bool {
+    pub(crate) fn is_disabled(&self) -> bool {
         self.limiter.is_none()
     }
 
-    pub fn release(mut self, outcome: Outcome) {
+    pub(crate) fn release(mut self, outcome: Outcome) {
         self.release_mut(Some(outcome));
     }
 
-    pub fn release_mut(&mut self, outcome: Option<Outcome>) {
+    pub(crate) fn release_mut(&mut self, outcome: Option<Outcome>) {
         if let Some(limiter) = self.limiter.take() {
             limiter.release_inner(self.start, outcome);
         }
@@ -252,13 +253,10 @@ impl Drop for Token {
     }
 }
 
+#[cfg(test)]
 impl LimiterState {
     /// The current concurrency limit.
-    pub fn limit(&self) -> usize {
+    fn limit(self) -> usize {
         self.limit
-    }
-    /// The number of jobs in flight.
-    pub fn in_flight(&self) -> usize {
-        self.in_flight
     }
 }
