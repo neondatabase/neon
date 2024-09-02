@@ -6441,9 +6441,9 @@ impl Service {
 
     pub(crate) async fn get_safekeeper(
         &self,
-        instance_id: String,
+        id: i64,
     ) -> Result<crate::persistence::SafekeeperPersistence, DatabaseError> {
-        self.persistence.safekeeper_get(instance_id).await
+        self.persistence.safekeeper_get(id).await
     }
 
     pub(crate) async fn upsert_safekeeper(

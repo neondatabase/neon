@@ -2337,7 +2337,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_configs()
     env.start()
 
-    fake_id = "i-fffffffffffffffff"
+    fake_id = 5
 
     target = env.storage_controller
 
@@ -2345,7 +2345,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
 
     body = {
         "active": True,
-        "id": 5,
+        "id": fake_id,
         "created_at": "2023-10-25T09:11:25Z",
         "updated_at": "2024-08-28T11:32:43Z",
         "region_id": "aws-us-east-2",
@@ -2353,7 +2353,6 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
         "port": 6401,
         "http_port": 7676,
         "version": 5957,
-        "instance_id": fake_id,
         "availability_zone_id": "us-east-2b",
     }
 
@@ -2369,10 +2368,7 @@ def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
         different_pk["id"] = 4
         assert different_pk["id"] != body["id"]
         target.on_safekeeper_deploy(fake_id, different_pk)
-    assert exc.value.status_code == 500
-    target.allowed_errors.append(
-        ".*Error processing HTTP request: InternalServerError\\(unsupported: surrogate id update \\(old=5, new=4\\)"
-    )
+    assert exc.value.status_code == 400
 
     inserted_again = target.get_safekeeper(fake_id)
     assert inserted_again is not None

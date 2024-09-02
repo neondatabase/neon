@@ -935,12 +935,12 @@ impl Persistence {
 
     pub(crate) async fn safekeeper_get(
         &self,
-        id: String,
+        id: i64,
     ) -> Result<SafekeeperPersistence, DatabaseError> {
-        use crate::schema::safekeepers::dsl::{instance_id, safekeepers};
+        use crate::schema::safekeepers::dsl::{id as id_column, safekeepers};
         self.with_conn(move |conn| -> DatabaseResult<SafekeeperPersistence> {
             Ok(safekeepers
-                .filter(instance_id.eq(&id))
+                .filter(id_column.eq(&id))
                 .select(SafekeeperPersistence::as_select())
                 .get_result(conn)?)
         })
@@ -956,36 +956,21 @@ impl Persistence {
         use diesel::query_dsl::methods::FilterDsl;
 
         self.with_conn(move |conn| -> DatabaseResult<()> {
-            let insert = record.as_insert();
-            let update = record.as_update();
+            let bind = record.as_insert_or_update();
 
-            let rows: Vec<i64> = diesel::insert_into(safekeepers)
-                .values(&insert)
-                .on_conflict(instance_id)
+            let inserted_updated = diesel::insert_into(safekeepers)
+                .values(&bind)
+                .on_conflict(id)
                 .do_update()
-                .set(((&update), (updated_at.eq(now))))
+                .set(((&bind), (updated_at.eq(now))))
                 // FIXME: is this needed
-                .filter(instance_id.eq(&record.instance_id))
-                .returning(id)
-                // apparently diesel doesn't support reading just one row? (it supports reading
-                // first row)
-                .get_results(conn)?;
+                .filter(id.eq(&record.id))
+                .execute(conn)?;
 
-            if rows.len() != 1 {
+            if inserted_updated != 1 {
                 return Err(DatabaseError::Logical(format!(
                     "unexpected number of rows ({})",
-                    rows.len()
-                )));
-            }
-
-            let row = rows[0];
-
-            if row != record.id {
-                // if we are going to use it as a foreign key, allowing to update it might not be
-                // the wisest call.
-                return Err(DatabaseError::Logical(format!(
-                    "unsupported: surrogate id update (old={row}, new={})",
-                    record.id
+                    inserted_updated
                 )));
             }
 
@@ -1140,7 +1125,6 @@ pub(crate) struct SafekeeperPersistence {
     /// Zero or negative is not really expected.
     /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
     pub(crate) version: i64,
-    pub(crate) instance_id: String,
     pub(crate) host: String,
     pub(crate) port: i32,
     pub(crate) active: bool,
@@ -1149,24 +1133,11 @@ pub(crate) struct SafekeeperPersistence {
 }
 
 impl SafekeeperPersistence {
-    fn as_insert(&self) -> InsertSafekeeper<'_> {
-        InsertSafekeeper {
+    fn as_insert_or_update(&self) -> InsertUpdateSafekeeper<'_> {
+        InsertUpdateSafekeeper {
             id: self.id,
             region_id: &self.region_id,
             version: self.version,
-            instance_id: &self.instance_id,
-            host: &self.host,
-            port: self.port,
-            active: self.active,
-            http_port: self.http_port,
-            availability_zone_id: &self.availability_zone_id,
-        }
-    }
-
-    fn as_update(&self) -> UpdateSafekeeper<'_> {
-        UpdateSafekeeper {
-            region_id: &self.region_id,
-            version: self.version,
             host: &self.host,
             port: self.port,
             active: self.active,
@@ -1176,25 +1147,10 @@ impl SafekeeperPersistence {
     }
 }
 
-/// When inserting, we need the bind the instance_id compared to when updating that is already
-/// bound.
-#[derive(Insertable)]
+#[derive(Insertable, AsChangeset)]
 #[diesel(table_name = crate::schema::safekeepers)]
-struct InsertSafekeeper<'a> {
+struct InsertUpdateSafekeeper<'a> {
     id: i64,
-    region_id: &'a str,
-    version: i64,
-    instance_id: &'a str,
-    host: &'a str,
-    port: i32,
-    active: bool,
-    http_port: i32,
-    availability_zone_id: &'a str,
-}
-
-#[derive(AsChangeset)]
-#[diesel(table_name = crate::schema::safekeepers)]
-struct UpdateSafekeeper<'a> {
     region_id: &'a str,
     version: i64,
     host: &'a str,

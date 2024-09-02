@@ -1,4 +1,4 @@
--- very much a copy of cplane version, except that the projects_count is not included
+-- started out as a copy of cplane schema, removed the unnecessary columns.
 CREATE TABLE safekeepers (
 	-- the surrogate identifier defined by control plane database sequence
 	id BIGINT PRIMARY KEY,
@@ -6,8 +6,8 @@ CREATE TABLE safekeepers (
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	region_id TEXT NOT NULL,
 	version BIGINT NOT NULL,
-	-- the natural id on whatever cloud platform
-	instance_id TEXT UNIQUE NOT NULL,
+	-- the natural id on whatever cloud platform, not needed in storage controller
+	-- instance_id TEXT UNIQUE NOT NULL,
 	host TEXT NOT NULL,
 	port INTEGER NOT NULL,
 	active BOOLEAN NOT NULL DEFAULT false,
