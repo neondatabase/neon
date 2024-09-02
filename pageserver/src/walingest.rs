@@ -51,6 +51,7 @@ use utils::lsn::Lsn;
 
 pub struct WalIngest {
     shard: ShardIdentity,
+    pg_version: u32,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
 }
@@ -69,6 +70,7 @@ impl WalIngest {
 
         Ok(WalIngest {
             shard: *timeline.get_shard_identity(),
+            pg_version: timeline.pg_version,
             checkpoint,
             checkpoint_modified: false,
         })
@@ -96,6 +98,12 @@ impl WalIngest {
         let prev_len = modification.len();
 
         modification.set_lsn(lsn)?;
+
+        if decoded.is_dbase_create_copy(self.pg_version) {
+            // Records of this type should always be preceded by a commit(), as they
+            // rely on reading data pages back from the Timeline.
+            assert!(!modification.has_dirty_data_pages());
+        }
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);

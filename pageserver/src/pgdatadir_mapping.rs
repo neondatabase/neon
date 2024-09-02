@@ -1074,6 +1074,10 @@ impl<'a> DatadirModification<'a> {
         self.pending_bytes
     }
 
+    pub(crate) fn has_dirty_data_pages(&self) -> bool {
+        (!self.pending_data_pages.is_empty()) || (!self.pending_zero_data_pages.is_empty())
+    }
+
     /// Set the current lsn
     pub(crate) fn set_lsn(&mut self, lsn: Lsn) -> anyhow::Result<()> {
         ensure!(
