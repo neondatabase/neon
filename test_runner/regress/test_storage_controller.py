@@ -2330,3 +2330,101 @@ def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder)
             connect=0,  # Disable retries: we want to see the 503
         )
     ).timeline_create(PgVersion.NOT_SET, tenant_id, create_timeline_id)
+
+
+def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvBuilder):
+    """
+    A correctness edge case: while we are live migrating and a shard's generation is
+    visible to the Reconciler but not to the central Service, the generation validation
+    API should still prevent stale generations from doing deletions.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": 128 * 1024,
+        "compaction_threshold": 1,
+        "compaction_target_size": 128 * 1024,
+        # disable background compaction and GC. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+    }
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    env.neon_cli.create_tenant(tenant_id, timeline_id)
+    env.storage_controller.pageserver_api().set_tenant_config(tenant_id, TENANT_CONF)
+
+    # Write enough data that a compaction would do some work (deleting some L0s)
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(64)
+    for _i in range(0, 2):
+        workload.churn_rows(64, upload=False)
+
+    # Upload but don't compact
+    origin_pageserver = env.get_tenant_pageserver(tenant_id)
+    dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
+    origin_pageserver.http_client().timeline_checkpoint(
+        tenant_id, timeline_id, wait_until_uploaded=True, compact=False
+    )
+
+    # Start a compaction that will pause on a failpoint.
+    failpoint = "before-upload-index-pausable"
+    origin_pageserver.http_client().configure_failpoints((failpoint, "sleep(5000)"))
+
+    # This failpoint can also cause migration code to time out trying to politely flush
+    # during migrations
+    origin_pageserver.allowed_errors.append(".*Timed out waiting for flush to remote storage.*")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        compact_fut = executor.submit(
+            origin_pageserver.http_client().timeline_compact,
+            tenant_id,
+            timeline_id,
+            wait_until_uploaded=True,
+        )
+
+        # Let the compaction start and then get stuck uploading an index: when we live migrate, the new generation's
+        # index will be initialized from the pre-compaction index, referencing layers that the compaction will try to delete
+        def has_hit_failpoint():
+            assert origin_pageserver.log_contains(f"at failpoint {failpoint}")
+
+        wait_until(10, 1, has_hit_failpoint)
+
+        # While the compaction is running, start a live migration which will pause long enough for the compaction to sleep,
+        # after incrementing generation and attaching the new location
+        env.storage_controller.configure_failpoints(
+            ("reconciler-live-migrate-post-notify", "sleep(10000)")
+        )
+        migrate_fut = executor.submit(
+            env.storage_controller.tenant_shard_migrate, TenantShardId(tenant_id, 0, 0), dest_ps_id
+        )
+
+        # Origin pageserver has succeeded with compaction before the migration completed. It has done all the writes it wanted to do in its own (stale) generation
+        compact_fut.result()
+        origin_pageserver.http_client().deletion_queue_flush(execute=True)
+
+        # Eventually migration completes
+        migrate_fut.result()
+
+    # Ensure the destination of the migration writes an index, so that if it has corrupt state that is
+    # visible to the scrubber.
+    workload.write_rows(1, upload=False)
+    env.get_pageserver(dest_ps_id).http_client().timeline_checkpoint(
+        tenant_id, timeline_id, wait_until_uploaded=True, compact=False
+    )
+
+    # The destination of the live migration would now have a corrupt index (referencing deleted L0s) if
+    # the controller had not properly applied validation rules.
+    healthy, _summary = env.storage_scrubber.scan_metadata()
+    try:
+        log.info(f"scrubbed, healthy={healthy}")
+        assert healthy
+    except:
+        # On failures, we want to report them FAIL during the test, not as ERROR during teardown
+        neon_env_builder.enable_scrub_on_exit = False
+        raise
