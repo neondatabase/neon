@@ -1929,9 +1929,15 @@ impl<'a> DatadirModification<'a> {
             + self.pending_deletions.len()
     }
 
-    // Read a page from the Timeline we are writing to.  For metadata pages, this passes through
-    // a cache in Self, which makes writes earlier in this modification visible to WAL records later
-    // in the modification.
+    /// Read a page from the Timeline we are writing to.  For metadata pages, this passes through
+    /// a cache in Self, which makes writes earlier in this modification visible to WAL records later
+    /// in the modification.
+    ///
+    /// For data pages, reads pass directly to the owning Timeline: any ingest code which reads a data
+    /// page must ensure that the pages they read are already committed in Timeline, for example
+    /// DB create operations are always preceded by a call to commit().  This is special cased because
+    /// it's rare: all the 'normal' WAL operations will only read metadata pages such as relation sizes,
+    /// and not data pages.
     async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
         if !Self::is_data_key(&key) {
             // Have we already updated the same key? Read the latest pending updated
@@ -1954,6 +1960,18 @@ impl<'a> DatadirModification<'a> {
                         )))
                     };
                 }
+            }
+        } else {
+            // This is an expensive check, so we only do it in debug mode. If reading a data key,
+            // this key should never be present in pending_data_pages. We ensure this by committing
+            // modifications before ingesting DB create operations, which are the only kind that reads
+            // data pages during ingest.
+            if cfg!(debug_assertions) {
+                for (dirty_key, _, _, _) in &self.pending_data_pages {
+                    debug_assert!(&key.to_compact() != dirty_key);
+                }
+
+                debug_assert!(!self.pending_zero_data_pages.contains(&key.to_compact()))
             }
         }
 
