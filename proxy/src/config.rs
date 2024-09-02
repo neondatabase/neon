@@ -25,7 +25,7 @@ use x509_parser::oid_registry;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
-    pub auth_backend: auth::BackendType<'static, (), ()>,
+    pub auth_backend: auth::Backend<'static, (), ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
@@ -247,7 +247,7 @@ impl CertResolver {
 
         let common_name = pem.subject().to_string();
 
-        // We only use non-wildcard certificates in link proxy so it seems okay to treat them the same as
+        // We only use non-wildcard certificates in web auth proxy so it seems okay to treat them the same as
         // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
         // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
         // and passed None instead, which blows up number of cases downstream code should handle. Proper coding

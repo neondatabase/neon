@@ -1,19 +1,19 @@
 mod classic;
 mod hacks;
 pub mod jwt;
-mod link;
 pub mod local;
+mod web;
 
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ipnet::{Ipv4Net, Ipv6Net};
-pub use link::LinkAuthError;
 use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
 use tracing::{info, warn};
+pub(crate) use web::WebAuthError;
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{validate_password_and_exchange, AuthError};
@@ -65,24 +65,24 @@ impl<T> std::ops::Deref for MaybeOwned<'_, T> {
 /// * However, when we substitute `T` with [`ComputeUserInfoMaybeEndpoint`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
-pub enum BackendType<'a, T, D> {
+pub enum Backend<'a, T, D> {
     /// Cloud API (V2).
     Console(MaybeOwned<'a, ConsoleBackend>, T),
     /// Authentication via a web browser.
-    Link(MaybeOwned<'a, url::ApiUrl>, D),
+    Web(MaybeOwned<'a, url::ApiUrl>, D),
     /// Local proxy uses configured auth credentials and does not wake compute
     Local(MaybeOwned<'a, LocalBackend>),
 }
 
-pub trait TestBackend: Send + Sync + 'static {
+#[cfg(test)]
+pub(crate) trait TestBackend: Send + Sync + 'static {
     fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
-    fn get_role_secret(&self) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError>;
 }
 
-impl std::fmt::Display for BackendType<'_, (), ()> {
+impl std::fmt::Display for Backend<'_, (), ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Console(api, ()) => match &**api {
@@ -96,73 +96,73 @@ impl std::fmt::Display for BackendType<'_, (), ()> {
                 #[cfg(test)]
                 ConsoleBackend::Test(_) => fmt.debug_tuple("Test").finish(),
             },
-            Self::Link(url, ()) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
+            Self::Web(url, ()) => fmt.debug_tuple("Web").field(&url.as_str()).finish(),
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
     }
 }
 
-impl<T, D> BackendType<'_, T, D> {
+impl<T, D> Backend<'_, T, D> {
     /// Very similar to [`std::option::Option::as_ref`].
     /// This helps us pass structured config to async tasks.
-    pub fn as_ref(&self) -> BackendType<'_, &T, &D> {
+    pub(crate) fn as_ref(&self) -> Backend<'_, &T, &D> {
         match self {
-            Self::Console(c, x) => BackendType::Console(MaybeOwned::Borrowed(c), x),
-            Self::Link(c, x) => BackendType::Link(MaybeOwned::Borrowed(c), x),
-            Self::Local(l) => BackendType::Local(MaybeOwned::Borrowed(l)),
+            Self::Console(c, x) => Backend::Console(MaybeOwned::Borrowed(c), x),
+            Self::Web(c, x) => Backend::Web(MaybeOwned::Borrowed(c), x),
+            Self::Local(l) => Backend::Local(MaybeOwned::Borrowed(l)),
         }
     }
 }
 
-impl<'a, T, D> BackendType<'a, T, D> {
+impl<'a, T, D> Backend<'a, T, D> {
     /// Very similar to [`std::option::Option::map`].
-    /// Maps [`BackendType<T>`] to [`BackendType<R>`] by applying
+    /// Maps [`Backend<T>`] to [`Backend<R>`] by applying
     /// a function to a contained value.
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> BackendType<'a, R, D> {
+    pub(crate) fn map<R>(self, f: impl FnOnce(T) -> R) -> Backend<'a, R, D> {
         match self {
-            Self::Console(c, x) => BackendType::Console(c, f(x)),
-            Self::Link(c, x) => BackendType::Link(c, x),
-            Self::Local(l) => BackendType::Local(l),
+            Self::Console(c, x) => Backend::Console(c, f(x)),
+            Self::Web(c, x) => Backend::Web(c, x),
+            Self::Local(l) => Backend::Local(l),
         }
     }
 }
-impl<'a, T, D, E> BackendType<'a, Result<T, E>, D> {
+impl<'a, T, D, E> Backend<'a, Result<T, E>, D> {
     /// Very similar to [`std::option::Option::transpose`].
     /// This is most useful for error handling.
-    pub fn transpose(self) -> Result<BackendType<'a, T, D>, E> {
+    pub(crate) fn transpose(self) -> Result<Backend<'a, T, D>, E> {
         match self {
-            Self::Console(c, x) => x.map(|x| BackendType::Console(c, x)),
-            Self::Link(c, x) => Ok(BackendType::Link(c, x)),
-            Self::Local(l) => Ok(BackendType::Local(l)),
+            Self::Console(c, x) => x.map(|x| Backend::Console(c, x)),
+            Self::Web(c, x) => Ok(Backend::Web(c, x)),
+            Self::Local(l) => Ok(Backend::Local(l)),
         }
     }
 }
 
-pub struct ComputeCredentials {
-    pub info: ComputeUserInfo,
-    pub keys: ComputeCredentialKeys,
+pub(crate) struct ComputeCredentials {
+    pub(crate) info: ComputeUserInfo,
+    pub(crate) keys: ComputeCredentialKeys,
 }
 
 #[derive(Debug, Clone)]
-pub struct ComputeUserInfoNoEndpoint {
-    pub user: RoleName,
-    pub options: NeonOptions,
+pub(crate) struct ComputeUserInfoNoEndpoint {
+    pub(crate) user: RoleName,
+    pub(crate) options: NeonOptions,
 }
 
 #[derive(Debug, Clone)]
-pub struct ComputeUserInfo {
-    pub endpoint: EndpointId,
-    pub user: RoleName,
-    pub options: NeonOptions,
+pub(crate) struct ComputeUserInfo {
+    pub(crate) endpoint: EndpointId,
+    pub(crate) user: RoleName,
+    pub(crate) options: NeonOptions,
 }
 
 impl ComputeUserInfo {
-    pub fn endpoint_cache_key(&self) -> EndpointCacheKey {
+    pub(crate) fn endpoint_cache_key(&self) -> EndpointCacheKey {
         self.options.get_cache_key(&self.endpoint)
     }
 }
 
-pub enum ComputeCredentialKeys {
+pub(crate) enum ComputeCredentialKeys {
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
     None,
@@ -222,7 +222,7 @@ impl RateBucketInfo {
 }
 
 impl AuthenticationConfig {
-    pub fn check_rate_limit(
+    pub(crate) fn check_rate_limit(
         &self,
         ctx: &RequestMonitoring,
         config: &AuthenticationConfig,
@@ -403,35 +403,26 @@ async fn authenticate_with_secret(
     classic::authenticate(ctx, info, client, config, secret).await
 }
 
-impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
-    /// Get compute endpoint name from the credentials.
-    pub fn get_endpoint(&self) -> Option<EndpointId> {
-        match self {
-            Self::Console(_, user_info) => user_info.endpoint_id.clone(),
-            Self::Link(_, ()) => Some("link".into()),
-            Self::Local(_) => Some("local".into()),
-        }
-    }
-
+impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
     /// Get username from the credentials.
-    pub fn get_user(&self) -> &str {
+    pub(crate) fn get_user(&self) -> &str {
         match self {
             Self::Console(_, user_info) => &user_info.user,
-            Self::Link(_, ()) => "link",
+            Self::Web(_, ()) => "web",
             Self::Local(_) => "local",
         }
     }
 
     /// Authenticate the client via the requested backend, possibly using credentials.
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
-    pub async fn authenticate(
+    pub(crate) async fn authenticate(
         self,
         ctx: &RequestMonitoring,
         client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
         allow_cleartext: bool,
         config: &'static AuthenticationConfig,
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-    ) -> auth::Result<BackendType<'a, ComputeCredentials, NodeInfo>> {
+    ) -> auth::Result<Backend<'a, ComputeCredentials, NodeInfo>> {
         let res = match self {
             Self::Console(api, user_info) => {
                 info!(
@@ -450,15 +441,15 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
                     endpoint_rate_limiter,
                 )
                 .await?;
-                BackendType::Console(api, credentials)
+                Backend::Console(api, credentials)
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Self::Link(url, ()) => {
-                info!("performing link authentication");
+            Self::Web(url, ()) => {
+                info!("performing web authentication");
 
-                let info = link::authenticate(ctx, &url, client).await?;
+                let info = web::authenticate(ctx, &url, client).await?;
 
-                BackendType::Link(url, info)
+                Backend::Web(url, info)
             }
             Self::Local(_) => {
                 return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
@@ -470,39 +461,39 @@ impl<'a> BackendType<'a, ComputeUserInfoMaybeEndpoint, &()> {
     }
 }
 
-impl BackendType<'_, ComputeUserInfo, &()> {
-    pub async fn get_role_secret(
+impl Backend<'_, ComputeUserInfo, &()> {
+    pub(crate) async fn get_role_secret(
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         match self {
             Self::Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
-            Self::Link(_, ()) => Ok(Cached::new_uncached(None)),
+            Self::Web(_, ()) => Ok(Cached::new_uncached(None)),
             Self::Local(_) => Ok(Cached::new_uncached(None)),
         }
     }
 
-    pub async fn get_allowed_ips_and_secret(
+    pub(crate) async fn get_allowed_ips_and_secret(
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         match self {
             Self::Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
-            Self::Link(_, ()) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
+            Self::Web(_, ()) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
             Self::Local(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
+impl ComputeConnectBackend for Backend<'_, ComputeCredentials, NodeInfo> {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
         match self {
             Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Self::Link(_, info) => Ok(Cached::new_uncached(info.clone())),
+            Self::Web(_, info) => Ok(Cached::new_uncached(info.clone())),
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
@@ -510,21 +501,23 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, NodeInfo> {
     fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
             Self::Console(_, creds) => &creds.keys,
-            Self::Link(_, _) => &ComputeCredentialKeys::None,
+            Self::Web(_, _) => &ComputeCredentialKeys::None,
             Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
+impl ComputeConnectBackend for Backend<'_, ComputeCredentials, &()> {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
     ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
         match self {
             Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Self::Link(_, ()) => unreachable!("link auth flow doesn't support waking the compute"),
+            Self::Web(_, ()) => {
+                unreachable!("web auth flow doesn't support waking the compute")
+            }
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
@@ -532,7 +525,7 @@ impl ComputeConnectBackend for BackendType<'_, ComputeCredentials, &()> {
     fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
             Self::Console(_, creds) => &creds.keys,
-            Self::Link(_, ()) => &ComputeCredentialKeys::None,
+            Self::Web(_, ()) => &ComputeCredentialKeys::None,
             Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use camino::Utf8PathBuf;
 use pageserver_api::controller_api::{MetadataHealthUpdateRequest, MetadataHealthUpdateResponse};
 use pageserver_api::shard::TenantShardId;
@@ -7,6 +7,7 @@ use storage_controller_client::control_api;
 use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use storage_scrubber::pageserver_physical_gc::GcMode;
 use storage_scrubber::scan_pageserver_metadata::scan_pageserver_metadata;
+use storage_scrubber::scan_safekeeper_metadata::DatabaseOrList;
 use storage_scrubber::tenant_snapshot::SnapshotDownloader;
 use storage_scrubber::{find_large_objects, ControllerClientConfig};
 use storage_scrubber::{
@@ -76,6 +77,9 @@ enum Command {
         /// For safekeeper node_kind only, table in the db with debug dump
         #[arg(long, default_value = None)]
         dump_db_table: Option<String>,
+        /// For safekeeper node_kind only, json list of timelines and their lsn info
+        #[arg(long, default_value = None)]
+        timeline_lsns: Option<String>,
     },
     TenantSnapshot {
         #[arg(long = "tenant-id")]
@@ -155,20 +159,22 @@ async fn main() -> anyhow::Result<()> {
             post_to_storcon,
             dump_db_connstr,
             dump_db_table,
+            timeline_lsns,
         } => {
             if let NodeKind::Safekeeper = node_kind {
-                let dump_db_connstr =
-                    dump_db_connstr.ok_or(anyhow::anyhow!("dump_db_connstr not specified"))?;
-                let dump_db_table =
-                    dump_db_table.ok_or(anyhow::anyhow!("dump_db_table not specified"))?;
-
-                let summary = scan_safekeeper_metadata(
-                    bucket_config.clone(),
-                    tenant_ids.iter().map(|tshid| tshid.tenant_id).collect(),
-                    dump_db_connstr,
-                    dump_db_table,
-                )
-                .await?;
+                let db_or_list = match (timeline_lsns, dump_db_connstr) {
+                    (Some(timeline_lsns), _) => {
+                        let timeline_lsns = serde_json::from_str(&timeline_lsns).context("parsing timeline_lsns")?;
+                        DatabaseOrList::List(timeline_lsns)
+                    }
+                    (None, Some(dump_db_connstr)) => {
+                        let dump_db_table = dump_db_table.ok_or_else(|| anyhow::anyhow!("dump_db_table not specified"))?;
+                        let tenant_ids = tenant_ids.iter().map(|tshid| tshid.tenant_id).collect();
+                        DatabaseOrList::Database { tenant_ids, connstr: dump_db_connstr, table: dump_db_table }
+                    }
+                    (None, None) => anyhow::bail!("neither `timeline_lsns` specified, nor `dump_db_connstr` and `dump_db_table`"),
+                };
+                let summary = scan_safekeeper_metadata(bucket_config.clone(), db_or_list).await?;
                 if json {
                     println!("{}", serde_json::to_string(&summary).unwrap())
                 } else {

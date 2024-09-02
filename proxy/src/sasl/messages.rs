@@ -5,16 +5,16 @@ use pq_proto::{BeAuthenticationSaslMessage, BeMessage};
 
 /// SASL-specific payload of [`PasswordMessage`](pq_proto::FeMessage::PasswordMessage).
 #[derive(Debug)]
-pub struct FirstMessage<'a> {
+pub(crate) struct FirstMessage<'a> {
     /// Authentication method, e.g. `"SCRAM-SHA-256"`.
-    pub method: &'a str,
+    pub(crate) method: &'a str,
     /// Initial client message.
-    pub message: &'a str,
+    pub(crate) message: &'a str,
 }
 
 impl<'a> FirstMessage<'a> {
     // NB: FromStr doesn't work with lifetimes
-    pub fn parse(bytes: &'a [u8]) -> Option<Self> {
+    pub(crate) fn parse(bytes: &'a [u8]) -> Option<Self> {
         let (method_cstr, tail) = split_cstr(bytes)?;
         let method = method_cstr.to_str().ok()?;
 

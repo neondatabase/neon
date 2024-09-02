@@ -2,18 +2,18 @@ use crate::{compute, config::RetryConfig};
 use std::{error::Error, io};
 use tokio::time;
 
-pub trait CouldRetry {
+pub(crate) trait CouldRetry {
     /// Returns true if the error could be retried
     fn could_retry(&self) -> bool;
 }
 
-pub trait ShouldRetryWakeCompute {
+pub(crate) trait ShouldRetryWakeCompute {
     /// Returns true if we need to invalidate the cache for this node.
     /// If false, we can continue retrying with the current node cache.
     fn should_retry_wake_compute(&self) -> bool;
 }
 
-pub fn should_retry(err: &impl CouldRetry, num_retries: u32, config: RetryConfig) -> bool {
+pub(crate) fn should_retry(err: &impl CouldRetry, num_retries: u32, config: RetryConfig) -> bool {
     num_retries < config.max_retries && err.could_retry()
 }
 
@@ -101,7 +101,7 @@ impl ShouldRetryWakeCompute for compute::ConnectionError {
     }
 }
 
-pub fn retry_after(num_retries: u32, config: RetryConfig) -> time::Duration {
+pub(crate) fn retry_after(num_retries: u32, config: RetryConfig) -> time::Duration {
     config
         .base_delay
         .mul_f64(config.backoff_factor.powi((num_retries as i32) - 1))

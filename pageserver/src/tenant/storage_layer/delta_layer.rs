@@ -40,7 +40,7 @@ use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
-    VectoredReadPlanner,
+    VectoredReadCoalesceMode, VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
@@ -65,7 +65,7 @@ use std::os::unix::fs::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tokio_epoll_uring::IoBufMut;
+use tokio_epoll_uring::IoBuf;
 use tracing::*;
 
 use utils::{
@@ -471,7 +471,7 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, anyhow::Result<()>)
     where
-        Buf: IoBufMut + Send,
+        Buf: IoBuf + Send,
     {
         assert!(
             self.lsn_range.start <= lsn,
@@ -678,7 +678,7 @@ impl DeltaLayerWriter {
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, anyhow::Result<()>)
     where
-        Buf: IoBufMut + Send,
+        Buf: IoBuf + Send,
     {
         self.inner
             .as_mut()
@@ -1205,6 +1205,7 @@ impl DeltaLayerInner {
         let mut prev: Option<(Key, Lsn, BlobRef)> = None;
 
         let mut read_builder: Option<VectoredReadBuilder> = None;
+        let read_mode = VectoredReadCoalesceMode::get();
 
         let max_read_size = self
             .max_vectored_read_bytes
@@ -1253,6 +1254,7 @@ impl DeltaLayerInner {
                         offsets.end.pos(),
                         meta,
                         max_read_size,
+                        read_mode,
                     ))
                 }
             } else {
@@ -2295,7 +2297,7 @@ pub(crate) mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;

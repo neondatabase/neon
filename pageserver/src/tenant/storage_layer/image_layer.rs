@@ -1381,7 +1381,7 @@ mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;

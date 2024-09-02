@@ -1257,6 +1257,7 @@ impl Service {
                     123,
                     "".to_string(),
                     123,
+                    None,
                 );
 
                 scheduler.node_upsert(&node);
@@ -4683,29 +4684,84 @@ impl Service {
         )
         .await;
 
-        {
+        if register_req.availability_zone_id.is_none() {
+            tracing::warn!(
+                "Node {} registering without specific availability zone id",
+                register_req.node_id
+            );
+        }
+
+        enum RegistrationStatus {
+            Matched(Node),
+            Mismatched,
+            New,
+        }
+
+        let registration_status = {
             let locked = self.inner.read().unwrap();
             if let Some(node) = locked.nodes.get(&register_req.node_id) {
-                // Note that we do not do a total equality of the struct, because we don't require
-                // the availability/scheduling states to agree for a POST to be idempotent.
                 if node.registration_match(&register_req) {
-                    tracing::info!(
-                        "Node {} re-registered with matching address",
-                        register_req.node_id
-                    );
-                    return Ok(());
+                    RegistrationStatus::Matched(node.clone())
                 } else {
-                    // TODO: decide if we want to allow modifying node addresses without removing and re-adding
-                    // the node.  Safest/simplest thing is to refuse it, and usually we deploy with
-                    // a fixed address through the lifetime of a node.
-                    tracing::warn!(
-                        "Node {} tried to register with different address",
-                        register_req.node_id
-                    );
-                    return Err(ApiError::Conflict(
-                        "Node is already registered with different address".to_string(),
-                    ));
+                    RegistrationStatus::Mismatched
                 }
+            } else {
+                RegistrationStatus::New
+            }
+        };
+
+        match registration_status {
+            RegistrationStatus::Matched(node) => {
+                tracing::info!(
+                    "Node {} re-registered with matching address",
+                    register_req.node_id
+                );
+
+                if node.get_availability_zone_id().is_none() {
+                    if let Some(az_id) = register_req.availability_zone_id.clone() {
+                        tracing::info!("Extracting availability zone id from registration request for node {}: {}",
+                                       register_req.node_id, az_id);
+
+                        // Persist to the database and update in memory state. See comment below
+                        // on ordering.
+                        self.persistence
+                            .set_node_availability_zone_id(register_req.node_id, az_id)
+                            .await?;
+                        let node_with_az = Node::new(
+                            register_req.node_id,
+                            register_req.listen_http_addr,
+                            register_req.listen_http_port,
+                            register_req.listen_pg_addr,
+                            register_req.listen_pg_port,
+                            register_req.availability_zone_id,
+                        );
+
+                        let mut locked = self.inner.write().unwrap();
+                        let mut new_nodes = (*locked.nodes).clone();
+
+                        locked.scheduler.node_upsert(&node_with_az);
+                        new_nodes.insert(register_req.node_id, node_with_az);
+
+                        locked.nodes = Arc::new(new_nodes);
+                    }
+                }
+
+                return Ok(());
+            }
+            RegistrationStatus::Mismatched => {
+                // TODO: decide if we want to allow modifying node addresses without removing and re-adding
+                // the node.  Safest/simplest thing is to refuse it, and usually we deploy with
+                // a fixed address through the lifetime of a node.
+                tracing::warn!(
+                    "Node {} tried to register with different address",
+                    register_req.node_id
+                );
+                return Err(ApiError::Conflict(
+                    "Node is already registered with different address".to_string(),
+                ));
+            }
+            RegistrationStatus::New => {
+                // fallthrough
             }
         }
 
@@ -4742,6 +4798,7 @@ impl Service {
             register_req.listen_http_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
+            register_req.availability_zone_id,
         );
 
         // TODO: idempotency if the node already exists in the database

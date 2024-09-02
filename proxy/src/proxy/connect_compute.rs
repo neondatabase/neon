@@ -25,7 +25,7 @@ const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
 #[tracing::instrument(name = "invalidate_cache", skip_all)]
-pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
+pub(crate) fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
     let is_cached = node_info.cached();
     if is_cached {
         warn!("invalidating stalled compute node info cache entry");
@@ -41,7 +41,7 @@ pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
 }
 
 #[async_trait]
-pub trait ConnectMechanism {
+pub(crate) trait ConnectMechanism {
     type Connection;
     type ConnectError: ReportableError;
     type Error: From<Self::ConnectError>;
@@ -56,7 +56,7 @@ pub trait ConnectMechanism {
 }
 
 #[async_trait]
-pub trait ComputeConnectBackend {
+pub(crate) trait ComputeConnectBackend {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
@@ -65,12 +65,12 @@ pub trait ComputeConnectBackend {
     fn get_keys(&self) -> &ComputeCredentialKeys;
 }
 
-pub struct TcpMechanism<'a> {
+pub(crate) struct TcpMechanism<'a> {
     /// KV-dictionary with PostgreSQL connection params.
-    pub params: &'a StartupMessageParams,
+    pub(crate) params: &'a StartupMessageParams,
 
     /// connect_to_compute concurrency lock
-    pub locks: &'static ApiLocks<Host>,
+    pub(crate) locks: &'static ApiLocks<Host>,
 }
 
 #[async_trait]
@@ -98,7 +98,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
 
 /// Try to connect to the compute node, retrying if necessary.
 #[tracing::instrument(skip_all)]
-pub async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
+pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
     ctx: &RequestMonitoring,
     mechanism: &M,
     user_info: &B,

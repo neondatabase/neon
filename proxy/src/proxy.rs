@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests;
 
-pub mod connect_compute;
+pub(crate) mod connect_compute;
 mod copy_bidirectional;
-pub mod handshake;
-pub mod passthrough;
-pub mod retry;
-pub mod wake_compute;
+pub(crate) mod handshake;
+pub(crate) mod passthrough;
+pub(crate) mod retry;
+pub(crate) mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
 pub use copy_bidirectional::ErrorSource;
 
@@ -170,21 +170,21 @@ pub async fn task_main(
     Ok(())
 }
 
-pub enum ClientMode {
+pub(crate) enum ClientMode {
     Tcp,
     Websockets { hostname: Option<String> },
 }
 
 /// Abstracts the logic of handling TCP vs WS clients
 impl ClientMode {
-    pub fn allow_cleartext(&self) -> bool {
+    pub(crate) fn allow_cleartext(&self) -> bool {
         match self {
             ClientMode::Tcp => false,
             ClientMode::Websockets { .. } => true,
         }
     }
 
-    pub fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
+    pub(crate) fn allow_self_signed_compute(&self, config: &ProxyConfig) -> bool {
         match self {
             ClientMode::Tcp => config.allow_self_signed_compute,
             ClientMode::Websockets { .. } => false,
@@ -213,7 +213,7 @@ impl ClientMode {
 // 2. Handshake: handshake reports errors if it can, otherwise if the handshake fails due to protocol violation,
 //    we cannot be sure the client even understands our error message
 // 3. PrepareClient: The client disconnected, so we can't tell them anyway...
-pub enum ClientRequestError {
+pub(crate) enum ClientRequestError {
     #[error("{0}")]
     Cancellation(#[from] cancellation::CancelError),
     #[error("{0}")]
@@ -238,7 +238,7 @@ impl ReportableError for ClientRequestError {
     }
 }
 
-pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
     ctx: &RequestMonitoring,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -340,9 +340,9 @@ pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         client: stream,
         aux: node.aux.clone(),
         compute: node,
-        req: request_gauge,
-        conn: conn_gauge,
-        cancel: session,
+        _req: request_gauge,
+        _conn: conn_gauge,
+        _cancel: session,
     }))
 }
 
@@ -377,20 +377,20 @@ async fn prepare_client_connection<P>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct NeonOptions(Vec<(SmolStr, SmolStr)>);
+pub(crate) struct NeonOptions(Vec<(SmolStr, SmolStr)>);
 
 impl NeonOptions {
-    pub fn parse_params(params: &StartupMessageParams) -> Self {
+    pub(crate) fn parse_params(params: &StartupMessageParams) -> Self {
         params
             .options_raw()
             .map(Self::parse_from_iter)
             .unwrap_or_default()
     }
-    pub fn parse_options_raw(options: &str) -> Self {
+    pub(crate) fn parse_options_raw(options: &str) -> Self {
         Self::parse_from_iter(StartupMessageParams::parse_options_raw(options))
     }
 
-    pub fn is_ephemeral(&self) -> bool {
+    pub(crate) fn is_ephemeral(&self) -> bool {
         // Currently, neon endpoint options are all reserved for ephemeral endpoints.
         !self.0.is_empty()
     }
@@ -404,7 +404,7 @@ impl NeonOptions {
         Self(options)
     }
 
-    pub fn get_cache_key(&self, prefix: &str) -> EndpointCacheKey {
+    pub(crate) fn get_cache_key(&self, prefix: &str) -> EndpointCacheKey {
         // prefix + format!(" {k}:{v}")
         // kinda jank because SmolStr is immutable
         std::iter::once(prefix)
@@ -415,7 +415,7 @@ impl NeonOptions {
 
     /// <https://swagger.io/docs/specification/serialization/> DeepObject format
     /// `paramName[prop1]=value1&paramName[prop2]=value2&...`
-    pub fn to_deep_object(&self) -> Vec<(SmolStr, SmolStr)> {
+    pub(crate) fn to_deep_object(&self) -> Vec<(SmolStr, SmolStr)> {
         self.0
             .iter()
             .map(|(k, v)| (format_smolstr!("options[{}]", k), v.clone()))
@@ -423,7 +423,7 @@ impl NeonOptions {
     }
 }
 
-pub fn neon_option(bytes: &str) -> Option<(&str, &str)> {
+pub(crate) fn neon_option(bytes: &str) -> Option<(&str, &str)> {
     static RE: OnceCell<Regex> = OnceCell::new();
     let re = RE.get_or_init(|| Regex::new(r"^neon_(\w+):(.+)").unwrap());
 

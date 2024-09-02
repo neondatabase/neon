@@ -62,8 +62,8 @@ pub struct ParquetUploadArgs {
 // But after FAILED_UPLOAD_WARN_THRESHOLD retries, we start to log it at WARN
 // level instead, as repeated failures can mean a more serious problem. If it
 // fails more than FAILED_UPLOAD_RETRIES times, we give up
-pub const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
-pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
+pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 // the parquet crate leaves a lot to be desired...
 // what follows is an attempt to write parquet files with minimal allocs.
@@ -73,7 +73,7 @@ pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 // * after each rowgroup write, we check the length of the file and upload to s3 if large enough
 
 #[derive(parquet_derive::ParquetRecordWriter)]
-pub struct RequestData {
+pub(crate) struct RequestData {
     region: &'static str,
     protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
@@ -607,40 +607,6 @@ mod tests {
                 (1315648, 3, 6000),
                 (1315884, 3, 6000),
                 (438913, 1, 2000)
-            ]
-        );
-
-        tmpdir.close().unwrap();
-    }
-
-    #[tokio::test]
-    async fn verify_parquet_min_compression() {
-        let tmpdir = camino_tempfile::tempdir().unwrap();
-
-        let config = ParquetConfig {
-            propeties: Arc::new(
-                WriterProperties::builder()
-                    .set_compression(parquet::basic::Compression::ZSTD(ZstdLevel::default()))
-                    .build(),
-            ),
-            rows_per_group: 2_000,
-            file_size: 1_000_000,
-            max_duration: time::Duration::from_secs(20 * 60),
-            test_remote_failures: 0,
-        };
-
-        let rx = random_stream(50_000);
-        let file_stats = run_test(tmpdir.path(), config, rx).await;
-
-        // with compression, there are fewer files with more rows per file
-        assert_eq!(
-            file_stats,
-            [
-                (1223214, 5, 10000),
-                (1229364, 5, 10000),
-                (1231158, 5, 10000),
-                (1230520, 5, 10000),
-                (1221798, 5, 10000)
             ]
         );
 

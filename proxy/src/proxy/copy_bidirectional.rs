@@ -14,7 +14,7 @@ enum TransferState {
 }
 
 #[derive(Debug)]
-pub enum ErrorDirection {
+pub(crate) enum ErrorDirection {
     Read(io::Error),
     Write(io::Error),
 }

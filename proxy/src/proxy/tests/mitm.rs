@@ -102,7 +102,7 @@ async fn proxy_mitm(
 }
 
 /// taken from tokio-postgres
-pub async fn connect_tls<S, T>(mut stream: S, tls: T) -> T::Stream
+pub(crate) async fn connect_tls<S, T>(mut stream: S, tls: T) -> T::Stream
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,

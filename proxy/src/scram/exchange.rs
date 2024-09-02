@@ -56,14 +56,14 @@ enum ExchangeState {
 }
 
 /// Server's side of SCRAM auth algorithm.
-pub struct Exchange<'a> {
+pub(crate) struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
     tls_server_end_point: config::TlsServerEndPoint,
 }
 
 impl<'a> Exchange<'a> {
-    pub fn new(
+    pub(crate) fn new(
         secret: &'a ServerSecret,
         nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
         tls_server_end_point: config::TlsServerEndPoint,
@@ -86,8 +86,7 @@ async fn derive_client_key(
 ) -> ScramKey {
     let salted_password = pool
         .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
-        .await
-        .expect("job should not be cancelled");
+        .await;
 
     let make_key = |name| {
         let key = Hmac::<Sha256>::new_from_slice(&salted_password)
@@ -101,7 +100,7 @@ async fn derive_client_key(
     make_key(b"Client Key").into()
 }
 
-pub async fn exchange(
+pub(crate) async fn exchange(
     pool: &ThreadPool,
     endpoint: EndpointIdInt,
     secret: &ServerSecret,

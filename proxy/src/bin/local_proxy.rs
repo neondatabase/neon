@@ -212,7 +212,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
 
     Ok(Box::leak(Box::new(ProxyConfig {
         tls_config: None,
-        auth_backend: proxy::auth::BackendType::Local(proxy::auth::backend::MaybeOwned::Owned(
+        auth_backend: proxy::auth::Backend::Local(proxy::auth::backend::MaybeOwned::Owned(
             LocalBackend::new(args.compute),
         )),
         metric_collection: None,

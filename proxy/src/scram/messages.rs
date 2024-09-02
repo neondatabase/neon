@@ -8,7 +8,7 @@ use std::fmt;
 use std::ops::Range;
 
 /// Faithfully taken from PostgreSQL.
-pub const SCRAM_RAW_NONCE_LEN: usize = 18;
+pub(crate) const SCRAM_RAW_NONCE_LEN: usize = 18;
 
 /// Although we ignore all extensions, we still have to validate the message.
 fn validate_sasl_extensions<'a>(parts: impl Iterator<Item = &'a str>) -> Option<()> {
@@ -27,18 +27,18 @@ fn validate_sasl_extensions<'a>(parts: impl Iterator<Item = &'a str>) -> Option<
 }
 
 #[derive(Debug)]
-pub struct ClientFirstMessage<'a> {
+pub(crate) struct ClientFirstMessage<'a> {
     /// `client-first-message-bare`.
-    pub bare: &'a str,
+    pub(crate) bare: &'a str,
     /// Channel binding mode.
-    pub cbind_flag: ChannelBinding<&'a str>,
+    pub(crate) cbind_flag: ChannelBinding<&'a str>,
     /// Client nonce.
-    pub nonce: &'a str,
+    pub(crate) nonce: &'a str,
 }
 
 impl<'a> ClientFirstMessage<'a> {
     // NB: FromStr doesn't work with lifetimes
-    pub fn parse(input: &'a str) -> Option<Self> {
+    pub(crate) fn parse(input: &'a str) -> Option<Self> {
         let mut parts = input.split(',');
 
         let cbind_flag = ChannelBinding::parse(parts.next()?)?;
@@ -77,7 +77,7 @@ impl<'a> ClientFirstMessage<'a> {
     }
 
     /// Build a response to [`ClientFirstMessage`].
-    pub fn build_server_first_message(
+    pub(crate) fn build_server_first_message(
         &self,
         nonce: &[u8; SCRAM_RAW_NONCE_LEN],
         salt_base64: &str,
@@ -101,20 +101,20 @@ impl<'a> ClientFirstMessage<'a> {
 }
 
 #[derive(Debug)]
-pub struct ClientFinalMessage<'a> {
+pub(crate) struct ClientFinalMessage<'a> {
     /// `client-final-message-without-proof`.
-    pub without_proof: &'a str,
+    pub(crate) without_proof: &'a str,
     /// Channel binding data (base64).
-    pub channel_binding: &'a str,
+    pub(crate) channel_binding: &'a str,
     /// Combined client & server nonce.
-    pub nonce: &'a str,
+    pub(crate) nonce: &'a str,
     /// Client auth proof.
-    pub proof: [u8; SCRAM_KEY_LEN],
+    pub(crate) proof: [u8; SCRAM_KEY_LEN],
 }
 
 impl<'a> ClientFinalMessage<'a> {
     // NB: FromStr doesn't work with lifetimes
-    pub fn parse(input: &'a str) -> Option<Self> {
+    pub(crate) fn parse(input: &'a str) -> Option<Self> {
         let (without_proof, proof) = input.rsplit_once(',')?;
 
         let mut parts = without_proof.split(',');
@@ -135,7 +135,7 @@ impl<'a> ClientFinalMessage<'a> {
     }
 
     /// Build a response to [`ClientFinalMessage`].
-    pub fn build_server_final_message(
+    pub(crate) fn build_server_final_message(
         &self,
         signature_builder: SignatureBuilder<'_>,
         server_key: &ScramKey,
@@ -153,7 +153,7 @@ impl<'a> ClientFinalMessage<'a> {
 
 /// We need to keep a convenient representation of this
 /// message for the next authentication step.
-pub struct OwnedServerFirstMessage {
+pub(crate) struct OwnedServerFirstMessage {
     /// Owned `server-first-message`.
     message: String,
     /// Slice into `message`.
@@ -163,13 +163,13 @@ pub struct OwnedServerFirstMessage {
 impl OwnedServerFirstMessage {
     /// Extract combined nonce from the message.
     #[inline(always)]
-    pub fn nonce(&self) -> &str {
+    pub(crate) fn nonce(&self) -> &str {
         &self.message[self.nonce.clone()]
     }
 
     /// Get reference to a text representation of the message.
     #[inline(always)]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.message
     }
 }

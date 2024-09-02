@@ -29,14 +29,14 @@ use crate::{
 
 use super::conn_pool::{poll_client, AuthData, Client, ConnInfo, GlobalConnPool};
 
-pub struct PoolingBackend {
-    pub pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
-    pub config: &'static ProxyConfig,
-    pub endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+pub(crate) struct PoolingBackend {
+    pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pub(crate) config: &'static ProxyConfig,
+    pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
 impl PoolingBackend {
-    pub async fn authenticate_with_password(
+    pub(crate) async fn authenticate_with_password(
         &self,
         ctx: &RequestMonitoring,
         config: &AuthenticationConfig,
@@ -98,20 +98,20 @@ impl PoolingBackend {
         })
     }
 
-    pub async fn authenticate_with_jwt(
+    pub(crate) async fn authenticate_with_jwt(
         &self,
         ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
         jwt: &str,
     ) -> Result<ComputeCredentials, AuthError> {
         match &self.config.auth_backend {
-            crate::auth::BackendType::Console(_, ()) => {
+            crate::auth::Backend::Console(_, ()) => {
                 Err(AuthError::auth_failed("JWT login is not yet supported"))
             }
-            crate::auth::BackendType::Link(_, ()) => Err(AuthError::auth_failed(
-                "JWT login over link proxy is not supported",
+            crate::auth::Backend::Web(_, ()) => Err(AuthError::auth_failed(
+                "JWT login over web auth proxy is not supported",
             )),
-            crate::auth::BackendType::Local(cache) => {
+            crate::auth::Backend::Local(cache) => {
                 cache
                     .jwks_cache
                     .check_jwt(
@@ -135,7 +135,7 @@ impl PoolingBackend {
     // we reuse the code from the usual proxy and we need to prepare few structures
     // that this code expects.
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
-    pub async fn connect_to_compute(
+    pub(crate) async fn connect_to_compute(
         &self,
         ctx: &RequestMonitoring,
         conn_info: ConnInfo,
@@ -175,7 +175,7 @@ impl PoolingBackend {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum HttpConnError {
+pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
     #[error("could not connection to compute")]
