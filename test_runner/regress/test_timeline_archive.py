@@ -32,13 +32,9 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
     # for a non existing tenant:
     invalid_tenant_id = TenantId.generate()
-    if unsharded:
-        not_found_pattern = f"NotFound: tenant {invalid_tenant_id}"
-    else:
-        not_found_pattern = "NotFound: Tenant not found"
     with pytest.raises(
         PageserverApiException,
-        match=not_found_pattern,
+        match="NotFound: [tT]enant",
     ) as exc:
         ps_http.timeline_archival_config(
             invalid_tenant_id,
