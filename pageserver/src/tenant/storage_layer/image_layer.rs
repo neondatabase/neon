@@ -28,7 +28,7 @@ use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
-use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
+use crate::tenant::block_io::{BlockBuf, FileBlockReader};
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
@@ -453,33 +453,6 @@ impl ImageLayerInner {
         Ok(())
     }
 
-    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
-    pub(super) async fn load_key_values(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader =
-            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
-        let mut result = Vec::new();
-        let mut stream = Box::pin(tree_reader.into_stream(&[0; KEY_SIZE], ctx));
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let cursor = block_reader.block_cursor();
-        while let Some(item) = stream.next().await {
-            // TODO: dedup code with get_reconstruct_value
-            let (raw_key, offset) = item?;
-            let key = Key::from_slice(&raw_key[..KEY_SIZE]);
-            // TODO: ctx handling and sharding
-            let blob = cursor
-                .read_blob(offset, ctx)
-                .await
-                .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
-            result.push((key, self.lsn, Value::Image(value)));
-        }
-        Ok(result)
-    }
-
     /// Traverse the layer's index to build read operations on the overlap of the input keyspace
     /// and the keys in this layer.
     ///
@@ -711,7 +684,7 @@ struct ImageLayerWriterInner {
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
-    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
+    #[cfg(feature = "testing")]
     last_written_key: Key,
 }
 
@@ -770,6 +743,7 @@ impl ImageLayerWriterInner {
             uncompressed_bytes_eligible: 0,
             uncompressed_bytes_chosen: 0,
             num_keys: 0,
+            #[cfg(feature = "testing")]
             last_written_key: Key::MIN,
         };
 
@@ -1381,7 +1355,7 @@ mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;

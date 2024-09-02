@@ -1850,6 +1850,7 @@ impl<'a> DatadirModification<'a> {
 
         // Flush relation and  SLRU data blocks, keep metadata.
         let pending_data_pages = std::mem::take(&mut self.pending_data_pages);
+
         // This bails out on first error without modifying pending_updates.
         // That's Ok, cf this function's doc comment.
         writer.put_batch(pending_data_pages, ctx).await?;

@@ -86,8 +86,7 @@ async fn derive_client_key(
 ) -> ScramKey {
     let salted_password = pool
         .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
-        .await
-        .expect("job should not be cancelled");
+        .await;
 
     let make_key = |name| {
         let key = Hmac::<Sha256>::new_from_slice(&salted_password)

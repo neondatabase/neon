@@ -496,6 +496,7 @@ class NeonEnvBuilder:
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
         storage_controller_port_override: Optional[int] = None,
+        pageserver_io_buffer_alignment: Optional[int] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -549,6 +550,8 @@ class NeonEnvBuilder:
         self.safekeeper_extra_opts = safekeeper_extra_opts
 
         self.storage_controller_port_override = storage_controller_port_override
+
+        self.pageserver_io_buffer_alignment = pageserver_io_buffer_alignment
 
         assert test_name.startswith(
             "test_"
@@ -1123,6 +1126,7 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
+        self.pageserver_io_buffer_alignment = config.pageserver_io_buffer_alignment
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: Dict[str, Any] = {
@@ -1183,6 +1187,8 @@ class NeonEnv:
                         override = toml.loads(o)
                         for key, value in override.items():
                             ps_cfg[key] = value
+
+            ps_cfg["io_buffer_alignment"] = self.pageserver_io_buffer_alignment
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1425,6 +1431,7 @@ def _shared_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
+    pageserver_io_buffer_alignment: Optional[int],
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1457,6 +1464,7 @@ def _shared_simple_env(
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
+        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
     ) as builder:
         env = builder.init_start()
 
@@ -1499,6 +1507,7 @@ def neon_env_builder(
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
     record_property: Callable[[str, object], None],
+    pageserver_io_buffer_alignment: Optional[int],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1534,6 +1543,7 @@ def neon_env_builder(
         test_overlay_dir=test_overlay_dir,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
+        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
     ) as builder:
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,
@@ -4615,12 +4625,20 @@ class Safekeeper(LogUtils):
         wait_until(20, 0.5, paused)
 
 
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class NodeKind(str, Enum):
+    PAGESERVER = "pageserver"
+    SAFEKEEPER = "safekeeper"
+
+
 class StorageScrubber:
     def __init__(self, env: NeonEnv, log_dir: Path):
         self.env = env
         self.log_dir = log_dir
 
-    def scrubber_cli(self, args: list[str], timeout) -> str:
+    def scrubber_cli(
+        self, args: list[str], timeout, extra_env: Optional[Dict[str, str]] = None
+    ) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
         s3_storage = self.env.pageserver_remote_storage
 
@@ -4634,6 +4652,9 @@ class StorageScrubber:
 
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
+
+        if extra_env is not None:
+            env.update(extra_env)
 
         base_args = [
             str(self.env.neon_binpath / "storage_scrubber"),
@@ -4662,18 +4683,43 @@ class StorageScrubber:
         assert stdout is not None
         return stdout
 
-    def scan_metadata(self, post_to_storage_controller: bool = False) -> Tuple[bool, Any]:
+    def scan_metadata_safekeeper(
+        self,
+        timeline_lsns: List[Dict[str, Any]],
+        cloud_admin_api_url: str,
+        cloud_admin_api_token: str,
+    ) -> Tuple[bool, Any]:
+        extra_env = {
+            "CLOUD_ADMIN_API_URL": cloud_admin_api_url,
+            "CLOUD_ADMIN_API_TOKEN": cloud_admin_api_token,
+        }
+        return self.scan_metadata(
+            node_kind=NodeKind.SAFEKEEPER, timeline_lsns=timeline_lsns, extra_env=extra_env
+        )
+
+    def scan_metadata(
+        self,
+        post_to_storage_controller: bool = False,
+        node_kind: NodeKind = NodeKind.PAGESERVER,
+        timeline_lsns: Optional[List[Dict[str, Any]]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, Any]:
         """
         Returns the health status and the metadata summary.
         """
-        args = ["scan-metadata", "--node-kind", "pageserver", "--json"]
+        args = ["scan-metadata", "--node-kind", node_kind.value, "--json"]
         if post_to_storage_controller:
             args.append("--post")
-        stdout = self.scrubber_cli(args, timeout=30)
+        if timeline_lsns is not None:
+            args.append("--timeline-lsns")
+            args.append(json.dumps(timeline_lsns))
+        stdout = self.scrubber_cli(args, timeout=30, extra_env=extra_env)
 
         try:
             summary = json.loads(stdout)
-            healthy = not summary["with_errors"] and not summary["with_warnings"]
+            # summary does not contain "with_warnings" if node_kind is the safekeeper
+            no_warnings = "with_warnings" not in summary or not summary["with_warnings"]
+            healthy = not summary["with_errors"] and no_warnings
             return healthy, summary
         except:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")

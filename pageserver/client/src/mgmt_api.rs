@@ -419,6 +419,24 @@ impl Client {
         }
     }
 
+    pub async fn timeline_archival_config(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        req: &TimelineArchivalConfigRequest,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/archival_config",
+            self.mgmt_api_endpoint
+        );
+
+        self.request(Method::POST, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_detach_ancestor(
         &self,
         tenant_shard_id: TenantShardId,
@@ -500,6 +518,16 @@ impl Client {
     ) -> Result<()> {
         let uri = format!("{}/v1/io_engine", self.mgmt_api_endpoint);
         self.request(Method::PUT, uri, engine)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    /// Configs io buffer alignment at runtime.
+    pub async fn put_io_alignment(&self, align: usize) -> Result<()> {
+        let uri = format!("{}/v1/io_alignment", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, align)
             .await?
             .json()
             .await

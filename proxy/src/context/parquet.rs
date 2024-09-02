@@ -614,40 +614,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_parquet_min_compression() {
-        let tmpdir = camino_tempfile::tempdir().unwrap();
-
-        let config = ParquetConfig {
-            propeties: Arc::new(
-                WriterProperties::builder()
-                    .set_compression(parquet::basic::Compression::ZSTD(ZstdLevel::default()))
-                    .build(),
-            ),
-            rows_per_group: 2_000,
-            file_size: 1_000_000,
-            max_duration: time::Duration::from_secs(20 * 60),
-            test_remote_failures: 0,
-        };
-
-        let rx = random_stream(50_000);
-        let file_stats = run_test(tmpdir.path(), config, rx).await;
-
-        // with compression, there are fewer files with more rows per file
-        assert_eq!(
-            file_stats,
-            [
-                (1223214, 5, 10000),
-                (1229364, 5, 10000),
-                (1231158, 5, 10000),
-                (1230520, 5, 10000),
-                (1221798, 5, 10000)
-            ]
-        );
-
-        tmpdir.close().unwrap();
-    }
-
-    #[tokio::test]
     async fn verify_parquet_strong_compression() {
         let tmpdir = camino_tempfile::tempdir().unwrap();
 

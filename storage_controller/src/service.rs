@@ -22,7 +22,7 @@ use crate::{
     peer_client::GlobalObservedState,
     persistence::{
         AbortShardSplitStatus, ControllerPersistence, DatabaseResult, MetadataHealthPersistence,
-        TenantFilter,
+        ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
@@ -46,7 +46,10 @@ use pageserver_api::{
         TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
         TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
-    models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
+    models::{
+        SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
+        TopTenantShardsRequest,
+    },
 };
 use reqwest::StatusCode;
 use tracing::{instrument, Instrument};
@@ -131,6 +134,7 @@ enum TenantOperations {
     TimelineCreate,
     TimelineDelete,
     AttachHook,
+    TimelineArchivalConfig,
     TimelineDetachAncestor,
 }
 
@@ -1257,6 +1261,7 @@ impl Service {
                     123,
                     "".to_string(),
                     123,
+                    None,
                 );
 
                 scheduler.node_upsert(&node);
@@ -2917,6 +2922,73 @@ impl Service {
         .await?
     }
 
+    pub(crate) async fn tenant_timeline_archival_config(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: TimelineArchivalConfigRequest,
+    ) -> Result<(), ApiError> {
+        tracing::info!(
+            "Setting archival config of timeline {tenant_id}/{timeline_id} to '{:?}'",
+            req.state
+        );
+
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineArchivalConfig,
+        )
+        .await;
+
+        self.tenant_remote_mutation(tenant_id, move |targets| async move {
+            if targets.is_empty() {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant not found").into(),
+                ));
+            }
+            async fn config_one(
+                tenant_shard_id: TenantShardId,
+                timeline_id: TimelineId,
+                node: Node,
+                jwt: Option<String>,
+                req: TimelineArchivalConfigRequest,
+            ) -> Result<(), ApiError> {
+                tracing::info!(
+                    "Setting archival config of timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
+                );
+
+                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+
+                client
+                    .timeline_archival_config(tenant_shard_id, timeline_id, &req)
+                    .await
+                    .map_err(|e| match e {
+                        mgmt_api::Error::ApiError(StatusCode::PRECONDITION_FAILED, msg) => {
+                            ApiError::PreconditionFailed(msg.into_boxed_str())
+                        }
+                        _ => passthrough_api_error(&node, e),
+                    })
+            }
+
+            // no shard needs to go first/last; the operation should be idempotent
+            // TODO: it would be great to ensure that all shards return the same error
+            let results = self
+                .tenant_for_shards(targets, |tenant_shard_id, node| {
+                    futures::FutureExt::boxed(config_one(
+                        tenant_shard_id,
+                        timeline_id,
+                        node,
+                        self.config.jwt_token.clone(),
+                        req.clone(),
+                    ))
+                })
+                .await?;
+            assert!(!results.is_empty(), "must have at least one result");
+
+            Ok(())
+        }).await?
+    }
+
     pub(crate) async fn tenant_timeline_detach_ancestor(
         &self,
         tenant_id: TenantId,
@@ -3105,20 +3177,44 @@ impl Service {
             // will still be the latest when we're done: we will check generations again at the end of
             // this function to handle that.
             let generations = self.persistence.peek_generations(tenant_id).await?;
-            let generations = if generations.iter().any(|i| i.1.is_none()) {
-                // One or more shards is not attached to anything: maybe this is a new tenant?  Wait for
-                // it to reconcile.
-                self.ensure_attached_wait(tenant_id).await?;
-                self.persistence.peek_generations(tenant_id).await?
-            } else {
-                generations
-            };
+
+            if generations
+                .iter()
+                .any(|i| i.generation.is_none() || i.generation_pageserver.is_none())
+            {
+                // One or more shards has not been attached to a pageserver.  Check if this is because it's configured
+                // to be detached (409: caller should give up), or because it's meant to be attached but isn't yet (503: caller should retry)
+                let locked = self.inner.read().unwrap();
+                for (shard_id, shard) in
+                    locked.tenants.range(TenantShardId::tenant_range(tenant_id))
+                {
+                    match shard.policy {
+                        PlacementPolicy::Attached(_) => {
+                            // This shard is meant to be attached: the caller is not wrong to try and
+                            // use this function, but we can't service the request right now.
+                        }
+                        PlacementPolicy::Secondary | PlacementPolicy::Detached => {
+                            return Err(ApiError::Conflict(format!(
+                                "Shard {shard_id} tenant has policy {:?}",
+                                shard.policy
+                            )));
+                        }
+                    }
+                }
+
+                return Err(ApiError::ResourceUnavailable(
+                    "One or more shards in tenant is not yet attached".into(),
+                ));
+            }
 
             let locked = self.inner.read().unwrap();
-            for (tenant_shard_id, generation, generation_pageserver) in generations {
-                let node_id = generation_pageserver.ok_or(ApiError::Conflict(
-                    "Tenant not currently attached".to_string(),
-                ))?;
+            for ShardGenerationState {
+                tenant_shard_id,
+                generation,
+                generation_pageserver,
+            } in generations
+            {
+                let node_id = generation_pageserver.expect("We checked for None above");
                 let node = locked
                     .nodes
                     .get(&node_id)
@@ -3140,7 +3236,13 @@ impl Service {
             let latest_generations = self.persistence.peek_generations(tenant_id).await?;
             if latest_generations
                 .into_iter()
-                .map(|g| (g.0, g.1))
+                .map(
+                    |ShardGenerationState {
+                         tenant_shard_id,
+                         generation,
+                         generation_pageserver: _,
+                     }| (tenant_shard_id, generation),
+                )
                 .collect::<Vec<_>>()
                 != target_gens
                     .into_iter()
@@ -4683,29 +4785,84 @@ impl Service {
         )
         .await;
 
-        {
+        if register_req.availability_zone_id.is_none() {
+            tracing::warn!(
+                "Node {} registering without specific availability zone id",
+                register_req.node_id
+            );
+        }
+
+        enum RegistrationStatus {
+            Matched(Node),
+            Mismatched,
+            New,
+        }
+
+        let registration_status = {
             let locked = self.inner.read().unwrap();
             if let Some(node) = locked.nodes.get(&register_req.node_id) {
-                // Note that we do not do a total equality of the struct, because we don't require
-                // the availability/scheduling states to agree for a POST to be idempotent.
                 if node.registration_match(&register_req) {
-                    tracing::info!(
-                        "Node {} re-registered with matching address",
-                        register_req.node_id
-                    );
-                    return Ok(());
+                    RegistrationStatus::Matched(node.clone())
                 } else {
-                    // TODO: decide if we want to allow modifying node addresses without removing and re-adding
-                    // the node.  Safest/simplest thing is to refuse it, and usually we deploy with
-                    // a fixed address through the lifetime of a node.
-                    tracing::warn!(
-                        "Node {} tried to register with different address",
-                        register_req.node_id
-                    );
-                    return Err(ApiError::Conflict(
-                        "Node is already registered with different address".to_string(),
-                    ));
+                    RegistrationStatus::Mismatched
                 }
+            } else {
+                RegistrationStatus::New
+            }
+        };
+
+        match registration_status {
+            RegistrationStatus::Matched(node) => {
+                tracing::info!(
+                    "Node {} re-registered with matching address",
+                    register_req.node_id
+                );
+
+                if node.get_availability_zone_id().is_none() {
+                    if let Some(az_id) = register_req.availability_zone_id.clone() {
+                        tracing::info!("Extracting availability zone id from registration request for node {}: {}",
+                                       register_req.node_id, az_id);
+
+                        // Persist to the database and update in memory state. See comment below
+                        // on ordering.
+                        self.persistence
+                            .set_node_availability_zone_id(register_req.node_id, az_id)
+                            .await?;
+                        let node_with_az = Node::new(
+                            register_req.node_id,
+                            register_req.listen_http_addr,
+                            register_req.listen_http_port,
+                            register_req.listen_pg_addr,
+                            register_req.listen_pg_port,
+                            register_req.availability_zone_id,
+                        );
+
+                        let mut locked = self.inner.write().unwrap();
+                        let mut new_nodes = (*locked.nodes).clone();
+
+                        locked.scheduler.node_upsert(&node_with_az);
+                        new_nodes.insert(register_req.node_id, node_with_az);
+
+                        locked.nodes = Arc::new(new_nodes);
+                    }
+                }
+
+                return Ok(());
+            }
+            RegistrationStatus::Mismatched => {
+                // TODO: decide if we want to allow modifying node addresses without removing and re-adding
+                // the node.  Safest/simplest thing is to refuse it, and usually we deploy with
+                // a fixed address through the lifetime of a node.
+                tracing::warn!(
+                    "Node {} tried to register with different address",
+                    register_req.node_id
+                );
+                return Err(ApiError::Conflict(
+                    "Node is already registered with different address".to_string(),
+                ));
+            }
+            RegistrationStatus::New => {
+                // fallthrough
             }
         }
 
@@ -4742,6 +4899,7 @@ impl Service {
             register_req.listen_http_port,
             register_req.listen_pg_addr,
             register_req.listen_pg_port,
+            register_req.availability_zone_id,
         );
 
         // TODO: idempotency if the node already exists in the database
@@ -5221,72 +5379,6 @@ impl Service {
         Err(ApiError::PreconditionFailed(
             format!("Node {node_id} has no fill in progress").into(),
         ))
-    }
-
-    /// Helper for methods that will try and call pageserver APIs for
-    /// a tenant, such as timeline CRUD: they cannot proceed unless the tenant
-    /// is attached somewhere.
-    fn ensure_attached_schedule(
-        &self,
-        mut locked: std::sync::RwLockWriteGuard<'_, ServiceState>,
-        tenant_id: TenantId,
-    ) -> Result<Vec<ReconcilerWaiter>, anyhow::Error> {
-        let mut waiters = Vec::new();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
-
-        let mut schedule_context = ScheduleContext::default();
-        for (tenant_shard_id, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
-            shard.schedule(scheduler, &mut schedule_context)?;
-
-            // The shard's policies may not result in an attached location being scheduled: this
-            // is an error because our caller needs it attached somewhere.
-            if shard.intent.get_attached().is_none() {
-                return Err(anyhow::anyhow!(
-                    "Tenant {tenant_id} not scheduled to be attached"
-                ));
-            };
-
-            if shard.stably_attached().is_some() {
-                // We do not require the shard to be totally up to date on reconciliation: we just require
-                // that it has been attached on the intended node.   Other dirty state such as unattached secondary
-                // locations, or compute hook notifications can be ignored.
-                continue;
-            }
-
-            if let Some(waiter) = self.maybe_reconcile_shard(shard, nodes) {
-                tracing::info!("Waiting for shard {tenant_shard_id} to reconcile, in order to ensure it is attached");
-                waiters.push(waiter);
-            }
-        }
-        Ok(waiters)
-    }
-
-    async fn ensure_attached_wait(&self, tenant_id: TenantId) -> Result<(), ApiError> {
-        let ensure_waiters = {
-            let locked = self.inner.write().unwrap();
-
-            // Check if the tenant is splitting: in this case, even if it is attached,
-            // we must act as if it is not: this blocks e.g. timeline creation/deletion
-            // operations during the split.
-            for (_shard_id, shard) in locked.tenants.range(TenantShardId::tenant_range(tenant_id)) {
-                if !matches!(shard.splitting, SplitState::Idle) {
-                    return Err(ApiError::ResourceUnavailable(
-                        "Tenant shards are currently splitting".into(),
-                    ));
-                }
-            }
-
-            self.ensure_attached_schedule(locked, tenant_id)
-                .map_err(ApiError::InternalServerError)?
-        };
-
-        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
-        for waiter in ensure_waiters {
-            let timeout = deadline.duration_since(Instant::now());
-            waiter.wait_timeout(timeout).await?;
-        }
-
-        Ok(())
     }
 
     /// Like [`Self::maybe_configured_reconcile_shard`], but uses the default reconciler

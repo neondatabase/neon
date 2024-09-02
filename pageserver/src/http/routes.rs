@@ -324,6 +324,9 @@ impl From<crate::tenant::TimelineArchivalError> for ApiError {
         match value {
             NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
             Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            e @ HasArchivedParent(_) => {
+                ApiError::PreconditionFailed(e.to_string().into_boxed_str())
+            }
             HasUnarchivedChildren(children) => ApiError::PreconditionFailed(
                 format!(
                     "Cannot archive timeline which has non-archived child timelines: {children:?}"
@@ -871,7 +874,10 @@ async fn get_timestamp_of_lsn_handler(
 
     match result {
         Some(time) => {
-            let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
+            let time = format_rfc3339(
+                postgres_ffi::try_from_pg_timestamp(time).map_err(ApiError::InternalServerError)?,
+            )
+            .to_string();
             json_response(StatusCode::OK, time)
         }
         None => Err(ApiError::NotFound(
@@ -1727,6 +1733,10 @@ async fn timeline_compact_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
+    if Some(true) == parse_query_param::<_, bool>(&request, "dry_run")? {
+        flags |= CompactFlags::DryRun;
+    }
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
@@ -2341,6 +2351,20 @@ async fn put_io_engine_handler(
     check_permission(&r, None)?;
     let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
     crate::virtual_file::io_engine::set(kind);
+    json_response(StatusCode::OK, ())
+}
+
+async fn put_io_alignment_handler(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+    let align: usize = json_request(&mut r).await?;
+    crate::virtual_file::set_io_buffer_alignment(align).map_err(|align| {
+        ApiError::PreconditionFailed(
+            format!("Requested io alignment ({align}) is not a power of two").into(),
+        )
+    })?;
     json_response(StatusCode::OK, ())
 }
 
@@ -3031,6 +3055,9 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .put("/v1/io_alignment", |r| {
+            api_handler(r, put_io_alignment_handler)
+        })
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
             |r| api_handler(r, force_aux_policy_switch_handler),

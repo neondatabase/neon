@@ -10,7 +10,5 @@ pub(crate) use limit_algorithm::{
 };
 pub(crate) use limiter::GlobalRateLimiter;
 
-pub use leaky_bucket::{
-    EndpointRateLimiter, LeakyBucketConfig, LeakyBucketRateLimiter, LeakyBucketState,
-};
+pub use leaky_bucket::{EndpointRateLimiter, LeakyBucketConfig, LeakyBucketRateLimiter};
 pub use limiter::{BucketRateLimiter, RateBucketInfo, WakeComputeRateLimiter};

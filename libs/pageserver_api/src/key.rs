@@ -108,14 +108,41 @@ impl Key {
         }
     }
 
+    /// This function checks more extensively what keys we can take on the write path.
+    /// If a key beginning with 00 does not have a global/default tablespace OID, it
+    /// will be rejected on the write path.
+    #[allow(dead_code)]
+    pub fn is_valid_key_on_write_path_strong(&self) -> bool {
+        use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+        if !self.is_i128_representable() {
+            return false;
+        }
+        if self.field1 == 0
+            && !(self.field2 == GLOBALTABLESPACE_OID
+                || self.field2 == DEFAULTTABLESPACE_OID
+                || self.field2 == 0)
+        {
+            return false; // User defined tablespaces are not supported
+        }
+        true
+    }
+
+    /// This is a weaker version of `is_valid_key_on_write_path_strong` that simply
+    /// checks if the key is i128 representable. Note that some keys can be successfully
+    /// ingested into the pageserver, but will cause errors on generating basebackup.
+    pub fn is_valid_key_on_write_path(&self) -> bool {
+        self.is_i128_representable()
+    }
+
+    pub fn is_i128_representable(&self) -> bool {
+        self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222
+    }
+
     /// 'field2' is used to store tablespaceid for relations and small enum numbers for other relish.
     /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
-        assert!(
-            self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222,
-            "invalid key: {self}",
-        );
+        assert!(self.is_i128_representable(), "invalid key: {self}");
         (((self.field1 & 0x7F) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)

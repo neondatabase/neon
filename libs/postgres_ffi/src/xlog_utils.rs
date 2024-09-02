@@ -135,6 +135,8 @@ pub fn get_current_timestamp() -> TimestampTz {
 mod timestamp_conversions {
     use std::time::Duration;
 
+    use anyhow::Context;
+
     use super::*;
 
     const UNIX_EPOCH_JDATE: u64 = 2440588; // == date2j(1970, 1, 1)
@@ -154,18 +156,18 @@ mod timestamp_conversions {
         }
     }
 
-    pub fn from_pg_timestamp(time: TimestampTz) -> SystemTime {
+    pub fn try_from_pg_timestamp(time: TimestampTz) -> anyhow::Result<SystemTime> {
         let time: u64 = time
             .try_into()
-            .expect("timestamp before millenium (postgres epoch)");
+            .context("timestamp before millenium (postgres epoch)")?;
         let since_unix_epoch = time + SECS_DIFF_UNIX_TO_POSTGRES_EPOCH * USECS_PER_SEC;
         SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_micros(since_unix_epoch))
-            .expect("SystemTime overflow")
+            .context("SystemTime overflow")
     }
 }
 
-pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp};
+pub use timestamp_conversions::{to_pg_timestamp, try_from_pg_timestamp};
 
 // Returns (aligned) end_lsn of the last record in data_dir with WAL segments.
 // start_lsn must point to some previously known record boundary (beginning of
@@ -545,14 +547,14 @@ mod tests {
     #[test]
     fn test_ts_conversion() {
         let now = SystemTime::now();
-        let round_trip = from_pg_timestamp(to_pg_timestamp(now));
+        let round_trip = try_from_pg_timestamp(to_pg_timestamp(now)).unwrap();
 
         let now_since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let round_trip_since = round_trip.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         assert_eq!(now_since.as_micros(), round_trip_since.as_micros());
 
         let now_pg = get_current_timestamp();
-        let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
+        let round_trip_pg = to_pg_timestamp(try_from_pg_timestamp(now_pg).unwrap());
 
         assert_eq!(now_pg, round_trip_pg);
     }

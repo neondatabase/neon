@@ -103,6 +103,7 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealthOutdated,
     GetLeader,
     UpdateLeader,
+    SetNodeAzId,
 }
 
 #[must_use]
@@ -119,6 +120,13 @@ pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 pub(crate) enum TenantFilter {
     Tenant(TenantId),
     Shard(TenantShardId),
+}
+
+/// Represents the results of looking up generation+pageserver for the shards of a tenant
+pub(crate) struct ShardGenerationState {
+    pub(crate) tenant_shard_id: TenantShardId,
+    pub(crate) generation: Option<Generation>,
+    pub(crate) generation_pageserver: Option<NodeId>,
 }
 
 impl Persistence {
@@ -309,6 +317,31 @@ impl Persistence {
         if updated != 1 {
             Err(DatabaseError::Logical(format!(
                 "Node {node_id:?} not found for update",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn set_node_availability_zone_id(
+        &self,
+        input_node_id: NodeId,
+        input_az_id: String,
+    ) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        let updated = self
+            .with_measured_conn(DatabaseOperation::SetNodeAzId, move |conn| {
+                let updated = diesel::update(nodes)
+                    .filter(node_id.eq(input_node_id.0 as i64))
+                    .set((availability_zone_id.eq(input_az_id.clone()),))
+                    .execute(conn)?;
+                Ok(updated)
+            })
+            .await?;
+
+        if updated != 1 {
+            Err(DatabaseError::Logical(format!(
+                "Node {node_id:?} not found for setting az id",
             )))
         } else {
             Ok(())
@@ -514,7 +547,7 @@ impl Persistence {
     pub(crate) async fn peek_generations(
         &self,
         filter_tenant_id: TenantId,
-    ) -> Result<Vec<(TenantShardId, Option<Generation>, Option<NodeId>)>, DatabaseError> {
+    ) -> Result<Vec<ShardGenerationState>, DatabaseError> {
         use crate::schema::tenant_shards::dsl::*;
         let rows = self
             .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
@@ -529,13 +562,12 @@ impl Persistence {
 
         Ok(rows
             .into_iter()
-            .map(|p| {
-                (
-                    p.get_tenant_shard_id()
-                        .expect("Corrupt tenant shard id in database"),
-                    p.generation.map(|g| Generation::new(g as u32)),
-                    p.generation_pageserver.map(|n| NodeId(n as u64)),
-                )
+            .map(|p| ShardGenerationState {
+                tenant_shard_id: p
+                    .get_tenant_shard_id()
+                    .expect("Corrupt tenant shard id in database"),
+                generation: p.generation.map(|g| Generation::new(g as u32)),
+                generation_pageserver: p.generation_pageserver.map(|n| NodeId(n as u64)),
             })
             .collect())
     }
@@ -974,6 +1006,7 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_http_port: i32,
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
+    pub(crate) availability_zone_id: Option<String>,
 }
 
 /// Tenant metadata health status that are stored durably.
