@@ -4,8 +4,8 @@ use std::{str::FromStr, time::Duration};
 use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
-        NodeAvailabilityWrapper, NodeDescribeResponse, ShardSchedulingPolicy, TenantCreateRequest,
-        TenantDescribeResponse, TenantPolicyRequest,
+        NodeAttachedResponse, NodeAvailabilityWrapper, NodeDescribeResponse, ShardSchedulingPolicy,
+        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
@@ -76,6 +76,11 @@ enum Command {
         /// unavailable, and are only for use in emergencies.
         #[arg(long)]
         scheduling: Option<ShardSchedulingPolicyArg>,
+    },
+    /// Print details about a particular node, including all shards attached to it.
+    NodeAttached {
+        #[arg(long)]
+        node: NodeId,
     },
     /// List nodes known to the storage controller
     Nodes {},
@@ -507,6 +512,29 @@ async fn main() -> anyhow::Result<()> {
                     config: tenant_conf,
                 })
                 .await?;
+        }
+        Command::NodeAttached { node } => {
+            let describe_response = storcon_client
+                .dispatch::<(), NodeAttachedResponse>(
+                    Method::GET,
+                    format!("control/v1/node/{node}/attached"),
+                    None,
+                )
+                .await?;
+            let shards = describe_response.shards;
+            let mut table = comfy_table::Table::new();
+            table.set_header(["Shard", "Primary/Secondary"]);
+            for shard in shards {
+                table.add_row([
+                    format!("{}", shard.tenant_shard_id),
+                    if shard.is_secondary {
+                        "Secondary".to_string()
+                    } else {
+                        "Primary".to_string()
+                    },
+                ]);
+            }
+            println!("{table}");
         }
         Command::TenantDescribe { tenant_id } => {
             let describe_response = storcon_client

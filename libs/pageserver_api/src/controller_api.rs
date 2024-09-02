@@ -101,6 +101,18 @@ pub struct TenantDescribeResponse {
     pub config: TenantConfig,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeAttachedResponse {
+    pub node_id: NodeId,
+    pub shards: Vec<NodeAttachedResponseShard>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeAttachedResponseShard {
+    pub tenant_shard_id: TenantShardId,
+    pub is_secondary: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct NodeDescribeResponse {
     pub id: NodeId,

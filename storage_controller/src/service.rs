@@ -40,11 +40,12 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
-        MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
-        NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest,
-        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
-        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
-        TenantShardMigrateRequest, TenantShardMigrateResponse,
+        MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAttachedResponse,
+        NodeAttachedResponseShard, NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy,
+        PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
+        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+        TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
@@ -4768,6 +4769,29 @@ impl Service {
             .ok_or(ApiError::NotFound(
                 format!("Node {node_id} not registered").into(),
             ))
+    }
+
+    pub(crate) async fn get_node_attached(
+        &self,
+        node_id: NodeId,
+    ) -> Result<NodeAttachedResponse, ApiError> {
+        let locked = self.inner.read().unwrap();
+        let mut shards = Vec::new();
+        for (tid, tenant) in locked.tenants.iter() {
+            if tenant.intent.get_attached() == &Some(node_id) {
+                shards.push(NodeAttachedResponseShard {
+                    tenant_shard_id: *tid,
+                    is_secondary: false,
+                });
+            }
+            if tenant.intent.get_secondary().contains(&node_id) {
+                shards.push(NodeAttachedResponseShard {
+                    tenant_shard_id: *tid,
+                    is_secondary: true,
+                });
+            }
+        }
+        Ok(NodeAttachedResponse { node_id, shards })
     }
 
     pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {

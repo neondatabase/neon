@@ -538,6 +538,17 @@ async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiErr
     json_response(StatusCode::OK, node_status)
 }
 
+async fn handle_node_attached(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+
+    let node_status = state.service.get_node_attached(node_id).await?;
+
+    json_response(StatusCode::OK, node_status)
+}
+
 async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -1046,6 +1057,13 @@ pub fn make_router(
         })
         .get("/control/v1/node/:node_id", |r| {
             named_request_span(r, handle_node_status, RequestName("control_v1_node_status"))
+        })
+        .get("/control/v1/node/:node_id/attached", |r| {
+            named_request_span(
+                r,
+                handle_node_attached,
+                RequestName("control_v1_node_describe"),
+            )
         })
         .get("/control/v1/leader", |r| {
             named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))

@@ -49,7 +49,7 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId, NodeId
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
@@ -2548,6 +2548,30 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/tenant/{tenant_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def nodes(self):
+        """
+        :return: list of {"id": ""}
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/node",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def node_attached(self, node_id: NodeId):
+        """
+        :return: list of {"shard_id": "", "is_secondary": bool}
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/node/{node_id}/attached",
             headers=self.headers(TokenScope.ADMIN),
         )
         response.raise_for_status()
