@@ -105,8 +105,10 @@ pub struct RequestContext {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, enum_map::Enum, strum_macros::IntoStaticStr)]
 pub enum PageContentKind {
     Unknown,
+    DeltaLayerSummary,
     DeltaLayerBtreeNode,
     DeltaLayerValue,
+    ImageLayerSummary,
     ImageLayerBtreeNode,
     ImageLayerValue,
     InMemoryLayer,

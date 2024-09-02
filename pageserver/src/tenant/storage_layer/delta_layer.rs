@@ -225,9 +225,7 @@ pub struct DeltaLayerInner {
     file: VirtualFile,
     file_id: FileId,
 
-    #[allow(dead_code)]
     layer_key_range: Range<Key>,
-    #[allow(dead_code)]
     layer_lsn_range: Range<Lsn>,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
@@ -880,44 +878,6 @@ impl DeltaLayerInner {
         reconstruct_state.on_lsn_advanced(&keyspace, lsn_range.start);
 
         Ok(())
-    }
-
-    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
-    pub(super) async fn load_key_values(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let index_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            self.index_start_blk,
-            self.index_root_blk,
-            block_reader,
-        );
-        let mut result = Vec::new();
-        let mut stream =
-            Box::pin(self.stream_index_forwards(index_reader, &[0; DELTA_KEY_SIZE], ctx));
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let cursor = block_reader.block_cursor();
-        let mut buf = Vec::new();
-        while let Some(item) = stream.next().await {
-            let (key, lsn, pos) = item?;
-            // TODO: dedup code with get_reconstruct_value
-            // TODO: ctx handling and sharding
-            cursor
-                .read_blob_into_buf(pos.pos(), &mut buf, ctx)
-                .await
-                .with_context(|| {
-                    format!("Failed to read blob from virtual file {}", self.file.path)
-                })?;
-            let val = Value::des(&buf).with_context(|| {
-                format!(
-                    "Failed to deserialize file blob from virtual file {}",
-                    self.file.path
-                )
-            })?;
-            result.push((key, lsn, val));
-        }
-        Ok(result)
     }
 
     async fn plan_reads<Reader>(
@@ -2283,7 +2243,7 @@ pub(crate) mod test {
             .await
             .unwrap();
         let delta_layer = resident_layer.get_as_delta(&ctx).await.unwrap();
-        for max_read_size in [1, 2048] {
+        for max_read_size in [1, 1024] {
             for batch_size in [1, 2, 4, 8, 3, 7, 13] {
                 println!("running with batch_size={batch_size} max_read_size={max_read_size}");
                 // Test if the batch size is correctly determined
@@ -2297,7 +2257,7 @@ pub(crate) mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;

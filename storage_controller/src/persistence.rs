@@ -122,6 +122,13 @@ pub(crate) enum TenantFilter {
     Shard(TenantShardId),
 }
 
+/// Represents the results of looking up generation+pageserver for the shards of a tenant
+pub(crate) struct ShardGenerationState {
+    pub(crate) tenant_shard_id: TenantShardId,
+    pub(crate) generation: Option<Generation>,
+    pub(crate) generation_pageserver: Option<NodeId>,
+}
+
 impl Persistence {
     // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
     // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
@@ -540,7 +547,7 @@ impl Persistence {
     pub(crate) async fn peek_generations(
         &self,
         filter_tenant_id: TenantId,
-    ) -> Result<Vec<(TenantShardId, Option<Generation>, Option<NodeId>)>, DatabaseError> {
+    ) -> Result<Vec<ShardGenerationState>, DatabaseError> {
         use crate::schema::tenant_shards::dsl::*;
         let rows = self
             .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
@@ -555,13 +562,12 @@ impl Persistence {
 
         Ok(rows
             .into_iter()
-            .map(|p| {
-                (
-                    p.get_tenant_shard_id()
-                        .expect("Corrupt tenant shard id in database"),
-                    p.generation.map(|g| Generation::new(g as u32)),
-                    p.generation_pageserver.map(|n| NodeId(n as u64)),
-                )
+            .map(|p| ShardGenerationState {
+                tenant_shard_id: p
+                    .get_tenant_shard_id()
+                    .expect("Corrupt tenant shard id in database"),
+                generation: p.generation.map(|g| Generation::new(g as u32)),
+                generation_pageserver: p.generation_pageserver.map(|n| NodeId(n as u64)),
             })
             .collect())
     }
