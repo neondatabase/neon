@@ -13,7 +13,7 @@ use utils::lsn::Lsn;
 use utils::sync::{gate, heavier_once_cell};
 
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext};
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::{CompactionError, GetVectoredError};
@@ -1678,6 +1678,9 @@ impl DownloadedLayer {
             );
 
             let res = if owner.desc.is_delta {
+                let ctx = RequestContextBuilder::extend(ctx)
+                    .page_content_kind(crate::context::PageContentKind::DeltaLayerSummary)
+                    .build();
                 let summary = Some(delta_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
                     owner.desc.timeline_id,
@@ -1688,11 +1691,14 @@ impl DownloadedLayer {
                     &owner.path,
                     summary,
                     Some(owner.conf.max_vectored_read_bytes),
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map(LayerKind::Delta)
             } else {
+                let ctx = RequestContextBuilder::extend(ctx)
+                    .page_content_kind(crate::context::PageContentKind::ImageLayerSummary)
+                    .build();
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
@@ -1705,7 +1711,7 @@ impl DownloadedLayer {
                     lsn,
                     summary,
                     Some(owner.conf.max_vectored_read_bytes),
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map(LayerKind::Image)
