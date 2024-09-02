@@ -353,7 +353,7 @@ impl SplitDeltaLayerWriter {
         Ok(generated_layers)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn finish(
         self,
         tline: &Arc<Timeline>,
