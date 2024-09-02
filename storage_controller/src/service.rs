@@ -46,7 +46,10 @@ use pageserver_api::{
         TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
         TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
-    models::{SecondaryProgress, TenantConfigRequest, TopTenantShardsRequest},
+    models::{
+        SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
+        TopTenantShardsRequest,
+    },
 };
 use reqwest::StatusCode;
 use tracing::{instrument, Instrument};
@@ -131,6 +134,7 @@ enum TenantOperations {
     TimelineCreate,
     TimelineDelete,
     AttachHook,
+    TimelineArchivalConfig,
     TimelineDetachAncestor,
 }
 
@@ -2916,6 +2920,73 @@ impl Service {
             Ok(timeline_info)
         })
         .await?
+    }
+
+    pub(crate) async fn tenant_timeline_archival_config(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        req: TimelineArchivalConfigRequest,
+    ) -> Result<(), ApiError> {
+        tracing::info!(
+            "Setting archival config of timeline {tenant_id}/{timeline_id} to '{:?}'",
+            req.state
+        );
+
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineArchivalConfig,
+        )
+        .await;
+
+        self.tenant_remote_mutation(tenant_id, move |targets| async move {
+            if targets.is_empty() {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant not found").into(),
+                ));
+            }
+            async fn config_one(
+                tenant_shard_id: TenantShardId,
+                timeline_id: TimelineId,
+                node: Node,
+                jwt: Option<String>,
+                req: TimelineArchivalConfigRequest,
+            ) -> Result<(), ApiError> {
+                tracing::info!(
+                    "Setting archival config of timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
+                );
+
+                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+
+                client
+                    .timeline_archival_config(tenant_shard_id, timeline_id, &req)
+                    .await
+                    .map_err(|e| match e {
+                        mgmt_api::Error::ApiError(StatusCode::PRECONDITION_FAILED, msg) => {
+                            ApiError::PreconditionFailed(msg.into_boxed_str())
+                        }
+                        _ => passthrough_api_error(&node, e),
+                    })
+            }
+
+            // no shard needs to go first/last; the operation should be idempotent
+            // TODO: it would be great to ensure that all shards return the same error
+            let results = self
+                .tenant_for_shards(targets, |tenant_shard_id, node| {
+                    futures::FutureExt::boxed(config_one(
+                        tenant_shard_id,
+                        timeline_id,
+                        node,
+                        self.config.jwt_token.clone(),
+                        req.clone(),
+                    ))
+                })
+                .await?;
+            assert!(!results.is_empty(), "must have at least one result");
+
+            Ok(())
+        }).await?
     }
 
     pub(crate) async fn tenant_timeline_detach_ancestor(
