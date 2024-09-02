@@ -1871,6 +1871,14 @@ impl Service {
                     );
 
                     in_memory_result.push((req_tenant.id, Generation::new(req_tenant.gen), valid));
+                } else {
+                    // This is legal: for example during a shard split the pageserver may still
+                    // have deletions in its queue from the old pre-split shard, or after deletion
+                    // of a tenant that was busy with compaction/gc while being deleted.
+                    tracing::info!(
+                        "Refusing deletion validation for missing shard {}",
+                        req_tenant.id
+                    );
                 }
             }
 
