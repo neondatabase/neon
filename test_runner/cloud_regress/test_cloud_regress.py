@@ -3,6 +3,8 @@ Run the regression tests on the cloud instance of Neon
 """
 import os
 import re
+import subprocess
+
 import psycopg2
 import pytest
 from fixtures.log_helper import log
@@ -37,7 +39,6 @@ def test_cloud_regress(remote_pg: RemotePostgres):
     runpath = f'{neondir}/vendor/postgres-v{pg_version}/src/test/regress'
     binpath = f'{neondir}/pg_install/v{pg_version}/bin'
 
-    log.info(os.path.relpath(__file__))
     env_vars = {
        'PGHOST': remote_pg.default_options['host'],
        'PGPORT': str(remote_pg.default_options['port'] if 'port' in remote_pg.default_options else 5432),
@@ -54,4 +55,12 @@ def test_cloud_regress(remote_pg: RemotePostgres):
         "--schedule=./parallel_schedule",
         "--max-connections=5"
     ]
-    remote_pg.pg_bin.run(regress_cmd, env=env_vars, cwd=runpath)
+    try:
+        remote_pg.pg_bin.run(regress_cmd, env=env_vars, cwd=runpath)
+    except subprocess.CalledProcessError as e:
+        log.error('Error(s) occurred while running the regression tests')
+        with open(f'{runpath}/regression.out', 'r') as f:
+            print(f.read)
+        with open(f'{runpath}/regression.diffs', 'r') as f:
+            print(f.read)
+        raise e
