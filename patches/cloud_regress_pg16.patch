@@ -568,7 +568,7 @@ index 93302a07efc..37c89b36e9f 100644
  --
  -- Schema creation with elements.
 -CREATE ROLE regress_create_schema_role SUPERUSER;
-+CREATE ROLE regress_create_schema_role SUPERUSER PASSWORD 'eib5tai9Oachootiex'; 
++CREATE ROLE regress_create_schema_role SUPERUSER PASSWORD 'eib5tai9Oachootiex';
  -- Cases where schema creation fails as objects are qualified with a schema
  -- that does not match with what's expected.
  -- This checks all the object types that include schema qualifications.
@@ -2787,7 +2787,7 @@ index 1b7064247a1..3f4a588020c 100644
  -- Schema creation with elements.
  
 -CREATE ROLE regress_create_schema_role SUPERUSER;
-+CREATE ROLE regress_create_schema_role SUPERUSER PASSWORD 'eib5tai9Oachootiex'; 
++CREATE ROLE regress_create_schema_role SUPERUSER PASSWORD 'eib5tai9Oachootiex';
  
  -- Cases where schema creation fails as objects are qualified with a schema
  -- that does not match with what's expected.
