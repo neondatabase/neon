@@ -1939,27 +1939,48 @@ index f02f0205427..14aa640e7ad 100644
  BEGIN;
  SET LOCAL SESSION AUTHORIZATION regress_seq_user;
 diff --git a/src/test/regress/expected/stats.out b/src/test/regress/expected/stats.out
-index 94187e59cfb..97189594579 100644
+index 94187e59cfb..72346e2c717 100644
 --- a/src/test/regress/expected/stats.out
 +++ b/src/test/regress/expected/stats.out
-@@ -1291,14 +1291,11 @@ SELECT sum(reads) AS io_sum_shared_before_reads
- -- rewritten table, e.g. by autovacuum.
- BEGIN;
- ALTER TABLE test_io_shared SET TABLESPACE regress_tblspace;
-+ERROR:  tablespace "regress_tblspace" does not exist
- -- SELECT from the table so that the data is read into shared buffers and
- -- context 'normal', object 'relation' reads are counted.
- SELECT COUNT(*) FROM test_io_shared;
+@@ -1283,37 +1283,6 @@ SELECT current_setting('fsync') = 'off'
+  t
+ (1 row)
+ 
+--- Change the tablespace so that the table is rewritten directly, then SELECT
+--- from it to cause it to be read back into shared buffers.
+-SELECT sum(reads) AS io_sum_shared_before_reads
+-  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+--- Do this in a transaction to prevent spurious failures due to concurrent accesses to our newly
+--- rewritten table, e.g. by autovacuum.
+-BEGIN;
+-ALTER TABLE test_io_shared SET TABLESPACE regress_tblspace;
+--- SELECT from the table so that the data is read into shared buffers and
+--- context 'normal', object 'relation' reads are counted.
+-SELECT COUNT(*) FROM test_io_shared;
 - count 
 --------
 -   100
 -(1 row)
 -
-+ERROR:  current transaction is aborted, commands ignored until end of transaction block
- COMMIT;
- SELECT pg_stat_force_next_flush();
-  pg_stat_force_next_flush 
-@@ -1415,6 +1412,7 @@ SELECT :io_sum_local_after_evictions > :io_sum_local_before_evictions,
+-COMMIT;
+-SELECT pg_stat_force_next_flush();
+- pg_stat_force_next_flush 
+---------------------------
+- 
+-(1 row)
+-
+-SELECT sum(reads) AS io_sum_shared_after_reads
+-  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation'  \gset
+-SELECT :io_sum_shared_after_reads > :io_sum_shared_before_reads;
+- ?column? 
+-----------
+- t
+-(1 row)
+-
+ SELECT sum(hits) AS io_sum_shared_before_hits
+   FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+ -- Select from the table again to count hits.
+@@ -1415,6 +1384,7 @@ SELECT :io_sum_local_after_evictions > :io_sum_local_before_evictions,
  -- local buffers, exercising a different codepath than standard local buffer
  -- writes.
  ALTER TABLE test_io_local SET TABLESPACE regress_tblspace;
@@ -1967,7 +1988,7 @@ index 94187e59cfb..97189594579 100644
  SELECT pg_stat_force_next_flush();
   pg_stat_force_next_flush 
  --------------------------
-@@ -1426,7 +1424,7 @@ SELECT sum(writes) AS io_sum_local_new_tblspc_writes
+@@ -1426,7 +1396,7 @@ SELECT sum(writes) AS io_sum_local_new_tblspc_writes
  SELECT :io_sum_local_new_tblspc_writes > :io_sum_local_after_writes;
   ?column? 
  ----------
@@ -3711,6 +3732,34 @@ index 793f1415f6b..e871d79f87a 100644
  
  -- nextval
  BEGIN;
+diff --git a/src/test/regress/sql/stats.sql b/src/test/regress/sql/stats.sql
+index 1e21e55c6d9..2251f50c5eb 100644
+--- a/src/test/regress/sql/stats.sql
++++ b/src/test/regress/sql/stats.sql
+@@ -622,23 +622,6 @@ SELECT :io_sum_shared_after_writes > :io_sum_shared_before_writes;
+ SELECT current_setting('fsync') = 'off'
+   OR :io_sum_shared_after_fsyncs > :io_sum_shared_before_fsyncs;
+ 
+--- Change the tablespace so that the table is rewritten directly, then SELECT
+--- from it to cause it to be read back into shared buffers.
+-SELECT sum(reads) AS io_sum_shared_before_reads
+-  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+--- Do this in a transaction to prevent spurious failures due to concurrent accesses to our newly
+--- rewritten table, e.g. by autovacuum.
+-BEGIN;
+-ALTER TABLE test_io_shared SET TABLESPACE regress_tblspace;
+--- SELECT from the table so that the data is read into shared buffers and
+--- context 'normal', object 'relation' reads are counted.
+-SELECT COUNT(*) FROM test_io_shared;
+-COMMIT;
+-SELECT pg_stat_force_next_flush();
+-SELECT sum(reads) AS io_sum_shared_after_reads
+-  FROM pg_stat_io WHERE context = 'normal' AND object = 'relation'  \gset
+-SELECT :io_sum_shared_after_reads > :io_sum_shared_before_reads;
+-
+ SELECT sum(hits) AS io_sum_shared_before_hits
+   FROM pg_stat_io WHERE context = 'normal' AND object = 'relation' \gset
+ -- Select from the table again to count hits.
 diff --git a/src/test/regress/sql/stats_ext.sql b/src/test/regress/sql/stats_ext.sql
 index 1b80d3687b4..d183353b197 100644
 --- a/src/test/regress/sql/stats_ext.sql
