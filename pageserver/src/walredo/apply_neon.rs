@@ -243,6 +243,7 @@ pub(crate) fn apply_in_neon(
             clear,
             will_init,
         } => {
+            use bytes::BufMut;
             if *will_init {
                 assert!(*clear, "init record must be clear to ensure correctness");
             }

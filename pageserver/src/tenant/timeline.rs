@@ -1947,6 +1947,7 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
+    /// TODO(chi): remove after retiring aux read path
     #[allow(dead_code)]
     pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
