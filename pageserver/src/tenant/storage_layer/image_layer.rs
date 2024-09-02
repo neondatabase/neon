@@ -743,6 +743,7 @@ impl ImageLayerWriterInner {
             uncompressed_bytes_eligible: 0,
             uncompressed_bytes_chosen: 0,
             num_keys: 0,
+            #[cfg(feature = "testing")]
             last_written_key: Key::MIN,
         };
 
