@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 use index_part::IndexPartCmd;
 use layers::LayerCmd;
 use pageserver::{
+    config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
     context::{DownloadBehavior, RequestContext},
     page_cache,
     task_mgr::TaskKind,
@@ -205,7 +206,11 @@ fn read_pg_control_file(control_file_path: &Utf8Path) -> anyhow::Result<()> {
 
 async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
-    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+    virtual_file::init(
+        10,
+        virtual_file::api::IoEngineKind::StdFs,
+        DEFAULT_IO_BUFFER_ALIGNMENT,
+    );
     page_cache::init(100);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
     dump_layerfile_from_path(path, true, &ctx).await

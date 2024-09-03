@@ -4,8 +4,8 @@ use lasso::ThreadedRodeo;
 use measured::{
     label::{FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet},
     metric::{histogram::Thresholds, name::MetricName},
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
-    LabelGroup, MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
+    MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
@@ -252,7 +252,7 @@ impl Drop for HttpEndpointPoolsGuard<'_> {
 }
 
 impl HttpEndpointPools {
-    pub fn guard(&self) -> HttpEndpointPoolsGuard {
+    pub fn guard(&self) -> HttpEndpointPoolsGuard<'_> {
         self.http_pool_endpoints_registered_total.inc();
         HttpEndpointPoolsGuard {
             dec: &self.http_pool_endpoints_unregistered_total,
@@ -548,6 +548,7 @@ pub enum RedisEventsCount {
 }
 
 pub struct ThreadPoolWorkers(usize);
+#[derive(Copy, Clone)]
 pub struct ThreadPoolWorkerId(pub usize);
 
 impl LabelValue for ThreadPoolWorkerId {
@@ -613,9 +614,6 @@ impl FixedCardinalitySet for ThreadPoolWorkers {
 #[derive(MetricGroup)]
 #[metric(new(workers: usize))]
 pub struct ThreadPoolMetrics {
-    pub injector_queue_depth: Gauge,
-    #[metric(init = GaugeVec::with_label_set(ThreadPoolWorkers(workers)))]
-    pub worker_queue_depth: GaugeVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]

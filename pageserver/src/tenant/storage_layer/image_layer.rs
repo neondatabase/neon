@@ -28,7 +28,7 @@ use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
-use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
+use crate::tenant::block_io::{BlockBuf, FileBlockReader};
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
@@ -165,6 +165,17 @@ pub struct ImageLayerInner {
     file_id: FileId,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
+}
+
+impl ImageLayerInner {
+    pub(crate) fn layer_dbg_info(&self) -> String {
+        format!(
+            "image {}..{} {}",
+            self.key_range().start,
+            self.key_range().end,
+            self.lsn()
+        )
+    }
 }
 
 impl std::fmt::Debug for ImageLayerInner {
@@ -442,33 +453,6 @@ impl ImageLayerInner {
         Ok(())
     }
 
-    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
-    pub(super) async fn load_key_values(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader =
-            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
-        let mut result = Vec::new();
-        let mut stream = Box::pin(tree_reader.into_stream(&[0; KEY_SIZE], ctx));
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let cursor = block_reader.block_cursor();
-        while let Some(item) = stream.next().await {
-            // TODO: dedup code with get_reconstruct_value
-            let (raw_key, offset) = item?;
-            let key = Key::from_slice(&raw_key[..KEY_SIZE]);
-            // TODO: ctx handling and sharding
-            let blob = cursor
-                .read_blob(offset, ctx)
-                .await
-                .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
-            result.push((key, self.lsn, Value::Image(value)));
-        }
-        Ok(result)
-    }
-
     /// Traverse the layer's index to build read operations on the overlap of the input keyspace
     /// and the keys in this layer.
     ///
@@ -700,15 +684,11 @@ struct ImageLayerWriterInner {
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
 
-    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
+    #[cfg(feature = "testing")]
     last_written_key: Key,
 }
 
 impl ImageLayerWriterInner {
-    fn size(&self) -> u64 {
-        self.tree.borrow_writer().size() + self.blob_writer.size()
-    }
-
     ///
     /// Start building a new image layer.
     ///
@@ -763,6 +743,7 @@ impl ImageLayerWriterInner {
             uncompressed_bytes_eligible: 0,
             uncompressed_bytes_chosen: 0,
             num_keys: 0,
+            #[cfg(feature = "testing")]
             last_written_key: Key::MIN,
         };
 
@@ -843,13 +824,19 @@ impl ImageLayerWriterInner {
             res?;
         }
 
+        let final_key_range = if let Some(end_key) = end_key {
+            self.key_range.start..end_key
+        } else {
+            self.key_range.clone()
+        };
+
         // Fill in the summary on blk 0
         let summary = Summary {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
             tenant_id: self.tenant_shard_id.tenant_id,
             timeline_id: self.timeline_id,
-            key_range: self.key_range.clone(),
+            key_range: final_key_range.clone(),
             lsn: self.lsn,
             index_start_blk,
             index_root_blk,
@@ -870,11 +857,7 @@ impl ImageLayerWriterInner {
         let desc = PersistentLayerDesc::new_img(
             self.tenant_shard_id,
             self.timeline_id,
-            if let Some(end_key) = end_key {
-                self.key_range.start..end_key
-            } else {
-                self.key_range.clone()
-            },
+            final_key_range,
             self.lsn,
             metadata.len(),
         );
@@ -963,14 +946,12 @@ impl ImageLayerWriter {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
-    #[cfg(test)]
     /// Estimated size of the image layer.
     pub(crate) fn estimated_size(&self) -> u64 {
         let inner = self.inner.as_ref().unwrap();
         inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
     }
 
-    #[cfg(test)]
     pub(crate) fn num_keys(&self) -> usize {
         self.inner.as_ref().unwrap().num_keys
     }
@@ -986,7 +967,6 @@ impl ImageLayerWriter {
         self.inner.take().unwrap().finish(timeline, ctx, None).await
     }
 
-    #[cfg(test)]
     /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
     pub(super) async fn finish_with_end_key(
         mut self,
@@ -999,10 +979,6 @@ impl ImageLayerWriter {
             .unwrap()
             .finish(timeline, ctx, Some(end_key))
             .await
-    }
-
-    pub(crate) fn size(&self) -> u64 {
-        self.inner.as_ref().unwrap().size()
     }
 }
 
@@ -1024,6 +1000,10 @@ pub struct ImageLayerIterator<'a> {
 }
 
 impl<'a> ImageLayerIterator<'a> {
+    pub(crate) fn layer_dbg_info(&self) -> String {
+        self.image_layer.layer_dbg_info()
+    }
+
     /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.key_values_batch.is_empty());
@@ -1375,7 +1355,7 @@ mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;

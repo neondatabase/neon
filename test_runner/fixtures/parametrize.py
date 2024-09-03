@@ -1,6 +1,7 @@
 import os
 from typing import Any, Dict, Optional
 
+import allure
 import pytest
 import toml
 from _pytest.python import Metafunc
@@ -31,6 +32,11 @@ def platform() -> Optional[str]:
 @pytest.fixture(scope="function", autouse=True)
 def pageserver_virtual_file_io_engine() -> Optional[str]:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_ENGINE")
+
+
+@pytest.fixture(scope="function", autouse=True)
+def pageserver_io_buffer_alignment() -> Optional[int]:
+    return None
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -91,3 +97,23 @@ def pytest_generate_tests(metafunc: Metafunc):
         and (platform := os.getenv("PLATFORM")) is not None
     ):
         metafunc.parametrize("platform", [platform.lower()])
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_makereport(*args, **kwargs):
+    # Add test parameters to Allue report to distinguish the same tests with different parameters.
+    # Names has `__` prefix to avoid conflicts with `pytest.mark.parametrize` parameters
+
+    # A mapping between `uname -m` and `RUNNER_ARCH` values.
+    # `RUNNER_ARCH` environment variable is set on GitHub Runners,
+    # possible values are X86, X64, ARM, or ARM64.
+    # See https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables
+    uname_m = {
+        "aarch64": "ARM64",
+        "arm64": "ARM64",
+        "x86_64": "X64",
+    }.get(os.uname().machine, "UNKNOWN")
+    arch = os.getenv("RUNNER_ARCH", uname_m)
+    allure.dynamic.parameter("__arch", arch)
+
+    yield

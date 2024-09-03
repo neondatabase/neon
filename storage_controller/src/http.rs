@@ -17,7 +17,7 @@ use pageserver_api::controller_api::{
 };
 use pageserver_api::models::{
     TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
-    TenantTimeTravelRequest, TimelineCreateRequest,
+    TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
@@ -332,6 +332,24 @@ async fn handle_tenant_timeline_delete(
             .and_then(map_reqwest_hyper_status)
     })
     .await
+}
+
+async fn handle_tenant_timeline_archival_config(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    let create_req = json_request::<TimelineArchivalConfigRequest>(&mut req).await?;
+
+    service
+        .tenant_timeline_archival_config(tenant_id, timeline_id, create_req)
+        .await?;
+
+    json_response(StatusCode::OK, ())
 }
 
 async fn handle_tenant_timeline_detach_ancestor(
@@ -1074,7 +1092,6 @@ pub fn make_router(
                 RequestName("control_v1_metadata_health_list_outdated"),
             )
         })
-        // TODO(vlad): endpoint for cancelling drain and fill
         // Tenant Shard operations
         .put("/control/v1/tenant/:tenant_shard_id/migrate", |r| {
             tenant_service_handler(
@@ -1161,6 +1178,16 @@ pub fn make_router(
                 RequestName("v1_tenant_timeline"),
             )
         })
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/archival_config",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_archival_config,
+                    RequestName("v1_tenant_timeline_archival_config"),
+                )
+            },
+        )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/detach_ancestor",
             |r| {

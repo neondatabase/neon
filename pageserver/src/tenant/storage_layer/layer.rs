@@ -13,8 +13,7 @@ use utils::lsn::Lsn;
 use utils::sync::{gate, heavier_once_cell};
 
 use crate::config::PageServerConf;
-use crate::context::{DownloadBehavior, RequestContext};
-use crate::repository::Key;
+use crate::context::{DownloadBehavior, RequestContext, RequestContextBuilder};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::{CompactionError, GetVectoredError};
@@ -34,6 +33,8 @@ mod tests;
 
 #[cfg(test)]
 mod failpoints;
+
+pub const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
 
 /// A Layer contains all data in a "rectangle" consisting of a range of keys and
 /// range of LSNs.
@@ -330,23 +331,6 @@ impl Layer {
                 ),
                 err => err,
             })
-    }
-
-    /// Get all key/values in the layer. Should be replaced with an iterator-based API in the future.
-    #[allow(dead_code)]
-    pub(crate) async fn load_key_values(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
-        let layer = self
-            .0
-            .get_or_maybe_download(true, Some(ctx))
-            .await
-            .map_err(|err| match err {
-                DownloadError::DownloadCancelled => GetVectoredError::Cancelled,
-                other => GetVectoredError::Other(anyhow::anyhow!(other)),
-            })?;
-        layer.load_key_values(&self.0, ctx).await
     }
 
     /// Download the layer if evicted.
@@ -1296,7 +1280,10 @@ impl LayerInner {
                 lsn_end: lsn_range.end,
                 remote: !resident,
                 access_stats,
-                l0: crate::tenant::layer_map::LayerMap::is_l0(&self.layer_desc().key_range),
+                l0: crate::tenant::layer_map::LayerMap::is_l0(
+                    &self.layer_desc().key_range,
+                    self.layer_desc().is_delta,
+                ),
             }
         } else {
             let lsn = self.desc.image_layer_lsn();
@@ -1489,8 +1476,9 @@ impl LayerInner {
                 let duration = SystemTime::now().duration_since(local_layer_mtime);
                 match duration {
                     Ok(elapsed) => {
-                        let accessed = self.access_stats.accessed();
-                        if accessed {
+                        let accessed_and_visible = self.access_stats.accessed()
+                            && self.access_stats.visibility() == LayerVisibilityHint::Visible;
+                        if accessed_and_visible {
                             // Only layers used for reads contribute to our "low residence" metric that is used
                             // to detect thrashing.  Layers promoted for other reasons (e.g. compaction) are allowed
                             // to be rapidly evicted without contributing to this metric.
@@ -1504,7 +1492,7 @@ impl LayerInner {
 
                         tracing::info!(
                             residence_millis = elapsed.as_millis(),
-                            accessed,
+                            accessed_and_visible,
                             "evicted layer after known residence period"
                         );
                     }
@@ -1690,6 +1678,9 @@ impl DownloadedLayer {
             );
 
             let res = if owner.desc.is_delta {
+                let ctx = RequestContextBuilder::extend(ctx)
+                    .page_content_kind(crate::context::PageContentKind::DeltaLayerSummary)
+                    .build();
                 let summary = Some(delta_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
                     owner.desc.timeline_id,
@@ -1700,11 +1691,14 @@ impl DownloadedLayer {
                     &owner.path,
                     summary,
                     Some(owner.conf.max_vectored_read_bytes),
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map(LayerKind::Delta)
             } else {
+                let ctx = RequestContextBuilder::extend(ctx)
+                    .page_content_kind(crate::context::PageContentKind::ImageLayerSummary)
+                    .build();
                 let lsn = owner.desc.image_layer_lsn();
                 let summary = Some(image_layer::Summary::expected(
                     owner.desc.tenant_shard_id.tenant_id,
@@ -1717,7 +1711,7 @@ impl DownloadedLayer {
                     lsn,
                     summary,
                     Some(owner.conf.max_vectored_read_bytes),
-                    ctx,
+                    &ctx,
                 )
                 .await
                 .map(LayerKind::Image)
@@ -1768,19 +1762,6 @@ impl DownloadedLayer {
                 i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
                     .await
             }
-        }
-    }
-
-    async fn load_key_values(
-        &self,
-        owner: &Arc<LayerInner>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, crate::repository::Value)>> {
-        use LayerKind::*;
-
-        match self.get(owner, ctx).await? {
-            Delta(d) => d.load_key_values(ctx).await,
-            Image(i) => i.load_key_values(ctx).await,
         }
     }
 

@@ -18,7 +18,7 @@ use crate::{
 };
 
 #[derive(Error, Debug)]
-pub enum HandshakeError {
+pub(crate) enum HandshakeError {
     #[error("data is sent before server replied with EncryptionResponse")]
     EarlyData,
 
@@ -57,7 +57,7 @@ impl ReportableError for HandshakeError {
     }
 }
 
-pub enum HandshakeData<S> {
+pub(crate) enum HandshakeData<S> {
     Startup(PqStream<Stream<S>>, StartupMessageParams),
     Cancel(CancelKeyData),
 }
@@ -67,7 +67,7 @@ pub enum HandshakeData<S> {
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
-pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     ctx: &RequestMonitoring,
     stream: S,
     mut tls: Option<&TlsConfig>,
@@ -82,9 +82,8 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
         let msg = stream.read_startup_packet().await?;
-        use FeStartupPacket::*;
         match msg {
-            SslRequest { direct } => match stream.get_ref() {
+            FeStartupPacket::SslRequest { direct } => match stream.get_ref() {
                 Stream::Raw { .. } if !tried_ssl => {
                     tried_ssl = true;
 
@@ -139,7 +138,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                         let tls_stream = accept.await.inspect_err(|_| {
                             if record_handshake_error {
-                                Metrics::get().proxy.tls_handshake_failures.inc()
+                                Metrics::get().proxy.tls_handshake_failures.inc();
                             }
                         })?;
 
@@ -182,7 +181,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
             },
-            GssEncRequest => match stream.get_ref() {
+            FeStartupPacket::GssEncRequest => match stream.get_ref() {
                 Stream::Raw { .. } if !tried_gss => {
                     tried_gss = true;
 
@@ -191,7 +190,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _ => return Err(HandshakeError::ProtocolViolation),
             },
-            StartupMessage { params, version }
+            FeStartupPacket::StartupMessage { params, version }
                 if PG_PROTOCOL_EARLIEST <= version && version <= PG_PROTOCOL_LATEST =>
             {
                 // Check that the config has been consumed during upgrade
@@ -211,7 +210,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 break Ok(HandshakeData::Startup(stream, params));
             }
             // downgrade protocol version
-            StartupMessage { params, version }
+            FeStartupPacket::StartupMessage { params, version }
                 if version.major() == 3 && version > PG_PROTOCOL_LATEST =>
             {
                 warn!(?version, "unsupported minor version");
@@ -241,7 +240,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 );
                 break Ok(HandshakeData::Startup(stream, params));
             }
-            StartupMessage { version, .. } => {
+            FeStartupPacket::StartupMessage { version, .. } => {
                 warn!(
                     ?version,
                     session_type = "normal",
@@ -249,7 +248,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 );
                 return Err(HandshakeError::ProtocolViolation);
             }
-            CancelRequest(cancel_key_data) => {
+            FeStartupPacket::CancelRequest(cancel_key_data) => {
                 info!(session_type = "cancellation", "successful handshake");
                 break Ok(HandshakeData::Cancel(cancel_key_data));
             }

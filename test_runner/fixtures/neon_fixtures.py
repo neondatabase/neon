@@ -61,8 +61,6 @@ from fixtures.pageserver.common_types import IndexPartDump, LayerName, parse_lay
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
-    wait_for_upload,
-    wait_for_upload_queue_empty,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
@@ -498,6 +496,7 @@ class NeonEnvBuilder:
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
         storage_controller_port_override: Optional[int] = None,
+        pageserver_io_buffer_alignment: Optional[int] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -551,6 +550,8 @@ class NeonEnvBuilder:
         self.safekeeper_extra_opts = safekeeper_extra_opts
 
         self.storage_controller_port_override = storage_controller_port_override
+
+        self.pageserver_io_buffer_alignment = pageserver_io_buffer_alignment
 
         assert test_name.startswith(
             "test_"
@@ -1125,6 +1126,7 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
+        self.pageserver_io_buffer_alignment = config.pageserver_io_buffer_alignment
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: Dict[str, Any] = {
@@ -1162,7 +1164,8 @@ class NeonEnv:
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
-                "image_compression": "zstd",
+                # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
+                "availability_zone": "us-east-2a",
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -1187,13 +1190,11 @@ class NeonEnv:
                         for key, value in override.items():
                             ps_cfg[key] = value
 
+            ps_cfg["io_buffer_alignment"] = self.pageserver_io_buffer_alignment
+
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
-                NeonPageserver(
-                    self,
-                    ps_id,
-                    port=pageserver_port,
-                )
+                NeonPageserver(self, ps_id, port=pageserver_port, az_id=ps_cfg["availability_zone"])
             )
             cfg["pageservers"].append(ps_cfg)
 
@@ -1428,6 +1429,7 @@ def _shared_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
+    pageserver_io_buffer_alignment: Optional[int],
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1460,6 +1462,7 @@ def _shared_simple_env(
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
+        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
     ) as builder:
         env = builder.init_start()
 
@@ -1502,6 +1505,7 @@ def neon_env_builder(
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
     record_property: Callable[[str, object], None],
+    pageserver_io_buffer_alignment: Optional[int],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1537,6 +1541,7 @@ def neon_env_builder(
         test_overlay_dir=test_overlay_dir,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
+        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
     ) as builder:
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,
@@ -2287,7 +2292,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             self.allowed_errors,
         )
 
-    def pageserver_api(self) -> PageserverHttpClient:
+    def pageserver_api(self, *args, **kwargs) -> PageserverHttpClient:
         """
         The storage controller implements a subset of the pageserver REST API, for mapping
         per-tenant actions into per-shard actions (e.g. timeline creation).  Tests should invoke those
@@ -2296,7 +2301,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         auth_token = None
         if self.auth_enabled:
             auth_token = self.env.auth_keys.generate_token(scope=TokenScope.PAGE_SERVER_API)
-        return PageserverHttpClient(self.port, lambda: True, auth_token)
+        return PageserverHttpClient(self.port, lambda: True, auth_token, *args, **kwargs)
 
     def request(self, method, *args, **kwargs) -> requests.Response:
         resp = requests.request(method, *args, **kwargs)
@@ -2393,6 +2398,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "listen_http_port": node.service_port.http,
             "listen_pg_addr": "localhost",
             "listen_pg_port": node.service_port.pg,
+            "availability_zone_id": node.az_id,
         }
         log.info(f"node_register({body})")
         self.request(
@@ -2916,10 +2922,11 @@ class NeonPageserver(PgProtocol, LogUtils):
 
     TEMP_FILE_SUFFIX = "___temp"
 
-    def __init__(self, env: NeonEnv, id: int, port: PageserverPort):
+    def __init__(self, env: NeonEnv, id: int, port: PageserverPort, az_id: str):
         super().__init__(host="localhost", port=port.pg, user="cloud_admin")
         self.env = env
         self.id = id
+        self.az_id = az_id
         self.running = False
         self.service_port = port
         self.version = env.get_binary_version("pageserver")
@@ -4546,6 +4553,8 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
+    # List partial uploaded segments of this safekeeper. Works only for
+    # RemoteStorageKind.LOCAL_FS.
     def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
         tline_path = (
             self.env.repo_dir
@@ -4555,9 +4564,11 @@ class Safekeeper(LogUtils):
             / str(timeline_id)
         )
         assert isinstance(self.env.safekeepers_remote_storage, LocalFsStorage)
-        return self._list_segments_in_dir(
+        segs = self._list_segments_in_dir(
             tline_path, lambda name: ".metadata" not in name and ".___temp" not in name
         )
+        mysegs = [s for s in segs if f"sk{self.id}" in s]
+        return mysegs
 
     def list_segments(self, tenant_id, timeline_id) -> List[str]:
         """
@@ -4618,12 +4629,20 @@ class Safekeeper(LogUtils):
         wait_until(20, 0.5, paused)
 
 
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class NodeKind(str, Enum):
+    PAGESERVER = "pageserver"
+    SAFEKEEPER = "safekeeper"
+
+
 class StorageScrubber:
     def __init__(self, env: NeonEnv, log_dir: Path):
         self.env = env
         self.log_dir = log_dir
 
-    def scrubber_cli(self, args: list[str], timeout) -> str:
+    def scrubber_cli(
+        self, args: list[str], timeout, extra_env: Optional[Dict[str, str]] = None
+    ) -> str:
         assert isinstance(self.env.pageserver_remote_storage, S3Storage)
         s3_storage = self.env.pageserver_remote_storage
 
@@ -4638,12 +4657,16 @@ class StorageScrubber:
         if s3_storage.endpoint is not None:
             env.update({"AWS_ENDPOINT_URL": s3_storage.endpoint})
 
+        if extra_env is not None:
+            env.update(extra_env)
+
         base_args = [
             str(self.env.neon_binpath / "storage_scrubber"),
             f"--controller-api={self.env.storage_controller.api_root()}",
         ]
         args = base_args + args
 
+        log.info(f"Invoking scrubber command {args} with env: {env}")
         (output_path, stdout, status_code) = subprocess_capture(
             self.log_dir,
             args,
@@ -4664,18 +4687,43 @@ class StorageScrubber:
         assert stdout is not None
         return stdout
 
-    def scan_metadata(self, post_to_storage_controller: bool = False) -> Tuple[bool, Any]:
+    def scan_metadata_safekeeper(
+        self,
+        timeline_lsns: List[Dict[str, Any]],
+        cloud_admin_api_url: str,
+        cloud_admin_api_token: str,
+    ) -> Tuple[bool, Any]:
+        extra_env = {
+            "CLOUD_ADMIN_API_URL": cloud_admin_api_url,
+            "CLOUD_ADMIN_API_TOKEN": cloud_admin_api_token,
+        }
+        return self.scan_metadata(
+            node_kind=NodeKind.SAFEKEEPER, timeline_lsns=timeline_lsns, extra_env=extra_env
+        )
+
+    def scan_metadata(
+        self,
+        post_to_storage_controller: bool = False,
+        node_kind: NodeKind = NodeKind.PAGESERVER,
+        timeline_lsns: Optional[List[Dict[str, Any]]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, Any]:
         """
         Returns the health status and the metadata summary.
         """
-        args = ["scan-metadata", "--node-kind", "pageserver", "--json"]
+        args = ["scan-metadata", "--node-kind", node_kind.value, "--json"]
         if post_to_storage_controller:
             args.append("--post")
-        stdout = self.scrubber_cli(args, timeout=30)
+        if timeline_lsns is not None:
+            args.append("--timeline-lsns")
+            args.append(json.dumps(timeline_lsns))
+        stdout = self.scrubber_cli(args, timeout=30, extra_env=extra_env)
 
         try:
             summary = json.loads(stdout)
-            healthy = not summary["with_errors"] and not summary["with_warnings"]
+            # summary does not contain "with_warnings" if node_kind is the safekeeper
+            no_warnings = "with_warnings" not in summary or not summary["with_warnings"]
+            healthy = not summary["with_errors"] and no_warnings
             return healthy, summary
         except:
             log.error("Failed to decode JSON output from `scan-metadata`.  Dumping stdout:")
@@ -5347,9 +5395,7 @@ def last_flush_lsn_upload(
     for tenant_shard_id, pageserver in shards:
         ps_http = pageserver.http_client(auth_token=auth_token)
         wait_for_last_record_lsn(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
-        # force a checkpoint to trigger upload
-        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id)
-        wait_for_upload(ps_http, tenant_shard_id, timeline_id, last_flush_lsn)
+        ps_http.timeline_checkpoint(tenant_shard_id, timeline_id, wait_until_uploaded=True)
     return last_flush_lsn
 
 
@@ -5434,9 +5480,5 @@ def generate_uploads_and_deletions(
         # ensures that the pageserver is in a fully idle state: there will be no more
         # background ingest, no more uploads pending, and therefore no non-determinism
         # in subsequent actions like pageserver restarts.
-        final_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
-        ps_http.timeline_checkpoint(tenant_id, timeline_id)
-        # Finish uploads
-        wait_for_upload(ps_http, tenant_id, timeline_id, final_lsn)
-        # Finish all remote writes (including deletions)
-        wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
+        flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id, pageserver.id)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)

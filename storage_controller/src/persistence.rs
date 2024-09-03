@@ -25,6 +25,9 @@ use crate::metrics::{
 };
 use crate::node::Node;
 
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
+
 /// ## What do we store?
 ///
 /// The storage controller service does not store most of its state durably.
@@ -72,6 +75,8 @@ pub(crate) enum DatabaseError {
     ConnectionPool(#[from] r2d2::Error),
     #[error("Logical error: {0}")]
     Logical(String),
+    #[error("Migration error: {0}")]
+    Migration(String),
 }
 
 #[derive(measured::FixedCardinalityLabel, Copy, Clone)]
@@ -86,6 +91,7 @@ pub(crate) enum DatabaseOperation {
     Detach,
     ReAttach,
     IncrementGeneration,
+    PeekGenerations,
     ListTenantShards,
     InsertTenantShards,
     UpdateTenantShard,
@@ -97,6 +103,7 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealthOutdated,
     GetLeader,
     UpdateLeader,
+    SetNodeAzId,
 }
 
 #[must_use]
@@ -113,6 +120,13 @@ pub(crate) type DatabaseResult<T> = Result<T, DatabaseError>;
 pub(crate) enum TenantFilter {
     Tenant(TenantId),
     Shard(TenantShardId),
+}
+
+/// Represents the results of looking up generation+pageserver for the shards of a tenant
+pub(crate) struct ShardGenerationState {
+    pub(crate) tenant_shard_id: TenantShardId,
+    pub(crate) generation: Option<Generation>,
+    pub(crate) generation_pageserver: Option<NodeId>,
 }
 
 impl Persistence {
@@ -165,6 +179,19 @@ impl Persistence {
                 }
             }
         }
+    }
+
+    /// Execute the diesel migrations that are built into this binary
+    pub(crate) async fn migration_run(&self) -> DatabaseResult<()> {
+        use diesel_migrations::{HarnessWithOutput, MigrationHarness};
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            HarnessWithOutput::write_to_stdout(conn)
+                .run_pending_migrations(MIGRATIONS)
+                .map(|_| ())
+                .map_err(|e| DatabaseError::Migration(e.to_string()))
+        })
+        .await
     }
 
     /// Wraps `with_conn` in order to collect latency and error metrics
@@ -290,6 +317,31 @@ impl Persistence {
         if updated != 1 {
             Err(DatabaseError::Logical(format!(
                 "Node {node_id:?} not found for update",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn set_node_availability_zone_id(
+        &self,
+        input_node_id: NodeId,
+        input_az_id: String,
+    ) -> DatabaseResult<()> {
+        use crate::schema::nodes::dsl::*;
+        let updated = self
+            .with_measured_conn(DatabaseOperation::SetNodeAzId, move |conn| {
+                let updated = diesel::update(nodes)
+                    .filter(node_id.eq(input_node_id.0 as i64))
+                    .set((availability_zone_id.eq(input_az_id.clone()),))
+                    .execute(conn)?;
+                Ok(updated)
+            })
+            .await?;
+
+        if updated != 1 {
+            Err(DatabaseError::Logical(format!(
+                "Node {node_id:?} not found for setting az id",
             )))
         } else {
             Ok(())
@@ -482,6 +534,42 @@ impl Persistence {
         };
 
         Ok(Generation::new(g as u32))
+    }
+
+    /// When we want to call out to the running shards for a tenant, e.g. during timeline CRUD operations,
+    /// we need to know where the shard is attached, _and_ the generation, so that we can re-check the generation
+    /// afterwards to confirm that our timeline CRUD operation is truly persistent (it must have happened in the
+    /// latest generation)
+    ///
+    /// If the tenant doesn't exist, an empty vector is returned.
+    ///
+    /// Output is sorted by shard number
+    pub(crate) async fn peek_generations(
+        &self,
+        filter_tenant_id: TenantId,
+    ) -> Result<Vec<ShardGenerationState>, DatabaseError> {
+        use crate::schema::tenant_shards::dsl::*;
+        let rows = self
+            .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
+                let result = tenant_shards
+                    .filter(tenant_id.eq(filter_tenant_id.to_string()))
+                    .select(TenantShardPersistence::as_select())
+                    .order(shard_number)
+                    .load(conn)?;
+                Ok(result)
+            })
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|p| ShardGenerationState {
+                tenant_shard_id: p
+                    .get_tenant_shard_id()
+                    .expect("Corrupt tenant shard id in database"),
+                generation: p.generation.map(|g| Generation::new(g as u32)),
+                generation_pageserver: p.generation_pageserver.map(|n| NodeId(n as u64)),
+            })
+            .collect())
     }
 
     #[allow(non_local_definitions)]
@@ -918,6 +1006,7 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_http_port: i32,
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
+    pub(crate) availability_zone_id: Option<String>,
 }
 
 /// Tenant metadata health status that are stored durably.

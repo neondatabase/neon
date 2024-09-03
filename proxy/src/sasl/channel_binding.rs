@@ -2,7 +2,7 @@
 
 /// Channel binding flag (possibly with params).
 #[derive(Debug, PartialEq, Eq)]
-pub enum ChannelBinding<T> {
+pub(crate) enum ChannelBinding<T> {
     /// Client doesn't support channel binding.
     NotSupportedClient,
     /// Client thinks server doesn't support channel binding.
@@ -12,45 +12,45 @@ pub enum ChannelBinding<T> {
 }
 
 impl<T> ChannelBinding<T> {
-    pub fn and_then<R, E>(self, f: impl FnOnce(T) -> Result<R, E>) -> Result<ChannelBinding<R>, E> {
-        use ChannelBinding::*;
+    pub(crate) fn and_then<R, E>(
+        self,
+        f: impl FnOnce(T) -> Result<R, E>,
+    ) -> Result<ChannelBinding<R>, E> {
         Ok(match self {
-            NotSupportedClient => NotSupportedClient,
-            NotSupportedServer => NotSupportedServer,
-            Required(x) => Required(f(x)?),
+            Self::NotSupportedClient => ChannelBinding::NotSupportedClient,
+            Self::NotSupportedServer => ChannelBinding::NotSupportedServer,
+            Self::Required(x) => ChannelBinding::Required(f(x)?),
         })
     }
 }
 
 impl<'a> ChannelBinding<&'a str> {
     // NB: FromStr doesn't work with lifetimes
-    pub fn parse(input: &'a str) -> Option<Self> {
-        use ChannelBinding::*;
+    pub(crate) fn parse(input: &'a str) -> Option<Self> {
         Some(match input {
-            "n" => NotSupportedClient,
-            "y" => NotSupportedServer,
-            other => Required(other.strip_prefix("p=")?),
+            "n" => Self::NotSupportedClient,
+            "y" => Self::NotSupportedServer,
+            other => Self::Required(other.strip_prefix("p=")?),
         })
     }
 }
 
 impl<T: std::fmt::Display> ChannelBinding<T> {
     /// Encode channel binding data as base64 for subsequent checks.
-    pub fn encode<'a, E>(
+    pub(crate) fn encode<'a, E>(
         &self,
         get_cbind_data: impl FnOnce(&T) -> Result<&'a [u8], E>,
     ) -> Result<std::borrow::Cow<'static, str>, E> {
-        use ChannelBinding::*;
         Ok(match self {
-            NotSupportedClient => {
+            Self::NotSupportedClient => {
                 // base64::encode("n,,")
                 "biws".into()
             }
-            NotSupportedServer => {
+            Self::NotSupportedServer => {
                 // base64::encode("y,,")
                 "eSws".into()
             }
-            Required(mode) => {
+            Self::Required(mode) => {
                 use std::io::Write;
                 let mut cbind_input = vec![];
                 write!(&mut cbind_input, "p={mode},,",).unwrap();

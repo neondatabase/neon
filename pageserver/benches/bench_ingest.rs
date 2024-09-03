@@ -4,12 +4,13 @@ use bytes::Bytes;
 use camino::Utf8PathBuf;
 use criterion::{criterion_group, criterion_main, Criterion};
 use pageserver::{
-    config::PageServerConf,
+    config::{defaults::DEFAULT_IO_BUFFER_ALIGNMENT, PageServerConf},
     context::{DownloadBehavior, RequestContext},
     l0_flush::{L0FlushConfig, L0FlushGlobalState},
     page_cache,
     repository::Value,
     task_mgr::TaskKind,
+    tenant::storage_layer::inmemory_layer::SerializedBatch,
     tenant::storage_layer::InMemoryLayer,
     virtual_file,
 };
@@ -67,11 +68,15 @@ async fn ingest(
     let layer =
         InMemoryLayer::create(conf, timeline_id, tenant_shard_id, lsn, entered, &ctx).await?;
 
-    let data = Value::Image(Bytes::from(vec![0u8; put_size])).ser()?;
+    let data = Value::Image(Bytes::from(vec![0u8; put_size]));
+    let data_ser_size = data.serialized_size().unwrap() as usize;
     let ctx = RequestContext::new(
         pageserver::task_mgr::TaskKind::WalReceiverConnectionHandler,
         pageserver::context::DownloadBehavior::Download,
     );
+
+    const BATCH_SIZE: usize = 16;
+    let mut batch = Vec::new();
 
     for i in 0..put_count {
         lsn += put_size as u64;
@@ -95,7 +100,17 @@ async fn ingest(
             }
         }
 
-        layer.put_value(key.to_compact(), lsn, &data, &ctx).await?;
+        batch.push((key.to_compact(), lsn, data_ser_size, data.clone()));
+        if batch.len() >= BATCH_SIZE {
+            let this_batch = std::mem::take(&mut batch);
+            let serialized = SerializedBatch::from_values(this_batch).unwrap();
+            layer.put_batch(serialized, &ctx).await?;
+        }
+    }
+    if !batch.is_empty() {
+        let this_batch = std::mem::take(&mut batch);
+        let serialized = SerializedBatch::from_values(this_batch).unwrap();
+        layer.put_batch(serialized, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
 
@@ -149,7 +164,11 @@ fn criterion_benchmark(c: &mut Criterion) {
     let conf: &'static PageServerConf = Box::leak(Box::new(
         pageserver::config::PageServerConf::dummy_conf(temp_dir.path().to_path_buf()),
     ));
-    virtual_file::init(16384, virtual_file::io_engine_for_bench());
+    virtual_file::init(
+        16384,
+        virtual_file::io_engine_for_bench(),
+        DEFAULT_IO_BUFFER_ALIGNMENT,
+    );
     page_cache::init(conf.page_cache_size);
 
     {

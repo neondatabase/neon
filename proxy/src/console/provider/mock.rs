@@ -48,7 +48,7 @@ impl Api {
         Self { endpoint }
     }
 
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         self.endpoint.as_str()
     }
 
@@ -64,7 +64,7 @@ impl Api {
                 tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
             tokio::spawn(connection);
-            let secret = match get_execute_postgres_query(
+            let secret = if let Some(entry) = get_execute_postgres_query(
                 &client,
                 "select rolpassword from pg_catalog.pg_authid where rolname = $1",
                 &[&&*user_info.user],
@@ -72,15 +72,12 @@ impl Api {
             )
             .await?
             {
-                Some(entry) => {
-                    info!("got a secret: {entry}"); // safe since it's not a prod scenario
-                    let secret = scram::ServerSecret::parse(&entry).map(AuthSecret::Scram);
-                    secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
-                }
-                None => {
-                    warn!("user '{}' does not exist", user_info.user);
-                    None
-                }
+                info!("got a secret: {entry}"); // safe since it's not a prod scenario
+                let secret = scram::ServerSecret::parse(&entry).map(AuthSecret::Scram);
+                secret.or_else(|| parse_md5(&entry).map(AuthSecret::Md5))
+            } else {
+                warn!("user '{}' does not exist", user_info.user);
+                None
             };
             let allowed_ips = match get_execute_postgres_query(
                 &client,
@@ -142,12 +139,11 @@ async fn get_execute_postgres_query(
     let rows = client.query(query, params).await?;
 
     // We can get at most one row, because `rolname` is unique.
-    let row = match rows.first() {
-        Some(row) => row,
+    let Some(row) = rows.first() else {
         // This means that the user doesn't exist, so there can be no secret.
         // However, this is still a *valid* outcome which is very similar
         // to getting `404 Not found` from the Neon console.
-        None => return Ok(None),
+        return Ok(None);
     };
 
     let entry = row.try_get(idx).map_err(MockApiError::PasswordNotSet)?;

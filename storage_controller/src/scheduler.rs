@@ -1,6 +1,6 @@
 use crate::{node::Node, tenant_shard::TenantShard};
 use itertools::Itertools;
-use pageserver_api::controller_api::UtilizationScore;
+use pageserver_api::models::PageserverUtilization;
 use serde::Serialize;
 use std::collections::HashMap;
 use utils::{http::error::ApiError, id::NodeId};
@@ -20,9 +20,9 @@ impl From<ScheduleError> for ApiError {
     }
 }
 
-#[derive(Serialize, Eq, PartialEq)]
+#[derive(Serialize)]
 pub enum MaySchedule {
-    Yes(UtilizationScore),
+    Yes(PageserverUtilization),
     No,
 }
 
@@ -282,6 +282,28 @@ impl Scheduler {
                 node.shard_count -= 1;
             }
         }
+
+        // Maybe update PageserverUtilization
+        match update {
+            RefCountUpdate::AddSecondary | RefCountUpdate::Attach => {
+                // Referencing the node: if this takes our shard_count above the utilzation structure's
+                // shard count, then artifically bump it: this ensures that the scheduler immediately
+                // recognizes that this node has more work on it, without waiting for the next heartbeat
+                // to update the utilization.
+                if let MaySchedule::Yes(utilization) = &mut node.may_schedule {
+                    utilization.adjust_shard_count_max(node.shard_count as u32);
+                }
+            }
+            RefCountUpdate::PromoteSecondary
+            | RefCountUpdate::Detach
+            | RefCountUpdate::RemoveSecondary
+            | RefCountUpdate::DemoteAttached => {
+                // De-referencing the node: leave the utilization's shard_count at a stale higher
+                // value until some future heartbeat after we have physically removed this shard
+                // from the node: this prevents the scheduler over-optimistically trying to schedule
+                // more work onto the node before earlier detaches are done.
+            }
+        }
     }
 
     // Check if the number of shards attached to a given node is lagging below
@@ -326,7 +348,18 @@ impl Scheduler {
         use std::collections::hash_map::Entry::*;
         match self.nodes.entry(node.get_id()) {
             Occupied(mut entry) => {
-                entry.get_mut().may_schedule = node.may_schedule();
+                // Updates to MaySchedule are how we receive updated PageserverUtilization: adjust these values
+                // to account for any shards scheduled on the controller but not yet visible to the pageserver.
+                let mut may_schedule = node.may_schedule();
+                match &mut may_schedule {
+                    MaySchedule::Yes(utilization) => {
+                        utilization.adjust_shard_count_max(entry.get().shard_count as u32);
+                    }
+                    MaySchedule::No => { // Nothing to tweak
+                    }
+                }
+
+                entry.get_mut().may_schedule = may_schedule;
             }
             Vacant(entry) => {
                 entry.insert(SchedulerNode {
@@ -363,7 +396,7 @@ impl Scheduler {
                 let may_schedule = self
                     .nodes
                     .get(node_id)
-                    .map(|n| n.may_schedule != MaySchedule::No)
+                    .map(|n| !matches!(n.may_schedule, MaySchedule::No))
                     .unwrap_or(false);
                 (*node_id, may_schedule)
             })
@@ -383,7 +416,7 @@ impl Scheduler {
     /// the same tenant on the same node.  This is a soft constraint: the context will never
     /// cause us to fail to schedule a shard.
     pub(crate) fn schedule_shard(
-        &self,
+        &mut self,
         hard_exclude: &[NodeId],
         context: &ScheduleContext,
     ) -> Result<NodeId, ScheduleError> {
@@ -391,31 +424,41 @@ impl Scheduler {
             return Err(ScheduleError::NoPageservers);
         }
 
-        let mut scores: Vec<(NodeId, AffinityScore, usize, usize)> = self
+        let mut scores: Vec<(NodeId, AffinityScore, u64, usize)> = self
             .nodes
-            .iter()
-            .filter_map(|(k, v)| {
-                if hard_exclude.contains(k) || v.may_schedule == MaySchedule::No {
-                    None
-                } else {
-                    Some((
-                        *k,
-                        context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
-                        v.shard_count,
-                        v.attached_shard_count,
-                    ))
-                }
+            .iter_mut()
+            .filter_map(|(k, v)| match &mut v.may_schedule {
+                MaySchedule::No => None,
+                MaySchedule::Yes(_) if hard_exclude.contains(k) => None,
+                MaySchedule::Yes(utilization) => Some((
+                    *k,
+                    context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
+                    utilization.cached_score(),
+                    v.attached_shard_count,
+                )),
             })
             .collect();
 
+        // Exclude nodes whose utilization is critically high, if there are alternatives available.  This will
+        // cause us to violate affinity rules if it is necessary to avoid critically overloading nodes: for example
+        // we may place shards in the same tenant together on the same pageserver if all other pageservers are
+        // overloaded.
+        let non_overloaded_scores = scores
+            .iter()
+            .filter(|i| !PageserverUtilization::is_overloaded(i.2))
+            .copied()
+            .collect::<Vec<_>>();
+        if !non_overloaded_scores.is_empty() {
+            scores = non_overloaded_scores;
+        }
+
         // Sort by, in order of precedence:
         //  1st: Affinity score.  We should never pick a higher-score node if a lower-score node is available
-        //  2nd: Attached shard count.  Within nodes with the same affinity, we always pick the node with
-        //  the least number of attached shards.
-        //  3rd: Total shard count.  Within nodes with the same affinity and attached shard count, use nodes
-        //  with the lower total shard count.
+        //  2nd: Utilization score (this combines shard count and disk utilization)
+        //  3rd: Attached shard count.  When nodes have identical utilization (e.g. when populating some
+        //       empty nodes), this acts as an anti-affinity between attached shards.
         //  4th: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
-        scores.sort_by_key(|i| (i.1, i.3, i.2, i.0));
+        scores.sort_by_key(|i| (i.1, i.2, i.3, i.0));
 
         if scores.is_empty() {
             // After applying constraints, no pageservers were left.
@@ -429,7 +472,7 @@ impl Scheduler {
                 for (node_id, node) in &self.nodes {
                     tracing::info!(
                         "Node {node_id}: may_schedule={} shards={}",
-                        node.may_schedule != MaySchedule::No,
+                        !matches!(node.may_schedule, MaySchedule::No),
                         node.shard_count
                     );
                 }
@@ -469,7 +512,7 @@ impl Scheduler {
 pub(crate) mod test_utils {
 
     use crate::node::Node;
-    use pageserver_api::controller_api::{NodeAvailability, UtilizationScore};
+    use pageserver_api::{controller_api::NodeAvailability, models::utilization::test_utilization};
     use std::collections::HashMap;
     use utils::id::NodeId;
     /// Test helper: synthesize the requested number of nodes, all in active state.
@@ -485,8 +528,9 @@ pub(crate) mod test_utils {
                         80 + i as u16,
                         format!("pghost-{i}"),
                         5432 + i as u16,
+                        None,
                     );
-                    node.set_availability(NodeAvailability::Active(UtilizationScore::worst()));
+                    node.set_availability(NodeAvailability::Active(test_utilization::simple(0, 0)));
                     assert!(node.is_available());
                     node
                 })
@@ -497,6 +541,8 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
+    use pageserver_api::{controller_api::NodeAvailability, models::utilization::test_utilization};
+
     use super::*;
 
     use crate::tenant_shard::IntentState;
@@ -556,5 +602,131 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    /// Test the PageserverUtilization's contribution to scheduling algorithm
+    fn scheduler_utilization() {
+        let mut nodes = test_utils::make_test_nodes(3);
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        // Need to keep these alive because they contribute to shard counts via RAII
+        let mut scheduled_intents = Vec::new();
+
+        let empty_context = ScheduleContext::default();
+
+        fn assert_scheduler_chooses(
+            expect_node: NodeId,
+            scheduled_intents: &mut Vec<IntentState>,
+            scheduler: &mut Scheduler,
+            context: &ScheduleContext,
+        ) {
+            let scheduled = scheduler.schedule_shard(&[], context).unwrap();
+            let mut intent = IntentState::new();
+            intent.set_attached(scheduler, Some(scheduled));
+            scheduled_intents.push(intent);
+            assert_eq!(scheduled, expect_node);
+        }
+
+        // Independent schedule calls onto empty nodes should round-robin, because each node's
+        // utilization's shard count is updated inline.  The order is determinsitic because when all other factors are
+        // equal, we order by node ID.
+        assert_scheduler_chooses(
+            NodeId(1),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(2),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(3),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+
+        // Manually setting utilization higher should cause schedule calls to round-robin the other nodes
+        // which have equal utilization.
+        nodes
+            .get_mut(&NodeId(1))
+            .unwrap()
+            .set_availability(NodeAvailability::Active(test_utilization::simple(
+                10,
+                1024 * 1024 * 1024,
+            )));
+        scheduler.node_upsert(nodes.get(&NodeId(1)).unwrap());
+
+        assert_scheduler_chooses(
+            NodeId(2),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(3),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(2),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+        assert_scheduler_chooses(
+            NodeId(3),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &empty_context,
+        );
+
+        // The scheduler should prefer nodes with lower affinity score,
+        // even if they have higher utilization (as long as they aren't utilized at >100%)
+        let mut context_prefer_node1 = ScheduleContext::default();
+        context_prefer_node1.avoid(&[NodeId(2), NodeId(3)]);
+        assert_scheduler_chooses(
+            NodeId(1),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &context_prefer_node1,
+        );
+        assert_scheduler_chooses(
+            NodeId(1),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &context_prefer_node1,
+        );
+
+        // If a node is over-utilized, it will not be used even if affinity scores prefer it
+        nodes
+            .get_mut(&NodeId(1))
+            .unwrap()
+            .set_availability(NodeAvailability::Active(test_utilization::simple(
+                20000,
+                1024 * 1024 * 1024,
+            )));
+        scheduler.node_upsert(nodes.get(&NodeId(1)).unwrap());
+        assert_scheduler_chooses(
+            NodeId(2),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &context_prefer_node1,
+        );
+        assert_scheduler_chooses(
+            NodeId(3),
+            &mut scheduled_intents,
+            &mut scheduler,
+            &context_prefer_node1,
+        );
+
+        for mut intent in scheduled_intents {
+            intent.clear(&mut scheduler);
+        }
     }
 }

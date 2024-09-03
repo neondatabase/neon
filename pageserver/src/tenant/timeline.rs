@@ -22,8 +22,8 @@ use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
-        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
-        NON_INHERITED_SPARSE_RANGE,
+        CompactKey, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
+        NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
@@ -44,10 +44,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
-    bin_ser::BeSer,
     fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
-    vec_map::VecMap,
 };
 
 use std::pin::pin;
@@ -71,7 +69,7 @@ use crate::{
         config::defaults::DEFAULT_PITR_INTERVAL,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::PersistentLayerDesc,
+        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
     },
     walredo,
 };
@@ -137,7 +135,10 @@ use self::layer_manager::LayerManager;
 use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
-use super::{config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized};
+use super::{
+    config::TenantConf, storage_layer::inmemory_layer, storage_layer::LayerVisibilityHint,
+    upload_queue::NotInitialized,
+};
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
 use super::{
@@ -217,7 +218,7 @@ pub(crate) struct RelSizeCache {
 }
 
 pub struct Timeline {
-    conf: &'static PageServerConf,
+    pub(crate) conf: &'static PageServerConf,
     tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
 
     myself: Weak<Self>,
@@ -864,6 +865,11 @@ impl Timeline {
         self.ancestor_timeline
             .as_ref()
             .map(|ancestor| ancestor.timeline_id)
+    }
+
+    /// Get the ancestor timeline
+    pub(crate) fn ancestor_timeline(&self) -> Option<&Arc<Timeline>> {
+        self.ancestor_timeline.as_ref()
     }
 
     /// Get the bytes written since the PITR cutoff on this branch, and
@@ -1906,6 +1912,8 @@ impl Timeline {
 
             true
         } else if projected_layer_size >= checkpoint_distance {
+            // NB: this check is relied upon by:
+            let _ = IndexEntry::validate_checkpoint_distance;
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 projected_lsn, layer_size, projected_layer_size
@@ -2233,6 +2241,11 @@ impl Timeline {
 
                 handles: Default::default(),
             };
+
+            if aux_file_policy == Some(AuxFilePolicy::V1) {
+                warn!("this timeline is using deprecated aux file policy V1");
+            }
+
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
 
@@ -2281,7 +2294,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             "layer flush task",
             async move {
@@ -2635,7 +2648,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             "initial size calculation",
             // NB: don't log errors here, task_mgr will do that.
@@ -2803,7 +2816,7 @@ impl Timeline {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::OndemandLogicalSizeCalculation,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             "ondemand logical size calculation",
             async move {
@@ -2996,7 +3009,10 @@ impl Timeline {
         // - For L1 & image layers, download most recent LSNs first: the older the LSN, the sooner
         //   the layer is likely to be covered by an image layer during compaction.
         layers.sort_by_key(|(desc, _meta, _atime)| {
-            std::cmp::Reverse((!LayerMap::is_l0(&desc.key_range), desc.lsn_range.end))
+            std::cmp::Reverse((
+                !LayerMap::is_l0(&desc.key_range, desc.is_delta),
+                desc.lsn_range.end,
+            ))
         });
 
         let layers = layers
@@ -3589,34 +3605,6 @@ impl Timeline {
                 return Err(FlushLayerError::Cancelled);
             }
 
-            // FIXME(auxfilesv2): support multiple metadata key partitions might need initdb support as well?
-            // This code path will not be hit during regression tests. After #7099 we have a single partition
-            // with two key ranges. If someone wants to fix initdb optimization in the future, this might need
-            // to be fixed.
-
-            // For metadata, always create delta layers.
-            let delta_layer = if !metadata_partition.parts.is_empty() {
-                assert_eq!(
-                    metadata_partition.parts.len(),
-                    1,
-                    "currently sparse keyspace should only contain a single metadata keyspace"
-                );
-                let metadata_keyspace = &metadata_partition.parts[0];
-                self.create_delta_layer(
-                    &frozen_layer,
-                    Some(
-                        metadata_keyspace.0.ranges.first().unwrap().start
-                            ..metadata_keyspace.0.ranges.last().unwrap().end,
-                    ),
-                    ctx,
-                )
-                .await
-                .map_err(|e| FlushLayerError::from_anyhow(self, e))?
-            } else {
-                None
-            };
-
-            // For image layers, we add them immediately into the layer map.
             let mut layers_to_upload = Vec::new();
             layers_to_upload.extend(
                 self.create_image_layers(
@@ -3627,13 +3615,27 @@ impl Timeline {
                 )
                 .await?,
             );
-
-            if let Some(delta_layer) = delta_layer {
-                layers_to_upload.push(delta_layer.clone());
-                (layers_to_upload, Some(delta_layer))
-            } else {
-                (layers_to_upload, None)
+            if !metadata_partition.parts.is_empty() {
+                assert_eq!(
+                    metadata_partition.parts.len(),
+                    1,
+                    "currently sparse keyspace should only contain a single metadata keyspace"
+                );
+                layers_to_upload.extend(
+                    self.create_image_layers(
+                        // Safety: create_image_layers treat sparse keyspaces differently that it does not scan
+                        // every single key within the keyspace, and therefore, it's safe to force converting it
+                        // into a dense keyspace before calling this function.
+                        &metadata_partition.into_dense(),
+                        self.initdb_lsn,
+                        ImageLayerCreationMode::Initial,
+                        ctx,
+                    )
+                    .await?,
+                );
             }
+
+            (layers_to_upload, None)
         } else {
             // Normal case, write out a L0 delta layer file.
             // `create_delta_layer` will not modify the layer map.
@@ -4043,8 +4045,6 @@ impl Timeline {
         mode: ImageLayerCreationMode,
         start: Key,
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
-        assert!(!matches!(mode, ImageLayerCreationMode::Initial));
-
         // Metadata keys image layer creation.
         let mut reconstruct_state = ValuesReconstructState::default();
         let data = self
@@ -4210,15 +4210,13 @@ impl Timeline {
                         "metadata keys must be partitioned separately"
                     );
                 }
-                if mode == ImageLayerCreationMode::Initial {
-                    return Err(CreateImageLayersError::Other(anyhow::anyhow!("no image layer should be created for metadata keys when flushing frozen layers")));
-                }
                 if mode == ImageLayerCreationMode::Try && !check_for_image_layers {
                     // Skip compaction if there are not enough updates. Metadata compaction will do a scan and
                     // might mess up with evictions.
                     start = img_range.end;
                     continue;
                 }
+                // For initial and force modes, we always generate image layers for metadata keys.
             } else if let ImageLayerCreationMode::Try = mode {
                 // check_for_image_layers = false -> skip
                 // check_for_image_layers = true -> check time_for_new_image_layer -> skip/generate
@@ -4226,7 +4224,8 @@ impl Timeline {
                     start = img_range.end;
                     continue;
                 }
-            } else if let ImageLayerCreationMode::Force = mode {
+            }
+            if let ImageLayerCreationMode::Force = mode {
                 // When forced to create image layers, we might try and create them where they already
                 // exist.  This mode is only used in tests/debug.
                 let layers = self.layers.read().await;
@@ -4240,6 +4239,7 @@ impl Timeline {
                         img_range.start,
                         img_range.end
                     );
+                    start = img_range.end;
                     continue;
                 }
             }
@@ -4537,7 +4537,6 @@ pub struct DeltaLayerTestDesc {
 
 #[cfg(test)]
 impl DeltaLayerTestDesc {
-    #[allow(dead_code)]
     pub fn new(lsn_range: Range<Lsn>, key_range: Range<Key>, data: Vec<(Key, Lsn, Value)>) -> Self {
         Self {
             lsn_range,
@@ -4595,7 +4594,7 @@ impl Timeline {
                 // for compact_level0_phase1 creating an L0, which does not happen in practice
                 // because we have not implemented L0 => L0 compaction.
                 duplicated_layers.insert(l.layer_desc().key());
-            } else if LayerMap::is_l0(&l.layer_desc().key_range) {
+            } else if LayerMap::is_l0(&l.layer_desc().key_range, l.layer_desc().is_delta) {
                 return Err(CompactionError::Other(anyhow::anyhow!("compaction generates a L0 layer file as output, which will cause infinite compaction.")));
             } else {
                 insert_layers.push(l.clone());
@@ -5162,7 +5161,7 @@ impl Timeline {
         let task_id = task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::DownloadAllRemoteLayers,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             "download all remote layers task",
             async move {
@@ -5451,12 +5450,17 @@ impl Timeline {
                 !(a.end <= b.start || b.end <= a.start)
             }
 
-            let guard = self.layers.read().await;
-            for layer in guard.layer_map()?.iter_historic_layers() {
-                if layer.is_delta()
-                    && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
-                    && layer.lsn_range != deltas.lsn_range
-                {
+            if deltas.key_range.start.next() != deltas.key_range.end {
+                let guard = self.layers.read().await;
+                let mut invalid_layers =
+                    guard.layer_map()?.iter_historic_layers().filter(|layer| {
+                        layer.is_delta()
+                        && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
+                        && layer.lsn_range != deltas.lsn_range
+                        // skip single-key layer files
+                        && layer.key_range.start.next() != layer.key_range.end
+                    });
+                if let Some(layer) = invalid_layers.next() {
                     // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
                     panic!(
                         "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",
@@ -5590,44 +5594,6 @@ enum OpenLayerAction {
 }
 
 impl<'a> TimelineWriter<'a> {
-    /// Put a new page version that can be constructed from a WAL record
-    ///
-    /// This will implicitly extend the relation, if the page is beyond the
-    /// current end-of-file.
-    pub(crate) async fn put(
-        &mut self,
-        key: Key,
-        lsn: Lsn,
-        value: &Value,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        // Avoid doing allocations for "small" values.
-        // In the regression test suite, the limit of 256 avoided allocations in 95% of cases:
-        // https://github.com/neondatabase/neon/pull/5056#discussion_r1301975061
-        let mut buf = smallvec::SmallVec::<[u8; 256]>::new();
-        value.ser_into(&mut buf)?;
-        let buf_size: u64 = buf.len().try_into().expect("oversized value buf");
-
-        let action = self.get_open_layer_action(lsn, buf_size);
-        let layer = self.handle_open_layer_action(lsn, action, ctx).await?;
-        let res = layer.put_value(key.to_compact(), lsn, &buf, ctx).await;
-
-        if res.is_ok() {
-            // Update the current size only when the entire write was ok.
-            // In case of failures, we may have had partial writes which
-            // render the size tracking out of sync. That's ok because
-            // the checkpoint distance should be significantly smaller
-            // than the S3 single shot upload limit of 5GiB.
-            let state = self.write_guard.as_mut().unwrap();
-
-            state.current_size += buf_size;
-            state.prev_lsn = Some(lsn);
-            state.max_lsn = std::cmp::max(state.max_lsn, Some(lsn));
-        }
-
-        res
-    }
-
     async fn handle_open_layer_action(
         &mut self,
         at: Lsn,
@@ -5733,18 +5699,64 @@ impl<'a> TimelineWriter<'a> {
     }
 
     /// Put a batch of keys at the specified Lsns.
-    ///
-    /// The batch is sorted by Lsn (enforced by usage of [`utils::vec_map::VecMap`].
     pub(crate) async fn put_batch(
         &mut self,
-        batch: VecMap<Lsn, (Key, Value)>,
+        batch: Vec<(CompactKey, Lsn, usize, Value)>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        for (lsn, (key, val)) in batch {
-            self.put(key, lsn, &val, ctx).await?
+        if batch.is_empty() {
+            return Ok(());
         }
 
-        Ok(())
+        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch)?;
+        let batch_max_lsn = serialized_batch.max_lsn;
+        let buf_size: u64 = serialized_batch.raw.len() as u64;
+
+        let action = self.get_open_layer_action(batch_max_lsn, buf_size);
+        let layer = self
+            .handle_open_layer_action(batch_max_lsn, action, ctx)
+            .await?;
+
+        let res = layer.put_batch(serialized_batch, ctx).await;
+
+        if res.is_ok() {
+            // Update the current size only when the entire write was ok.
+            // In case of failures, we may have had partial writes which
+            // render the size tracking out of sync. That's ok because
+            // the checkpoint distance should be significantly smaller
+            // than the S3 single shot upload limit of 5GiB.
+            let state = self.write_guard.as_mut().unwrap();
+
+            state.current_size += buf_size;
+            state.prev_lsn = Some(batch_max_lsn);
+            state.max_lsn = std::cmp::max(state.max_lsn, Some(batch_max_lsn));
+        }
+
+        res
+    }
+
+    #[cfg(test)]
+    /// Test helper, for tests that would like to poke individual values without composing a batch
+    pub(crate) async fn put(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        value: &Value,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        use utils::bin_ser::BeSer;
+        if !key.is_valid_key_on_write_path() {
+            bail!(
+                "the request contains data not supported by pageserver at TimelineWriter::put: {}",
+                key
+            );
+        }
+        let val_ser_size = value.serialized_size().unwrap() as usize;
+        self.put_batch(
+            vec![(key.to_compact(), lsn, val_ser_size, value.clone())],
+            ctx,
+        )
+        .await
     }
 
     pub(crate) async fn delete_batch(
@@ -5885,7 +5897,7 @@ mod tests {
             };
 
             // Apart from L0s, newest Layers should come first
-            if !LayerMap::is_l0(layer.name.key_range()) {
+            if !LayerMap::is_l0(layer.name.key_range(), layer.name.is_delta()) {
                 assert!(layer_lsn <= last_lsn);
                 last_lsn = layer_lsn;
             }

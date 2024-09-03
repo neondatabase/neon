@@ -39,7 +39,7 @@ use super::{common::Cached, *};
 ///
 /// * It's possible for an entry that has not yet expired entry to be evicted
 ///   before expired items. That's a bit wasteful, but probably fine in practice.
-pub struct TimedLru<K, V> {
+pub(crate) struct TimedLru<K, V> {
     /// Cache's name for tracing.
     name: &'static str,
 
@@ -58,7 +58,7 @@ impl<K: Hash + Eq, V> Cache for TimedLru<K, V> {
     type LookupInfo<Key> = LookupInfo<Key>;
 
     fn invalidate(&self, info: &Self::LookupInfo<K>) {
-        self.invalidate_raw(info)
+        self.invalidate_raw(info);
     }
 }
 
@@ -72,7 +72,7 @@ struct Entry<T> {
 
 impl<K: Hash + Eq, V> TimedLru<K, V> {
     /// Construct a new LRU cache with timed entries.
-    pub fn new(
+    pub(crate) fn new(
         name: &'static str,
         capacity: usize,
         ttl: Duration,
@@ -207,11 +207,11 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
-    pub fn insert_ttl(&self, key: K, value: V, ttl: Duration) {
+    pub(crate) fn insert_ttl(&self, key: K, value: V, ttl: Duration) {
         self.insert_raw_ttl(key, value, ttl, false);
     }
 
-    pub fn insert_unit(&self, key: K, value: V) -> (Option<V>, Cached<&Self, ()>) {
+    pub(crate) fn insert_unit(&self, key: K, value: V) -> (Option<V>, Cached<&Self, ()>) {
         let (created_at, old) = self.insert_raw(key.clone(), value);
 
         let cached = Cached {
@@ -221,22 +221,11 @@ impl<K: Hash + Eq + Clone, V: Clone> TimedLru<K, V> {
 
         (old, cached)
     }
-
-    pub fn insert(&self, key: K, value: V) -> (Option<V>, Cached<&Self>) {
-        let (created_at, old) = self.insert_raw(key.clone(), value.clone());
-
-        let cached = Cached {
-            token: Some((self, LookupInfo { created_at, key })),
-            value,
-        };
-
-        (old, cached)
-    }
 }
 
 impl<K: Hash + Eq, V: Clone> TimedLru<K, V> {
     /// Retrieve a cached entry in convenient wrapper.
-    pub fn get<Q>(&self, key: &Q) -> Option<timed_lru::Cached<&Self>>
+    pub(crate) fn get<Q>(&self, key: &Q) -> Option<timed_lru::Cached<&Self>>
     where
         K: Borrow<Q> + Clone,
         Q: Hash + Eq + ?Sized,
@@ -253,32 +242,10 @@ impl<K: Hash + Eq, V: Clone> TimedLru<K, V> {
             }
         })
     }
-
-    /// Retrieve a cached entry in convenient wrapper, ignoring its TTL.
-    pub fn get_ignoring_ttl<Q>(&self, key: &Q) -> Option<timed_lru::Cached<&Self>>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        let mut cache = self.cache.lock();
-        cache
-            .get(key)
-            .map(|entry| Cached::new_uncached(entry.value.clone()))
-    }
-
-    /// Remove an entry from the cache.
-    pub fn remove<Q>(&self, key: &Q) -> Option<V>
-    where
-        K: Borrow<Q> + Clone,
-        Q: Hash + Eq + ?Sized,
-    {
-        let mut cache = self.cache.lock();
-        cache.remove(key).map(|entry| entry.value)
-    }
 }
 
 /// Lookup information for key invalidation.
-pub struct LookupInfo<K> {
+pub(crate) struct LookupInfo<K> {
     /// Time of creation of a cache [`Entry`].
     /// We use this during invalidation lookups to prevent eviction of a newer
     /// entry sharing the same key (it might've been inserted by a different

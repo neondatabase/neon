@@ -94,10 +94,15 @@ jobs:
       # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
       # corresponding Cargo.toml files for their descriptions.
       - name: Set env variables
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           CARGO_FEATURES="--features testing"
-          if [[ $BUILD_TYPE == "debug" ]]; then
+          if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+            CARGO_FLAGS="--locked"
+          elif [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=""
             CARGO_FLAGS="--locked"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
@@ -158,6 +163,8 @@ jobs:
       # Do install *before* running rust tests because they might recompile the
       # binaries with different features/flags.
       - name: Install rust binaries
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           # Install target binaries
           mkdir -p /tmp/neon/bin/
@@ -172,7 +179,7 @@ jobs:
           done
 
           # Install test executables and write list of all binaries (for code coverage)
-          if [[ $BUILD_TYPE == "debug" ]]; then
+          if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             # Keep bloated coverage data files away from the rest of the artifact
             mkdir -p /tmp/coverage/
 
@@ -209,8 +216,14 @@ jobs:
           #nextest does not yet support running doctests
           ${cov_prefix} cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
 
+          # run all non-pageserver tests
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E '!package(pageserver)'
+
+          # run pageserver tests with different settings
           for io_engine in std-fs tokio-epoll-uring ; do
-            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+            for io_buffer_alignment in 0 1 512 ; do
+              NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT=$io_buffer_alignment ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
+            done
           done
 
           # Run separate tests for real S3
@@ -243,8 +256,8 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    # Run test on x64 only
-    if: inputs.arch == 'x64'
+    # Don't run regression tests on debug arm64 builds
+    if: inputs.build-type != 'debug' || inputs.arch != 'arm64'
     needs: [ build-neon ]
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     container:

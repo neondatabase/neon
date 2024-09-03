@@ -98,7 +98,7 @@ to list timelines and find their backup and start LSNs.
 
 If S3 state is altered first manually, pageserver in-memory state will contain wrong data about S3 state, and tenants/timelines may get recreated on S3 (due to any layer upload due to compaction, pageserver restart, etc.). So before proceeding, for tenants/timelines which are already deleted in the console, we must remove these from pageservers.
 
-First, we need to group pageservers by buckets, `https://<admin host>/admin/pageservers`` can be used for all env nodes, then `cat /storage/pageserver/data/pageserver.toml` on every node will show the bucket names and regions needed.
+First, we need to group pageservers by buckets, `https://<admin host>/admin/pageservers` can be used for all env nodes, then `cat /storage/pageserver/data/pageserver.toml` on every node will show the bucket names and regions needed.
 
 Per bucket, for every pageserver id related, find deleted tenants:
 

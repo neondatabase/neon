@@ -8,22 +8,22 @@ use super::key::ScramKey;
 /// Server secret is produced from user's password,
 /// and is used throughout the authentication process.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct ServerSecret {
+pub(crate) struct ServerSecret {
     /// Number of iterations for `PBKDF2` function.
-    pub iterations: u32,
+    pub(crate) iterations: u32,
     /// Salt used to hash user's password.
-    pub salt_base64: String,
+    pub(crate) salt_base64: String,
     /// Hashed `ClientKey`.
-    pub stored_key: ScramKey,
+    pub(crate) stored_key: ScramKey,
     /// Used by client to verify server's signature.
-    pub server_key: ScramKey,
+    pub(crate) server_key: ScramKey,
     /// Should auth fail no matter what?
     /// This is exactly the case for mocked secrets.
-    pub doomed: bool,
+    pub(crate) doomed: bool,
 }
 
 impl ServerSecret {
-    pub fn parse(input: &str) -> Option<Self> {
+    pub(crate) fn parse(input: &str) -> Option<Self> {
         // SCRAM-SHA-256$<iterations>:<salt>$<storedkey>:<serverkey>
         let s = input.strip_prefix("SCRAM-SHA-256$")?;
         let (params, keys) = s.split_once('$')?;
@@ -42,7 +42,7 @@ impl ServerSecret {
         Some(secret)
     }
 
-    pub fn is_password_invalid(&self, client_key: &ScramKey) -> Choice {
+    pub(crate) fn is_password_invalid(&self, client_key: &ScramKey) -> Choice {
         // constant time to not leak partial key match
         client_key.sha256().ct_ne(&self.stored_key) | Choice::from(self.doomed as u8)
     }
@@ -50,7 +50,7 @@ impl ServerSecret {
     /// To avoid revealing information to an attacker, we use a
     /// mocked server secret even if the user doesn't exist.
     /// See `auth-scram.c : mock_scram_secret` for details.
-    pub fn mock(nonce: [u8; 32]) -> Self {
+    pub(crate) fn mock(nonce: [u8; 32]) -> Self {
         Self {
             // this doesn't reveal much information as we're going to use
             // iteration count 1 for our generated passwords going forward.
@@ -66,7 +66,7 @@ impl ServerSecret {
     /// Build a new server secret from the prerequisites.
     /// XXX: We only use this function in tests.
     #[cfg(test)]
-    pub async fn build(password: &str) -> Option<Self> {
+    pub(crate) async fn build(password: &str) -> Option<Self> {
         Self::parse(&postgres_protocol::password::scram_sha_256(password.as_bytes()).await)
     }
 }
@@ -82,13 +82,7 @@ mod tests {
         let stored_key = "D5h6KTMBlUvDJk2Y8ELfC1Sjtc6k9YHjRyuRZyBNJns=";
         let server_key = "Pi3QHbcluX//NDfVkKlFl88GGzlJ5LkyPwcdlN/QBvI=";
 
-        let secret = format!(
-            "SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}",
-            iterations = iterations,
-            salt = salt,
-            stored_key = stored_key,
-            server_key = server_key,
-        );
+        let secret = format!("SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}");
 
         let parsed = ServerSecret::parse(&secret).unwrap();
         assert_eq!(parsed.iterations, iterations);

@@ -78,6 +78,7 @@ where
             .expect("must not use after we returned an error")
     }
 
+    /// Guarantees that if Ok() is returned, all bytes in `chunk` have been accepted.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub async fn write_buffered<S: IoBuf + Send>(
         &mut self,

@@ -16,6 +16,7 @@ pub mod l0_flush;
 use futures::{stream::FuturesUnordered, StreamExt};
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;
+mod assert_u64_eq_usize;
 pub mod aux_file;
 pub mod metrics;
 pub mod page_cache;
@@ -49,7 +50,7 @@ use tracing::{info, info_span};
 /// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
-pub const DEFAULT_PG_VERSION: u32 = 15;
+pub const DEFAULT_PG_VERSION: u32 = 16;
 
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
@@ -87,6 +88,8 @@ pub async fn shutdown_pageserver(
     exit_code: i32,
 ) {
     use std::time::Duration;
+
+    let started_at = std::time::Instant::now();
 
     // If the orderly shutdown below takes too long, we still want to make
     // sure that all walredo processes are killed and wait()ed on by us, not systemd.
@@ -241,7 +244,10 @@ pub async fn shutdown_pageserver(
     walredo_extraordinary_shutdown_thread.join().unwrap();
     info!("walredo_extraordinary_shutdown_thread done");
 
-    info!("Shut down successfully completed");
+    info!(
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "Shut down successfully completed"
+    );
     std::process::exit(exit_code);
 }
 

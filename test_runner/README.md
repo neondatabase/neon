@@ -71,8 +71,7 @@ a subdirectory for each version with naming convention `v{PG_VERSION}/`.
 Inside that dir, a `bin/postgres` binary should be present.
 `DEFAULT_PG_VERSION`: The version of Postgres to use,
 This is used to construct full path to the postgres binaries.
-Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION="14"`. Alternatively,
-you can use `--pg-version` argument.
+Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION=16`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
 `TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.

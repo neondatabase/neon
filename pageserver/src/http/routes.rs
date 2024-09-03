@@ -318,6 +318,27 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
     }
 }
 
+impl From<crate::tenant::TimelineArchivalError> for ApiError {
+    fn from(value: crate::tenant::TimelineArchivalError) -> Self {
+        use crate::tenant::TimelineArchivalError::*;
+        match value {
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
+            Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            e @ HasArchivedParent(_) => {
+                ApiError::PreconditionFailed(e.to_string().into_boxed_str())
+            }
+            HasUnarchivedChildren(children) => ApiError::PreconditionFailed(
+                format!(
+                    "Cannot archive timeline which has non-archived child timelines: {children:?}"
+                )
+                .into_boxed_str(),
+            ),
+            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
+            Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
 impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::mgr::DeleteTimelineError) -> Self {
         use crate::tenant::mgr::DeleteTimelineError::*;
@@ -405,6 +426,8 @@ async fn build_timeline_info_common(
     let current_logical_size = timeline.get_current_logical_size(logical_size_task_priority, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
+    // Report is_archived = false if the timeline is still loading
+    let is_archived = timeline.is_archived().unwrap_or(false);
     let remote_consistent_lsn_projected = timeline
         .get_remote_consistent_lsn_projected()
         .unwrap_or(Lsn(0));
@@ -445,6 +468,7 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
+        is_archived,
 
         walreceiver_status,
 
@@ -686,9 +710,7 @@ async fn timeline_archival_config_handler(
 
         tenant
             .apply_timeline_archival_config(timeline_id, request_data.state)
-            .await
-            .context("applying archival config")
-            .map_err(ApiError::InternalServerError)?;
+            .await?;
         Ok::<_, ApiError>(())
     }
     .instrument(info_span!("timeline_archival_config",
@@ -852,7 +874,10 @@ async fn get_timestamp_of_lsn_handler(
 
     match result {
         Some(time) => {
-            let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
+            let time = format_rfc3339(
+                postgres_ffi::try_from_pg_timestamp(time).map_err(ApiError::InternalServerError)?,
+            )
+            .to_string();
             json_response(StatusCode::OK, time)
         }
         None => Err(ApiError::NotFound(
@@ -1706,13 +1731,12 @@ async fn timeline_compact_handler(
         flags |= CompactFlags::ForceImageLayerCreation;
     }
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
-        if !cfg!(feature = "testing") {
-            return Err(ApiError::InternalServerError(anyhow!(
-                "enhanced_gc_bottom_most_compaction is only available in testing mode"
-            )));
-        }
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
+    if Some(true) == parse_query_param::<_, bool>(&request, "dry_run")? {
+        flags |= CompactFlags::DryRun;
+    }
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
@@ -2330,6 +2354,20 @@ async fn put_io_engine_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn put_io_alignment_handler(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+    let align: usize = json_request(&mut r).await?;
+    crate::virtual_file::set_io_buffer_alignment(align).map_err(|align| {
+        ApiError::PreconditionFailed(
+            format!("Requested io alignment ({align}) is not a power of two").into(),
+        )
+    })?;
+    json_response(StatusCode::OK, ())
+}
+
 /// Polled by control plane.
 ///
 /// See [`crate::utilization`].
@@ -2942,7 +2980,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
-            |r| testing_api_handler("run timeline compaction", r, timeline_compact_handler),
+            |r| api_handler(r, timeline_compact_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",
@@ -3017,6 +3055,9 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .put("/v1/io_alignment", |r| {
+            api_handler(r, put_io_alignment_handler)
+        })
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
             |r| api_handler(r, force_aux_policy_switch_handler),

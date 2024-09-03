@@ -8,6 +8,7 @@ mod drain_utils;
 mod heartbeater;
 pub mod http;
 mod id_lock_map;
+mod leadership;
 pub mod metrics;
 mod node;
 mod pageserver_client;

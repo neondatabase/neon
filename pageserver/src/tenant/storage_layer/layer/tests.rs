@@ -782,7 +782,7 @@ async fn eviction_cancellation_on_drop() {
         let mut writer = timeline.writer().await;
         writer
             .put(
-                Key::from_i128(5),
+                crate::repository::Key::from_i128(5),
                 Lsn(0x20),
                 &Value::Image(Bytes::from_static(b"this does not matter either")),
                 &ctx,

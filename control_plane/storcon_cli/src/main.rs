@@ -41,6 +41,8 @@ enum Command {
         listen_http_addr: String,
         #[arg(long)]
         listen_http_port: u16,
+        #[arg(long)]
+        availability_zone_id: String,
     },
 
     /// Modify a node's configuration in the storage controller
@@ -147,9 +149,9 @@ enum Command {
         #[arg(long)]
         threshold: humantime::Duration,
     },
-    // Drain a set of specified pageservers by moving the primary attachments to pageservers
+    // Migrate away from a set of specified pageservers by moving the primary attachments to pageservers
     // outside of the specified set.
-    Drain {
+    BulkMigrate {
         // Set of pageserver node ids to drain.
         #[arg(long)]
         nodes: Vec<NodeId>,
@@ -162,6 +164,34 @@ enum Command {
         // Optional: when set to true, nothing is migrated, but the plan is printed to stdout
         #[arg(long)]
         dry_run: Option<bool>,
+    },
+    /// Start draining the specified pageserver.
+    /// The drain is complete when the schedulling policy returns to active.
+    StartDrain {
+        #[arg(long)]
+        node_id: NodeId,
+    },
+    /// Cancel draining the specified pageserver and wait for `timeout`
+    /// for the operation to be canceled. May be retried.
+    CancelDrain {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        timeout: humantime::Duration,
+    },
+    /// Start filling the specified pageserver.
+    /// The drain is complete when the schedulling policy returns to active.
+    StartFill {
+        #[arg(long)]
+        node_id: NodeId,
+    },
+    /// Cancel filling the specified pageserver and wait for `timeout`
+    /// for the operation to be canceled. May be retried.
+    CancelFill {
+        #[arg(long)]
+        node_id: NodeId,
+        #[arg(long)]
+        timeout: humantime::Duration,
     },
 }
 
@@ -249,6 +279,34 @@ impl FromStr for NodeAvailabilityArg {
     }
 }
 
+async fn wait_for_scheduling_policy<F>(
+    client: Client,
+    node_id: NodeId,
+    timeout: Duration,
+    f: F,
+) -> anyhow::Result<NodeSchedulingPolicy>
+where
+    F: Fn(NodeSchedulingPolicy) -> bool,
+{
+    let waiter = tokio::time::timeout(timeout, async move {
+        loop {
+            let node = client
+                .dispatch::<(), NodeDescribeResponse>(
+                    Method::GET,
+                    format!("control/v1/node/{node_id}"),
+                    None,
+                )
+                .await?;
+
+            if f(node.scheduling) {
+                return Ok::<NodeSchedulingPolicy, mgmt_api::Error>(node.scheduling);
+            }
+        }
+    });
+
+    Ok(waiter.await??)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -266,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
             listen_pg_port,
             listen_http_addr,
             listen_http_port,
+            availability_zone_id,
         } => {
             storcon_client
                 .dispatch::<_, ()>(
@@ -277,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_pg_port,
                         listen_http_addr,
                         listen_http_port,
+                        availability_zone_id: Some(availability_zone_id),
                     }),
                 )
                 .await?;
@@ -628,7 +688,7 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
         }
-        Command::Drain {
+        Command::BulkMigrate {
             nodes,
             concurrency,
             max_shards,
@@ -657,7 +717,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if nodes.len() != node_to_drain_descs.len() {
-                anyhow::bail!("Drain requested for node which doesn't exist.")
+                anyhow::bail!("Bulk migration requested away from node which doesn't exist.")
             }
 
             node_to_fill_descs.retain(|desc| {
@@ -669,7 +729,7 @@ async fn main() -> anyhow::Result<()> {
             });
 
             if node_to_fill_descs.is_empty() {
-                anyhow::bail!("There are no nodes to drain to")
+                anyhow::bail!("There are no nodes to migrate to")
             }
 
             // Set the node scheduling policy to draining for the nodes which
@@ -690,7 +750,7 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
             }
 
-            // Perform the drain: move each tenant shard scheduled on a node to
+            // Perform the migration: move each tenant shard scheduled on a node to
             // be drained to a node which is being filled. A simple round robin
             // strategy is used to pick the new node.
             let tenants = storcon_client
@@ -703,13 +763,13 @@ async fn main() -> anyhow::Result<()> {
 
             let mut selected_node_idx = 0;
 
-            struct DrainMove {
+            struct MigrationMove {
                 tenant_shard_id: TenantShardId,
                 from: NodeId,
                 to: NodeId,
             }
 
-            let mut moves: Vec<DrainMove> = Vec::new();
+            let mut moves: Vec<MigrationMove> = Vec::new();
 
             let shards = tenants
                 .into_iter()
@@ -739,7 +799,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                moves.push(DrainMove {
+                moves.push(MigrationMove {
                     tenant_shard_id: shard.tenant_shard_id,
                     from: shard
                         .node_attached
@@ -814,6 +874,67 @@ async fn main() -> anyhow::Result<()> {
                 total_moves,
                 success,
                 failure
+            );
+        }
+        Command::StartDrain { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::PUT,
+                    format!("control/v1/node/{node_id}/drain"),
+                    None,
+                )
+                .await?;
+            println!("Drain started for {node_id}");
+        }
+        Command::CancelDrain { node_id, timeout } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/drain"),
+                    None,
+                )
+                .await?;
+
+            println!("Waiting for node {node_id} to quiesce on scheduling policy ...");
+
+            let final_policy =
+                wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
+                    use NodeSchedulingPolicy::*;
+                    matches!(sched, Active | PauseForRestart)
+                })
+                .await?;
+
+            println!(
+                "Drain was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
+            );
+        }
+        Command::StartFill { node_id } => {
+            storcon_client
+                .dispatch::<(), ()>(Method::PUT, format!("control/v1/node/{node_id}/fill"), None)
+                .await?;
+
+            println!("Fill started for {node_id}");
+        }
+        Command::CancelFill { node_id, timeout } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::DELETE,
+                    format!("control/v1/node/{node_id}/fill"),
+                    None,
+                )
+                .await?;
+
+            println!("Waiting for node {node_id} to quiesce on scheduling policy ...");
+
+            let final_policy =
+                wait_for_scheduling_policy(storcon_client, node_id, *timeout, |sched| {
+                    use NodeSchedulingPolicy::*;
+                    matches!(sched, Active)
+                })
+                .await?;
+
+            println!(
+                "Fill was cancelled for node {node_id}. Schedulling policy is now {final_policy:?}"
             );
         }
     }

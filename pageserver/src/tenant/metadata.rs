@@ -565,7 +565,7 @@ mod tests {
         );
         let expected_bytes = vec![
             /* TimelineMetadataHeader */
-            4, 37, 101, 34, 0, 70, 0, 4, // checksum, size, format_version (4 + 2 + 2)
+            74, 104, 158, 105, 0, 70, 0, 4, // checksum, size, format_version (4 + 2 + 2)
             /* TimelineMetadataBodyV2 */
             0, 0, 0, 0, 0, 0, 2, 0, // disk_consistent_lsn (8 bytes)
             1, 0, 0, 0, 0, 0, 0, 1, 0, // prev_record_lsn (9 bytes)
@@ -574,7 +574,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, // ancestor_lsn (8 bytes)
             0, 0, 0, 0, 0, 0, 0, 0, // latest_gc_cutoff_lsn (8 bytes)
             0, 0, 0, 0, 0, 0, 0, 0, // initdb_lsn (8 bytes)
-            0, 0, 0, 15, // pg_version (4 bytes)
+            0, 0, 0, 16, // pg_version (4 bytes)
             /* padding bytes */
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
