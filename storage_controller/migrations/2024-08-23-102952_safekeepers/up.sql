@@ -2,8 +2,6 @@
 CREATE TABLE safekeepers (
 	-- the surrogate identifier defined by control plane database sequence
 	id BIGINT PRIMARY KEY,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 	region_id TEXT NOT NULL,
 	version BIGINT NOT NULL,
 	-- the natural id on whatever cloud platform, not needed in storage controller

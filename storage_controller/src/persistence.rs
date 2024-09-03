@@ -952,8 +952,6 @@ impl Persistence {
         record: SafekeeperPersistence,
     ) -> Result<(), DatabaseError> {
         use crate::schema::safekeepers::dsl::*;
-        use diesel::dsl::now;
-        use diesel::query_dsl::methods::FilterDsl;
 
         self.with_conn(move |conn| -> DatabaseResult<()> {
             let bind = record.as_insert_or_update();
@@ -962,9 +960,7 @@ impl Persistence {
                 .values(&bind)
                 .on_conflict(id)
                 .do_update()
-                .set(((&bind), (updated_at.eq(now))))
-                // FIXME: is this needed
-                .filter(id.eq(&record.id))
+                .set(&bind)
                 .execute(conn)?;
 
             if inserted_updated != 1 {
@@ -1118,8 +1114,6 @@ pub(crate) struct ControllerPersistence {
 #[diesel(table_name = crate::schema::safekeepers)]
 pub(crate) struct SafekeeperPersistence {
     pub(crate) id: i64,
-    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
-    pub(crate) updated_at: chrono::DateTime<chrono::Utc>,
     pub(crate) region_id: String,
     /// 1 is special, it means just created (not currently posted to storcon).
     /// Zero or negative is not really expected.
