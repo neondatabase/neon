@@ -149,6 +149,10 @@ def test_create_snapshot(
     )
 
 
+# check_neon_works does recovery from WAL => the compatibility snapshot's WAL is old => will log this warning
+ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_lsn_timeout.*"
+
+
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
@@ -173,10 +177,6 @@ def test_backward_compatibility(
     try:
         neon_env_builder.num_safekeepers = 3
         env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
-        # check_neon_works does recovery from WAL => the compatibility snapshot's WAL is old => will log this warning
-        ingest_lag_log_line = (
-            ".*ingesting record with timestamp lagging more than wait_lsn_timeout.*"
-        )
         env.pageserver.allowed_errors.append(ingest_lag_log_line)
         neon_env_builder.start()
 
@@ -246,6 +246,8 @@ def test_forward_compatibility(
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
         )
+        # there may be an arbitrary number of unrelated tests run between create_snapshot and here
+        env.pageserver.allowed_errors.append(ingest_lag_log_line)
 
         # not using env.pageserver.version because it was initialized before
         prev_pageserver_version_str = env.get_binary_version("pageserver")

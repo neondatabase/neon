@@ -1164,6 +1164,8 @@ class NeonEnv:
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
+                # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
+                "availability_zone": "us-east-2a",
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -1192,11 +1194,7 @@ class NeonEnv:
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
-                NeonPageserver(
-                    self,
-                    ps_id,
-                    port=pageserver_port,
-                )
+                NeonPageserver(self, ps_id, port=pageserver_port, az_id=ps_cfg["availability_zone"])
             )
             cfg["pageservers"].append(ps_cfg)
 
@@ -2400,6 +2398,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "listen_http_port": node.service_port.http,
             "listen_pg_addr": "localhost",
             "listen_pg_port": node.service_port.pg,
+            "availability_zone_id": node.az_id,
         }
         log.info(f"node_register({body})")
         self.request(
@@ -2923,10 +2922,11 @@ class NeonPageserver(PgProtocol, LogUtils):
 
     TEMP_FILE_SUFFIX = "___temp"
 
-    def __init__(self, env: NeonEnv, id: int, port: PageserverPort):
+    def __init__(self, env: NeonEnv, id: int, port: PageserverPort, az_id: str):
         super().__init__(host="localhost", port=port.pg, user="cloud_admin")
         self.env = env
         self.id = id
+        self.az_id = az_id
         self.running = False
         self.service_port = port
         self.version = env.get_binary_version("pageserver")
@@ -4553,6 +4553,8 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
+    # List partial uploaded segments of this safekeeper. Works only for
+    # RemoteStorageKind.LOCAL_FS.
     def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
         tline_path = (
             self.env.repo_dir
@@ -4562,9 +4564,11 @@ class Safekeeper(LogUtils):
             / str(timeline_id)
         )
         assert isinstance(self.env.safekeepers_remote_storage, LocalFsStorage)
-        return self._list_segments_in_dir(
+        segs = self._list_segments_in_dir(
             tline_path, lambda name: ".metadata" not in name and ".___temp" not in name
         )
+        mysegs = [s for s in segs if f"sk{self.id}" in s]
+        return mysegs
 
     def list_segments(self, tenant_id, timeline_id) -> List[str]:
         """
