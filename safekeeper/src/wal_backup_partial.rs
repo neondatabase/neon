@@ -416,7 +416,7 @@ pub(crate) fn needs_uploading(
 ///
 /// When there is nothing more to do and the last segment was successfully uploaded, the task
 /// returns PartialRemoteSegment, to signal readiness for offloading the timeline.
-#[instrument(name = "Partial backup", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "partial_backup", skip_all, fields(ttid = %tli.ttid))]
 pub async fn main_task(
     tli: WalResidentTimeline,
     conf: SafeKeeperConf,

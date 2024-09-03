@@ -203,7 +203,7 @@ struct WalBackupTask {
 }
 
 /// Offload single timeline.
-#[instrument(name = "WAL backup", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "wal_backup", skip_all, fields(ttid = %tli.ttid))]
 async fn backup_task_main(
     tli: WalResidentTimeline,
     parallel_jobs: usize,
