@@ -3213,7 +3213,7 @@ impl Service {
             // run concurrently with reconciliations, and it is not guaranteed that the node we find here
             // will still be the latest when we're done: we will check generations again at the end of
             // this function to handle that.
-            let generations = self.persistence.peek_generations(tenant_id).await?;
+            let generations = self.persistence.tenant_generations(tenant_id).await?;
 
             if generations
                 .iter()
@@ -3270,7 +3270,7 @@ impl Service {
         // Post-check: are all the generations of all the shards the same as they were initially?  This proves that
         // our remote operation executed on the latest generation and is therefore persistent.
         {
-            let latest_generations = self.persistence.peek_generations(tenant_id).await?;
+            let latest_generations = self.persistence.tenant_generations(tenant_id).await?;
             if latest_generations
                 .into_iter()
                 .map(

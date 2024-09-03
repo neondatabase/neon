@@ -92,7 +92,8 @@ pub(crate) enum DatabaseOperation {
     Detach,
     ReAttach,
     IncrementGeneration,
-    PeekGenerations,
+    TenantGenerations,
+    ShardGenerations,
     ListTenantShards,
     InsertTenantShards,
     UpdateTenantShard,
@@ -545,13 +546,13 @@ impl Persistence {
     /// If the tenant doesn't exist, an empty vector is returned.
     ///
     /// Output is sorted by shard number
-    pub(crate) async fn peek_generations(
+    pub(crate) async fn tenant_generations(
         &self,
         filter_tenant_id: TenantId,
     ) -> Result<Vec<ShardGenerationState>, DatabaseError> {
         use crate::schema::tenant_shards::dsl::*;
         let rows = self
-            .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
+            .with_measured_conn(DatabaseOperation::TenantGenerations, move |conn| {
                 let result = tenant_shards
                     .filter(tenant_id.eq(filter_tenant_id.to_string()))
                     .select(TenantShardPersistence::as_select())
@@ -574,6 +575,8 @@ impl Persistence {
     }
 
     /// Read the generation number of specific tenant shards
+    ///
+    /// Output is unsorted.  Output may not include values for all inputs, if they are missing in the database.
     pub(crate) async fn shard_generations(
         &self,
         mut tenant_shard_ids: impl Iterator<Item = &TenantShardId>,
@@ -604,7 +607,7 @@ impl Persistence {
             }
 
             let chunk_rows = self
-                .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
+                .with_measured_conn(DatabaseOperation::ShardGenerations, move |conn| {
                     // diesel doesn't support multi-column IN queries, so we compose raw SQL.  No escaping is required because
                     // the inputs are strongly typed and cannot carry any user-supplied raw string content.
                     let result : Vec<TenantShardPersistence> = diesel::sql_query(
