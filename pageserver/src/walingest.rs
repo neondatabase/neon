@@ -176,6 +176,10 @@ impl WalIngest {
                     }
                 } else if pg_version == 15 {
                     if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_WAL_LOG {
+                        let createdb = XlCreateDatabaseFromWal::decode(&mut buf);
+                        modification
+                            .create_rel_dir(createdb.tablespace_id, createdb.db_id)
+                            .await?;
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
                     } else if info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY {
                         // The XLOG record was renamed between v14 and v15,
@@ -196,6 +200,10 @@ impl WalIngest {
                     }
                 } else if pg_version == 16 {
                     if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_WAL_LOG {
+                        let createdb = XlCreateDatabaseFromWal::decode(&mut buf);
+                        modification
+                            .create_rel_dir(createdb.tablespace_id, createdb.db_id)
+                            .await?;
                         debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
                     } else if info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY {
                         // The XLOG record was renamed between v14 and v15,

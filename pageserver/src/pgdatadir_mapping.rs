@@ -1180,6 +1180,17 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub async fn create_rel_dir(&mut self, spcnode: Oid, dbnode: Oid) -> anyhow::Result<()> {
+        let buf = RelDirectory::ser(&RelDirectory {
+            rels: HashSet::new(),
+        })?;
+        self.put(
+            rel_dir_to_key(spcnode, dbnode),
+            Value::Image(Bytes::from(buf)),
+        );
+        Ok(())
+    }
+
     /// Store a relmapper file (pg_filenode.map) in the repository
     pub async fn put_relmap_file(
         &mut self,
@@ -1384,9 +1395,6 @@ impl<'a> DatadirModification<'a> {
             // Update the entry with the new size.
             let buf = nblocks.to_le_bytes();
             self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
-
-            // Update relation size cache
-            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
             // Update relation size cache
             self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
