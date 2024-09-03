@@ -139,7 +139,7 @@ impl DerefMut for IoBufferMut {
     }
 }
 
-// SAFETY: See [`IoBufferMut::advance_mut`]
+/// SAFETY: See [`IoBufferMut::advance_mut`]
 unsafe impl bytes::BufMut for IoBufferMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
@@ -183,8 +183,8 @@ fn panic_advance(idx: usize, len: usize) -> ! {
     );
 }
 
-// Safety: [`IoBufferMut`] has exclusive ownership of the io buffer,
-// and the location remains stable even if [`Self`] is moved.
+/// Safety: [`IoBufferMut`] has exclusive ownership of the io buffer,
+/// and the location remains stable even if [`Self`] is moved.
 unsafe impl tokio_epoll_uring::IoBuf for IoBufferMut {
     fn stable_ptr(&self) -> *const u8 {
         self.ptr
