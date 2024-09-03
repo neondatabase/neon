@@ -1890,10 +1890,23 @@ impl Service {
         let mut response = ValidateResponse {
             tenants: Vec::new(),
         };
+
+        let db_generations = self
+            .persistence
+            .shard_generations(in_memory_result.iter().filter_map(|i| {
+                if i.2 {
+                    Some(&i.0)
+                } else {
+                    None
+                }
+            }))
+            .await?;
+        let db_generations = db_generations.into_iter().collect::<HashMap<_, _>>();
+
         for (tenant_shard_id, validate_generation, valid) in in_memory_result.into_iter() {
             let valid = if valid {
-                let db_generation = self.persistence.get_generation(tenant_shard_id).await?;
-                db_generation == Some(validate_generation)
+                let db_generation = db_generations.get(&tenant_shard_id);
+                db_generation == Some(&Some(validate_generation))
             } else {
                 // If in-memory state says it's invalid, trust that.  It's always safe to fail a validation, at worst
                 // this prevents a pageserver from cleaning up an object in S3.
