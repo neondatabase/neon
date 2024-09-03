@@ -286,8 +286,6 @@ impl DeleteTimelineFlow {
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
-                // Aux file policy is not needed for deletion, assuming deletion does not read aux keyspace
-                None,
             )
             .context("create_timeline_struct")?;
 

@@ -27,7 +27,7 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
+        AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
         DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
         InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
     },
@@ -96,12 +96,12 @@ use crate::{
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
-use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
-use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use crate::{
-    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
+    pgdatadir_mapping::DirectoryKind,
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
@@ -200,11 +200,6 @@ pub struct TimelineResources {
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-}
-
-pub(crate) struct AuxFilesState {
-    pub(crate) dir: Option<AuxFilesDirectory>,
-    pub(crate) n_deltas: usize,
 }
 
 /// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
@@ -410,14 +405,8 @@ pub struct Timeline {
         crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
     >,
 
-    /// Keep aux directory cache to avoid it's reconstruction on each update
-    pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
-
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
-
-    /// Indicate whether aux file v2 storage is enabled.
-    pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
 
     /// Some test cases directly place keys into the timeline without actually modifying the directory
     /// keys (i.e., DB_DIR). The test cases creating such keys will put the keyspaces here, so that
@@ -1949,7 +1938,7 @@ impl Timeline {
     }
 
     // TODO(yuchen): remove unused flag after implementing https://github.com/neondatabase/neon/issues/8072
-    #[allow(unused)]
+    #[allow(dead_code)]
     pub(crate) fn get_lsn_lease_length_for_ts(&self) -> Duration {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -1958,6 +1947,8 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
+    /// TODO(chi): remove after retiring aux read path
+    #[allow(dead_code)]
     pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2098,7 +2089,6 @@ impl Timeline {
         resources: TimelineResources,
         pg_version: u32,
         state: TimelineState,
-        aux_file_policy: Option<AuxFilePolicy>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2225,14 +2215,7 @@ impl Timeline {
 
                 timeline_get_throttle: resources.timeline_get_throttle,
 
-                aux_files: tokio::sync::Mutex::new(AuxFilesState {
-                    dir: None,
-                    n_deltas: 0,
-                }),
-
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
-
-                last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
 
                 #[cfg(test)]
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
@@ -2241,10 +2224,6 @@ impl Timeline {
 
                 handles: Default::default(),
             };
-
-            if aux_file_policy == Some(AuxFilePolicy::V1) {
-                warn!("this timeline is using deprecated aux file policy V1");
-            }
 
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -4407,14 +4386,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<(), detach_ancestor::Error> {
         detach_ancestor::complete(self, tenant, attempt, ctx).await
-    }
-
-    /// Switch aux file policy and schedule upload to the index part.
-    pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
-        self.last_aux_file_policy.store(Some(policy));
-        self.remote_client
-            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
-        Ok(())
     }
 }
 

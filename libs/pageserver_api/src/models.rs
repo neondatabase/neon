@@ -719,9 +719,6 @@ pub struct TimelineInfo {
     pub is_archived: bool,
 
     pub walreceiver_status: String,
-
-    /// The last aux file policy being used on this timeline
-    pub last_aux_file_policy: Option<AuxFilePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
