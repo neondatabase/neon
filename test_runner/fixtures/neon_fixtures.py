@@ -49,7 +49,7 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId, NodeId
+from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics

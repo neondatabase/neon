@@ -139,13 +139,13 @@ class TenantId(Id):
     def __str__(self) -> str:
         return self.id.hex()
 
+
 class NodeId(Id):
     def __repr__(self) -> str:
         return f'`TenantId("{self.id.hex()}")'
 
     def __str__(self) -> str:
         return self.id.hex()
-
 
 
 class TimelineId(Id):
