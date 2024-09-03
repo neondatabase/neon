@@ -1,9 +1,11 @@
 #![allow(unused)]
 
+use core::slice;
 use std::{
     alloc::{self, Layout},
-    mem::ManuallyDrop,
+    mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
+    ptr::NonNull,
 };
 
 use bytes::buf::UninitSlice;
@@ -13,7 +15,10 @@ use bytes::buf::UninitSlice;
 /// An aligned buffer type used for I/O.
 pub struct IoBufferMut {
     /// Use `Vec` to benefit from the helper methods, but never reallocates.
-    buf: ManuallyDrop<Vec<u8>>,
+    // buf: Option<Box<[MaybeUninit<u8>]>>,
+    ptr: *mut u8,
+    capacity: usize,
+    len: usize,
     align: usize,
 }
 
@@ -33,26 +38,40 @@ impl IoBufferMut {
     /// * `capacity`, when rounded up to the nearest multiple of `align`,
     ///    must not overflow isize (i.e., the rounded value must be
     ///    less than or equal to `isize::MAX`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut buf = IoBufferMut::with_capacity_aligned(4096, 4096);
+    ///
+    /// assert_eq!(buf.len(), 0);
+    /// assert_eq!(buf.capacity(), 4096);
+    /// assert_eq!(buf.align(), 4096);
+    /// ```
     pub fn with_capacity_aligned(capacity: usize, align: usize) -> Self {
         let layout = Layout::from_size_align(capacity, align).expect("Invalid layout");
 
-        // SAFETY:  Making an allocation and construct a `Vec` from raw ptr. The memory is manually freed with the same layout.
-        let buf = unsafe {
+        // SAFETY:  Making an allocation with a sized and aligned layout. The memory is manually freed with the same layout.
+        let ptr = unsafe {
             let ptr = alloc::alloc(layout);
             if ptr.is_null() {
                 alloc::handle_alloc_error(layout);
             }
-            ManuallyDrop::new(Vec::from_raw_parts(ptr, 0, capacity))
+            ptr
         };
 
-        IoBufferMut { buf, align }
+        IoBufferMut {
+            ptr,
+            capacity,
+            len: 0,
+            align,
+        }
     }
 
-    /// Returns the total number of elements the buffer can hold without
-    /// reallocating.
+    /// Returns the total number of bytes the buffer can hold.
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.buf.capacity()
+        self.capacity
     }
 
     /// Returns the alignment of the buffer.
@@ -61,16 +80,38 @@ impl IoBufferMut {
         self.align
     }
 
+    /// Returns the number of bytes in the buffer, also referred to as its 'length'.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     /// Force the length of the buffer to `new_len`.
     #[inline]
     unsafe fn set_len(&mut self, new_len: usize) {
-        self.buf.set_len(new_len)
+        debug_assert!(new_len <= self.capacity());
+        self.len = new_len;
+    }
+
+    /// Extracts a slice containing the entire buffer.
+    ///
+    /// Equivalent to `&s[..]`.
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// Extracts a mutable slice of the entire buffer.
+    ///
+    /// Equivalent to `&mut s[..]`.
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
     /// Drops the all the contents of the buffer, setting its length to `0`.
     #[inline]
     pub fn clear(&mut self) {
-        self.buf.clear()
+        self.len = 0;
     }
 }
 
@@ -79,8 +120,8 @@ impl Drop for IoBufferMut {
         // SAFETY: memory was allocated with std::alloc::alloc with the same layout.
         unsafe {
             alloc::dealloc(
-                self.buf.as_ptr() as *mut u8,
-                Layout::from_size_align_unchecked(self.capacity(), self.align),
+                self.ptr,
+                Layout::from_size_align_unchecked(self.capacity, self.align),
             )
         }
     }
@@ -90,13 +131,13 @@ impl Deref for IoBufferMut {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        self.buf.deref()
+        self.as_slice()
     }
 }
 
 impl DerefMut for IoBufferMut {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.buf.deref_mut()
+        self.as_mut_slice()
     }
 }
 
@@ -128,11 +169,10 @@ unsafe impl bytes::BufMut for IoBufferMut {
         let cap = self.capacity();
         let len = self.len();
 
-        let ptr = self.buf.as_mut_ptr();
-        // SAFETY: Since `ptr` is valid for `cap` bytes, `ptr.add(len)` must be
+        // SAFETY: Since `self.ptr` is valid for `cap` bytes, `self.ptr.add(len)` must be
         // valid for `cap - len` bytes. The subtraction will not underflow since
         // `len <= cap`.
-        unsafe { UninitSlice::from_raw_parts_mut(ptr.add(len), cap - len) }
+        unsafe { UninitSlice::from_raw_parts_mut(self.ptr.add(len), cap - len) }
     }
 }
 
@@ -149,7 +189,7 @@ fn panic_advance(idx: usize, len: usize) -> ! {
 // and the location remains stable even if [`Self`] is moved.
 unsafe impl tokio_epoll_uring::IoBuf for IoBufferMut {
     fn stable_ptr(&self) -> *const u8 {
-        self.buf.as_ptr()
+        self.ptr
     }
 
     fn bytes_init(&self) -> usize {
@@ -164,7 +204,7 @@ unsafe impl tokio_epoll_uring::IoBuf for IoBufferMut {
 // SAFETY: See above.
 unsafe impl tokio_epoll_uring::IoBufMut for IoBufferMut {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
-        self.buf.as_mut_ptr()
+        self.ptr
     }
 
     unsafe fn set_init(&mut self, init_len: usize) {
