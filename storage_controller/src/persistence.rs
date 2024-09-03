@@ -576,36 +576,46 @@ impl Persistence {
     /// Read the generation number of specific tenant shards
     pub(crate) async fn shard_generations(
         &self,
-        tenant_shard_ids: impl Iterator<Item = &TenantShardId>,
+        mut tenant_shard_ids: impl Iterator<Item = &TenantShardId>,
     ) -> Result<Vec<(TenantShardId, Option<Generation>)>, DatabaseError> {
-        //use crate::schema::tenant_shards::dsl::*;
+        let mut rows = Vec::with_capacity(tenant_shard_ids.size_hint().0);
 
-        // diesel doesn't support multi-column IN queries, so we compose raw SQL.  No escaping is required because
-        // the inputs are strongly typed and cannot carry any user-supplied raw string content.
-        let in_clause = tenant_shard_ids
-            .map(|tsid| {
-                format!(
-                    "('{}', {}, {})",
-                    tsid.tenant_id, tsid.shard_number.0, tsid.shard_count.0
-                )
-            })
-            .join(",");
+        // We will chunk our input to avoid composing arbitrarily long `IN` clauses.  Typically we are
+        // called with a single digit number of IDs, but in principle we could be called with tens
+        // of thousands (all the shards on one pageserver) from the generation validation API.
+        loop {
+            // A modest hardcoded chunk size to handle typical cases in a single query but never generate particularly
+            // large query strings.
+            let chunk_ids = tenant_shard_ids.by_ref().take(32);
 
-        if in_clause.is_empty() {
-            // Elide database I/O for empty case
-            return Ok(Default::default());
+            // Compose a comma separated list of tuples for matching on (tenant_id, shard_number, shard_count)
+            let in_clause = chunk_ids
+                .map(|tsid| {
+                    format!(
+                        "('{}', {}, {})",
+                        tsid.tenant_id, tsid.shard_number.0, tsid.shard_count.0
+                    )
+                })
+                .join(",");
+
+            // We are done when our iterator gives us nothing to filter on
+            if in_clause.is_empty() {
+                break;
+            }
+
+            let chunk_rows = self
+                .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
+                    // diesel doesn't support multi-column IN queries, so we compose raw SQL.  No escaping is required because
+                    // the inputs are strongly typed and cannot carry any user-supplied raw string content.
+                    let result : Vec<TenantShardPersistence> = diesel::sql_query(
+                        format!("SELECT * from tenant_shards where (tenant_id, shard_number, shard_count) in ({in_clause});").as_str()
+                    ).load(conn)?;
+
+                    Ok(result)
+                })
+                .await?;
+            rows.extend(chunk_rows.into_iter())
         }
-
-        let rows = self
-            .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
-                let raw_query = format!("SELECT * from tenant_shards where (tenant_id, shard_number, shard_count) in ({in_clause});");
-
-                tracing::info!("Querying: {raw_query}");
-                let result : Vec<TenantShardPersistence> = diesel::sql_query(raw_query.as_str()).load(conn)?;
-
-                Ok(result)
-            })
-            .await?;
 
         Ok(rows
             .into_iter()

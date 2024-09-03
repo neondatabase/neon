@@ -1887,10 +1887,6 @@ impl Service {
 
         // Database calls to confirm validity for anything that passed the in-memory check.  We must do this
         // in case of controller split-brain, where some other controller process might have incremented the generation.
-        let mut response = ValidateResponse {
-            tenants: Vec::new(),
-        };
-
         let db_generations = self
             .persistence
             .shard_generations(in_memory_result.iter().filter_map(|i| {
@@ -1903,6 +1899,9 @@ impl Service {
             .await?;
         let db_generations = db_generations.into_iter().collect::<HashMap<_, _>>();
 
+        let mut response = ValidateResponse {
+            tenants: Vec::new(),
+        };
         for (tenant_shard_id, validate_generation, valid) in in_memory_result.into_iter() {
             let valid = if valid {
                 let db_generation = db_generations.get(&tenant_shard_id);
