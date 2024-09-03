@@ -166,7 +166,7 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
                         listen_pg_port: m.postgres_port,
                         listen_http_addr: m.http_host,
                         listen_http_port: m.http_port,
-                        availability_zone_id: az_id.expect("Checke above"),
+                        availability_zone_id: az_id.expect("Checked above"),
                     })
                 }
                 Err(e) => {
