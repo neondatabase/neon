@@ -2373,43 +2373,57 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
     )
 
     # Start a compaction that will pause on a failpoint.
-    failpoint = "before-upload-index-pausable"
-    origin_pageserver.http_client().configure_failpoints((failpoint, "sleep(5000)"))
+    compaction_failpoint = "before-upload-index-pausable"
+    origin_pageserver.http_client().configure_failpoints((compaction_failpoint, "pause"))
 
     # This failpoint can also cause migration code to time out trying to politely flush
     # during migrations
     origin_pageserver.allowed_errors.append(".*Timed out waiting for flush to remote storage.*")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        compact_fut = executor.submit(
-            origin_pageserver.http_client().timeline_compact,
-            tenant_id,
-            timeline_id,
-            wait_until_uploaded=True,
-        )
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            compact_fut = executor.submit(
+                origin_pageserver.http_client().timeline_compact,
+                tenant_id,
+                timeline_id,
+                wait_until_uploaded=True,
+            )
 
-        # Let the compaction start and then get stuck uploading an index: when we live migrate, the new generation's
-        # index will be initialized from the pre-compaction index, referencing layers that the compaction will try to delete
-        def has_hit_failpoint():
-            assert origin_pageserver.log_contains(f"at failpoint {failpoint}")
+            # Let the compaction start and then get stuck uploading an index: when we live migrate, the new generation's
+            # index will be initialized from the pre-compaction index, referencing layers that the compaction will try to delete
+            def has_hit_compaction_failpoint():
+                assert origin_pageserver.log_contains(f"at failpoint {compaction_failpoint}")
 
-        wait_until(10, 1, has_hit_failpoint)
+            wait_until(10, 1, has_hit_compaction_failpoint)
 
-        # While the compaction is running, start a live migration which will pause long enough for the compaction to sleep,
-        # after incrementing generation and attaching the new location
-        env.storage_controller.configure_failpoints(
-            ("reconciler-live-migrate-post-notify", "sleep(10000)")
-        )
-        migrate_fut = executor.submit(
-            env.storage_controller.tenant_shard_migrate, TenantShardId(tenant_id, 0, 0), dest_ps_id
-        )
+            # While the compaction is running, start a live migration which will pause long enough for the compaction to sleep,
+            # after incrementing generation and attaching the new location
+            migration_failpoint = "reconciler-live-migrate-post-notify"
+            env.storage_controller.configure_failpoints((migration_failpoint, "pause"))
+            migrate_fut = executor.submit(
+                env.storage_controller.tenant_shard_migrate,
+                TenantShardId(tenant_id, 0, 0),
+                dest_ps_id,
+            )
 
-        # Origin pageserver has succeeded with compaction before the migration completed. It has done all the writes it wanted to do in its own (stale) generation
-        compact_fut.result()
-        origin_pageserver.http_client().deletion_queue_flush(execute=True)
+            def has_hit_migration_failpoint():
+                assert env.storage_controller.log_contains(f"at failpoint {migration_failpoint}")
 
-        # Eventually migration completes
-        migrate_fut.result()
+            wait_until(10, 1, has_hit_migration_failpoint)
+
+            # Origin pageserver has succeeded with compaction before the migration completed. It has done all the writes it wanted to do in its own (stale) generation
+            origin_pageserver.http_client().configure_failpoints((compaction_failpoint, "off"))
+            compact_fut.result()
+            origin_pageserver.http_client().deletion_queue_flush(execute=True)
+
+            # Eventually migration completes
+            env.storage_controller.configure_failpoints((migration_failpoint, "off"))
+            migrate_fut.result()
+    except:
+        # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
+        env.storage_controller.configure_failpoints((migration_failpoint, "off"))
+        origin_pageserver.http_client().configure_failpoints((compaction_failpoint, "off"))
+        raise
 
     # Ensure the destination of the migration writes an index, so that if it has corrupt state that is
     # visible to the scrubber.
