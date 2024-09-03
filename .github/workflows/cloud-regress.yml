@@ -1,7 +1,6 @@
 name: Cloud Regression Test
 on:
-  schedule:
-    - cron: "0 0 1 1 *"
+  pull_request:
 
   workflow_dispatch: # adds ability to run this manually
     inputs:
