@@ -44,6 +44,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use compute_tools::disk_quota::set_disk_quota;
 use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
@@ -151,6 +152,7 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
     let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
     let resize_swap_on_bind = matches.get_flag("resize-swap-on-bind");
+    let set_disk_quota_on_bind = matches.get_flag("set-disk-quota-on-bind");
 
     Ok(ProcessCliResult {
         connstr,
@@ -161,6 +163,7 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
         spec_json,
         spec_path,
         resize_swap_on_bind,
+        set_disk_quota_on_bind,
     })
 }
 
@@ -173,6 +176,7 @@ struct ProcessCliResult<'clap> {
     spec_json: Option<&'clap String>,
     spec_path: Option<&'clap String>,
     resize_swap_on_bind: bool,
+    set_disk_quota_on_bind: bool,
 }
 
 fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
@@ -293,6 +297,7 @@ fn wait_spec(
         pgbin,
         ext_remote_storage,
         resize_swap_on_bind,
+        set_disk_quota_on_bind,
         http_port,
         ..
     }: ProcessCliResult,
@@ -373,6 +378,7 @@ fn wait_spec(
         compute,
         http_port,
         resize_swap_on_bind,
+        set_disk_quota_on_bind,
     })
 }
 
@@ -381,6 +387,7 @@ struct WaitSpecResult {
     // passed through from ProcessCliResult
     http_port: u16,
     resize_swap_on_bind: bool,
+    set_disk_quota_on_bind: bool,
 }
 
 fn start_postgres(
@@ -390,6 +397,7 @@ fn start_postgres(
         compute,
         http_port,
         resize_swap_on_bind,
+        set_disk_quota_on_bind,
     }: WaitSpecResult,
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
@@ -403,6 +411,7 @@ fn start_postgres(
     );
     // before we release the mutex, fetch the swap size (if any) for later.
     let swap_size_bytes = state.pspec.as_ref().unwrap().spec.swap_size_bytes;
+    let disk_quota_bytes = state.pspec.as_ref().unwrap().spec.pgdata_disk_quota_bytes;
     drop(state);
 
     // Launch remaining service threads
@@ -427,6 +436,29 @@ fn start_postgres(
             }
             Err(err) => {
                 let err = err.context("failed to resize swap");
+                error!("{err:#}");
+
+                // Mark compute startup as failed; don't try to start postgres, and report this
+                // error to the control plane when it next asks.
+                prestartup_failed = true;
+                let mut state = compute.state.lock().unwrap();
+                state.error = Some(format!("{err:?}"));
+                state.status = ComputeStatus::Failed;
+                compute.state_changed.notify_all();
+                delay_exit = true;
+            }
+        }
+    }
+
+    // Set disk quota if the compute spec says so
+    if let (Some(disk_quota_bytes), true) = (disk_quota_bytes, set_disk_quota_on_bind) {
+        match set_disk_quota(disk_quota_bytes, &compute.pgdata) {
+            Ok(()) => {
+                let size_gib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%disk_quota_bytes, %size_gib, "set disk quota");
+            }
+            Err(err) => {
+                let err = err.context("failed to set disk quota");
                 error!("{err:#}");
 
                 // Mark compute startup as failed; don't try to start postgres, and report this
@@ -748,6 +780,11 @@ fn cli() -> clap::Command {
         .arg(
             Arg::new("resize-swap-on-bind")
                 .long("resize-swap-on-bind")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("set-disk-quota-on-bind")
+                .long("set-disk-quota-on-bind")
                 .action(clap::ArgAction::SetTrue),
         )
 }

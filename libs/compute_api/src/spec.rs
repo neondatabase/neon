@@ -50,6 +50,10 @@ pub struct ComputeSpec {
     #[serde(default)]
     pub swap_size_bytes: Option<u64>,
 
+    /// TODO: write comment
+    #[serde(default)]
+    pub pgdata_disk_quota_bytes: Option<u64>,
+
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
