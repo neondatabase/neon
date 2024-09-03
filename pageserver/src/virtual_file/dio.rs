@@ -10,8 +10,6 @@ use std::{
 
 use bytes::buf::UninitSlice;
 
-// pub const DIO_MEM_ALIGN: usize = 4096;
-
 /// An aligned buffer type used for I/O.
 pub struct IoBufferMut {
     /// Use `Vec` to benefit from the helper methods, but never reallocates.
