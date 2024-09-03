@@ -468,7 +468,7 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
-        is_archived,
+        is_archived: Some(is_archived),
 
         walreceiver_status,
 
