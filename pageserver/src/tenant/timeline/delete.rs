@@ -137,7 +137,7 @@ async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<(
 
 /// It is important that this gets called when DeletionGuard is being held.
 /// For more context see comments in [`DeleteTimelineFlow::prepare`]
-async fn remove_timeline_from_tenant(
+pub(super) async fn remove_timeline_from_tenant(
     tenant: &Tenant,
     timeline: &Timeline,
     _: &DeletionGuard, // using it as a witness
@@ -290,7 +290,7 @@ impl DeleteTimelineFlow {
         Ok(())
     }
 
-    fn prepare(
+    pub(super) fn prepare(
         tenant: &Tenant,
         timeline_id: TimelineId,
     ) -> Result<(Arc<Timeline>, DeletionGuard), DeleteTimelineError> {
@@ -400,7 +400,7 @@ impl DeleteTimelineFlow {
     }
 }
 
-struct DeletionGuard(OwnedMutexGuard<DeleteTimelineFlow>);
+pub(super) struct DeletionGuard(OwnedMutexGuard<DeleteTimelineFlow>);
 
 impl Deref for DeletionGuard {
     type Target = DeleteTimelineFlow;

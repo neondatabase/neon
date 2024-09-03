@@ -38,6 +38,7 @@ use std::future::Future;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::offload::offload_timeline;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -1876,7 +1877,7 @@ impl Tenant {
     ///
     /// Returns whether we have pending compaction task.
     async fn compaction_iteration(
-        &self,
+        self: &Arc<Self>,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<bool, timeline::CompactionError> {
@@ -1897,21 +1898,27 @@ impl Tenant {
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
         // compaction runs.
-        let timelines_to_compact = {
+        let timelines_to_compact_or_offload;
+        {
             let timelines = self.timelines.lock().unwrap();
-            let timelines_to_compact = timelines
+            timelines_to_compact_or_offload = timelines
                 .iter()
                 .filter_map(|(timeline_id, timeline)| {
-                    if timeline.is_active() {
-                        Some((*timeline_id, timeline.clone()))
-                    } else {
+                    let (is_active, can_offload) = (timeline.is_active(), timeline.can_offload());
+                    let can_offload = can_offload && {
+                        !timelines
+                            .iter()
+                            .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(*timeline_id))
+                    };
+                    if (is_active, can_offload) == (false, false) {
                         None
+                    } else {
+                        Some((*timeline_id, timeline.clone(), (is_active, can_offload)))
                     }
                 })
                 .collect::<Vec<_>>();
             drop(timelines);
-            timelines_to_compact
-        };
+        }
 
         // Before doing any I/O work, check our circuit breaker
         if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
@@ -1921,20 +1928,31 @@ impl Tenant {
 
         let mut has_pending_task = false;
 
-        for (timeline_id, timeline) in &timelines_to_compact {
-            has_pending_task |= timeline
-                .compact(cancel, EnumSet::empty(), ctx)
-                .instrument(info_span!("compact_timeline", %timeline_id))
-                .await
-                .inspect_err(|e| match e {
-                    timeline::CompactionError::ShuttingDown => (),
-                    timeline::CompactionError::Other(e) => {
-                        self.compaction_circuit_breaker
-                            .lock()
-                            .unwrap()
-                            .fail(&CIRCUIT_BREAKERS_BROKEN, e);
-                    }
-                })?;
+        for (timeline_id, timeline, (can_compact, can_offload)) in &timelines_to_compact_or_offload
+        {
+            let pending_task_left = if *can_compact {
+                timeline
+                    .compact(cancel, EnumSet::empty(), ctx)
+                    .instrument(info_span!("compact_timeline", %timeline_id))
+                    .await
+                    .inspect_err(|e| match e {
+                        timeline::CompactionError::ShuttingDown => (),
+                        timeline::CompactionError::Other(e) => {
+                            self.compaction_circuit_breaker
+                                .lock()
+                                .unwrap()
+                                .fail(&CIRCUIT_BREAKERS_BROKEN, e);
+                        }
+                    })?
+            } else {
+                false
+            };
+            has_pending_task |= pending_task_left;
+            if !pending_task_left && *can_offload {
+                offload_timeline(self, timeline)
+                    .await
+                    .map_err(|e| timeline::CompactionError::Other(e))?;
+            }
         }
 
         self.compaction_circuit_breaker
