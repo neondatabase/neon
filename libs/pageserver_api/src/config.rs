@@ -51,7 +51,9 @@ pub struct ConfigToml {
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
     pub availability_zone: Option<String>,
+    #[serde(with = "humantime_serde")]
     pub wait_lsn_timeout: Duration,
+    #[serde(with = "humantime_serde")]
     pub wal_redo_timeout: Duration,
     pub superuser: String,
     pub page_cache_size: usize,
@@ -63,16 +65,20 @@ pub struct ConfigToml {
     pub remote_storage: Option<RemoteStorageConfig>,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub broker_endpoint: storage_broker::Uri,
+    #[serde(with = "humantime_serde")]
     pub broker_keepalive_interval: Duration,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub log_format: LogFormat,
+    #[serde(with = "humantime_serde")]
     pub metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<reqwest::Url>,
     pub metric_collection_bucket: Option<RemoteStorageConfig>,
+    #[serde(with = "humantime_serde")]
     pub synthetic_size_calculation_interval: Duration,
     pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
     pub test_remote_failures: u64,
     pub ondemand_download_behavior_treat_error_as_warn: bool,
+    #[serde(with = "humantime_serde")]
     pub background_task_maximum_delay: Duration,
     pub control_plane_api: Option<reqwest::Url>,
     pub control_plane_api_token: Option<String>,
