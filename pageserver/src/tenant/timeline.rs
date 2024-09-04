@@ -2243,7 +2243,7 @@ impl Timeline {
             };
 
             if aux_file_policy == Some(AuxFilePolicy::V1) {
-                warn!("this timeline is using deprecated aux file policy V1");
+                warn!("this timeline is using deprecated aux file policy V1 (when loading the timeline)");
             }
 
             result.repartition_threshold =
