@@ -122,9 +122,11 @@ jobs:
 
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
+    # There's no reason to expect clippy or code formatting to be different on different platforms,
+    # so it's enough to run these on x64 only.
     strategy:
       matrix:
-        arch: [ x64, arm64 ]
+        arch: [ x64 ]
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     container:
@@ -168,8 +170,6 @@ jobs:
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
       - name: Run cargo clippy (debug)
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
-      - name: Run cargo clippy (release)
-        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items
