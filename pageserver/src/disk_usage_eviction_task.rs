@@ -1247,6 +1247,7 @@ mod filesystem_level_usage {
                 max_usage_pct: Percent::new(85).unwrap(),
                 min_avail_bytes: 0,
                 period: Duration::MAX,
+                #[cfg(feature = "testing")]
                 mock_statvfs: None,
                 eviction_order: pageserver_api::config::EvictionOrder::default(),
             },
