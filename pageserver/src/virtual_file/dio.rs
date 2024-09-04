@@ -10,11 +10,13 @@ use std::{
 
 use bytes::buf::UninitSlice;
 
+struct IoBufferPtr(*mut u8);
+
+unsafe impl Send for IoBufferPtr {}
+
 /// An aligned buffer type used for I/O.
 pub struct IoBufferMut {
-    /// Use `Vec` to benefit from the helper methods, but never reallocates.
-    // buf: Option<Box<[MaybeUninit<u8>]>>,
-    ptr: *mut u8,
+    ptr: IoBufferPtr,
     capacity: usize,
     len: usize,
     align: usize,
@@ -55,7 +57,7 @@ impl IoBufferMut {
             if ptr.is_null() {
                 alloc::handle_alloc_error(layout);
             }
-            ptr
+            IoBufferPtr(ptr)
         };
 
         IoBufferMut {
@@ -91,19 +93,29 @@ impl IoBufferMut {
         self.len = new_len;
     }
 
+    #[inline]
+    fn as_ptr(&self) -> *const u8 {
+        self.ptr.0
+    }
+
+    #[inline]
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr.0
+    }
+
     /// Extracts a slice containing the entire buffer.
     ///
     /// Equivalent to `&s[..]`.
     #[inline]
     fn as_slice(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.ptr, self.len) }
+        unsafe { slice::from_raw_parts(self.as_ptr(), self.len) }
     }
 
     /// Extracts a mutable slice of the entire buffer.
     ///
     /// Equivalent to `&mut s[..]`.
     fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
+        unsafe { slice::from_raw_parts_mut(self.as_mut_ptr(), self.len) }
     }
 
     /// Drops the all the contents of the buffer, setting its length to `0`.
@@ -118,7 +130,7 @@ impl Drop for IoBufferMut {
         // SAFETY: memory was allocated with std::alloc::alloc with the same layout.
         unsafe {
             alloc::dealloc(
-                self.ptr,
+                self.as_mut_ptr(),
                 Layout::from_size_align_unchecked(self.capacity, self.align),
             )
         }
@@ -170,7 +182,7 @@ unsafe impl bytes::BufMut for IoBufferMut {
         // SAFETY: Since `self.ptr` is valid for `cap` bytes, `self.ptr.add(len)` must be
         // valid for `cap - len` bytes. The subtraction will not underflow since
         // `len <= cap`.
-        unsafe { UninitSlice::from_raw_parts_mut(self.ptr.add(len), cap - len) }
+        unsafe { UninitSlice::from_raw_parts_mut(self.as_mut_ptr().add(len), cap - len) }
     }
 }
 
@@ -187,7 +199,7 @@ fn panic_advance(idx: usize, len: usize) -> ! {
 /// and the location remains stable even if [`Self`] is moved.
 unsafe impl tokio_epoll_uring::IoBuf for IoBufferMut {
     fn stable_ptr(&self) -> *const u8 {
-        self.ptr
+        self.as_ptr()
     }
 
     fn bytes_init(&self) -> usize {
@@ -202,7 +214,7 @@ unsafe impl tokio_epoll_uring::IoBuf for IoBufferMut {
 // SAFETY: See above.
 unsafe impl tokio_epoll_uring::IoBufMut for IoBufferMut {
     fn stable_mut_ptr(&mut self) -> *mut u8 {
-        self.ptr
+        self.as_mut_ptr()
     }
 
     unsafe fn set_init(&mut self, init_len: usize) {
