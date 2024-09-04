@@ -729,9 +729,13 @@ pub struct XlClogTruncate {
 }
 
 impl XlClogTruncate {
-    pub fn decode(buf: &mut Bytes) -> XlClogTruncate {
+    pub fn decode(buf: &mut Bytes, pg_version: u32) -> XlClogTruncate {
         XlClogTruncate {
-            pageno: buf.get_u32_le(),
+            pageno: if pg_version < 17 {
+                buf.get_u32_le()
+            } else {
+                buf.get_u64_le() as u32
+            },
             oldest_xid: buf.get_u32_le(),
             oldest_xid_db: buf.get_u32_le(),
         }

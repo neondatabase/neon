@@ -225,7 +225,11 @@ impl WalIngest {
                 let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
 
                 if info == pg_constants::CLOG_ZEROPAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
@@ -239,7 +243,7 @@ impl WalIngest {
                     .await?;
                 } else {
                     assert!(info == pg_constants::CLOG_TRUNCATE);
-                    let xlrec = XlClogTruncate::decode(&mut buf);
+                    let xlrec = XlClogTruncate::decode(&mut buf, pg_version);
                     self.ingest_clog_truncate_record(modification, &xlrec, ctx)
                         .await?;
                 }
@@ -291,7 +295,11 @@ impl WalIngest {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
                 if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
@@ -304,7 +312,11 @@ impl WalIngest {
                     )
                     .await?;
                 } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
