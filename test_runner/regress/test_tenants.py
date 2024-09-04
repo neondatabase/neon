@@ -372,8 +372,10 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     tenant_id: TenantId = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    # Multiple creation requests which race will generate this error
+    # Multiple creation requests which race will generate this error on the pageserver
+    # and storage controller respectively
     env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
+    env.storage_controller.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
 
     # Tenant creation requests which arrive out of order will generate complaints about
     # generation nubmers out of order.

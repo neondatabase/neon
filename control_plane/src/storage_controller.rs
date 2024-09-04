@@ -437,6 +437,8 @@ impl StorageController {
             &humantime::Duration::from(self.config.max_offline).to_string(),
             "--max-warming-up-interval",
             &humantime::Duration::from(self.config.max_warming_up).to_string(),
+            "--heartbeat-interval",
+            &humantime::Duration::from(self.config.heartbeat_interval).to_string(),
             "--address-for-peers",
             &address_for_peers.to_string(),
         ]
