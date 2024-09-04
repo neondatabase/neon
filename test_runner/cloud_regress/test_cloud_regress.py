@@ -28,13 +28,13 @@ def test_cloud_regress(remote_pg: RemotePostgres):
         log.info('The extension is found')
     else:
         log.info('Creating the extension')
-        cur.execute('CREATE EXTENSION regress_so')
-        conn.commit()
+        #cur.execute('CREATE EXTENSION regress_so')
+        #conn.commit()
 
     log.info('Creating a C function to check availability of regress.so')
-    cur.execute("CREATE FUNCTION get_columns_length(oid[]) "
-                "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;")
-    conn.rollback()
+    #cur.execute("CREATE FUNCTION get_columns_length(oid[]) "
+    #            "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;")
+    #conn.rollback()
     neondir = os.path.abspath(os.path.join(os.path.dirname(os.path.relpath(__file__)), '../../'))
     runpath = f'{neondir}/vendor/postgres-v{pg_version}/src/test/regress'
     binpath = f'{neondir}/pg_install/v{pg_version}/bin'
