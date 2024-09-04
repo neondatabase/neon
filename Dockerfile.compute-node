@@ -689,6 +689,7 @@ RUN wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.
     ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/neon_ai.control
 
+    
 #########################################################################################
 #
 # Layer "pg-jsonschema-pg-build"
