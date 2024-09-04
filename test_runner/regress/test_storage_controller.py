@@ -2409,7 +2409,11 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
             def has_hit_migration_failpoint():
                 assert env.storage_controller.log_contains(f"at failpoint {migration_failpoint}")
 
-            wait_until(10, 1, has_hit_migration_failpoint)
+            # Long wait because the migration will have to time out during transition to AttachedStale
+            # before it reaches this point.  The timeout is because the AttachedStale transition includes
+            # a flush of remote storage, and if the compaction already enqueued an index upload this cannot
+            # make progress.
+            wait_until(60, 1, has_hit_migration_failpoint)
 
             # Origin pageserver has succeeded with compaction before the migration completed. It has done all the writes it wanted to do in its own (stale) generation
             origin_pageserver.http_client().configure_failpoints((compaction_failpoint, "off"))
