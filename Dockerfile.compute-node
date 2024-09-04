@@ -674,7 +674,7 @@ ARG PG_VERSION
 
 RUN apt-get update && apt-get install -y python3 python3-pip && \
     python3 -m pip install cmake && \
-    wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
+    wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
     ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
 
