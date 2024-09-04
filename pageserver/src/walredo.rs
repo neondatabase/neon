@@ -171,7 +171,8 @@ impl PostgresRedoManager {
 
             if rec_neon != batch_neon {
                 let result = if batch_neon {
-                    self.apply_batch_neon(key, lsn, img, &records[batch_start..i])
+                    self.apply_batch_neon(key, lsn, img, &records[batch_start..i], pg_version)
+                        .await
                 } else {
                     self.apply_batch_postgres(
                         key,
@@ -192,7 +193,8 @@ impl PostgresRedoManager {
         }
         // last batch
         if batch_neon {
-            self.apply_batch_neon(key, lsn, img, &records[batch_start..])
+            self.apply_batch_neon(key, lsn, img, &records[batch_start..], pg_version)
+                .await
         } else {
             self.apply_batch_postgres(
                 key,
@@ -494,12 +496,13 @@ impl PostgresRedoManager {
     ///
     /// Process a batch of WAL records using bespoken Neon code.
     ///
-    fn apply_batch_neon(
+    async fn apply_batch_neon(
         &self,
         key: Key,
         lsn: Lsn,
         base_img: Option<Bytes>,
         records: &[(Lsn, NeonWalRecord)],
+        pg_version: u32,
     ) -> Result<Bytes, Error> {
         let start_time = Instant::now();
 
@@ -529,6 +532,10 @@ impl PostgresRedoManager {
             lsn
         );
 
+        if *ADD_PROCESS_PING_TO_IN_PROCESS {
+            self.ping(pg_version).await.unwrap();
+        }
+
         Ok(page.freeze())
     }
 
@@ -544,6 +551,11 @@ impl PostgresRedoManager {
         Ok(())
     }
 }
+
+// add a walredo roundtrip to simulate latency overhead
+pub(crate) static ADD_PROCESS_PING_TO_IN_PROCESS: Lazy<bool> = Lazy::new(|| {
+    utils::env::var("NEON_PAGESERVER_WALREDO_ADD_PROCESS_PING_TO_IN_PROCESS").unwrap_or(false)
+});
 
 #[cfg(test)]
 mod tests {

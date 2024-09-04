@@ -5085,6 +5085,16 @@ impl Timeline {
                     img_lsn,
                     request_lsn,
                 );
+                if *crate::walredo::ADD_PROCESS_PING_TO_IN_PROCESS {
+                    self.walredo_mgr
+                        .as_ref()
+                        .context("timeline has no walredo manager")
+                        .map_err(PageReconstructError::WalRedo)?
+                        .ping(self.pg_version)
+                        .await
+                        .unwrap();
+                }
+
                 Ok(img.clone())
             } else {
                 Err(PageReconstructError::from(anyhow!(
