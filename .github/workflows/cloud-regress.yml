@@ -62,7 +62,7 @@ jobs:
         uses: ./.github/actions/run-python-test-set
         with:
           build_type: ${{ env.BUILD_TYPE }}
-          test_selection: test_cloud_regress
+          test_selection: cloud_regress
           run_in_parallel: false
           save_perf_report: ${{ env.SAVE_PERF_REPORT }}
           pg_version: ${{ env.DEFAULT_PG_VERSION }}
