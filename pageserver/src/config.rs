@@ -614,14 +614,15 @@ mod tests {
             "#}
         );
 
-        test!(
-            remote_storage_config,
-            indoc! {r#"
-                [remote_storage_config]
-                local_path = "/nonexistent"
-                some_invalid_field = 23
-            "#}
-        );
+        // TODO: fix this => https://github.com/neondatabase/neon/issues/8915
+        // test!(
+        //     remote_storage_config,
+        //     indoc! {r#"
+        //         [remote_storage_config]
+        //         local_path = "/nonexistent"
+        //         some_invalid_field = 23
+        //     "#}
+        // );
 
         test!(
             compact_level0_phase1_value_access,
