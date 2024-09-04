@@ -622,7 +622,11 @@ where
         buf.extend_from_slice(&img[..]);
         let crc = crc32c::crc32c(&img[..]);
         buf.put_u32_le(crc);
-        let path = format!("pg_twophase/{:>08X}", xid);
+        let path = if self.timeline.pg_version < 17 {
+            format!("pg_twophase/{:>08X}", xid)
+        } else {
+            format!("pg_twophase/{:>016X}", xid)
+        };
         let header = new_tar_header(&path, buf.len() as u64)?;
         self.ar
             .append(&header, &buf[..])
