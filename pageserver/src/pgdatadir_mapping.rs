@@ -730,13 +730,10 @@ impl Timeline {
         match current_policy {
             Some(AuxFilePolicy::V1) => {
                 let res = self.list_aux_files_v1(lsn, ctx).await?;
-                if !res.is_empty() {
-                    warn!("this timeline is using deprecated aux file policy V1 (policy=v1)");
-                } else {
-                    warn!(
-                        "this timeline is using deprecated aux file policy V1 (policy=v1, empty)"
-                    );
-                }
+                let empty_str = if res.is_empty() { ", empty" } else { "" };
+                warn!(
+                    "this timeline is using deprecated aux file policy V1 (policy=v1{empty_str})"
+                );
                 Ok(res)
             }
             None => {
