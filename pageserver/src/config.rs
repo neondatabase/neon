@@ -555,6 +555,18 @@ mod tests {
             .expect("parse_and_validate");
     }
 
+    /// If there's a typo in the pageserver config, we'd rather catch that typo
+    /// and fail pageserver startup than silently ignoring the typo, leaving whoever
+    /// made it in the believe that their config change is effective.
+    ///
+    /// The default in serde is to allow unknown fields, so, we rely
+    /// on developer+review discipline to add `deny_unknown_fields` when adding
+    /// new structs to the config, and these tests here as a regression test.
+    ///
+    /// The alternative to all of this would be to allow unknown fields in the config.
+    /// To catch them, we could have a config check tool or mgmt API endpoint that
+    /// compares the effective config with the TOML on disk and makes sure that
+    /// the on-disk TOML is a strict subset of the effective config.
     mod unknown_fields_handling {
         macro_rules! test {
             ($short_name:ident, $input:expr) => {
@@ -568,56 +580,56 @@ mod tests {
                 }
             };
         }
+        use indoc::indoc;
 
-        // Usage examples
         test!(
             toplevel,
-            r#"
-    some_invalid_field = 23
-    "#
+            indoc! {r#"
+                some_invalid_field = 23
+            "#}
         );
 
         test!(
-            disk_usage_based_eviction_config,
-            r#"
-    [disk_usage_based_eviction]
-    some_invalid_field = 23
-    "#
+            disk_usage_based_eviction,
+            indoc! {r#"
+                [disk_usage_based_eviction]
+                some_invalid_field = 23
+            "#}
         );
 
         test!(
             tenant_config,
-            r#"
-    [tenant_config]
-    some_invalid_field = 23
-    "#
+            indoc! {r#"
+                [tenant_config]
+                some_invalid_field = 23
+            "#}
         );
 
         test!(
-            l0_flush_config,
-            r#"
-    [l0_flush]
-    mode = "direct"
-    some_invalid_field = 23
-    "#
+            l0_flush,
+            indoc! {r#"
+                [l0_flush]
+                mode = "direct"
+                some_invalid_field = 23
+            "#}
         );
 
         test!(
             remote_storage_config,
-            r#"
-    [remote_storage_config]
-    local_path = "/nonexistent"
-    some_invalid_field = 23
-    "#
+            indoc! {r#"
+                [remote_storage_config]
+                local_path = "/nonexistent"
+                some_invalid_field = 23
+            "#}
         );
 
         test!(
             compact_level0_phase1_value_access,
-            r#"
-    [compact_level0_phase1_value_access]
-    mode = "streaming-kmerge"
-    some_invalid_field = 23
-    "#
+            indoc! {r#"
+                [compact_level0_phase1_value_access]
+                mode = "streaming-kmerge"
+                some_invalid_field = 23
+            "#}
         );
     }
 }
