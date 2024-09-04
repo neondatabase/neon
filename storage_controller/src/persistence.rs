@@ -8,6 +8,7 @@ use self::split_state::SplitState;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
+use itertools::Itertools;
 use pageserver_api::controller_api::MetadataHealthRecord;
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
@@ -91,7 +92,8 @@ pub(crate) enum DatabaseOperation {
     Detach,
     ReAttach,
     IncrementGeneration,
-    PeekGenerations,
+    TenantGenerations,
+    ShardGenerations,
     ListTenantShards,
     InsertTenantShards,
     UpdateTenantShard,
@@ -544,13 +546,13 @@ impl Persistence {
     /// If the tenant doesn't exist, an empty vector is returned.
     ///
     /// Output is sorted by shard number
-    pub(crate) async fn peek_generations(
+    pub(crate) async fn tenant_generations(
         &self,
         filter_tenant_id: TenantId,
     ) -> Result<Vec<ShardGenerationState>, DatabaseError> {
         use crate::schema::tenant_shards::dsl::*;
         let rows = self
-            .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
+            .with_measured_conn(DatabaseOperation::TenantGenerations, move |conn| {
                 let result = tenant_shards
                     .filter(tenant_id.eq(filter_tenant_id.to_string()))
                     .select(TenantShardPersistence::as_select())
@@ -568,6 +570,64 @@ impl Persistence {
                     .expect("Corrupt tenant shard id in database"),
                 generation: p.generation.map(|g| Generation::new(g as u32)),
                 generation_pageserver: p.generation_pageserver.map(|n| NodeId(n as u64)),
+            })
+            .collect())
+    }
+
+    /// Read the generation number of specific tenant shards
+    ///
+    /// Output is unsorted.  Output may not include values for all inputs, if they are missing in the database.
+    pub(crate) async fn shard_generations(
+        &self,
+        mut tenant_shard_ids: impl Iterator<Item = &TenantShardId>,
+    ) -> Result<Vec<(TenantShardId, Option<Generation>)>, DatabaseError> {
+        let mut rows = Vec::with_capacity(tenant_shard_ids.size_hint().0);
+
+        // We will chunk our input to avoid composing arbitrarily long `IN` clauses.  Typically we are
+        // called with a single digit number of IDs, but in principle we could be called with tens
+        // of thousands (all the shards on one pageserver) from the generation validation API.
+        loop {
+            // A modest hardcoded chunk size to handle typical cases in a single query but never generate particularly
+            // large query strings.
+            let chunk_ids = tenant_shard_ids.by_ref().take(32);
+
+            // Compose a comma separated list of tuples for matching on (tenant_id, shard_number, shard_count)
+            let in_clause = chunk_ids
+                .map(|tsid| {
+                    format!(
+                        "('{}', {}, {})",
+                        tsid.tenant_id, tsid.shard_number.0, tsid.shard_count.0
+                    )
+                })
+                .join(",");
+
+            // We are done when our iterator gives us nothing to filter on
+            if in_clause.is_empty() {
+                break;
+            }
+
+            let chunk_rows = self
+                .with_measured_conn(DatabaseOperation::ShardGenerations, move |conn| {
+                    // diesel doesn't support multi-column IN queries, so we compose raw SQL.  No escaping is required because
+                    // the inputs are strongly typed and cannot carry any user-supplied raw string content.
+                    let result : Vec<TenantShardPersistence> = diesel::sql_query(
+                        format!("SELECT * from tenant_shards where (tenant_id, shard_number, shard_count) in ({in_clause});").as_str()
+                    ).load(conn)?;
+
+                    Ok(result)
+                })
+                .await?;
+            rows.extend(chunk_rows.into_iter())
+        }
+
+        Ok(rows
+            .into_iter()
+            .map(|tsp| {
+                (
+                    tsp.get_tenant_shard_id()
+                        .expect("Bad tenant ID in database"),
+                    tsp.generation.map(|g| Generation::new(g as u32)),
+                )
             })
             .collect())
     }
@@ -983,7 +1043,9 @@ impl Persistence {
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
-#[derive(Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[derive(
+    QueryableByName, Queryable, Selectable, Insertable, Serialize, Deserialize, Clone, Eq, PartialEq,
+)]
 #[diesel(table_name = crate::schema::tenant_shards)]
 pub(crate) struct TenantShardPersistence {
     #[serde(default)]
