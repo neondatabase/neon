@@ -3411,6 +3411,7 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
+            conf_file.write("\n")
 
     def edit_hba(self, hba: List[str]):
         """Prepend hba lines into pg_hba.conf file."""
@@ -3464,7 +3465,7 @@ def vanilla_pg(
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
-        vanilla_pg.configure(['shared_preload_libraries=neon_rmgr'])
+        vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
         yield vanilla_pg
 
 
