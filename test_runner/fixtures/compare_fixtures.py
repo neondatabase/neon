@@ -1,3 +1,5 @@
+import os
+import time
 from abc import ABC, abstractmethod
 from contextlib import _GeneratorContextManager, contextmanager
 
@@ -8,6 +10,7 @@ import pytest
 from _pytest.fixtures import FixtureRequest
 
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     PgBin,
@@ -333,3 +336,25 @@ def neon_with_baseline(request: FixtureRequest) -> PgCompare:
     fixture = request.getfixturevalue(request.param)
     assert isinstance(fixture, PgCompare), f"test error: fixture {fixture} is not PgCompare"
     return fixture
+
+
+@pytest.fixture(scope="function", autouse=True)
+def sync_after_each_test():
+    # some of the benchmarks are quite write-happy, and create issues to start
+    # the processes up in 10s.
+    # SYNC_AFTER_EACH_TEST is only "true" for build_and_test workflow
+    # benchmarks, which run test_runner/performance cases sequentially
+    key = "SYNC_AFTER_EACH_TEST"
+    enabled = os.environ.get(key) == "true"
+
+    yield
+
+    if not enabled:
+        # regress test, or running locally
+        return
+
+    # we only run benches on linuxes, the method might not exist on windows
+    start = time.time()
+    os.sync()
+    elapsed = time.time() - start
+    log.info(f"called sync after test {elapsed=}")
