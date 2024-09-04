@@ -126,8 +126,8 @@ jobs:
     # so it's enough to run these on x64 only.
     strategy:
       matrix:
-        arch: [ x64 ]
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
+        arch: [ x64, arm64 ]
+    runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     container:
       image: ${{ needs.build-build-tools-image.outputs.image }}
