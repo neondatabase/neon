@@ -1,9 +1,13 @@
 import os
+from pathlib import Path
 
+from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
+    PgBin,
     fork_at_current_lsn,
+    import_timeline_from_vanilla_postgres,
 )
 
 
@@ -14,6 +18,11 @@ def twophase_test_on_timeline(env: NeonEnv):
 
     conn = endpoint.connect()
     cur = conn.cursor()
+
+    # FIXME: Switch to the next WAL segment, to work around the bug fixed in
+    # https://github.com/neondatabase/neon/pull/8914.  When that is merged, this can be
+    # removed.
+    cur.execute("select pg_switch_wal()")
 
     cur.execute("CREATE TABLE foo (t text)")
 
@@ -89,5 +98,42 @@ def test_twophase(neon_simple_env: NeonEnv):
     """
     env = neon_simple_env
     env.neon_cli.create_branch("test_twophase", "empty")
+
+    twophase_test_on_timeline(env)
+
+
+def test_twophase_nonzero_epoch(
+    neon_simple_env: NeonEnv,
+    test_output_dir: Path,
+    pg_bin: PgBin,
+    vanilla_pg,
+):
+    """
+    Same as 'test_twophase' test, but with a non-zero XID epoch, i.e. after 4 billion XIDs
+    have been consumed. (This is to ensure that we correctly use the full 64-bit XIDs in
+    pg_twophase filenames with PostgreSQL v17.)
+    """
+    env = neon_simple_env
+
+    # Reset the vanilla Postgres instance with a higher XID epoch
+    pg_resetwal_path = os.path.join(pg_bin.pg_bin_path, "pg_resetwal")
+    cmd = [pg_resetwal_path, "--epoch=1000000000", "-D", str(vanilla_pg.pgdatadir)]
+    pg_bin.run_capture(cmd)
+
+    timeline_id = TimelineId.generate()
+
+    # Import the cluster to Neon
+    vanilla_pg.start()
+    vanilla_pg.safe_psql("create user cloud_admin with password 'postgres' superuser")
+    import_timeline_from_vanilla_postgres(
+        test_output_dir,
+        env,
+        pg_bin,
+        env.initial_tenant,
+        timeline_id,
+        "test_twophase",
+        vanilla_pg.connstr(),
+    )
+    vanilla_pg.stop()  # don't need the original server anymore
 
     twophase_test_on_timeline(env)

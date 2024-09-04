@@ -306,12 +306,21 @@ impl WalIngest {
                         parsed_xact.xid,
                         lsn,
                     );
-                    modification
-                        .drop_twophase_file(parsed_xact.xid, ctx)
-                        .await?;
+
+                    let xid: u64 = if pg_version >= 17 {
+                        self.adjust_to_full_transaction_id(parsed_xact.xid)?
+                    } else {
+                        parsed_xact.xid as u64
+                    };
+                    modification.drop_twophase_file(xid, ctx).await?;
                 } else if info == pg_constants::XLOG_XACT_PREPARE {
+                    let xid: u64 = if pg_version >= 17 {
+                        self.adjust_to_full_transaction_id(decoded.xl_xid)?
+                    } else {
+                        decoded.xl_xid as u64
+                    };
                     modification
-                        .put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]), ctx)
+                        .put_twophase_file(xid, Bytes::copy_from_slice(&buf[..]), ctx)
                         .await?;
                 }
             }
@@ -416,12 +425,24 @@ impl WalIngest {
                     if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
                         && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
                     {
-                        let mut oldest_active_xid = self.checkpoint.nextXid.value as u32;
-                        for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
-                            if (xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
-                                oldest_active_xid = xid;
+                        let oldest_active_xid = if pg_version >= 17 {
+                            let mut oldest_active_full_xid = self.checkpoint.nextXid.value;
+                            for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                                if xid < oldest_active_full_xid {
+                                    oldest_active_full_xid = xid;
+                                }
                             }
-                        }
+                            oldest_active_full_xid as u32
+                        } else {
+                            let mut oldest_active_xid = self.checkpoint.nextXid.value as u32;
+                            for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                                let narrow_xid = xid as u32;
+                                if (narrow_xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
+                                    oldest_active_xid = narrow_xid;
+                                }
+                            }
+                            oldest_active_xid
+                        };
                         self.checkpoint.oldestActiveXid = oldest_active_xid;
                     } else {
                         self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
@@ -527,6 +548,24 @@ impl WalIngest {
         modification.on_record_end();
 
         Ok(modification.len() > prev_len)
+    }
+
+    /// This is the same as AdjustToFullTransactionId(xid) in PostgreSQL
+    fn adjust_to_full_transaction_id(&self, xid: TransactionId) -> Result<u64> {
+        let next_full_xid = self.checkpoint.nextXid.value;
+
+        let next_xid = (next_full_xid) as u32;
+        let mut epoch = (next_full_xid >> 32) as u32;
+
+        if xid > next_xid {
+            // Wraparound occurred, must be from a prev epoch.
+            if epoch == 0 {
+                bail!("apparent XID wraparound with prepared transaction XID {xid}, nextXid is {next_full_xid}");
+            }
+            epoch -= 1;
+        }
+
+        Ok((epoch as u64) << 32 | xid as u64)
     }
 
     /// Do not store this block, but observe it for the purposes of updating our relation size state.
