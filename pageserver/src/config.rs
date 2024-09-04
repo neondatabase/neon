@@ -428,16 +428,7 @@ impl PageServerConf {
         }
 
         IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
-            .map_err(|msg| anyhow::anyhow!("{msg}"))
-            .with_context(|| {
-                format!(
-                    "effective checkpoint distance is unsupported: {}",
-                    conf.default_tenant_conf.checkpoint_distance
-                )
-            })?;
-
-        IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
-            .map_err(|msg| anyhow::anyhow!("{msg}"))
+            .map_err(anyhow::Error::msg)
             .with_context(|| {
                 format!(
                     "effective checkpoint distance is unsupported: {}",
