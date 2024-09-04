@@ -302,7 +302,7 @@ impl PageServerConf {
             http_auth_type,
             pg_auth_type,
             auth_validation_public_key_path,
-            remote_storage_config,
+            remote_storage,
             broker_endpoint,
             broker_keepalive_interval,
             log_format,
@@ -348,7 +348,7 @@ impl PageServerConf {
             http_auth_type,
             pg_auth_type,
             auth_validation_public_key_path,
-            remote_storage_config,
+            remote_storage_config: remote_storage,
             broker_endpoint,
             broker_keepalive_interval,
             log_format,
@@ -577,6 +577,14 @@ mod tests {
             toplevel,
             indoc! {r#"
                 some_invalid_field = 23
+            "#}
+        );
+
+        test!(
+            toplevel_nested,
+            indoc! {r#"
+                [some_invalid_field]
+                foo = 23
             "#}
         );
 
