@@ -548,7 +548,7 @@ mod tests {
         // we use Default impl of everything in this situation
         let input = r#"
         "#;
-        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
             .expect("empty config is valid");
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
