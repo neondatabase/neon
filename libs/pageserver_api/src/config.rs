@@ -3,6 +3,12 @@ use camino::Utf8PathBuf;
 #[cfg(test)]
 mod tests;
 
+use const_format::formatcp;
+pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
+pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
+pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
+pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
+
 use postgres_backend::AuthType;
 use remote_storage::RemoteStorageConfig;
 use serde_with::serde_as;
@@ -321,14 +327,9 @@ pub struct TenantConfigToml {
 }
 
 pub mod defaults {
-    use const_format::formatcp;
-
     use crate::models::ImageCompressionAlgorithm;
 
-    pub const DEFAULT_PG_LISTEN_PORT: u16 = 64000;
-    pub const DEFAULT_PG_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_PG_LISTEN_PORT}");
-    pub const DEFAULT_HTTP_LISTEN_PORT: u16 = 9898;
-    pub const DEFAULT_HTTP_LISTEN_ADDR: &str = formatcp!("127.0.0.1:{DEFAULT_HTTP_LISTEN_PORT}");
+    pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
     pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
@@ -341,6 +342,8 @@ pub mod defaults {
     pub const DEFAULT_LOG_FORMAT: &str = "plain";
 
     pub const DEFAULT_CONCURRENT_TENANT_WARMUP: usize = 8;
+
+    pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize = 1;
 
     pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
@@ -355,7 +358,9 @@ pub mod defaults {
     pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
-        ImageCompressionAlgorithm::Disabled;
+        ImageCompressionAlgorithm::Zstd { level: Some(1) };
+
+    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
