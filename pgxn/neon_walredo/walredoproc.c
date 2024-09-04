@@ -24,6 +24,7 @@
  * PushPage ('P'): Copy a page image (in the payload) to buffer cache
  * ApplyRecord ('A'): Apply a WAL record (in the payload)
  * GetPage ('G'): Return a page image from buffer cache.
+ * Ping ('H'): Return the input message.
  *
  * Currently, you only get a response to GetPage requests; the response is
  * simply a 8k page, without any headers. Errors are logged to stderr.
@@ -130,6 +131,7 @@ static void ApplyRecord(StringInfo input_message);
 static void apply_error_callback(void *arg);
 static bool redo_block_filter(XLogReaderState *record, uint8 block_id);
 static void GetPage(StringInfo input_message);
+static void Ping(StringInfo input_message);
 static ssize_t buffered_read(void *buf, size_t count);
 static void CreateFakeSharedMemoryAndSemaphores();
 
@@ -389,6 +391,10 @@ WalRedoMain(int argc, char *argv[])
 
 			case 'G':			/* GetPage */
 				GetPage(&input_message);
+				break;
+
+			case 'H': 			/* Ping */
+				Ping(&input_message);
 				break;
 
 				/*
@@ -1044,6 +1050,31 @@ GetPage(StringInfo input_message)
 	wal_redo_buffer = InvalidBuffer;
 
 	elog(TRACE, "Page sent back for block %u", blknum);
+}
+
+
+static void
+Ping(StringInfo input_message)
+{
+	int			tot_written;
+	/* Response: the input message */
+	tot_written = 0;
+	do {
+		ssize_t		rc;
+		static const char response[BLCKSZ] = {0};
+		rc = write(STDOUT_FILENO, &response[tot_written], BLCKSZ - tot_written);
+		if (rc < 0) {
+			/* If interrupted by signal, just retry */
+			if (errno == EINTR)
+				continue;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not write to stdout: %m")));
+		}
+		tot_written += rc;
+	} while (tot_written < BLCKSZ);
+
+	elog(TRACE, "Page sent back for ping");
 }
 
 

@@ -4,10 +4,7 @@ mod protocol;
 
 use self::no_leak_child::NoLeakChild;
 use crate::{
-    config::PageServerConf,
-    metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
-    span::debug_assert_current_span_has_tenant_id,
-    walrecord::NeonWalRecord,
+    config::PageServerConf, metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER}, page_cache::PAGE_SZ, span::debug_assert_current_span_has_tenant_id, walrecord::NeonWalRecord
 };
 use anyhow::Context;
 use bytes::Bytes;
@@ -235,6 +232,23 @@ impl WalRedoProcess {
         }
 
         res
+    }
+
+    pub(crate) async fn ping(&self, timeout: Duration) -> anyhow::Result<()> {
+        let mut writebuf: Vec<u8> = Vec::with_capacity(4);
+        protocol::build_ping_msg(&mut writebuf);
+        let Ok(res) = tokio::time::timeout(timeout, self.apply_wal_records0(&writebuf)).await
+        else {
+            anyhow::bail!("WAL redo ping timed out");
+        };
+        let response = res?;
+        if response.len() != PAGE_SZ {
+            anyhow::bail!(
+                "WAL redo ping response should respond with page-sized response: {}",
+                response.len()
+            );
+        }
+        Ok(())
     }
 
     /// # Cancel-Safety
