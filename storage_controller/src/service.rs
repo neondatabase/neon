@@ -6476,4 +6476,18 @@ impl Service {
 
         global_observed
     }
+
+    pub(crate) async fn get_safekeeper(
+        &self,
+        id: i64,
+    ) -> Result<crate::persistence::SafekeeperPersistence, DatabaseError> {
+        self.persistence.safekeeper_get(id).await
+    }
+
+    pub(crate) async fn upsert_safekeeper(
+        &self,
+        record: crate::persistence::SafekeeperPersistence,
+    ) -> Result<(), DatabaseError> {
+        self.persistence.safekeeper_upsert(record).await
+    }
 }
