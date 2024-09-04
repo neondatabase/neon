@@ -1705,7 +1705,7 @@ mod tests {
 
             assert_eq!(
                 serde_json::Value::String(display.to_string()),
-                serde_json::to_value(&expected).unwrap(),
+                serde_json::to_value(expected).unwrap(),
                 "Display is the serde serialization"
             );
         }
