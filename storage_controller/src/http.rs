@@ -1159,6 +1159,13 @@ pub fn make_router(
         .put("/control/v1/step_down", |r| {
             named_request_span(r, handle_step_down, RequestName("control_v1_step_down"))
         })
+        .get("/control/v1/safekeeper/:id", |r| {
+            named_request_span(r, handle_get_safekeeper, RequestName("v1_safekeeper"))
+        })
+        .post("/control/v1/safekeeper/:id", |r| {
+            // id is in the body
+            named_request_span(r, handle_upsert_safekeeper, RequestName("v1_safekeeper"))
+        })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into
         // this service to manage tenants that actually consist of many tenant shards, as if they are a single entity.
@@ -1237,12 +1244,5 @@ pub fn make_router(
                 handle_tenant_timeline_passthrough,
                 RequestName("v1_tenant_passthrough"),
             )
-        })
-        .get("/v1/safekeeper/:id", |r| {
-            named_request_span(r, handle_get_safekeeper, RequestName("v1_safekeeper"))
-        })
-        .post("/v1/safekeeper/:id", |r| {
-            // id is in the body
-            named_request_span(r, handle_upsert_safekeeper, RequestName("v1_safekeeper"))
         })
 }

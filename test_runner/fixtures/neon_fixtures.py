@@ -2849,7 +2849,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
     def on_safekeeper_deploy(self, id: int, body: dict[str, Any]):
         self.request(
             "POST",
-            f"{self.api}/v1/safekeeper/{id}",
+            f"{self.api}/control/v1/safekeeper/{id}",
             headers=self.headers(TokenScope.ADMIN),
             json=body,
         )
@@ -2858,7 +2858,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         try:
             response = self.request(
                 "GET",
-                f"{self.api}/v1/safekeeper/{id}",
+                f"{self.api}/control/v1/safekeeper/{id}",
                 headers=self.headers(TokenScope.ADMIN),
             )
             json = response.json()
