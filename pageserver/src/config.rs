@@ -534,3 +534,99 @@ impl ConfigurableSemaphore {
         &self.inner
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use camino::Utf8PathBuf;
+    use utils::id::NodeId;
+
+    use super::PageServerConf;
+
+    #[test]
+    fn test_empty_config_toml_is_valid() {
+        // we use Default impl of everything in this situation
+        let input = r#"
+        "#;
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect("empty config is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields_toplevel() {
+        let input = r#"
+some_invalid_field = 23
+        "#;
+        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect_err("some_invalid_field is an invalid field");
+        dbg!(&err);
+        assert!(err.to_string().contains("some_invalid_field"));
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields_in_disk_usage_based_eviction_config() {
+        let input = r#"
+[disk_usage_based_eviction]
+some_invalid_field = 23
+        "#;
+        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect_err("some_invalid_field is an invalid field");
+        dbg!(&err);
+        assert!(err.to_string().contains("some_invalid_field"));
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields_in_tenant_config() {
+        let input = r#"
+[tenant_config]
+some_invalid_field = 23
+        "#;
+        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect_err("some_invalid_field is an invalid field");
+        dbg!(&err);
+        assert!(err.to_string().contains("some_invalid_field"));
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields_in_l0_flush_config() {
+        let input = r#"
+[l0_flush]
+mode = "direct"
+some_invalid_field = 23
+        "#;
+        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect_err("some_invalid_field is an invalid field");
+        dbg!(&err);
+        assert!(err.to_string().contains("some_invalid_field"));
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields_in_remote_storage_config() {
+        let input = r#"
+[remote_storage_config]
+local_path = "/nonexistent"
+some_invalid_field = 23
+        "#;
+        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect_err("some_invalid_field is an invalid field");
+        dbg!(&err);
+        assert!(err.to_string().contains("some_invalid_field"));
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields_in_compact_level0_phase1_value_access() {
+        let input = r#"
+[compact_level0_phase1_value_access]
+mode = "streaming-kmerge"
+some_invalid_field = 23
+
+        "#;
+        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+            .expect_err("some_invalid_field is an invalid field");
+        dbg!(&err);
+        assert!(err.to_string().contains("some_invalid_field"));
+    }
+}

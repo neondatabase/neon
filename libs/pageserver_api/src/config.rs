@@ -39,7 +39,7 @@ pub struct NodeMetadata {
 
 #[serde_as]
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConfigToml {
     // types mapped 1:1 into the runtime PageServerConfig type
     pub listen_pg_addr: String,
@@ -91,6 +91,7 @@ pub struct ConfigToml {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiskUsageEvictionTaskConfig {
     pub max_usage_pct: utils::serde_percent::Percent,
     pub min_avail_bytes: u64,
@@ -103,7 +104,6 @@ pub struct DiskUsageEvictionTaskConfig {
     pub eviction_order: EvictionOrder,
 }
 
-#[cfg(feature = "testing")]
 pub mod statvfs {
     pub mod mock {
         #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -114,17 +114,18 @@ pub mod statvfs {
                 total_blocks: u64,
                 name_filter: Option<utils::serde_regex::Regex>,
             },
-            Failure {
-                mocked_error: MockedError,
-            },
+            #[cfg(feature = "testing")]
+            Failure { mocked_error: MockedError },
         }
 
+        #[cfg(feature = "testing")]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
         #[allow(clippy::upper_case_acronyms)]
         pub enum MockedError {
             EIO,
         }
 
+        #[cfg(feature = "testing")]
         impl From<MockedError> for nix::Error {
             fn from(e: MockedError) -> Self {
                 match e {
@@ -232,6 +233,7 @@ impl Default for CompactL0Phase1ValueAccess {
 /// For storing and transmitting individual tenant's configuration, see
 /// TenantConfOpt.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct TenantConfigToml {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the

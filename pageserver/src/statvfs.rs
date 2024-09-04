@@ -91,6 +91,7 @@ pub mod mock {
                     block_size: *blocksize,
                 })
             }
+            #[cfg(feature = "testing")]
             Behavior::Failure { mocked_error } => Err((*mocked_error).into()),
         }
     }
