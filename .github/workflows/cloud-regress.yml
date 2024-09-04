@@ -47,7 +47,7 @@ jobs:
 
       - name: Patch the test
         run:
-          cd /__w/neon/neon/vendor/postgres-v${{ matrix.DEFAULT_PG_VERSION }} && patch -p1 < ../../patches/cloud_regress_pg${{ matrix.DEFAULT_PG_VERSION }}
+          cd /__w/neon/neon/vendor/postgres-v${{ matrix.DEFAULT_PG_VERSION }} && patch -p1 < ../../patches/cloud_regress_pg${{ matrix.DEFAULT_PG_VERSION }}.patch
 
       - name: Download Neon artifact
         uses: ./.github/actions/download
