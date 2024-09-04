@@ -69,4 +69,4 @@ jobs:
           extra_params:
             -m remote_cluster
         env:
-          BENCHMARK_CONNSTR: "postgresql://user:password@host:5432"
+          BENCHMARK_CONNSTR: ${{ secrets.PG_REGRESS_CONNSTR }}
