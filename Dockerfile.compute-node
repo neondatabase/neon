@@ -657,7 +657,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
-    cargo install --locked --version 0.11.3 cargo-pgrx && \
+    cargo install --locked --version "=0.11.3" cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
@@ -676,12 +676,12 @@ RUN apt-get update && apt-get install -y python3 python3-pip && \
     python3 -m pip install cmake && \
     wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
-    ./build.sh --config Release --parallel --skip_submodule_sync --allow_running_as_root --skip_tests
+    ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
 
 FROM pg-onnx-build AS pg-neon-ai-pg-build
 ARG PG_VERSION
 
-RUN wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz &&  \
+RUN wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz && \
     mkdir pg_neon_ai-src && cd pg_neon_ai-src && tar xzf ../pg_neon_ai.tar.gz --strip-components=1 -C . && \
     wget 'https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx?download=true' -O bge_small_en_v15/model.onnx && \
     wget 'https://huggingface.co/jinaai/jina-reranker-v1-tiny-en/resolve/main/onnx/model.onnx?download=true' -O jina_reranker_v1_tiny_en/model.onnx && \
