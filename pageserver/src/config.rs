@@ -555,78 +555,69 @@ mod tests {
             .expect("parse_and_validate");
     }
 
-    #[test]
-    fn test_rejects_unknown_fields_toplevel() {
-        let input = r#"
-some_invalid_field = 23
-        "#;
-        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-            .expect_err("some_invalid_field is an invalid field");
-        dbg!(&err);
-        assert!(err.to_string().contains("some_invalid_field"));
-    }
+    mod unknown_fields_handling {
+        macro_rules! test {
+            ($short_name:ident, $input:expr) => {
+                #[test]
+                fn $short_name() {
+                    let input = $input;
+                    let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+                        .expect_err("some_invalid_field is an invalid field");
+                    dbg!(&err);
+                    assert!(err.to_string().contains("some_invalid_field"));
+                }
+            };
+        }
 
-    #[test]
-    fn test_rejects_unknown_fields_in_disk_usage_based_eviction_config() {
-        let input = r#"
-[disk_usage_based_eviction]
-some_invalid_field = 23
-        "#;
-        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-            .expect_err("some_invalid_field is an invalid field");
-        dbg!(&err);
-        assert!(err.to_string().contains("some_invalid_field"));
-    }
+        // Usage examples
+        test!(
+            toplevel,
+            r#"
+    some_invalid_field = 23
+    "#
+        );
 
-    #[test]
-    fn test_rejects_unknown_fields_in_tenant_config() {
-        let input = r#"
-[tenant_config]
-some_invalid_field = 23
-        "#;
-        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-            .expect_err("some_invalid_field is an invalid field");
-        dbg!(&err);
-        assert!(err.to_string().contains("some_invalid_field"));
-    }
+        test!(
+            disk_usage_based_eviction_config,
+            r#"
+    [disk_usage_based_eviction]
+    some_invalid_field = 23
+    "#
+        );
 
-    #[test]
-    fn test_rejects_unknown_fields_in_l0_flush_config() {
-        let input = r#"
-[l0_flush]
-mode = "direct"
-some_invalid_field = 23
-        "#;
-        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-            .expect_err("some_invalid_field is an invalid field");
-        dbg!(&err);
-        assert!(err.to_string().contains("some_invalid_field"));
-    }
+        test!(
+            tenant_config,
+            r#"
+    [tenant_config]
+    some_invalid_field = 23
+    "#
+        );
 
-    #[test]
-    fn test_rejects_unknown_fields_in_remote_storage_config() {
-        let input = r#"
-[remote_storage_config]
-local_path = "/nonexistent"
-some_invalid_field = 23
-        "#;
-        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-            .expect_err("some_invalid_field is an invalid field");
-        dbg!(&err);
-        assert!(err.to_string().contains("some_invalid_field"));
-    }
+        test!(
+            l0_flush_config,
+            r#"
+    [l0_flush]
+    mode = "direct"
+    some_invalid_field = 23
+    "#
+        );
 
-    #[test]
-    fn test_rejects_unknown_fields_in_compact_level0_phase1_value_access() {
-        let input = r#"
-[compact_level0_phase1_value_access]
-mode = "streaming-kmerge"
-some_invalid_field = 23
+        test!(
+            remote_storage_config,
+            r#"
+    [remote_storage_config]
+    local_path = "/nonexistent"
+    some_invalid_field = 23
+    "#
+        );
 
-        "#;
-        let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
-            .expect_err("some_invalid_field is an invalid field");
-        dbg!(&err);
-        assert!(err.to_string().contains("some_invalid_field"));
+        test!(
+            compact_level0_phase1_value_access,
+            r#"
+    [compact_level0_phase1_value_access]
+    mode = "streaming-kmerge"
+    some_invalid_field = 23
+    "#
+        );
     }
 }
