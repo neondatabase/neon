@@ -63,7 +63,7 @@ def test_cloud_regress(remote_pg: RemotePostgres):
     except subprocess.CalledProcessError as e:
         log.error('Error(s) occurred while running the regression tests')
         with open(f'{runpath}/regression.out', 'r') as f:
-            print(f.read)
+            print(f.read())
         with open(f'{runpath}/regression.diffs', 'r') as f:
-            print(f.read)
+            print(f.read())
         raise e
