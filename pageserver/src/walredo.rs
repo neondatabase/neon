@@ -33,6 +33,7 @@ use crate::repository::Key;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
+use once_cell::sync::Lazy;
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::shard::TenantShardId;
 use std::future::Future;
@@ -203,6 +204,15 @@ impl PostgresRedoManager {
             )
             .await
         }
+    }
+
+    pub async fn ping(&self, pg_version: u32) -> Result<(), Error> {
+        self.do_with_walredo_process(pg_version, |proc| async move {
+            proc.ping(Duration::from_secs(1))
+                .await
+                .map_err(Error::Other)
+        })
+        .await
     }
 
     pub fn status(&self) -> WalRedoManagerStatus {
@@ -544,6 +554,17 @@ mod tests {
     use std::str::FromStr;
     use tracing::Instrument;
     use utils::{id::TenantId, lsn::Lsn};
+
+    #[tokio::test]
+    async fn test_ping() {
+        let h = RedoHarness::new().unwrap();
+
+        h.manager
+            .ping(14)
+            .instrument(h.span())
+            .await
+            .expect("ping should work");
+    }
 
     #[tokio::test]
     async fn short_v14_redo() {

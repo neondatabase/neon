@@ -442,6 +442,14 @@ impl WalRedoManager {
         }
     }
 
+    pub(crate) async fn ping(&self,pg_version: u32) -> Result<(), walredo::Error> {
+        match self {
+            Self::Prod(_, mgr) => mgr.ping(pg_version).await,
+            #[cfg(test)]
+            Self::Test(_) => unimplemented!(),
+        }
+    }
+
     pub(crate) fn status(&self) -> Option<WalRedoManagerStatus> {
         match self {
             WalRedoManager::Prod(_, m) => Some(m.status()),
