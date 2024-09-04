@@ -692,8 +692,13 @@ impl InMemoryLayer {
             let vec_map = inner.index.entry(key).or_default();
             let old = vec_map.append_or_update_last(lsn, index_entry).unwrap().0;
             if old.is_some() {
-                // We already had an entry for this LSN. That's odd..
-                warn!("Key {} at {} already exists", key, lsn);
+                // This should not break anything, but is unexpected: ingestion code aims to filter out
+                // multiple writes to the same key at the same LSN.  This happens in cases where our
+                // ingenstion code generates some write like an empty page, and we see a write from postgres
+                // to the same key in the same wal record.  If one such write makes it through, we
+                // index the most recent write, implicitly ignoring the earlier write.  We log a warning
+                // because this case is unexpected, and we would like tests to fail if this happens.
+                warn!("Key {} at {} written twice at same LSN", key, lsn);
             }
         }
 

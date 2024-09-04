@@ -2845,6 +2845,29 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         raise AssertionError("unreachable")
 
+    def on_safekeeper_deploy(self, id: int, body: dict[str, Any]):
+        self.request(
+            "POST",
+            f"{self.api}/control/v1/safekeeper/{id}",
+            headers=self.headers(TokenScope.ADMIN),
+            json=body,
+        )
+
+    def get_safekeeper(self, id: int) -> Optional[dict[str, Any]]:
+        try:
+            response = self.request(
+                "GET",
+                f"{self.api}/control/v1/safekeeper/{id}",
+                headers=self.headers(TokenScope.ADMIN),
+            )
+            json = response.json()
+            assert isinstance(json, dict)
+            return json
+        except StorageControllerApiException as e:
+            if e.status_code == 404:
+                return None
+            raise e
+
     def __enter__(self) -> "NeonStorageController":
         return self
 
