@@ -39,7 +39,7 @@ use crate::tenant::disk_btree::{
 use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    self, BlobFlag, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadCoalesceMode, VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
@@ -1025,8 +1025,30 @@ impl DeltaLayerInner {
                 if Some(meta.meta.key) == ignore_key_with_err {
                     continue;
                 }
+                let slice = &blobs_buf.buf[meta.start..meta.end];
+                let decompressed = vectored_blob_io::decompress(slice, meta.compression_bits).await;
+                let decompressed = match decompressed {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        reconstruct_state.on_key_error(
+                            meta.meta.key,
+                            PageReconstructError::Other(anyhow!(e).context(format!(
+                                "Failed to decompress blob from virtual file {}",
+                                self.file.path,
+                            ))),
+                        );
 
-                let value = Value::des(&blobs_buf.buf[meta.start..meta.end]);
+                        ignore_key_with_err = Some(meta.meta.key);
+                        continue;
+                    }
+                };
+
+                let value = if let Some(decompressed) = decompressed {
+                    Value::des(&decompressed)
+                } else {
+                    Value::des(slice)
+                };
+
                 let value = match value {
                     Ok(v) => v,
                     Err(e) => {
@@ -1245,7 +1267,21 @@ impl DeltaLayerInner {
                 for blob in res.blobs {
                     let key = blob.meta.key;
                     let lsn = blob.meta.lsn;
-                    let data = &res.buf[blob.start..blob.end];
+                    let slice = &res.buf[blob.start..blob.end];
+                    let decompressed = vectored_blob_io::decompress(slice, blob.compression_bits)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "blob failed to decompress for {}@{}, {}..{}: ",
+                                blob.meta.key, blob.meta.lsn, blob.start, blob.end
+                            )
+                        })?;
+
+                    let data = if let Some(decompressed) = &decompressed {
+                        &decompressed[..]
+                    } else {
+                        slice
+                    };
 
                     #[cfg(debug_assertions)]
                     Value::des(data)
@@ -1538,7 +1574,14 @@ impl<'a> DeltaLayerIterator<'a> {
             .await?;
         let frozen_buf = blobs_buf.buf.freeze();
         for meta in blobs_buf.blobs.iter() {
-            let value = Value::des(&frozen_buf[meta.start..meta.end])?;
+            let slice = &frozen_buf[meta.start..meta.end];
+            let decompressed = vectored_blob_io::decompress(slice, meta.compression_bits).await?;
+            let value = if let Some(decompressed) = &decompressed {
+                Value::des(decompressed)?
+            } else {
+                Value::des(slice)?
+            };
+
             next_batch.push_back((meta.meta.key, meta.meta.lsn, value));
         }
         self.key_values_batch = next_batch;
@@ -1916,8 +1959,17 @@ pub(crate) mod test {
                     .read_blobs(&read, buf.take().expect("Should have a buffer"), &ctx)
                     .await?;
                 for meta in blobs_buf.blobs.iter() {
-                    let value = &blobs_buf.buf[meta.start..meta.end];
-                    assert_eq!(value, entries_meta.index[&(meta.meta.key, meta.meta.lsn)]);
+                    let slice = &blobs_buf.buf[meta.start..meta.end];
+                    let decompressed =
+                        vectored_blob_io::decompress(slice, meta.compression_bits).await?;
+
+                    let value = if let Some(decompressed) = &decompressed {
+                        decompressed
+                    } else {
+                        slice
+                    };
+
+                    assert_eq!(&value, &entries_meta.index[&(meta.meta.key, meta.meta.lsn)]);
                 }
 
                 buf = Some(blobs_buf.buf);
