@@ -37,7 +37,7 @@ def test_cloud_regress(remote_pg: RemotePostgres):
     #conn.rollback()
     neondir = os.path.abspath(os.path.join(os.path.dirname(os.path.relpath(__file__)), '../../'))
     runpath = f'{neondir}/vendor/postgres-v{pg_version}/src/test/regress'
-    binpath = f'{neondir}/pg_install/v{pg_version}/bin'
+    binpath = '/tmp/neon/bin'
 
     env_vars = {
        'PGHOST': remote_pg.default_options['host'],
@@ -47,7 +47,7 @@ def test_cloud_regress(remote_pg: RemotePostgres):
        'PGDATABASE': remote_pg.default_options['dbname']
     }
     regress_cmd = [
-        f'{runpath}/pg_regress',
+        f'{binpath}/pg_regress',
         '--inputdir=.',
         f"--bindir={binpath}",
         "--dlpath=/usr/local/lib",
