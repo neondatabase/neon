@@ -59,7 +59,9 @@ pub struct ConfigToml {
     pub page_cache_size: usize,
     pub max_file_descriptors: usize,
     pub pg_distrib_dir: Option<Utf8PathBuf>,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub http_auth_type: AuthType,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     pub pg_auth_type: AuthType,
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
     pub remote_storage: Option<RemoteStorageConfig>,
