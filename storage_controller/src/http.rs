@@ -754,7 +754,8 @@ impl From<ReconcileError> for ApiError {
 ///
 /// Not used by anything except manual testing.
 async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    // TODO: jwt, see POST handler in handle_upsert_safekeeper
+    check_permissions(&req, Scope::Admin)?;
+
     let id = parse_request_param::<i64>(&req, "id")?;
 
     let state = get_state(&req);
@@ -775,8 +776,7 @@ async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, Api
 /// Assumes information is only relayed to storage controller after first selecting an unique id on
 /// control plane database, which means we have an id field in the request and payload.
 async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    // todo: jwt -- as long we don't use this for anything, it doesn't really need much security
-    // either
+    check_permissions(&req, Scope::Admin)?;
 
     let body = json_request::<SafekeeperPersistence>(&mut req).await?;
     let id = parse_request_param::<i64>(&req, "id")?;
