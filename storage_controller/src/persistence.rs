@@ -122,6 +122,13 @@ pub(crate) enum TenantFilter {
     Shard(TenantShardId),
 }
 
+/// Represents the results of looking up generation+pageserver for the shards of a tenant
+pub(crate) struct ShardGenerationState {
+    pub(crate) tenant_shard_id: TenantShardId,
+    pub(crate) generation: Option<Generation>,
+    pub(crate) generation_pageserver: Option<NodeId>,
+}
+
 impl Persistence {
     // The default postgres connection limit is 100.  We use up to 99, to leave one free for a human admin under
     // normal circumstances.  This assumes we have exclusive use of the database cluster to which we connect.
@@ -540,7 +547,7 @@ impl Persistence {
     pub(crate) async fn peek_generations(
         &self,
         filter_tenant_id: TenantId,
-    ) -> Result<Vec<(TenantShardId, Option<Generation>, Option<NodeId>)>, DatabaseError> {
+    ) -> Result<Vec<ShardGenerationState>, DatabaseError> {
         use crate::schema::tenant_shards::dsl::*;
         let rows = self
             .with_measured_conn(DatabaseOperation::PeekGenerations, move |conn| {
@@ -555,13 +562,12 @@ impl Persistence {
 
         Ok(rows
             .into_iter()
-            .map(|p| {
-                (
-                    p.get_tenant_shard_id()
-                        .expect("Corrupt tenant shard id in database"),
-                    p.generation.map(|g| Generation::new(g as u32)),
-                    p.generation_pageserver.map(|n| NodeId(n as u64)),
-                )
+            .map(|p| ShardGenerationState {
+                tenant_shard_id: p
+                    .get_tenant_shard_id()
+                    .expect("Corrupt tenant shard id in database"),
+                generation: p.generation.map(|g| Generation::new(g as u32)),
+                generation_pageserver: p.generation_pageserver.map(|n| NodeId(n as u64)),
             })
             .collect())
     }
@@ -932,6 +938,48 @@ impl Persistence {
 
         Ok(())
     }
+
+    pub(crate) async fn safekeeper_get(
+        &self,
+        id: i64,
+    ) -> Result<SafekeeperPersistence, DatabaseError> {
+        use crate::schema::safekeepers::dsl::{id as id_column, safekeepers};
+        self.with_conn(move |conn| -> DatabaseResult<SafekeeperPersistence> {
+            Ok(safekeepers
+                .filter(id_column.eq(&id))
+                .select(SafekeeperPersistence::as_select())
+                .get_result(conn)?)
+        })
+        .await
+    }
+
+    pub(crate) async fn safekeeper_upsert(
+        &self,
+        record: SafekeeperPersistence,
+    ) -> Result<(), DatabaseError> {
+        use crate::schema::safekeepers::dsl::*;
+
+        self.with_conn(move |conn| -> DatabaseResult<()> {
+            let bind = record.as_insert_or_update();
+
+            let inserted_updated = diesel::insert_into(safekeepers)
+                .values(&bind)
+                .on_conflict(id)
+                .do_update()
+                .set(&bind)
+                .execute(conn)?;
+
+            if inserted_updated != 1 {
+                return Err(DatabaseError::Logical(format!(
+                    "unexpected number of rows ({})",
+                    inserted_updated
+                )));
+            }
+
+            Ok(())
+        })
+        .await
+    }
 }
 
 /// Parts of [`crate::tenant_shard::TenantShard`] that are stored durably
@@ -1066,4 +1114,48 @@ impl From<MetadataHealthPersistence> for MetadataHealthRecord {
 pub(crate) struct ControllerPersistence {
     pub(crate) address: String,
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize, Queryable, Selectable, Eq, PartialEq, Debug, Clone)]
+#[diesel(table_name = crate::schema::safekeepers)]
+pub(crate) struct SafekeeperPersistence {
+    pub(crate) id: i64,
+    pub(crate) region_id: String,
+    /// 1 is special, it means just created (not currently posted to storcon).
+    /// Zero or negative is not really expected.
+    /// Otherwise the number from `release-$(number_of_commits_on_branch)` tag.
+    pub(crate) version: i64,
+    pub(crate) host: String,
+    pub(crate) port: i32,
+    pub(crate) active: bool,
+    pub(crate) http_port: i32,
+    pub(crate) availability_zone_id: String,
+}
+
+impl SafekeeperPersistence {
+    fn as_insert_or_update(&self) -> InsertUpdateSafekeeper<'_> {
+        InsertUpdateSafekeeper {
+            id: self.id,
+            region_id: &self.region_id,
+            version: self.version,
+            host: &self.host,
+            port: self.port,
+            active: self.active,
+            http_port: self.http_port,
+            availability_zone_id: &self.availability_zone_id,
+        }
+    }
+}
+
+#[derive(Insertable, AsChangeset)]
+#[diesel(table_name = crate::schema::safekeepers)]
+struct InsertUpdateSafekeeper<'a> {
+    id: i64,
+    region_id: &'a str,
+    version: i64,
+    host: &'a str,
+    port: i32,
+    active: bool,
+    http_port: i32,
+    availability_zone_id: &'a str,
 }

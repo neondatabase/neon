@@ -723,12 +723,17 @@ pub struct TimelineInfo {
     pub pg_version: u32,
 
     pub state: TimelineState,
-    pub is_archived: bool,
 
     pub walreceiver_status: String,
 
+    // ALWAYS add new fields at the end of the struct with `Option` to ensure forward/backward compatibility.
+    // Backward compatibility: you will get a JSON not containing the newly-added field.
+    // Forward compatibility: a previous version of the pageserver will receive a JSON. serde::Deserialize does
+    // not deny unknown fields by default so it's safe to set the field to some value, though it won't be
+    // read.
     /// The last aux file policy being used on this timeline
     pub last_aux_file_policy: Option<AuxFilePolicy>,
+    pub is_archived: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

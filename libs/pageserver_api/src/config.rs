@@ -359,7 +359,7 @@ pub mod defaults {
 
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
-    pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 0;
+    pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
 }
 
 impl Default for ConfigToml {

@@ -57,6 +57,7 @@ use utils::lsn::Lsn;
 
 pub struct WalIngest {
     shard: ShardIdentity,
+    pg_version: u32,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
     warn_ingest_lag: WarnIngestLag,
@@ -82,6 +83,7 @@ impl WalIngest {
 
         Ok(WalIngest {
             shard: *timeline.get_shard_identity(),
+            pg_version: timeline.pg_version,
             checkpoint,
             checkpoint_modified: false,
             warn_ingest_lag: WarnIngestLag {
@@ -104,10 +106,9 @@ impl WalIngest {
     ///
     pub async fn ingest_record(
         &mut self,
-        recdata: Bytes,
+        decoded: DecodedWALRecord,
         lsn: Lsn,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
         WAL_INGEST.records_received.inc();
@@ -115,7 +116,12 @@ impl WalIngest {
         let prev_len = modification.len();
 
         modification.set_lsn(lsn)?;
-        decode_wal_record(recdata, decoded, pg_version)?;
+
+        if decoded.is_dbase_create_copy(self.pg_version) {
+            // Records of this type should always be preceded by a commit(), as they
+            // rely on reading data pages back from the Timeline.
+            assert!(!modification.has_dirty_data_pages());
+        }
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -133,11 +139,11 @@ impl WalIngest {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages
                 // without registering them with the standard mechanism.
-                self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
+                self.ingest_heapam_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_NEON_ID => {
-                self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
+                self.ingest_neonrmgr_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             // Handle other special record types
@@ -325,7 +331,7 @@ impl WalIngest {
             }
             pg_constants::RM_RELMAP_ID => {
                 let xlrec = XlRelmapUpdate::decode(&mut buf);
-                self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
+                self.ingest_relmap_page(modification, &xlrec, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_XLOG_ID => {
@@ -470,7 +476,7 @@ impl WalIngest {
 
                 continue;
             }
-            self.ingest_decoded_block(modification, lsn, decoded, blk, ctx)
+            self.ingest_decoded_block(modification, lsn, &decoded, blk, ctx)
                 .await?;
         }
 
@@ -485,6 +491,8 @@ impl WalIngest {
         // Note that at this point this record is only cached in the modification
         // until commit() is called to flush the data into the repository and update
         // the latest LSN.
+
+        modification.on_record_end();
 
         Ok(modification.len() > prev_len)
     }
@@ -557,6 +565,7 @@ impl WalIngest {
                 page_set_lsn(&mut image, lsn)
             }
             assert_eq!(image.len(), BLCKSZ as usize);
+
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze(), ctx)
                 .await?;
         } else {
@@ -1195,7 +1204,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
                 // Tail of last remaining FSM page has to be zeroed.
                 // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
-                modification.put_rel_page_image(rel, fsm_physical_page_no, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, fsm_physical_page_no);
                 fsm_physical_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1217,7 +1226,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
                 // Tail of last remaining vm page has to be zeroed.
                 // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
-                modification.put_rel_page_image(rel, vm_page_no, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, vm_page_no);
                 vm_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1687,7 +1696,7 @@ impl WalIngest {
                     continue;
                 }
 
-                modification.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, gap_blknum);
             }
         }
         Ok(())
@@ -1753,7 +1762,7 @@ impl WalIngest {
 
             // fill the gap with zeros
             for gap_blknum in old_nblocks..blknum {
-                modification.put_slru_page_image(kind, segno, gap_blknum, ZERO_PAGE.clone())?;
+                modification.put_slru_page_image_zero(kind, segno, gap_blknum);
             }
         }
         Ok(())
@@ -1827,21 +1836,25 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 3"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1 at 4"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 2, test_img("foo blk 2 at 5"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
@@ -1983,6 +1996,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
@@ -2008,6 +2022,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1500, test_img("foo blk 1500"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
@@ -2409,7 +2424,6 @@ mod tests {
             .await
             .unwrap();
         let mut modification = tline.begin_modification(startpoint);
-        let mut decoded = DecodedWALRecord::default();
         println!("decoding {} bytes", bytes.len() - xlogoff);
 
         // Decode and ingest wal. We process the wal in chunks because
@@ -2417,8 +2431,10 @@ mod tests {
         for chunk in bytes[xlogoff..].chunks(50) {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
+                let mut decoded = DecodedWALRecord::default();
+                decode_wal_record(recdata, &mut decoded, modification.tline.pg_version).unwrap();
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .ingest_record(decoded, lsn, &mut modification, &ctx)
                     .instrument(span.clone())
                     .await
                     .unwrap();

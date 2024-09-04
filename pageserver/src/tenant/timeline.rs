@@ -4537,7 +4537,6 @@ pub struct DeltaLayerTestDesc {
 
 #[cfg(test)]
 impl DeltaLayerTestDesc {
-    #[allow(dead_code)]
     pub fn new(lsn_range: Range<Lsn>, key_range: Range<Key>, data: Vec<(Key, Lsn, Value)>) -> Self {
         Self {
             lsn_range,

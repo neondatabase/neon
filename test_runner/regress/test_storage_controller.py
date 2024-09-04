@@ -31,7 +31,7 @@ from fixtures.pageserver.utils import (
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
-from fixtures.pg_version import PgVersion
+from fixtures.pg_version import PgVersion, run_only_on_default_postgres
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
@@ -2330,3 +2330,69 @@ def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder)
             connect=0,  # Disable retries: we want to see the 503
         )
     ).timeline_create(PgVersion.NOT_SET, tenant_id, create_timeline_id)
+
+
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
+def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    fake_id = 5
+
+    target = env.storage_controller
+
+    assert target.get_safekeeper(fake_id) is None
+
+    body = {
+        "active": True,
+        "id": fake_id,
+        "created_at": "2023-10-25T09:11:25Z",
+        "updated_at": "2024-08-28T11:32:43Z",
+        "region_id": "aws-us-east-2",
+        "host": "safekeeper-333.us-east-2.aws.neon.build",
+        "port": 6401,
+        "http_port": 7676,
+        "version": 5957,
+        "availability_zone_id": "us-east-2b",
+    }
+
+    target.on_safekeeper_deploy(fake_id, body)
+
+    inserted = target.get_safekeeper(fake_id)
+    assert inserted is not None
+    assert eq_safekeeper_records(body, inserted)
+
+    # error out if pk is changed (unexpected)
+    with pytest.raises(StorageControllerApiException) as exc:
+        different_pk = dict(body)
+        different_pk["id"] = 4
+        assert different_pk["id"] != body["id"]
+        target.on_safekeeper_deploy(fake_id, different_pk)
+    assert exc.value.status_code == 400
+
+    inserted_again = target.get_safekeeper(fake_id)
+    assert inserted_again is not None
+    assert eq_safekeeper_records(inserted, inserted_again)
+
+    # the most common case, version goes up:
+    assert isinstance(body["version"], int)
+    body["version"] += 1
+    target.on_safekeeper_deploy(fake_id, body)
+    inserted_now = target.get_safekeeper(fake_id)
+    assert inserted_now is not None
+
+    assert eq_safekeeper_records(body, inserted_now)
+
+
+def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    compared = [dict(a), dict(b)]
+
+    masked_keys = ["created_at", "updated_at"]
+
+    for d in compared:
+        # keep deleting these in case we are comparing the body as it will be uploaded by real scripts
+        for key in masked_keys:
+            if key in d:
+                del d[key]
+
+    return compared[0] == compared[1]
