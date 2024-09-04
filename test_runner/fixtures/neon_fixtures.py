@@ -24,7 +24,20 @@ from functools import cached_property, partial
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    cast,
+)
 from urllib.parse import quote, urlparse
 
 import asyncpg
@@ -89,6 +102,8 @@ from fixtures.utils import (
 from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
 from .neon_api import NeonAPI, NeonApiEndpoint
+
+T = TypeVar("T")
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -2986,16 +3001,17 @@ class NeonPageserver(PgProtocol, LogUtils):
     def config_toml_path(self) -> Path:
         return self.workdir / "pageserver.toml"
 
-    def edit_config_toml(self, edit_fn: Callable[[Dict[str, Any]], None]):
+    def edit_config_toml(self, edit_fn: Callable[[Dict[str, Any]], T]) -> T:
         """
         Edit the pageserver's config toml file in place.
         """
         path = self.config_toml_path
         with open(path, "r") as f:
             config = toml.load(f)
-        edit_fn(config)
+        res = edit_fn(config)
         with open(path, "w") as f:
             toml.dump(config, f)
+        return res
 
     def patch_config_toml_nonrecursive(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         """
