@@ -63,10 +63,18 @@ fn main() -> anyhow::Result<()> {
             .map_err(|s| anyhow!("Bad postgres server path {s:?}"))?
     };
 
+    let unwind_abi_functions = [
+        "log_internal",
+        "recovery_download",
+        "start_streaming",
+        "finish_sync_safekeepers",
+        "wait_event_set",
+    ];
+
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         // The input header we would like to generate
         // bindings for.
         .header("bindgen_deps.h")
@@ -104,7 +112,12 @@ fn main() -> anyhow::Result<()> {
         .allowlist_var("WL_SOCKET_MASK")
         .clang_arg("-DWALPROPOSER_LIB")
         .clang_arg(format!("-I{pgxn_neon}"))
-        .clang_arg(format!("-I{inc_server_path}"))
+        .clang_arg(format!("-I{inc_server_path}"));
+
+    for name in unwind_abi_functions {
+        builder = builder.override_abi(bindgen::Abi::CUnwind, name);
+    }
+    let bindings = builder
         // Finish the builder and generate the bindings.
         .generate()
         // Unwrap the Result and panic on failure.
