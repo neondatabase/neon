@@ -336,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_pg_port,
                         listen_http_addr,
                         listen_http_port,
-                        availability_zone_id: Some(availability_zone_id),
+                        availability_zone_id,
                     }),
                 )
                 .await?;

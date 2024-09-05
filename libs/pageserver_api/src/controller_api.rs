@@ -57,7 +57,7 @@ pub struct NodeRegisterRequest {
     pub listen_http_addr: String,
     pub listen_http_port: u16,
 
-    pub availability_zone_id: Option<String>,
+    pub availability_zone_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
