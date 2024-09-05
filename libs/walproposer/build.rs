@@ -4,7 +4,6 @@
 use std::{env, path::PathBuf, process::Command};
 
 use anyhow::{anyhow, Context};
-use bindgen::CargoCallbacks;
 
 fn main() -> anyhow::Result<()> {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
@@ -73,7 +72,7 @@ fn main() -> anyhow::Result<()> {
         .header("bindgen_deps.h")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
-        .parse_callbacks(Box::new(CargoCallbacks))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .allowlist_type("WalProposer")
         .allowlist_type("WalProposerConfig")
         .allowlist_type("walproposer_api")
