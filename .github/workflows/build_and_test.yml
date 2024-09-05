@@ -794,9 +794,6 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
-    permissions:
-      contents: read  # This is required for actions/checkout
-      id-token: write # This is required for Azure Login to work.
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
@@ -821,28 +818,6 @@ jobs:
           for version in ${VERSIONS}; do
             docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }} \
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
-          done
-
-      - name: Azure login
-        if: github.ref_name == 'main'
-        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
-        with:
-          client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
-
-      - name: Login to ACR
-        if: github.ref_name == 'main'
-        run: |
-          az acr login --name=neoneastus2
-
-      - name: Copy docker images to ACR-dev
-        if: github.ref_name == 'main'
-        run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
-            docker buildx imagetools create \
-              -t neoneastus2.azurecr.io/neondatabase/${image}:${{ needs.tag.outputs.build-tag }} \
-                                        neondatabase/${image}:${{ needs.tag.outputs.build-tag }}
           done
 
       - name: Add latest tag to images
@@ -881,6 +856,28 @@ jobs:
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
                                                369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
           done
+
+  push-to-acr-dev:
+    if: github.ref_name == 'main'
+    needs: [ tag, promote-images ]
+    uses: ./.github/workflows/_push-to-acr.yml
+    with:
+      client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
+      image_tag: ${{ needs.tag.outputs.build-tag }}
+      registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
+      tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+
+  push-to-acr-prod:
+    if: github.ref_name == 'main'
+    needs: [ tag, push-to-acr-dev ]
+    uses: ./.github/workflows/_push-to-acr.yml
+    with:
+      client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
+      image_tag: ${{ needs.tag.outputs.build-tag }}
+      registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
+      tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
