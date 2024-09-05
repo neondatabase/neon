@@ -4798,11 +4798,13 @@ impl Service {
             } else {
                 None
             };
-            shards.push(NodeShard {
-                tenant_shard_id: *tid,
-                is_intended_secondary,
-                is_observed_secondary,
-            });
+            if is_intended_secondary.is_some() || is_observed_secondary.is_some() {
+                shards.push(NodeShard {
+                    tenant_shard_id: *tid,
+                    is_intended_secondary,
+                    is_observed_secondary,
+                });
+            }
         }
         Ok(NodeShardResponse { node_id, shards })
     }
