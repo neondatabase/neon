@@ -355,7 +355,7 @@ def sync_after_each_test():
         return
 
     start = time.time()
-    # we only run benches on linuxes, the method might not exist on windows
+    # we only run benches on unices, the method might not exist on windows
     os.sync()
     elapsed = time.time() - start
     log.info(f"called sync after test {elapsed=}")
