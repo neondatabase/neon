@@ -2728,6 +2728,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "indoc"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b248f5224d1d606005e02c97f5aa4e88eeb230488bcc03bc9ca4d7991399f2b5"
+
+[[package]]
 name = "infer"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3701,6 +3707,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "hyper 0.14.26",
+ "indoc",
  "itertools 0.10.5",
  "md5",
  "metrics",
@@ -3766,6 +3773,7 @@ dependencies = [
  "bincode",
  "byteorder",
  "bytes",
+ "camino",
  "chrono",
  "const_format",
  "enum-map",
@@ -3773,11 +3781,16 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "itertools 0.10.5",
+ "nix 0.27.1",
+ "postgres_backend",
  "postgres_ffi",
  "rand 0.8.5",
+ "remote_storage",
+ "reqwest 0.12.4",
  "serde",
  "serde_json",
  "serde_with",
+ "storage_broker",
  "strum",
  "strum_macros",
  "thiserror",

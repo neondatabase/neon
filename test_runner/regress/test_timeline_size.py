@@ -733,7 +733,7 @@ def test_ondemand_activation(neon_env_builder: NeonEnvBuilder):
 
     # We will run with the limit set to 1, so that once we have one tenant stuck
     # in a pausable failpoint, the rest are prevented from proceeding through warmup.
-    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = 1"
 
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -984,7 +984,7 @@ def test_timeline_logical_size_task_priority(neon_env_builder: NeonEnvBuilder):
 
 
 def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
-    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = 1"
 
     env = neon_env_builder.init_start()
 
@@ -1062,7 +1062,7 @@ def test_eager_attach_does_not_queue_up(neon_env_builder: NeonEnvBuilder):
 @pytest.mark.parametrize("activation_method", ["endpoint", "branch", "delete"])
 def test_lazy_attach_activation(neon_env_builder: NeonEnvBuilder, activation_method: str):
     # env.initial_tenant will take up this permit when attaching with lazy because of a failpoint activated after restart
-    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = '1'"
+    neon_env_builder.pageserver_config_override = "concurrent_tenant_warmup = 1"
 
     env = neon_env_builder.init_start()
 

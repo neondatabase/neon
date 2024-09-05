@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Subcommand;
-use pageserver::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::block_io::BlockCursor;
@@ -194,7 +193,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             pageserver::virtual_file::init(
                 10,
                 virtual_file::api::IoEngineKind::StdFs,
-                DEFAULT_IO_BUFFER_ALIGNMENT,
+                pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
             );
             pageserver::page_cache::init(100);
 

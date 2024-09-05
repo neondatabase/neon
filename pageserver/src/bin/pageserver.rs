@@ -5,6 +5,7 @@
 use std::env;
 use std::env::{var, VarError};
 use std::io::Read;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -223,27 +224,15 @@ fn initialize_config(
         }
     };
 
-    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
-        Ok(mut f) => {
-            let md = f.metadata().context("stat config file")?;
-            if md.is_file() {
-                let mut s = String::new();
-                f.read_to_string(&mut s).context("read config file")?;
-                s.parse().context("parse config file toml")?
-            } else {
-                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
-            }
-        }
-        Err(e) => {
-            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
-        }
-    };
-
-    debug!("Using pageserver toml: {config}");
-
-    // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(identity.id, &config, workdir)
-        .context("Failed to parse pageserver configuration")?;
+    let config_file_contents =
+        std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
+    let config_toml = serde_path_to_error::deserialize(
+        toml_edit::de::Deserializer::from_str(&config_file_contents)
+            .context("build toml deserializer")?,
+    )
+    .context("deserialize config toml")?;
+    let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
+        .context("runtime-validation of config toml")?;
 
     Ok(Box::leak(Box::new(conf)))
 }

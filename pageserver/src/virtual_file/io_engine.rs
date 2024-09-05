@@ -84,9 +84,14 @@ pub(crate) fn get() -> IoEngine {
                         }
                     },
                     Err(std::env::VarError::NotPresent) => {
-                        crate::config::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE
-                            .parse()
-                            .unwrap()
+                        #[cfg(target_os = "linux")]
+                        {
+                            IoEngineKind::TokioEpollUring
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            IoEngineKind::StdFs
+                        }
                     }
                     Err(std::env::VarError::NotUnicode(_)) => {
                         panic!("env var {env_var_name} is not unicode");

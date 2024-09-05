@@ -215,7 +215,7 @@ impl IndexEntry {
 
     const _ASSERT_DEFAULT_CHECKPOINT_DISTANCE_IS_VALID: () = {
         let res = Self::validate_checkpoint_distance(
-            crate::tenant::config::defaults::DEFAULT_CHECKPOINT_DISTANCE,
+            pageserver_api::config::tenant_conf_defaults::DEFAULT_CHECKPOINT_DISTANCE,
         );
         if res.is_err() {
             panic!("default checkpoint distance is valid")
