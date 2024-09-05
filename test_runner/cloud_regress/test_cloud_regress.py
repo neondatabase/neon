@@ -20,7 +20,7 @@ def test_cloud_regress(remote_pg: RemotePostgres):
     """
     cur_test = os.environ.get("PYTEST_CURRENT_TEST")
     assert cur_test
-    pg_version_match = re.match(r"\-pg(\d+)\]", cur_test)
+    pg_version_match = re.search(r"\-pg(\d+)\]", cur_test)
     assert pg_version_match
     pg_version = int(pg_version_match.group(1))
     with psycopg2.connect(remote_pg.connstr()) as conn:
