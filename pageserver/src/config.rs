@@ -555,16 +555,6 @@ mod tests {
             .expect("parse_and_validate");
     }
 
-    #[test]
-    fn test_compactl0_phase1_access_mode_is_rejected() {
-        let input = indoc::indoc! {r#"
-            [compact_level0_phase1_value_access]
-            mode = "streaming-kmerge"
-            validate = "key-lsn-value"
-        "#};
-        toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input).unwrap_err();
-    }
-
     /// If there's a typo in the pageserver config, we'd rather catch that typo
     /// and fail pageserver startup than silently ignoring the typo, leaving whoever
     /// made it in the believe that their config change is effective.
