@@ -586,6 +586,20 @@ index f3f8c7b5a2..3e3e54ff4c 100644
  ANALYZE real_city;
  SELECT *
     INTO TABLE ramp
+diff --git a/src/test/regress/expected/database.out b/src/test/regress/expected/database.out
+index 454db91ec0..01378d7081 100644
+--- a/src/test/regress/expected/database.out
++++ b/src/test/regress/expected/database.out
+@@ -1,8 +1,7 @@
+ CREATE DATABASE regression_tbd
+ 	ENCODING utf8 LC_COLLATE "C" LC_CTYPE "C" TEMPLATE template0;
+ ALTER DATABASE regression_tbd RENAME TO regression_utf8;
+-ALTER DATABASE regression_utf8 SET TABLESPACE regress_tblspace;
+-ALTER DATABASE regression_utf8 RESET TABLESPACE;
++WARNING:  you need to manually restart any running background workers after this command
+ ALTER DATABASE regression_utf8 CONNECTION_LIMIT 123;
+ -- Test PgDatabaseToastTable.  Doing this with GRANT would be slow.
+ BEGIN;
 diff --git a/src/test/regress/expected/dependency.out b/src/test/regress/expected/dependency.out
 index 6d9498cdd1..e9473949e1 100644
 --- a/src/test/regress/expected/dependency.out
