@@ -1450,8 +1450,9 @@ log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	for (int i = 0; i < nblocks; i++)
 	{
-		memcpy(copied_buffer[nregistered].data, pages[nregistered], BLCKSZ);
-		pageptrs[nregistered] = copied_buffer[nregistered].data;
+		Page	page = copied_buffer[nregistered].data;
+		memcpy(page, pages[i], BLCKSZ);
+		pageptrs[nregistered] = page;
 		blknos[nregistered] = blkno + i;
 
 		++nregistered;
