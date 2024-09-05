@@ -64,6 +64,12 @@ brew install protobuf openssl flex bison icu4c pkg-config
 echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc
 ```
 
+If you get errors about missing `m4` you many have install manually it.
+```
+brew install m4
+brew link --force m4
+````
+
 2. [Install Rust](https://www.rust-lang.org/tools/install)
 ```
 # recommended approach from https://www.rust-lang.org/tools/install
