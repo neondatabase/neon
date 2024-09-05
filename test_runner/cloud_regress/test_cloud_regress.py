@@ -43,7 +43,7 @@ def test_cloud_regress(remote_pg: RemotePostgres):
                 "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;"
             )
             conn.rollback()
-            runpath = (f"{os.path.abspath(f'{os.path.relpath(__file__)}/../../')}"
+            runpath = (f"{os.path.abspath(f'{os.path.relpath(__file__)}/../../../')}"
                        f"/vendor/postgres-v{pg_version}/src/test/regress")
             prefix = f"/tmp/neon/pg_install/v{pg_version}"
             regress_bin = f"{prefix}/lib/postgresql/pgxs/src/test/regress/pg_regress"
