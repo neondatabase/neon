@@ -38,10 +38,7 @@ impl Api {
         locks: &'static ApiLocks<EndpointCacheKey>,
         wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     ) -> Self {
-        let jwt = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
-            Ok(v) => v,
-            Err(_) => String::new(),
-        };
+        let jwt = std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN").unwrap_or_default();
         Self {
             endpoint,
             caches,
