@@ -174,6 +174,7 @@ impl DecodedWALRecord {
                 }
                 15 => info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 16 => info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                17 => info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 _ => {
                     panic!("Unsupported postgres version {pg_version}")
                 }
