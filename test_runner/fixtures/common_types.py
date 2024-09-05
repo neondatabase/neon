@@ -142,7 +142,7 @@ class TenantId(Id):
 
 class NodeId(Id):
     def __repr__(self) -> str:
-        return f'`TenantId("{self.id.hex()}")'
+        return f'`NodeId("{self.id.hex()}")'
 
     def __str__(self) -> str:
         return self.id.hex()

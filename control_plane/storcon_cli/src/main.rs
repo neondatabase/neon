@@ -4,7 +4,7 @@ use std::{str::FromStr, time::Duration};
 use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
-        NodeAttachedResponse, NodeAvailabilityWrapper, NodeDescribeResponse, ShardSchedulingPolicy,
+        NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse, ShardSchedulingPolicy,
         TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
@@ -77,15 +77,13 @@ enum Command {
         #[arg(long)]
         scheduling: Option<ShardSchedulingPolicyArg>,
     },
-    /// Print details about a particular node, including all shards attached to it.
-    NodeAttached {
-        #[arg(long)]
-        node: NodeId,
-    },
     /// List nodes known to the storage controller
     Nodes {},
     /// List tenants known to the storage controller
-    Tenants {},
+    Tenants {
+        /// If this field is set, it will list the tenants on a specific node
+        node_id: Option<NodeId>,
+    },
     /// Create a new tenant in the storage controller, and by extension on pageservers.
     TenantCreate {
         #[arg(long)]
@@ -408,7 +406,41 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
         }
-        Command::Tenants {} => {
+        Command::Tenants {
+            node_id: Some(node_id),
+        } => {
+            let describe_response = storcon_client
+                .dispatch::<(), NodeShardResponse>(
+                    Method::GET,
+                    format!("control/v1/node/{node_id}/attached"),
+                    None,
+                )
+                .await?;
+            let shards = describe_response.shards;
+            let mut table = comfy_table::Table::new();
+            table.set_header([
+                "Shard",
+                "Intended Primary/Secondary",
+                "Observed Primary/Secondary",
+            ]);
+            for shard in shards {
+                table.add_row([
+                    format!("{}", shard.tenant_shard_id),
+                    match shard.is_intended_secondary {
+                        None => "".to_string(),
+                        Some(true) => "Secondary".to_string(),
+                        Some(false) => "Primary".to_string(),
+                    },
+                    match shard.is_observed_secondary {
+                        None => "".to_string(),
+                        Some(true) => "Secondary".to_string(),
+                        Some(false) => "Primary".to_string(),
+                    },
+                ]);
+            }
+            println!("{table}");
+        }
+        Command::Tenants { node_id: None } => {
             let mut resp = storcon_client
                 .dispatch::<(), Vec<TenantDescribeResponse>>(
                     Method::GET,
@@ -512,29 +544,6 @@ async fn main() -> anyhow::Result<()> {
                     config: tenant_conf,
                 })
                 .await?;
-        }
-        Command::NodeAttached { node } => {
-            let describe_response = storcon_client
-                .dispatch::<(), NodeAttachedResponse>(
-                    Method::GET,
-                    format!("control/v1/node/{node}/attached"),
-                    None,
-                )
-                .await?;
-            let shards = describe_response.shards;
-            let mut table = comfy_table::Table::new();
-            table.set_header(["Shard", "Primary/Secondary"]);
-            for shard in shards {
-                table.add_row([
-                    format!("{}", shard.tenant_shard_id),
-                    if shard.is_secondary {
-                        "Secondary".to_string()
-                    } else {
-                        "Primary".to_string()
-                    },
-                ]);
-            }
-            println!("{table}");
         }
         Command::TenantDescribe { tenant_id } => {
             let describe_response = storcon_client

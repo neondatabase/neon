@@ -102,15 +102,16 @@ pub struct TenantDescribeResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct NodeAttachedResponse {
+pub struct NodeShardResponse {
     pub node_id: NodeId,
-    pub shards: Vec<NodeAttachedResponseShard>,
+    pub shards: Vec<NodeShard>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct NodeAttachedResponseShard {
+pub struct NodeShard {
     pub tenant_shard_id: TenantShardId,
-    pub is_secondary: bool,
+    pub is_observed_secondary: Option<bool>,
+    pub is_intended_secondary: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]

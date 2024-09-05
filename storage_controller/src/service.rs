@@ -40,12 +40,11 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
-        MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAttachedResponse,
-        NodeAttachedResponseShard, NodeAvailability, NodeRegisterRequest, NodeSchedulingPolicy,
-        PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest, TenantCreateResponse,
-        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
-        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
+        MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
+        NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy, ShardSchedulingPolicy,
+        TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
+        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
+        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
@@ -4774,24 +4773,38 @@ impl Service {
     pub(crate) async fn get_node_attached(
         &self,
         node_id: NodeId,
-    ) -> Result<NodeAttachedResponse, ApiError> {
+    ) -> Result<NodeShardResponse, ApiError> {
         let locked = self.inner.read().unwrap();
         let mut shards = Vec::new();
         for (tid, tenant) in locked.tenants.iter() {
-            if tenant.intent.get_attached() == &Some(node_id) {
-                shards.push(NodeAttachedResponseShard {
-                    tenant_shard_id: *tid,
-                    is_secondary: false,
-                });
-            }
-            if tenant.intent.get_secondary().contains(&node_id) {
-                shards.push(NodeAttachedResponseShard {
-                    tenant_shard_id: *tid,
-                    is_secondary: true,
-                });
-            }
+            let is_intended_secondary = match (
+                tenant.intent.get_attached() == &Some(node_id),
+                tenant.intent.get_secondary().contains(&node_id),
+            ) {
+                (true, true) => {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "{} attached as primary+secondary on the same node",
+                        tid
+                    )))
+                }
+                (true, false) => Some(false),
+                (false, true) => Some(true),
+                (false, false) => None,
+            };
+            let is_observed_secondary = if let Some(ObservedStateLocation { conf: Some(conf) }) =
+                tenant.observed.locations.get(&node_id)
+            {
+                Some(conf.secondary_conf.is_some())
+            } else {
+                None
+            };
+            shards.push(NodeShard {
+                tenant_shard_id: *tid,
+                is_intended_secondary,
+                is_observed_secondary,
+            });
         }
-        Ok(NodeAttachedResponse { node_id, shards })
+        Ok(NodeShardResponse { node_id, shards })
     }
 
     pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
