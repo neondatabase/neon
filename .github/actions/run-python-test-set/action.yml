@@ -1,53 +1,53 @@
-name: 'Run python test'
-description: 'Runs a Neon python test set, performing all the required preparations before'
+name: "Run python test"
+description: "Runs a Neon python test set, performing all the required preparations before"
 
 inputs:
   build_type:
     description: 'Type of Rust (neon) and C (postgres) builds. Must be "release" or "debug", or "remote" for the remote cluster'
     required: true
   test_selection:
-    description: 'A python test suite to run'
+    description: "A python test suite to run"
     required: true
   extra_params:
     description: 'Arbitrary parameters to pytest. For example "-s" to prevent capturing stdout/stderr'
     required: false
-    default: ''
+    default: ""
   needs_postgres_source:
-    description: 'Set to true if the test suite requires postgres source checked out'
+    description: "Set to true if the test suite requires postgres source checked out"
     required: false
-    default: 'false'
+    default: "false"
   run_in_parallel:
-    description: 'Whether to run tests in parallel'
+    description: "Whether to run tests in parallel"
     required: false
-    default: 'true'
+    default: "true"
   save_perf_report:
-    description: 'Whether to upload the performance report, if true PERF_TEST_RESULT_CONNSTR env variable should be set'
+    description: "Whether to upload the performance report, if true PERF_TEST_RESULT_CONNSTR env variable should be set"
     required: false
-    default: 'false'
+    default: "false"
   run_with_real_s3:
-    description: 'Whether to pass real s3 credentials to the test suite'
+    description: "Whether to pass real s3 credentials to the test suite"
     required: false
-    default: 'false'
+    default: "false"
   real_s3_bucket:
-    description: 'Bucket name for real s3 tests'
+    description: "Bucket name for real s3 tests"
     required: false
-    default: ''
+    default: ""
   real_s3_region:
-    description: 'Region name for real s3 tests'
+    description: "Region name for real s3 tests"
     required: false
-    default: ''
+    default: ""
   rerun_flaky:
-    description: 'Whether to rerun flaky tests'
+    description: "Whether to rerun flaky tests"
     required: false
-    default: 'false'
+    default: "false"
   pg_version:
-    description: 'Postgres version to use for tests'
+    description: "Postgres version to use for tests"
     required: false
-    default: 'v16'
+    default: "v16"
   benchmark_durations:
-    description: 'benchmark durations JSON'
+    description: "benchmark durations JSON"
     required: false
-    default: '{}'
+    default: "{}"
 
 runs:
   using: "composite"
@@ -56,14 +56,14 @@ runs:
       if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
-        name: neon-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build_type }}-artifact
+        name: neon-${{ runner.os }}-bookworm-${{ inputs.build_type }}-artifact
         path: /tmp/neon
 
     - name: Download Neon binaries for the previous release
       if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
-        name: neon-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build_type }}-artifact
+        name: neon-${{ runner.os }}-bookworm-${{ inputs.build_type }}-artifact
         path: /tmp/neon-previous
         prefix: latest
 
