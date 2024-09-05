@@ -34,7 +34,6 @@ jobs:
       DEFAULT_PG_VERSION: ${{ matrix.DEFAULT_PG_VERSION }}
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
     runs-on: ${{ matrix.RUNNER }}
