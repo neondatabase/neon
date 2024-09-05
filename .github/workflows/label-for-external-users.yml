@@ -27,11 +27,29 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       run: |
-        if gh api -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "/orgs/${GITHUB_REPOSITORY_OWNER}/members/${GITHUB_ACTOR}"; then
-          is_member=true
-        else
-          is_member=false
-        fi
+        expected_error="User does not exist or is not a member of the organization"
+        output_file=output.txt
+
+        for i in $(seq 1 10); do
+          if gh api "/orgs/${GITHUB_REPOSITORY_OWNER}/members/${GITHUB_ACTOR}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" > ${output_file}; then
+
+            is_member=true
+            break
+          elif grep -q "${expected_error}" ${output_file}; then
+            is_member=false
+            break
+          elif [ $i -eq 10 ]; then
+            title="Failed to get memmbership status for ${GITHUB_ACTOR}"
+            message="The latest GitHub API error message: '$(cat ${output_file})'"
+            echo "::error file=.github/workflows/label-for-external-users.yml,title=${title}::${message}"
+
+            exit 1
+          fi
+
+          sleep 1
+        done
 
         echo "is-member=${is_member}" | tee -a ${GITHUB_OUTPUT}
 
