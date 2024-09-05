@@ -170,17 +170,19 @@ jobs:
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
 
       - name: Run cargo clippy (debug)
-        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
+        run: |
+          parallel --jobs 8 "cargo hack --feature-powerset --partition {}/8 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS" ::: 1 2 3 4 5 6 7 8
 
       # instead of running the full release build, running debug build again,
       # but with disabled `debug-assertions` to excersice release code paths
       - name: Run cargo clippy (debug, with debug-assertions=false)
-        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS -C debug-assertions=off
+        run: |
+          parallel --jobs 8 "cargo hack --feature-powerset --partition {}/8 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS -C debug-assertions=off" ::: 1 2 3 4 5 6 7 8
 
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items
         env:
-            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
+          RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
