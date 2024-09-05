@@ -41,10 +41,11 @@ use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
         MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
-        NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, TenantCreateRequest,
-        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
-        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
-        TenantShardMigrateRequest, TenantShardMigrateResponse,
+        NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
+        ShardsPreferredAzsResponse, TenantCreateRequest, TenantCreateResponse,
+        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
+        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
+        TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
@@ -3587,6 +3588,7 @@ impl Service {
                 is_pending_compute_notification: shard.pending_compute_notification,
                 is_splitting: matches!(shard.splitting, SplitState::Splitting),
                 scheduling_policy: *shard.get_scheduling_policy(),
+                preferred_az_id: shard.preferred_az().map(ToString::to_string),
             })
         }
 
@@ -6614,5 +6616,36 @@ impl Service {
         record: crate::persistence::SafekeeperPersistence,
     ) -> Result<(), DatabaseError> {
         self.persistence.safekeeper_upsert(record).await
+    }
+
+    pub(crate) async fn update_shards_preferred_azs(
+        &self,
+        req: ShardsPreferredAzsRequest,
+    ) -> Result<ShardsPreferredAzsResponse, ApiError> {
+        let preferred_azs = req.preferred_az_ids.into_iter().collect::<Vec<_>>();
+        let updated = self
+            .persistence
+            .set_tenant_shard_preferred_azs(preferred_azs)
+            .await
+            .map_err(|err| {
+                ApiError::InternalServerError(anyhow::anyhow!(
+                    "Failed to persist preferred AZs: {err}"
+                ))
+            })?;
+
+        let mut updated_in_mem_and_db = Vec::default();
+
+        let mut locked = self.inner.write().unwrap();
+        for (tid, az_id) in updated {
+            let shard = locked.tenants.get_mut(&tid);
+            if let Some(shard) = shard {
+                shard.set_preferred_az(az_id);
+                updated_in_mem_and_db.push(tid);
+            }
+        }
+
+        Ok(ShardsPreferredAzsResponse {
+            updated: updated_in_mem_and_db,
+        })
     }
 }
