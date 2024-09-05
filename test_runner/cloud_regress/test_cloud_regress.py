@@ -43,11 +43,9 @@ def test_cloud_regress(remote_pg: RemotePostgres):
                 "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;"
             )
             conn.rollback()
-            neondir = os.path.abspath(os.path.join(os.path.dirname(os.path.relpath(__file__)), "../../"))
-            runpath = f"{neondir}/vendor/postgres-v{pg_version}/src/test/regress"
-            artpath = "/tmp/neon"
-            prefix = f"{artpath}/pg_install/v{pg_version}"
-            binpath = f"{prefix}/bin"
+            runpath = (f"{os.path.abspath(f'{os.path.relpath(__file__)}/../../')}/vendor/postgres-v{pg_version}'"
+                       f"'/src/test/regress")
+            prefix = f"/tmp/neon/pg_install/v{pg_version}"
             regress_bin = f"{prefix}/lib/postgresql/pgxs/src/test/regress/pg_regress"
 
             env_vars = {
@@ -62,7 +60,7 @@ def test_cloud_regress(remote_pg: RemotePostgres):
             regress_cmd = [
                 regress_bin,
                 "--inputdir=.",
-                f"--bindir={binpath}",
+                f"--bindir={prefix}/bin",
                 "--dlpath=/usr/local/lib",
                 "--max-concurrent-tests=20",
                 "--schedule=./parallel_schedule",
