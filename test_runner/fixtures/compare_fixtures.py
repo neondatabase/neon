@@ -340,14 +340,11 @@ def neon_with_baseline(request: FixtureRequest) -> PgCompare:
 
 @pytest.fixture(scope="function", autouse=True)
 def sync_after_each_test():
-    # some of the benchmarks are quite write-happy, and create issues to start
-    # the processes up in 10s.
-    # SYNC_AFTER_EACH_TEST is only "true" for build_and_test workflow
-    # benchmarks, which run test_runner/performance cases sequentially.
-    # however, this fixture is included for all regress tests as well.
-    #
-    # use the environment variable SYNC_AFTER_EACH_TEST to control whether any
-    # syncing happens.
+    # The fixture calls `sync(2)` after each test if `SYNC_AFTER_EACH_TEST` env var is `true`
+    # 
+    # In CI, `SYNC_AFTER_EACH_TEST` is set to `true` only for benchmarks (`test_runner/performance`) 
+    # that are run on self-hosted runners because some of these tests are pretty write-heavy 
+    # and create issues to start the processes within 10s
     key = "SYNC_AFTER_EACH_TEST"
     enabled = os.environ.get(key) == "true"
 
