@@ -103,13 +103,13 @@ async fn ingest(
         batch.push((key.to_compact(), lsn, data_ser_size, data.clone()));
         if batch.len() >= BATCH_SIZE {
             let this_batch = std::mem::take(&mut batch);
-            let serialized = SerializedBatch::from_values(this_batch);
+            let serialized = SerializedBatch::from_values(this_batch).unwrap();
             layer.put_batch(serialized, &ctx).await?;
         }
     }
     if !batch.is_empty() {
         let this_batch = std::mem::take(&mut batch);
-        let serialized = SerializedBatch::from_values(this_batch);
+        let serialized = SerializedBatch::from_values(this_batch).unwrap();
         layer.put_batch(serialized, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;
@@ -164,7 +164,11 @@ fn criterion_benchmark(c: &mut Criterion) {
     let conf: &'static PageServerConf = Box::leak(Box::new(
         pageserver::config::PageServerConf::dummy_conf(temp_dir.path().to_path_buf()),
     ));
-    virtual_file::init(16384, virtual_file::io_engine_for_bench());
+    virtual_file::init(
+        16384,
+        virtual_file::io_engine_for_bench(),
+        pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
+    );
     page_cache::init(conf.page_cache_size);
 
     {

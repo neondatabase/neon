@@ -31,7 +31,7 @@ from fixtures.pageserver.utils import (
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
-from fixtures.pg_version import PgVersion
+from fixtures.pg_version import PgVersion, run_only_on_default_postgres
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
@@ -2330,3 +2330,185 @@ def test_storage_controller_timeline_crud_race(neon_env_builder: NeonEnvBuilder)
             connect=0,  # Disable retries: we want to see the 503
         )
     ).timeline_create(PgVersion.NOT_SET, tenant_id, create_timeline_id)
+
+
+def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvBuilder):
+    """
+    A correctness edge case: while we are live migrating and a shard's generation is
+    visible to the Reconciler but not to the central Service, the generation validation
+    API should still prevent stale generations from doing deletions.
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": 128 * 1024,
+        "compaction_threshold": 1,
+        "compaction_target_size": 128 * 1024,
+        # disable background compaction and GC. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+    }
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    env.neon_cli.create_tenant(tenant_id, timeline_id)
+    env.storage_controller.pageserver_api().set_tenant_config(tenant_id, TENANT_CONF)
+
+    # Write enough data that a compaction would do some work (deleting some L0s)
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(64)
+    for _i in range(0, 2):
+        workload.churn_rows(64, upload=False)
+
+    # Upload but don't compact
+    origin_pageserver = env.get_tenant_pageserver(tenant_id)
+    dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
+    origin_pageserver.http_client().timeline_checkpoint(
+        tenant_id, timeline_id, wait_until_uploaded=True, compact=False
+    )
+
+    # Start a compaction that will pause on a failpoint.
+    compaction_failpoint = "before-upload-index-pausable"
+    origin_pageserver.http_client().configure_failpoints((compaction_failpoint, "pause"))
+
+    # This failpoint can also cause migration code to time out trying to politely flush
+    # during migrations
+    origin_pageserver.allowed_errors.append(".*Timed out waiting for flush to remote storage.*")
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            compact_fut = executor.submit(
+                origin_pageserver.http_client().timeline_compact,
+                tenant_id,
+                timeline_id,
+                wait_until_uploaded=True,
+            )
+
+            # Let the compaction start and then get stuck uploading an index: when we live migrate, the new generation's
+            # index will be initialized from the pre-compaction index, referencing layers that the compaction will try to delete
+            def has_hit_compaction_failpoint():
+                assert origin_pageserver.log_contains(f"at failpoint {compaction_failpoint}")
+
+            wait_until(10, 1, has_hit_compaction_failpoint)
+
+            # While the compaction is running, start a live migration which will pause long enough for the compaction to sleep,
+            # after incrementing generation and attaching the new location
+            migration_failpoint = "reconciler-live-migrate-post-notify"
+            env.storage_controller.configure_failpoints((migration_failpoint, "pause"))
+            migrate_fut = executor.submit(
+                env.storage_controller.tenant_shard_migrate,
+                TenantShardId(tenant_id, 0, 0),
+                dest_ps_id,
+            )
+
+            def has_hit_migration_failpoint():
+                assert env.storage_controller.log_contains(f"at failpoint {migration_failpoint}")
+
+            # Long wait because the migration will have to time out during transition to AttachedStale
+            # before it reaches this point.  The timeout is because the AttachedStale transition includes
+            # a flush of remote storage, and if the compaction already enqueued an index upload this cannot
+            # make progress.
+            wait_until(60, 1, has_hit_migration_failpoint)
+
+            # Origin pageserver has succeeded with compaction before the migration completed. It has done all the writes it wanted to do in its own (stale) generation
+            origin_pageserver.http_client().configure_failpoints((compaction_failpoint, "off"))
+            compact_fut.result()
+            origin_pageserver.http_client().deletion_queue_flush(execute=True)
+
+            # Eventually migration completes
+            env.storage_controller.configure_failpoints((migration_failpoint, "off"))
+            migrate_fut.result()
+    except:
+        # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
+        env.storage_controller.configure_failpoints((migration_failpoint, "off"))
+        origin_pageserver.http_client().configure_failpoints((compaction_failpoint, "off"))
+        raise
+
+    # Ensure the destination of the migration writes an index, so that if it has corrupt state that is
+    # visible to the scrubber.
+    workload.write_rows(1, upload=False)
+    env.get_pageserver(dest_ps_id).http_client().timeline_checkpoint(
+        tenant_id, timeline_id, wait_until_uploaded=True, compact=False
+    )
+
+    # The destination of the live migration would now have a corrupt index (referencing deleted L0s) if
+    # the controller had not properly applied validation rules.
+    healthy, _summary = env.storage_scrubber.scan_metadata()
+    try:
+        log.info(f"scrubbed, healthy={healthy}")
+        assert healthy
+    except:
+        # On failures, we want to report them FAIL during the test, not as ERROR during teardown
+        neon_env_builder.enable_scrub_on_exit = False
+        raise
+
+
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
+def test_safekeeper_deployment_time_update(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    fake_id = 5
+
+    target = env.storage_controller
+
+    assert target.get_safekeeper(fake_id) is None
+
+    body = {
+        "active": True,
+        "id": fake_id,
+        "created_at": "2023-10-25T09:11:25Z",
+        "updated_at": "2024-08-28T11:32:43Z",
+        "region_id": "aws-us-east-2",
+        "host": "safekeeper-333.us-east-2.aws.neon.build",
+        "port": 6401,
+        "http_port": 7676,
+        "version": 5957,
+        "availability_zone_id": "us-east-2b",
+    }
+
+    target.on_safekeeper_deploy(fake_id, body)
+
+    inserted = target.get_safekeeper(fake_id)
+    assert inserted is not None
+    assert eq_safekeeper_records(body, inserted)
+
+    # error out if pk is changed (unexpected)
+    with pytest.raises(StorageControllerApiException) as exc:
+        different_pk = dict(body)
+        different_pk["id"] = 4
+        assert different_pk["id"] != body["id"]
+        target.on_safekeeper_deploy(fake_id, different_pk)
+    assert exc.value.status_code == 400
+
+    inserted_again = target.get_safekeeper(fake_id)
+    assert inserted_again is not None
+    assert eq_safekeeper_records(inserted, inserted_again)
+
+    # the most common case, version goes up:
+    assert isinstance(body["version"], int)
+    body["version"] += 1
+    target.on_safekeeper_deploy(fake_id, body)
+    inserted_now = target.get_safekeeper(fake_id)
+    assert inserted_now is not None
+
+    assert eq_safekeeper_records(body, inserted_now)
+
+
+def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    compared = [dict(a), dict(b)]
+
+    masked_keys = ["created_at", "updated_at"]
+
+    for d in compared:
+        # keep deleting these in case we are comparing the body as it will be uploaded by real scripts
+        for key in masked_keys:
+            if key in d:
+                del d[key]
+
+    return compared[0] == compared[1]

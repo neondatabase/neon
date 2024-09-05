@@ -174,6 +174,22 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, dict)
         return res_json
 
+    def debug_dump_timeline(
+        self, timeline_id: TimelineId, params: Optional[Dict[str, str]] = None
+    ) -> Any:
+        params = params or {}
+        params["timeline_id"] = str(timeline_id)
+        dump = self.debug_dump(params)
+        return dump["timelines"][0]
+
+    def get_partial_backup(self, timeline_id: TimelineId) -> Any:
+        dump = self.debug_dump_timeline(timeline_id, {"dump_control_file": "true"})
+        return dump["control_file"]["partial_backup"]
+
+    def get_eviction_state(self, timeline_id: TimelineId) -> Any:
+        dump = self.debug_dump_timeline(timeline_id, {"dump_control_file": "true"})
+        return dump["control_file"]["eviction_state"]
+
     def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
         res.raise_for_status()
@@ -227,6 +243,14 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
+
+    def backup_partial_reset(self, tenant_id: TenantId, timeline_id: TimelineId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/backup_partial_reset",
+            json={},
+        )
+        res.raise_for_status()
+        return res.json()
 
     def record_safekeeper_info(self, tenant_id: TenantId, timeline_id: TimelineId, body):
         res = self.post(

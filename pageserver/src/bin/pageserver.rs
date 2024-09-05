@@ -5,6 +5,7 @@
 use std::env;
 use std::env::{var, VarError};
 use std::io::Read;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -125,6 +126,7 @@ fn main() -> anyhow::Result<()> {
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
     info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
+    info!(?conf.io_buffer_alignment, "starting with setting for IO buffer alignment");
 
     // The tenants directory contains all the pageserver local disk state.
     // Create if not exists and make sure all the contents are durable before proceeding.
@@ -182,7 +184,11 @@ fn main() -> anyhow::Result<()> {
     let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
-    virtual_file::init(conf.max_file_descriptors, conf.virtual_file_io_engine);
+    virtual_file::init(
+        conf.max_file_descriptors,
+        conf.virtual_file_io_engine,
+        conf.io_buffer_alignment,
+    );
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
@@ -218,27 +224,15 @@ fn initialize_config(
         }
     };
 
-    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
-        Ok(mut f) => {
-            let md = f.metadata().context("stat config file")?;
-            if md.is_file() {
-                let mut s = String::new();
-                f.read_to_string(&mut s).context("read config file")?;
-                s.parse().context("parse config file toml")?
-            } else {
-                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
-            }
-        }
-        Err(e) => {
-            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
-        }
-    };
-
-    debug!("Using pageserver toml: {config}");
-
-    // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(identity.id, &config, workdir)
-        .context("Failed to parse pageserver configuration")?;
+    let config_file_contents =
+        std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
+    let config_toml = serde_path_to_error::deserialize(
+        toml_edit::de::Deserializer::from_str(&config_file_contents)
+            .context("build toml deserializer")?,
+    )
+    .context("deserialize config toml")?;
+    let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
+        .context("runtime-validation of config toml")?;
 
     Ok(Box::leak(Box::new(conf)))
 }

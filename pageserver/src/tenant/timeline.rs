@@ -66,10 +66,9 @@ use std::{
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
-        config::defaults::DEFAULT_PITR_INTERVAL,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::PersistentLayerDesc,
+        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
     },
     walredo,
 };
@@ -102,6 +101,7 @@ use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
@@ -218,7 +218,7 @@ pub(crate) struct RelSizeCache {
 }
 
 pub struct Timeline {
-    conf: &'static PageServerConf,
+    pub(crate) conf: &'static PageServerConf,
     tenant_conf: Arc<ArcSwap<AttachedTenantConf>>,
 
     myself: Weak<Self>,
@@ -865,6 +865,11 @@ impl Timeline {
         self.ancestor_timeline
             .as_ref()
             .map(|ancestor| ancestor.timeline_id)
+    }
+
+    /// Get the ancestor timeline
+    pub(crate) fn ancestor_timeline(&self) -> Option<&Arc<Timeline>> {
+        self.ancestor_timeline.as_ref()
     }
 
     /// Get the bytes written since the PITR cutoff on this branch, and
@@ -1907,6 +1912,8 @@ impl Timeline {
 
             true
         } else if projected_layer_size >= checkpoint_distance {
+            // NB: this check is relied upon by:
+            let _ = IndexEntry::validate_checkpoint_distance;
             info!(
                 "Will roll layer at {} with layer size {} due to layer size ({})",
                 projected_lsn, layer_size, projected_layer_size
@@ -2236,7 +2243,7 @@ impl Timeline {
             };
 
             if aux_file_policy == Some(AuxFilePolicy::V1) {
-                warn!("this timeline is using deprecated aux file policy V1");
+                warn!("this timeline is using deprecated aux file policy V1 (when loading the timeline)");
             }
 
             result.repartition_threshold =
@@ -4530,7 +4537,6 @@ pub struct DeltaLayerTestDesc {
 
 #[cfg(test)]
 impl DeltaLayerTestDesc {
-    #[allow(dead_code)]
     pub fn new(lsn_range: Range<Lsn>, key_range: Range<Key>, data: Vec<(Key, Lsn, Value)>) -> Self {
         Self {
             lsn_range,
@@ -5702,7 +5708,7 @@ impl<'a> TimelineWriter<'a> {
             return Ok(());
         }
 
-        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch);
+        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch)?;
         let batch_max_lsn = serialized_batch.max_lsn;
         let buf_size: u64 = serialized_batch.raw.len() as u64;
 
@@ -5739,6 +5745,12 @@ impl<'a> TimelineWriter<'a> {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         use utils::bin_ser::BeSer;
+        if !key.is_valid_key_on_write_path() {
+            bail!(
+                "the request contains data not supported by pageserver at TimelineWriter::put: {}",
+                key
+            );
+        }
         let val_ser_size = value.serialized_size().unwrap() as usize;
         self.put_batch(
             vec![(key.to_compact(), lsn, val_ser_size, value.clone())],

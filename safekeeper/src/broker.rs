@@ -86,7 +86,7 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
 }
 
 /// Subscribe and fetch all the interesting data from the broker.
-#[instrument(name = "broker pull", skip_all)]
+#[instrument(name = "broker_pull", skip_all)]
 async fn pull_loop(conf: SafeKeeperConf, stats: Arc<BrokerStats>) -> Result<()> {
     let mut client = storage_broker::connect(conf.broker_endpoint, conf.broker_keepalive_interval)?;
 
