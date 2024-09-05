@@ -864,7 +864,7 @@ jobs:
     with:
       client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: 'neon compute-tools {vm-,}compute-node-{v14,v15,v16}'
+      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 compute-node-v14 compute-node-v15 compute-node-v16
       registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
@@ -876,7 +876,7 @@ jobs:
     with:
       client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: 'neon compute-tools {vm-,}compute-node-{v14,v15,v16}'
+      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 compute-node-v14 compute-node-v15 compute-node-v16
       registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}

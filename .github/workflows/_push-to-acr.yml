@@ -48,7 +48,8 @@ jobs:
 
       - name: Copy docker images to ACR ${{ inputs.registry_name }}
         run: |
-          for image in ${{ inputs.images }}; do
+          images='${{ inputs.images }}'
+          for image in ${images}; do
             docker buildx imagetools create \
               -t ${{ inputs.registry_name }}.azurecr.io/neondatabase/${image}:${{ inputs.image_tag }} \
                                         neondatabase/${image}:${{ inputs.image_tag }}
