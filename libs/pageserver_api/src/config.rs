@@ -73,12 +73,15 @@ pub struct ConfigToml {
     pub pg_auth_type: AuthType,
     pub auth_validation_public_key_path: Option<Utf8PathBuf>,
     pub remote_storage: Option<RemoteStorageConfig>,
+    pub tenant_config: TenantConfigToml,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub broker_endpoint: storage_broker::Uri,
     #[serde(with = "humantime_serde")]
     pub broker_keepalive_interval: Duration,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub log_format: LogFormat,
+    pub concurrent_tenant_warmup: NonZeroUsize,
+    pub concurrent_tenant_size_logical_size_queries: NonZeroUsize,
     #[serde(with = "humantime_serde")]
     pub metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<reqwest::Url>,
@@ -95,6 +98,7 @@ pub struct ConfigToml {
     pub control_plane_emergency_mode: bool,
     pub heatmap_upload_concurrency: usize,
     pub secondary_download_concurrency: usize,
+    pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
     pub ingest_batch_size: u64,
     pub max_vectored_read_bytes: MaxVectoredReadBytes,
     pub image_compression: ImageCompressionAlgorithm,
@@ -103,12 +107,6 @@ pub struct ConfigToml {
     pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
     pub virtual_file_direct_io: crate::models::virtual_file::DirectIoMode,
     pub io_buffer_alignment: usize,
-
-    pub tenant_config: TenantConfigToml,
-
-    pub concurrent_tenant_warmup: NonZeroUsize,
-    pub concurrent_tenant_size_logical_size_queries: NonZeroUsize,
-    pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
