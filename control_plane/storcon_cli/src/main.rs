@@ -412,7 +412,7 @@ async fn main() -> anyhow::Result<()> {
             let describe_response = storcon_client
                 .dispatch::<(), NodeShardResponse>(
                     Method::GET,
-                    format!("control/v1/node/{node_id}/attached"),
+                    format!("control/v1/node/{node_id}/shards"),
                     None,
                 )
                 .await?;

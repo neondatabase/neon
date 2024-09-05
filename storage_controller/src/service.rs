@@ -4770,7 +4770,7 @@ impl Service {
             ))
     }
 
-    pub(crate) async fn get_node_attached(
+    pub(crate) async fn get_node_shards(
         &self,
         node_id: NodeId,
     ) -> Result<NodeShardResponse, ApiError> {

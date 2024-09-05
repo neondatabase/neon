@@ -2565,13 +2565,13 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return response.json()
 
-    def node_attached(self, node_id: NodeId):
+    def node_shards(self, node_id: NodeId):
         """
         :return: list of {"shard_id": "", "is_secondary": bool}
         """
         response = self.request(
             "GET",
-            f"{self.api}/control/v1/node/{node_id}/attached",
+            f"{self.api}/control/v1/node/{node_id}/shards",
             headers=self.headers(TokenScope.ADMIN),
         )
         response.raise_for_status()
