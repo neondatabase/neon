@@ -10,6 +10,10 @@ on:
         description: Tag for the container image
         required: true
         type: string
+      images:
+        description: Images to push
+        required: true
+        type: string
       registry_name:
         description: Name of the container registry
         required: true
@@ -44,7 +48,7 @@ jobs:
 
       - name: Copy docker images to ACR ${{ inputs.registry_name }}
         run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+          for image in ${{ inputs.images }}; do
             docker buildx imagetools create \
               -t ${{ inputs.registry_name }}.azurecr.io/neondatabase/${image}:${{ inputs.image_tag }} \
                                         neondatabase/${image}:${{ inputs.image_tag }}
