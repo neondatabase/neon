@@ -7,6 +7,11 @@ on:
   pull_request_target:
     types:
       - opened
+  workflow_dispatch:
+    inputs:
+      github-actor:
+        description: 'GitHub username. If empty, the username of the current user will be used'
+        required: false
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
@@ -26,12 +31,13 @@ jobs:
       id: check-user
       env:
         GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        ACTOR: ${{ inputs.github-actor || github.actor }}
       run: |
         expected_error="User does not exist or is not a member of the organization"
         output_file=output.txt
 
         for i in $(seq 1 10); do
-          if gh api "/orgs/${GITHUB_REPOSITORY_OWNER}/members/${GITHUB_ACTOR}" \
+          if gh api "/orgs/${GITHUB_REPOSITORY_OWNER}/members/${ACTOR}" \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" > ${output_file}; then
 
@@ -41,7 +47,7 @@ jobs:
             is_member=false
             break
           elif [ $i -eq 10 ]; then
-            title="Failed to get memmbership status for ${GITHUB_ACTOR}"
+            title="Failed to get memmbership status for ${ACTOR}"
             message="The latest GitHub API error message: '$(cat ${output_file})'"
             echo "::error file=.github/workflows/label-for-external-users.yml,title=${title}::${message}"
 
