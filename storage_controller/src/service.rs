@@ -2031,6 +2031,7 @@ impl Service {
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
+                preferred_az_id: None,
             })
             .collect();
 
@@ -2078,6 +2079,40 @@ impl Service {
                 }
                 InitialShardScheduleOutcome::TenantError(err) => {
                     return Err(err);
+                }
+            }
+        }
+
+        let preferred_azs = {
+            let locked = self.inner.read().unwrap();
+            response_shards
+                .iter()
+                .filter_map(|resp| {
+                    let az_id = locked
+                        .nodes
+                        .get(&resp.node_id)
+                        .map(|n| n.get_availability_zone_id().to_string())?;
+
+                    Some((resp.shard_id, az_id))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let updated = self
+            .persistence
+            .set_tenant_shard_preferred_azs(preferred_azs)
+            .await
+            .map_err(|err| {
+                ApiError::InternalServerError(anyhow::anyhow!(
+                    "Failed to persist preferred az ids: {err}"
+                ))
+            })?;
+
+        {
+            let mut locked = self.inner.write().unwrap();
+            for (tid, az_id) in updated {
+                if let Some(shard) = locked.tenants.get_mut(&tid) {
+                    shard.set_preferred_az(az_id);
                 }
             }
         }
