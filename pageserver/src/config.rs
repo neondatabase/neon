@@ -35,6 +35,21 @@ use crate::virtual_file;
 use crate::virtual_file::io_engine;
 use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
+/// Global state of pageserver.
+///
+/// It's mostly immutable configuration, but some semaphores and the
+/// like crept in over time and the name stuck.
+///
+/// Instantiated by deserializing `pageserver.toml` into  [`pageserver_api::config::ConfigToml`]
+/// and passing that to [`PageServerConf::parse_and_validate`].
+///
+/// # Adding a New Field
+///
+/// 1. Add the field to `pageserver_api::config::ConfigToml`.
+/// 2. Fix compiler errors (exhaustive destructuring will guide you).
+///
+/// For fields that require additional validation or filling in of defaults at runtime,
+/// check for examples in the [`PageServerConf::parse_and_validate`] method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageServerConf {
     // Identifier of that particular pageserver so e g safekeepers

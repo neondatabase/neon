@@ -43,6 +43,14 @@ pub struct NodeMetadata {
     pub other: HashMap<String, serde_json::Value>,
 }
 
+/// `pageserver.toml`
+///
+/// We use serde derive with `#[serde(default)]` to generate a deserializer
+/// that fills in the default values for each config field.
+///
+/// If there cannot be a static default value because we need to make runtime
+/// checks to determine the default, make it an `Option` (which defaults to None).
+/// The runtime check should be done in the consuming crate, i.e., `pageserver`.
 #[serde_as]
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -98,7 +106,6 @@ pub struct ConfigToml {
 
     pub tenant_config: TenantConfigToml,
 
-    // types which are transformed (potentially impurely) into a different type that is then used in PageServerConfig runtime type
     pub concurrent_tenant_warmup: NonZeroUsize,
     pub concurrent_tenant_size_logical_size_queries: NonZeroUsize,
     pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
