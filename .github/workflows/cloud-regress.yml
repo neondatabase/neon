@@ -1,8 +1,7 @@
 name: Cloud Regression Test
 on:
-  # uncomment to run on push for debugging your PR
-  # push:
-  #   branches: [ your branch ]
+  push:
+    branches: [amasterov/regress-arm]
   schedule:
     # * is a special character in YAML so you have to quote this string
     #          ┌───────────── minute (0 - 59)
@@ -12,11 +11,6 @@ on:
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
     - cron:   '0 3 * * *' # run once a day, timezone is utc
   workflow_dispatch: # adds ability to run this manually
-    inputs:
-      region_id:
-        description: 'Project region id. If not set, the default region will be used'
-        required: false
-        default: 'aws-us-east-2'
 
 defaults:
   run:
@@ -24,7 +18,7 @@ defaults:
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  group: ${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:
@@ -34,20 +28,15 @@ jobs:
       matrix:
         include:
           - DEFAULT_PG_VERSION: 16
-            PLATFORM: "neon-staging"
-            region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
-            RUNNER: [ us-east-2 ]
-            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: ${{ matrix.DEFAULT_PG_VERSION }}
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      PLATFORM: ${{ matrix.PLATFORM }}
 
-    runs-on: ${{ matrix.RUNNER }}
+    runs-on: small
     container:
-      image: ${{ matrix.IMAGE }}
+      image: neondatabase/build-tools:pinned
       options: --init
 
     steps:
@@ -57,7 +46,8 @@ jobs:
 
       - name: Patch the test
         run:
-          cd /__w/neon/neon/vendor/postgres-v${{ matrix.DEFAULT_PG_VERSION }} && ls && patch -p1 < ../../patches/cloud_regress_pg${{ matrix.DEFAULT_PG_VERSION }}.patch
+          cd /__w/neon/neon/vendor/postgres-v${{ matrix.DEFAULT_PG_VERSION }}
+          patch -p1 < ../../patches/cloud_regress_pg${{ matrix.DEFAULT_PG_VERSION }}.patch
 
       - name: Download Neon artifact
         uses: ./.github/actions/download
@@ -72,7 +62,6 @@ jobs:
           build_type: ${{ env.BUILD_TYPE }}
           test_selection: cloud_regress
           run_in_parallel: false
-          save_perf_report: ${{ env.SAVE_PERF_REPORT }}
           pg_version: ${{ env.DEFAULT_PG_VERSION }}
           extra_params:
             -m remote_cluster
