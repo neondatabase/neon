@@ -334,6 +334,7 @@ impl PageServerConf {
             max_vectored_read_bytes,
             image_compression,
             ephemeral_bytes_per_memory_kb,
+            compact_level0_phase1_value_access: (),
             l0_flush,
             virtual_file_direct_io,
             concurrent_tenant_warmup,
