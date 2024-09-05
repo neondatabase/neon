@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::Context;
 
 pub const DISK_QUOTA_BIN: &str = "/neonvm/bin/set-disk-quota";
@@ -5,7 +7,7 @@ pub const DISK_QUOTA_BIN: &str = "/neonvm/bin/set-disk-quota";
 /// If size_bytes is 0, it disables the quota.
 /// Otherwise, it sets the quota to size_bytes.
 pub fn set_disk_quota(size_bytes: u64, dir: &str) -> anyhow::Result<()> {
-    let mountpoint = find_mountpoint(dir)?;
+    let mountpoint = find_mountpoint(dir).context("finding mountpoint")?;
 
     let size_kb = size_bytes / 1024;
     // run `/neonvm/bin/set-disk-quota {size_kb} {mountpoint}`
@@ -29,6 +31,8 @@ pub fn set_disk_quota(size_bytes: u64, dir: &str) -> anyhow::Result<()> {
 }
 
 fn find_mountpoint(dir: &str) -> anyhow::Result<String> {
+    let dir = find_existing_directory(dir)?;
+
     // run `stat -c %m <dir>` to get the mount point
     let child_result = std::process::Command::new("/usr/bin/stat")
         .arg("-c")
@@ -47,4 +51,20 @@ fn find_mountpoint(dir: &str) -> anyhow::Result<String> {
         .to_string();
 
     Ok(mountpoint)
+}
+
+fn find_existing_directory(path: &str) -> anyhow::Result<String> {
+    let mut current_path = Path::new(path);
+
+    while !current_path.exists() {
+        // If no parent is found, break out of the loop (we reached the root)
+        match current_path.parent() {
+            Some(parent) => {
+                current_path = parent;
+            },
+            None => anyhow::bail!("no directory is found"), // No valid parent, and no existing path was found
+        }
+    }
+
+    Ok(current_path.to_str().ok_or_else(|| anyhow::anyhow!("path is not valid utf-8"))?.to_string())
 }

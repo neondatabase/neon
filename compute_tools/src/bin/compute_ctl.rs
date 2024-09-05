@@ -421,6 +421,8 @@ fn start_postgres(
     let mut prestartup_failed = false;
     let mut delay_exit = false;
 
+    info!("starting compute node, {swap_size_bytes:?} swap, {resize_swap_on_bind} swapon, {disk_quota_bytes:?} disk quota, {set_disk_quota_on_bind} quotaon");
+
     // Resize swap to the desired size if the compute spec says so
     if let (Some(size_bytes), true) = (swap_size_bytes, resize_swap_on_bind) {
         // To avoid 'swapoff' hitting postgres startup, we need to run resize-swap to completion
@@ -431,7 +433,7 @@ fn start_postgres(
         // OOM-killed during startup because swap wasn't available yet.
         match resize_swap(size_bytes) {
             Ok(()) => {
-                let size_gib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                let size_gib = size_bytes as f32 / (1 << 30) as f32; // just for more coherent display.
                 info!(%size_bytes, %size_gib, "resized swap");
             }
             Err(err) => {
@@ -454,7 +456,7 @@ fn start_postgres(
     if let (Some(disk_quota_bytes), true) = (disk_quota_bytes, set_disk_quota_on_bind) {
         match set_disk_quota(disk_quota_bytes, &compute.pgdata) {
             Ok(()) => {
-                let size_gib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                let size_gib = disk_quota_bytes as f32 / (1 << 30) as f32; // just for more coherent display.
                 info!(%disk_quota_bytes, %size_gib, "set disk quota");
             }
             Err(err) => {
