@@ -357,8 +357,8 @@ def sync_after_each_test():
         # regress test, or running locally
         return
 
-    # we only run benches on linuxes, the method might not exist on windows
     start = time.time()
+    # we only run benches on linuxes, the method might not exist on windows
     os.sync()
     elapsed = time.time() - start
     log.info(f"called sync after test {elapsed=}")
