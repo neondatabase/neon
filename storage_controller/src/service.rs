@@ -25,7 +25,7 @@ use crate::{
         ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
-    scheduler::{MaySchedule, ScheduleContext, ScheduleMode},
+    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
         ScheduleOptimizationAction,
@@ -351,6 +351,13 @@ impl From<DatabaseError> for ApiError {
             }
         }
     }
+}
+
+enum InitialShardScheduleOutcome {
+    Scheduled(TenantCreateResponseShard),
+    NotScheduled,
+    ShardScheduleError(ScheduleError),
+    TenantError(ApiError),
 }
 
 pub struct Service {
@@ -2047,99 +2054,52 @@ impl Service {
         };
 
         let mut schedule_context = ScheduleContext::default();
+        let mut schedule_error = None;
+        let mut response_shards = Vec::new();
+        for tenant_shard_id in create_ids {
+            tracing::info!("Creating shard {tenant_shard_id}...");
 
-        let (waiters, response_shards) = {
+            let outcome = self
+                .do_initial_shard_scheduling(
+                    tenant_shard_id,
+                    initial_generation,
+                    &create_req.shard_parameters,
+                    create_req.config.clone(),
+                    placement_policy.clone(),
+                    &mut schedule_context,
+                )
+                .await;
+
+            match outcome {
+                InitialShardScheduleOutcome::Scheduled(resp) => response_shards.push(resp),
+                InitialShardScheduleOutcome::NotScheduled => {}
+                InitialShardScheduleOutcome::ShardScheduleError(err) => {
+                    schedule_error = Some(err);
+                }
+                InitialShardScheduleOutcome::TenantError(err) => {
+                    return Err(err);
+                }
+            }
+        }
+
+        // If we failed to schedule shards, then they are still created in the controller,
+        // but we return an error to the requester to avoid a silent failure when someone
+        // tries to e.g. create a tenant whose placement policy requires more nodes than
+        // are present in the system.  We do this here rather than in the above loop, to
+        // avoid situations where we only create a subset of shards in the tenant.
+        if let Some(e) = schedule_error {
+            return Err(ApiError::Conflict(format!(
+                "Failed to schedule shard(s): {e}"
+            )));
+        }
+
+        let waiters = {
             let mut locked = self.inner.write().unwrap();
-            let (nodes, tenants, scheduler) = locked.parts_mut();
-
-            let mut response_shards = Vec::new();
-            let mut schcedule_error = None;
-
-            for tenant_shard_id in create_ids {
-                tracing::info!("Creating shard {tenant_shard_id}...");
-
-                use std::collections::btree_map::Entry;
-                match tenants.entry(tenant_shard_id) {
-                    Entry::Occupied(mut entry) => {
-                        tracing::info!(
-                            "Tenant shard {tenant_shard_id} already exists while creating"
-                        );
-
-                        // TODO: schedule() should take an anti-affinity expression that pushes
-                        // attached and secondary locations (independently) away frorm those
-                        // pageservers also holding a shard for this tenant.
-
-                        entry
-                            .get_mut()
-                            .schedule(scheduler, &mut schedule_context)
-                            .map_err(|e| {
-                                ApiError::Conflict(format!(
-                                    "Failed to schedule shard {tenant_shard_id}: {e}"
-                                ))
-                            })?;
-
-                        if let Some(node_id) = entry.get().intent.get_attached() {
-                            let generation = entry
-                                .get()
-                                .generation
-                                .expect("Generation is set when in attached mode");
-                            response_shards.push(TenantCreateResponseShard {
-                                shard_id: tenant_shard_id,
-                                node_id: *node_id,
-                                generation: generation.into().unwrap(),
-                            });
-                        }
-
-                        continue;
-                    }
-                    Entry::Vacant(entry) => {
-                        let state = entry.insert(TenantShard::new(
-                            tenant_shard_id,
-                            ShardIdentity::from_params(
-                                tenant_shard_id.shard_number,
-                                &create_req.shard_parameters,
-                            ),
-                            placement_policy.clone(),
-                        ));
-
-                        state.generation = initial_generation;
-                        state.config = create_req.config.clone();
-                        if let Err(e) = state.schedule(scheduler, &mut schedule_context) {
-                            schcedule_error = Some(e);
-                        }
-
-                        // Only include shards in result if we are attaching: the purpose
-                        // of the response is to tell the caller where the shards are attached.
-                        if let Some(node_id) = state.intent.get_attached() {
-                            let generation = state
-                                .generation
-                                .expect("Generation is set when in attached mode");
-                            response_shards.push(TenantCreateResponseShard {
-                                shard_id: tenant_shard_id,
-                                node_id: *node_id,
-                                generation: generation.into().unwrap(),
-                            });
-                        }
-                    }
-                };
-            }
-
-            // If we failed to schedule shards, then they are still created in the controller,
-            // but we return an error to the requester to avoid a silent failure when someone
-            // tries to e.g. create a tenant whose placement policy requires more nodes than
-            // are present in the system.  We do this here rather than in the above loop, to
-            // avoid situations where we only create a subset of shards in the tenant.
-            if let Some(e) = schcedule_error {
-                return Err(ApiError::Conflict(format!(
-                    "Failed to schedule shard(s): {e}"
-                )));
-            }
-
-            let waiters = tenants
+            let (nodes, tenants, _scheduler) = locked.parts_mut();
+            tenants
                 .range_mut(TenantShardId::tenant_range(tenant_id))
                 .filter_map(|(_shard_id, shard)| self.maybe_reconcile_shard(shard, nodes))
-                .collect::<Vec<_>>();
-            (waiters, response_shards)
+                .collect::<Vec<_>>()
         };
 
         Ok((
@@ -2148,6 +2108,86 @@ impl Service {
             },
             waiters,
         ))
+    }
+
+    /// Helper for tenant creation that does the scheduling for an individual shard. Covers both the
+    /// case of a new tenant and a pre-existing one.
+    async fn do_initial_shard_scheduling(
+        &self,
+        tenant_shard_id: TenantShardId,
+        initial_generation: Option<Generation>,
+        shard_params: &ShardParameters,
+        config: TenantConfig,
+        placement_policy: PlacementPolicy,
+        schedule_context: &mut ScheduleContext,
+    ) -> InitialShardScheduleOutcome {
+        let mut locked = self.inner.write().unwrap();
+        let (_nodes, tenants, scheduler) = locked.parts_mut();
+
+        use std::collections::btree_map::Entry;
+        match tenants.entry(tenant_shard_id) {
+            Entry::Occupied(mut entry) => {
+                tracing::info!("Tenant shard {tenant_shard_id} already exists while creating");
+
+                // TODO: schedule() should take an anti-affinity expression that pushes
+                // attached and secondary locations (independently) away frorm those
+                // pageservers also holding a shard for this tenant.
+
+                if let Err(err) = entry
+                    .get_mut()
+                    .schedule(scheduler, schedule_context)
+                    .map_err(|e| {
+                        ApiError::Conflict(format!(
+                            "Failed to schedule shard {tenant_shard_id}: {e}"
+                        ))
+                    })
+                {
+                    return InitialShardScheduleOutcome::TenantError(err);
+                }
+
+                if let Some(node_id) = entry.get().intent.get_attached() {
+                    let generation = entry
+                        .get()
+                        .generation
+                        .expect("Generation is set when in attached mode");
+                    InitialShardScheduleOutcome::Scheduled(TenantCreateResponseShard {
+                        shard_id: tenant_shard_id,
+                        node_id: *node_id,
+                        generation: generation.into().unwrap(),
+                    })
+                } else {
+                    InitialShardScheduleOutcome::NotScheduled
+                }
+            }
+            Entry::Vacant(entry) => {
+                let state = entry.insert(TenantShard::new(
+                    tenant_shard_id,
+                    ShardIdentity::from_params(tenant_shard_id.shard_number, shard_params),
+                    placement_policy,
+                ));
+
+                state.generation = initial_generation;
+                state.config = config;
+                if let Err(e) = state.schedule(scheduler, schedule_context) {
+                    return InitialShardScheduleOutcome::ShardScheduleError(e);
+                }
+
+                // Only include shards in result if we are attaching: the purpose
+                // of the response is to tell the caller where the shards are attached.
+                if let Some(node_id) = state.intent.get_attached() {
+                    let generation = state
+                        .generation
+                        .expect("Generation is set when in attached mode");
+                    InitialShardScheduleOutcome::Scheduled(TenantCreateResponseShard {
+                        shard_id: tenant_shard_id,
+                        node_id: *node_id,
+                        generation: generation.into().unwrap(),
+                    })
+                } else {
+                    InitialShardScheduleOutcome::NotScheduled
+                }
+            }
+        }
     }
 
     /// Helper for functions that reconcile a number of shards, and would like to do a timeout-bounded
