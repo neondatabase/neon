@@ -256,9 +256,7 @@ where
         let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
         let pgversion = self.timeline.pg_version;
-        let subdirs = dispatch_pgversion!(pgversion, {
-            &pgv::bindings::PGDATA_SUBDIRS[..]
-        });
+        let subdirs = dispatch_pgversion!(pgversion, &pgv::bindings::PGDATA_SUBDIRS[..]);
 
         // Create pgdata subdirs structure
         for dir in subdirs.iter() {
