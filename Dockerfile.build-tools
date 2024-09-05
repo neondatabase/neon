@@ -25,6 +25,8 @@ RUN set -e \
     curl \
     flex \
     git \
+    gpg \
+    lsb-release \
     gnupg \
     gzip \
     jq \
@@ -39,14 +41,14 @@ RUN set -e \
     libseccomp-dev \
     libsqlite3-dev \
     libssl-dev \
-    libstdc++-10-dev \
+    libstdc++-11-dev \
     libtool \
     libxml2-dev \
     libxmlsec1-dev \
     libxxhash-dev \
     lsof \
     make \
-    netcat \
+    netcat-traditional \
     net-tools \
     openssh-client \
     parallel \
@@ -56,6 +58,7 @@ RUN set -e \
     xz-utils \
     zlib1g-dev \
     zstd \
+    software-properties-common \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
@@ -75,15 +78,15 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
 # LLVM
 ENV LLVM_VERSION=18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
-    && echo "deb http://apt.llvm.org/${DEBIAN_VERSION_CODENAME}/ llvm-toolchain-${DEBIAN_VERSION_CODENAME}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
     && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Install docker
-RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+# PostgreSQL 14
+RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
+    && echo 'deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
     && apt update \
     && apt install -y docker-ce docker-ce-cli \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
