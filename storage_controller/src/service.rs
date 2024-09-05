@@ -1452,6 +1452,7 @@ impl Service {
                 splitting: SplitState::default(),
                 scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                     .unwrap(),
+                preferred_az_id: None,
             };
 
             match self.persistence.insert_tenant_shards(vec![tsp]).await {
