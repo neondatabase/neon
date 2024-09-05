@@ -2773,6 +2773,19 @@ index 3a78be1b0c..617d2dc8d6 100644
  ANALYZE real_city;
  
  SELECT *
+diff --git a/src/test/regress/sql/database.sql b/src/test/regress/sql/database.sql
+index 0367c0e37a..a23b98c4bd 100644
+--- a/src/test/regress/sql/database.sql
++++ b/src/test/regress/sql/database.sql
+@@ -1,8 +1,6 @@
+ CREATE DATABASE regression_tbd
+ 	ENCODING utf8 LC_COLLATE "C" LC_CTYPE "C" TEMPLATE template0;
+ ALTER DATABASE regression_tbd RENAME TO regression_utf8;
+-ALTER DATABASE regression_utf8 SET TABLESPACE regress_tblspace;
+-ALTER DATABASE regression_utf8 RESET TABLESPACE;
+ ALTER DATABASE regression_utf8 CONNECTION_LIMIT 123;
+ 
+ -- Test PgDatabaseToastTable.  Doing this with GRANT would be slow.
 diff --git a/src/test/regress/sql/dependency.sql b/src/test/regress/sql/dependency.sql
 index 2559c62d0b..32b1f7242b 100644
 --- a/src/test/regress/sql/dependency.sql
