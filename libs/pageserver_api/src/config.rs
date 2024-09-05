@@ -239,10 +239,7 @@ pub enum CompactL0BypassPageCacheValidation {
 
 impl Default for CompactL0Phase1ValueAccess {
     fn default() -> Self {
-        CompactL0Phase1ValueAccess::StreamingKmerge {
-            // TODO(https://github.com/neondatabase/neon/issues/8184): change to None once confident
-            validate: Some(CompactL0BypassPageCacheValidation::KeyLsnValue),
-        }
+        CompactL0Phase1ValueAccess::StreamingKmerge { validate: None }
     }
 }
 
