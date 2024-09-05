@@ -528,6 +528,7 @@ pub(crate) mod test_utils {
                         80 + i as u16,
                         format!("pghost-{i}"),
                         5432 + i as u16,
+                        None,
                     );
                     node.set_availability(NodeAvailability::Active(test_utilization::simple(0, 0)));
                     assert!(node.is_available());

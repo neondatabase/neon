@@ -23,7 +23,7 @@ where
     for (i, item) in iter.enumerate() {
         visitor(item);
 
-        if i + 1 % interval == 0 {
+        if (i + 1) % interval == 0 {
             tokio::task::yield_now().await;
             if cancel.is_cancelled() {
                 return Err(YieldingLoopError::Cancelled);

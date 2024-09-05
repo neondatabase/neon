@@ -160,6 +160,30 @@ pub struct DecodedWALRecord {
     pub origin_id: u16,
 }
 
+impl DecodedWALRecord {
+    /// Check if this WAL record represents a legacy "copy" database creation, which populates new relations
+    /// by reading other existing relations' data blocks.  This is more complex to apply than new-style database
+    /// creations which simply include all the desired blocks in the WAL, so we need a helper function to detect this case.
+    pub(crate) fn is_dbase_create_copy(&self, pg_version: u32) -> bool {
+        if self.xl_rmid == pg_constants::RM_DBASE_ID {
+            let info = self.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+            match pg_version {
+                14 => {
+                    // Postgres 14 database creations are always the legacy kind
+                    info == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE
+                }
+                15 => info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                16 => info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                _ => {
+                    panic!("Unsupported postgres version {pg_version}")
+                }
+            }
+        } else {
+            false
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RelFileNode {

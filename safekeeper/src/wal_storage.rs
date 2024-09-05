@@ -15,6 +15,7 @@ use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogF
 use postgres_ffi::{dispatch_pgversion, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
 use std::cmp::{max, min};
+use std::future::Future;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use tokio::fs::{self, remove_file, File, OpenOptions};
@@ -35,8 +36,9 @@ use postgres_ffi::XLOG_BLCKSZ;
 use pq_proto::SystemId;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-#[async_trait::async_trait]
 pub trait Storage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn;
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn;
 
@@ -44,16 +46,19 @@ pub trait Storage {
     /// the segment and short header at the page of given LSN. This is only used
     /// for timeline initialization because compute will stream data only since
     /// init_lsn. Other segment headers are included in compute stream.
-    async fn initialize_first_segment(&mut self, init_lsn: Lsn) -> Result<()>;
+    fn initialize_first_segment(
+        &mut self,
+        init_lsn: Lsn,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     /// Write piece of WAL from buf to disk, but not necessarily sync it.
-    async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()>;
+    fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> impl Future<Output = Result<()>> + Send;
 
     /// Truncate WAL at specified LSN, which must be the end of WAL record.
-    async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()>;
+    fn truncate_wal(&mut self, end_pos: Lsn) -> impl Future<Output = Result<()>> + Send;
 
     /// Durably store WAL on disk, up to the last written WAL record.
-    async fn flush_wal(&mut self) -> Result<()>;
+    fn flush_wal(&mut self) -> impl Future<Output = Result<()>> + Send;
 
     /// Remove all segments <= given segno. Returns function doing that as we
     /// want to perform it without timeline lock.
@@ -325,8 +330,11 @@ impl PhysicalStorage {
     }
 }
 
-#[async_trait::async_trait]
 impl Storage for PhysicalStorage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn {
+        self.write_lsn
+    }
     /// flush_lsn returns LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn

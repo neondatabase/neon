@@ -71,7 +71,7 @@ runs:
       if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
-        name: compatibility-snapshot-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
+        name: compatibility-snapshot-${{ runner.arch }}-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
         path: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
         prefix: latest
         # The lack of compatibility snapshot (for example, for the new Postgres version)
@@ -211,13 +211,13 @@ runs:
         fi
 
     - name: Upload compatibility snapshot
-      if: github.ref_name == 'release'
+      # Note, that we use `github.base_ref` which is a target branch for a PR
+      if: github.event_name == 'pull_request' && github.base_ref == 'release'
       uses: ./.github/actions/upload
       with:
-        name: compatibility-snapshot-${{ inputs.build_type }}-pg${{ inputs.pg_version }}-${{ github.run_id }}
+        name: compatibility-snapshot-${{ runner.arch }}-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
         # Directory is created by test_compatibility.py::test_create_snapshot, keep the path in sync with the test
         path: /tmp/test_output/compatibility_snapshot_pg${{ inputs.pg_version }}/
-        prefix: latest
 
     - name: Upload test results
       if: ${{ !cancelled() }}

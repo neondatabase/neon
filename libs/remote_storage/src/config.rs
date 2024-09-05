@@ -236,6 +236,31 @@ timeout = '5s'";
     }
 
     #[test]
+    fn test_storage_class_serde_roundtrip() {
+        let classes = [
+            None,
+            Some(StorageClass::Standard),
+            Some(StorageClass::IntelligentTiering),
+        ];
+        for class in classes {
+            #[derive(Serialize, Deserialize)]
+            struct Wrapper {
+                #[serde(
+                    deserialize_with = "deserialize_storage_class",
+                    serialize_with = "serialize_storage_class"
+                )]
+                class: Option<StorageClass>,
+            }
+            let wrapped = Wrapper {
+                class: class.clone(),
+            };
+            let serialized = serde_json::to_string(&wrapped).unwrap();
+            let deserialized: Wrapper = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(class, deserialized.class);
+        }
+    }
+
+    #[test]
     fn test_azure_parsing() {
         let toml = "\
     container_name = 'foo-bar'

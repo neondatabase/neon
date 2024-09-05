@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use storage_controller_client::control_api;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{error, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use utils::fs_ext;
@@ -422,7 +422,7 @@ fn stream_objects_with_retries<'a>(
                     let yield_err = if err.is_permanent() {
                         true
                     } else {
-                        let backoff_time = 1 << trial.max(5);
+                        let backoff_time = 1 << trial.min(5);
                         tokio::time::sleep(Duration::from_secs(backoff_time)).await;
                         trial += 1;
                         trial == MAX_RETRIES - 1
@@ -466,14 +466,14 @@ async fn list_objects_with_retries(
                     return Err(e)
                         .with_context(|| format!("Failed to list objects {MAX_RETRIES} times"));
                 }
-                error!(
+                warn!(
                     "list_objects_v2 query failed: bucket_name={}, prefix={}, delimiter={}, error={}",
                     s3_target.bucket_name,
                     s3_target.prefix_in_bucket,
                     s3_target.delimiter,
                     DisplayErrorContext(e),
                 );
-                let backoff_time = 1 << trial.max(5);
+                let backoff_time = 1 << trial.min(5);
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             }
         }
@@ -492,7 +492,7 @@ async fn download_object_with_retries(
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to download object for key {key}: {e}");
-                let backoff_time = 1 << trial.max(5);
+                let backoff_time = 1 << trial.min(5);
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
                 continue;
             }
@@ -508,7 +508,7 @@ async fn download_object_with_retries(
             }
             Err(e) => {
                 error!("Failed to stream object body for key {key}: {e}");
-                let backoff_time = 1 << trial.max(5);
+                let backoff_time = 1 << trial.min(5);
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             }
         }

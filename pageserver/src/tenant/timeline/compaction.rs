@@ -19,6 +19,7 @@ use bytes::Bytes;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
+use pageserver_api::config::{CompactL0BypassPageCacheValidation, CompactL0Phase1ValueAccess};
 use pageserver_api::key::KEY_SIZE;
 use pageserver_api::keyspace::ShardedRange;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
@@ -29,7 +30,6 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::split_writer::{
@@ -43,6 +43,9 @@ use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::DeltaLayer;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
+use pageserver_api::config::tenant_conf_defaults::{
+    DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
+};
 
 use crate::keyspace::KeySpace;
 use crate::repository::{Key, Value};
@@ -1430,43 +1433,6 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .new_deltas_size
                 .ok_or_else(|| anyhow!("new_deltas_size not set"))?,
         })
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum CompactL0Phase1ValueAccess {
-    /// The old way.
-    PageCachedBlobIo,
-    /// The new way.
-    StreamingKmerge {
-        /// If set, we run both the old way and the new way, validate that
-        /// they are identical (=> [`CompactL0BypassPageCacheValidation`]),
-        /// and if the validation fails,
-        /// - in tests: fail them with a panic or
-        /// - in prod, log a rate-limited warning and use the old way's results.
-        ///
-        /// If not set, we only run the new way and trust its results.
-        validate: Option<CompactL0BypassPageCacheValidation>,
-    },
-}
-
-/// See [`CompactL0Phase1ValueAccess::StreamingKmerge`].
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CompactL0BypassPageCacheValidation {
-    /// Validate that the series of (key, lsn) pairs are the same.
-    KeyLsn,
-    /// Validate that the entire output of old and new way is identical.
-    KeyLsnValue,
-}
-
-impl Default for CompactL0Phase1ValueAccess {
-    fn default() -> Self {
-        CompactL0Phase1ValueAccess::StreamingKmerge {
-            // TODO(https://github.com/neondatabase/neon/issues/8184): change to None once confident
-            validate: Some(CompactL0BypassPageCacheValidation::KeyLsnValue),
-        }
     }
 }
 
