@@ -4290,9 +4290,10 @@ impl Service {
                     config: serde_json::to_string(&config).unwrap(),
                     splitting: SplitState::Splitting,
 
-                    // Scheduling policies do not carry through to children
+                    // Scheduling policies and preferred AZ do not carry through to children
                     scheduling_policy: serde_json::to_string(&ShardSchedulingPolicy::default())
                         .unwrap(),
+                    preferred_az_id: None,
                 });
             }
 
@@ -4411,6 +4412,47 @@ impl Service {
         // Replace all the shards we just split with their children: this phase is infallible.
         let (response, child_locations, waiters) =
             self.tenant_shard_split_commit_inmem(tenant_id, new_shard_count, new_stripe_size);
+
+        // Now that we have scheduled the child shards, attempt to set their preferred AZ
+        // to that of the pageserver they've been attached on.
+        let preferred_azs = {
+            let locked = self.inner.read().unwrap();
+            child_locations
+                .iter()
+                .filter_map(|(tid, node_id, _stripe_size)| {
+                    let az_id = locked
+                        .nodes
+                        .get(node_id)
+                        .map(|n| n.get_availability_zone_id().to_string())?;
+
+                    Some((*tid, az_id))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let updated = self
+            .persistence
+            .set_tenant_shard_preferred_azs(preferred_azs)
+            .await
+            .map_err(|err| {
+                ApiError::InternalServerError(anyhow::anyhow!(
+                    "Failed to persist preferred az ids: {err}"
+                ))
+            });
+
+        match updated {
+            Ok(updated) => {
+                let mut locked = self.inner.write().unwrap();
+                for (tid, az_id) in updated {
+                    if let Some(shard) = locked.tenants.get_mut(&tid) {
+                        shard.set_preferred_az(az_id);
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!("Failed to persist preferred AZs after split: {err}");
+            }
+        }
 
         // Send compute notifications for all the new shards
         let mut failed_notifications = Vec::new();
