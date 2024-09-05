@@ -106,7 +106,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
-          key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v2-${{ runner.os }}-temp-python-deps-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
         run: ./scripts/pysync
