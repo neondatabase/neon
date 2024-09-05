@@ -681,12 +681,12 @@ RUN apt-get update && apt-get install -y python3 python3-pip && \
 FROM pg-onnx-build AS pg-neon-ai-pg-build
 ARG PG_VERSION
 
-RUN wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz &&  \
+RUN wget https://github.com/neondatabase/pg_neon_ai/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz && \
     mkdir pg_neon_ai-src && cd pg_neon_ai-src && tar xzf ../pg_neon_ai.tar.gz --strip-components=1 -C . && \
     wget 'https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx?download=true' -O bge_small_en_v15/model.onnx && \
     wget 'https://huggingface.co/jinaai/jina-reranker-v1-tiny-en/resolve/main/onnx/model.onnx?download=true' -O jina_reranker_v1_tiny_en/model.onnx && \
     sed -i 's/pgrx = "0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
-    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux cargo pgrx install --release && \
+    XORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/neon_ai.control
 
 
