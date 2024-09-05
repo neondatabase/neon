@@ -870,7 +870,7 @@ jobs:
 
   push-to-acr-prod:
     if: github.ref_name == 'main'
-    needs: [ tag, push-to-acr-dev ]
+    needs: [ tag, promote-images ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
       client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
