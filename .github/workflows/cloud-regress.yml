@@ -65,3 +65,21 @@ jobs:
           extra_params: -m remote_cluster
         env:
           BENCHMARK_CONNSTR: ${{ secrets.PG_REGRESS_CONNSTR }}
+
+      - name: Create Allure report
+        id: create-allure-report
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/allure-report-generate
+
+      - name: Post to a Slack channel
+        if: ${{ github.event.schedule && failure() }}
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: "C033QLM5P7D" # on-call-staging-stream
+          slack-message: |
+            Periodic regression testing: ${{ job.status }}
+            <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
+            <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
