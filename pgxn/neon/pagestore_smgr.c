@@ -1524,6 +1524,10 @@ neon_wallog_pagev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		XLogRecPtr	recptr;
 		recptr = log_newpages_copy(&InfoFromSMgrRel(reln), forknum, blocknum,
 								   nblocks, (Page *) buffers, false);
+
+		for (int i = 0; i < nblocks; i++)
+			PageSetLSN(unconstify(char *, buffers[i]), recptr);
+
 		ereport(SmgrTrace,
 				(errmsg(NEON_TAG "Page %u through %u of relation %u/%u/%u.%u "
 								 "were force logged, lsn=%X/%X",

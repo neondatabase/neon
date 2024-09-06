@@ -135,10 +135,7 @@ impl WalRedoProcess {
                     }
                 };
                 match res {
-                    Ok(()) => {
-                        tracing::info!("wal-redo-postgres stderr_logger_task finished");
-                        
-                    },
+                    Ok(()) => (),
                     Err(e) => {
                         error!(error=?e, "failed to read from walredo stderr");
                     }
