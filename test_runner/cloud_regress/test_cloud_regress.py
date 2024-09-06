@@ -14,7 +14,9 @@ from fixtures.pg_version import PgVersion
 
 @pytest.mark.timeout(7200)
 @pytest.mark.remote_cluster
-def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion, pg_distrib_dir: Path):
+def test_cloud_regress(
+    remote_pg: RemotePostgres, pg_version: PgVersion, pg_distrib_dir: Path, base_dir: Path
+):
     """
     Run the regression tests
     """
@@ -34,10 +36,8 @@ def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion, pg_dist
                 "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;"
             )
             conn.rollback()
-            artifact_prefix = f"/tmp/neon/pg_install/v{pg_version}"
-            regress_bin = f"{artifact_prefix}/lib/postgresql/pgxs/src/test/regress/pg_regress"
-            runpath = pg_distrib_dir / f"build/{pg_version.v_prefixed}/src/test/regress"
-            log.info(runpath)
+            regress_bin = pg_distrib_dir / "lib/postgresql/pgxs/src/test/regress/pg_regress"
+            runpath = base_dir / f"build/{pg_version.v_prefixed}/src/test/regress"
 
             env_vars = {
                 "PGHOST": remote_pg.default_options["host"],
@@ -51,9 +51,9 @@ def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion, pg_dist
                 "PGDATABASE": remote_pg.default_options["dbname"],
             }
             regress_cmd = [
-                regress_bin,
+                str(regress_bin),
                 "--inputdir=.",
-                f"--bindir={artifact_prefix}/bin",
+                f"--bindir={pg_distrib_dir}/bin",
                 "--dlpath=/usr/local/lib",
                 "--max-concurrent-tests=20",
                 "--schedule=./parallel_schedule",
