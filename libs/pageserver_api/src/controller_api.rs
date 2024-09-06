@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,17 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct ShardsPreferredAzsRequest {
+    #[serde(flatten)]
+    pub preferred_az_ids: HashMap<TenantShardId, String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ShardsPreferredAzsResponse {
+    pub updated: Vec<TenantShardId>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TenantLocateResponseShard {
     pub shard_id: TenantShardId,
@@ -132,6 +143,8 @@ pub struct TenantDescribeResponseShard {
     pub is_splitting: bool,
 
     pub scheduling_policy: ShardSchedulingPolicy,
+
+    pub preferred_az_id: Option<String>,
 }
 
 /// Explicitly migrating a particular shard is a low level operation

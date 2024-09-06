@@ -41,6 +41,7 @@ diesel::table! {
         splitting -> Int2,
         config -> Text,
         scheduling_policy -> Varchar,
+        preferred_az_id -> Nullable<Varchar>,
     }
 }
 
