@@ -174,10 +174,6 @@ pub struct PageServerConf {
 
     pub l0_flush: crate::l0_flush::L0FlushConfig,
 
-    /// This flag is temporary and will be removed after gradual rollout.
-    /// See <https://github.com/neondatabase/neon/issues/8184>.
-    pub compact_level0_phase1_value_access: pageserver_api::config::CompactL0Phase1ValueAccess,
-
     /// Direct IO settings
     pub virtual_file_direct_io: virtual_file::DirectIoMode,
 
@@ -338,7 +334,7 @@ impl PageServerConf {
             max_vectored_read_bytes,
             image_compression,
             ephemeral_bytes_per_memory_kb,
-            compact_level0_phase1_value_access,
+            compact_level0_phase1_value_access: _,
             l0_flush,
             virtual_file_direct_io,
             concurrent_tenant_warmup,
@@ -383,7 +379,6 @@ impl PageServerConf {
             max_vectored_read_bytes,
             image_compression,
             ephemeral_bytes_per_memory_kb,
-            compact_level0_phase1_value_access,
             virtual_file_direct_io,
             io_buffer_alignment,
 
@@ -561,6 +556,16 @@ mod tests {
             .expect("parse_and_validate");
     }
 
+    #[test]
+    fn test_compactl0_phase1_access_mode_is_ignored_silently() {
+        let input = indoc::indoc! {r#"
+            [compact_level0_phase1_value_access]
+            mode = "streaming-kmerge"
+            validate = "key-lsn-value"
+        "#};
+        toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input).unwrap();
+    }
+
     /// If there's a typo in the pageserver config, we'd rather catch that typo
     /// and fail pageserver startup than silently ignoring the typo, leaving whoever
     /// made it in the believe that their config change is effective.
@@ -637,14 +642,5 @@ mod tests {
         //         some_invalid_field = 23
         //     "#}
         // );
-
-        test!(
-            compact_level0_phase1_value_access,
-            indoc! {r#"
-                [compact_level0_phase1_value_access]
-                mode = "streaming-kmerge"
-                some_invalid_field = 23
-            "#}
-        );
     }
 }
