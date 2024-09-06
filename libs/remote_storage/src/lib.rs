@@ -45,6 +45,8 @@ pub use azure_core::Etag;
 
 pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
+/// Default concurrency limit for S3 operations
+///
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
 /// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>
@@ -300,7 +302,9 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<(), TimeTravelError>;
 }
 
-/// DownloadStream is sensitive to the timeout and cancellation used with the original
+/// Data part of an ongoing [`Download`].
+///
+/// `DownloadStream` is sensitive to the timeout and cancellation used with the original
 /// [`RemoteStorage::download`] request. The type yields `std::io::Result<Bytes>` to be compatible
 /// with `tokio::io::copy_buf`.
 // This has 'static because safekeepers do not use cancellation tokens (yet)

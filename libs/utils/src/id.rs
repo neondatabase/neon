@@ -249,8 +249,10 @@ macro_rules! id_newtype {
     };
 }
 
-/// Neon timeline IDs are different from PostgreSQL timeline
-/// IDs. They serve a similar purpose though: they differentiate
+/// Neon timeline ID.
+///
+/// They are different from PostgreSQL timeline
+/// IDs, but serve a similar purpose: they differentiate
 /// between different "histories" of the same cluster.  However,
 /// PostgreSQL timeline IDs are a bit cumbersome, because they are only
 /// 32-bits wide, and they must be in ascending order in any given

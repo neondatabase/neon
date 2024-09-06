@@ -1,6 +1,8 @@
-//! Code related to evicting WAL files to remote storage. The actual upload is done by the
-//! partial WAL backup code. This file has code to delete and re-download WAL files,
-//! cross-validate with partial WAL backup if local file is still present.
+//! Code related to evicting WAL files to remote storage.
+//!
+//! The actual upload is done by the partial WAL backup code. This file has
+//! code to delete and re-download WAL files, cross-validate with partial WAL
+//! backup if local file is still present.
 
 use anyhow::Context;
 use camino::Utf8PathBuf;

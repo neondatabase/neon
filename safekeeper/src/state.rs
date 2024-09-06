@@ -147,9 +147,11 @@ pub struct TimelineMemState {
     pub proposer_uuid: PgUuid,
 }
 
-/// Safekeeper persistent state plus in memory layer, to avoid frequent fsyncs
-/// when we update fields like commit_lsn which don't need immediate
-/// persistence. Provides transactional like API to atomically update the state.
+/// Safekeeper persistent state plus in memory layer.
+///
+/// Allows us to avoid frequent fsyncs when we update fields like commit_lsn
+/// which don't need immediate persistence. Provides transactional like API
+/// to atomically update the state.
 ///
 /// Implements Deref into *persistent* part.
 pub struct TimelineState<CTRL: control_file::Storage> {

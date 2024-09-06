@@ -69,8 +69,10 @@ impl QueryError {
 }
 
 /// Returns true if the given error is a normal consequence of a network issue,
-/// or the client closing the connection. These errors can happen during normal
-/// operations, and don't indicate a bug in our code.
+/// or the client closing the connection.
+///
+/// These errors can happen during normal operations,
+/// and don't indicate a bug in our code.
 pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(

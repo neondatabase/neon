@@ -169,6 +169,7 @@ impl<'a> Drop for WriteGuardSharedState<'a> {
 }
 
 /// This structure is stored in shared state and represents the state of the timeline.
+///
 /// Usually it holds SafeKeeper, but it also supports offloaded timeline state. In this
 /// case, SafeKeeper is not available (because WAL is not present on disk) and all
 /// operations can be done only with control file.
