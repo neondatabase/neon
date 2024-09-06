@@ -358,7 +358,6 @@ enum InitialShardScheduleOutcome {
     Scheduled(TenantCreateResponseShard),
     NotScheduled,
     ShardScheduleError(ScheduleError),
-    TenantError(ApiError),
 }
 
 pub struct Service {
@@ -2078,9 +2077,6 @@ impl Service {
                 InitialShardScheduleOutcome::ShardScheduleError(err) => {
                     schedule_error = Some(err);
                 }
-                InitialShardScheduleOutcome::TenantError(err) => {
-                    return Err(err);
-                }
             }
         }
 
@@ -2169,16 +2165,8 @@ impl Service {
                 // attached and secondary locations (independently) away frorm those
                 // pageservers also holding a shard for this tenant.
 
-                if let Err(err) = entry
-                    .get_mut()
-                    .schedule(scheduler, schedule_context)
-                    .map_err(|e| {
-                        ApiError::Conflict(format!(
-                            "Failed to schedule shard {tenant_shard_id}: {e}"
-                        ))
-                    })
-                {
-                    return InitialShardScheduleOutcome::TenantError(err);
+                if let Err(err) = entry.get_mut().schedule(scheduler, schedule_context) {
+                    return InitialShardScheduleOutcome::ShardScheduleError(err);
                 }
 
                 if let Some(node_id) = entry.get().intent.get_attached() {
