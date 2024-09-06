@@ -10,33 +10,25 @@ import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import RemotePostgres
+from fixtures.pg_version import PgVersion
 
 
 @pytest.mark.timeout(7200)
 @pytest.mark.remote_cluster
-def test_cloud_regress(remote_pg: RemotePostgres):
+def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion):
     """
     Run the regression tests
     """
-    cur_test = os.environ.get("PYTEST_CURRENT_TEST")
-    assert cur_test
-    pg_version_match = re.search(r"\-pg(\d+)\]", cur_test)
-    assert pg_version_match
-    pg_version = int(pg_version_match.group(1))
     with psycopg2.connect(remote_pg.connstr()) as conn:
         with conn.cursor() as cur:
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM pg_extension WHERE extname = 'regress_so'")
-            for r in cur:
-                num_ext = r[0]
-            assert int(num_ext) < 2
-            if num_ext == 1:
-                log.info("The extension is found")
-            else:
-                log.info("Creating the extension")
-                cur.execute("CREATE EXTENSION regress_so")
-                conn.commit()
+            log.info("Creating the extension")
+            cur.execute("CREATE EXTENSION IF NOT EXISTS regress_so")
+            conn.commit()
 
+            # This is also a workaround for the full path problem
+            # If we specify the full path in the command, the library won't be downloaded
+            # So we specify the name only for the first time
             log.info("Creating a C function to check availability of regress.so")
             cur.execute(
                 "CREATE FUNCTION get_columns_length(oid[]) "
