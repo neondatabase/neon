@@ -19,7 +19,7 @@ use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use storage_broker::Uri;
 
 use tracing::*;
@@ -373,6 +373,16 @@ async fn main() -> anyhow::Result<()> {
 type JoinTaskRes = Result<anyhow::Result<()>, JoinError>;
 
 async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
+    // fsync the datadir to make sure we have a consistent state on disk.
+    let dfd = File::open(&conf.workdir).context("open datadir for syncfs")?;
+    let started = Instant::now();
+    utils::crashsafe::syncfs(dfd)?;
+    let elapsed = started.elapsed();
+    info!(
+        elapsed_ms = elapsed.as_millis(),
+        "syncfs data directory done"
+    );
+
     info!("starting safekeeper WAL service on {}", conf.listen_pg_addr);
     let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
