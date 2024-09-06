@@ -1,3 +1,4 @@
+use crate::http;
 use crate::metrics::{
     HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, PageserverRequestLabelGroup,
     METRICS_REGISTRY,
@@ -22,6 +23,7 @@ use pageserver_api::models::{
 };
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::{mgmt_api, BlockUnblock};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -1030,6 +1032,95 @@ where
 {
     request.set_context(name);
     request_span(request, handler).await
+}
+
+
+async fn convert_response(resp: reqwest::Response) -> Result<hyper::Response<Body>, ApiError> {
+    use std::str::FromStr;
+
+    let mut builder = hyper::Response::builder().status(resp.status().as_u16());
+    for (key, value) in resp.headers().into_iter() {
+        let key = hyper::header::HeaderName::from_str(key.as_str()).map_err(|err| {
+            ApiError::InternalServerError(anyhow::anyhow!("Response conversion failed: {err}"))
+        })?;
+
+        let value = hyper::header::HeaderValue::from_bytes(value.as_bytes()).map_err(|err| {
+            ApiError::InternalServerError(anyhow::anyhow!("Response conversion failed: {err}"))
+        })?;
+
+        builder = builder.header(key, value);
+    }
+
+    let body = http::Body::wrap_stream(resp.bytes_stream());
+    //let body = hyper::body::Body::wrap_stream(resp.bytes_stream());
+
+    builder.body(body).map_err(|err| {
+        ApiError::InternalServerError(anyhow::anyhow!("Response conversion failed: {err}"))
+    })
+}
+
+async fn convert_request(
+    req: hyper::Request<Body>,
+    client: &reqwest::Client,
+    to_address: String,
+) -> Result<reqwest::Request, ApiError> {
+    use std::str::FromStr;
+
+    let (parts, body) = req.into_parts();
+    let method = reqwest::Method::from_str(parts.method.as_str()).map_err(|err| {
+        ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))
+    })?;
+
+    let path_and_query = parts.uri.path_and_query().ok_or_else(|| {
+        ApiError::InternalServerError(anyhow::anyhow!(
+            "Request conversion failed: no path and query"
+        ))
+    })?;
+
+    let uri = reqwest::Url::from_str(
+        format!(
+            "{}{}",
+            to_address.trim_end_matches("/"),
+            path_and_query.as_str()
+        )
+        .as_str(),
+    )
+    .map_err(|err| {
+        ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))
+    })?;
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (key, value) in parts.headers.into_iter() {
+        let key = match key {
+            Some(k) => k,
+            None => {
+                continue;
+            }
+        };
+
+        let key = reqwest::header::HeaderName::from_str(key.as_str()).map_err(|err| {
+            ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))
+        })?;
+
+        let value = reqwest::header::HeaderValue::from_bytes(value.as_bytes()).map_err(|err| {
+            ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))
+        })?;
+
+        headers.insert(key, value);
+    }
+
+    let body = hyper::body::to_bytes(body).await.map_err(|err| {
+        ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))
+    })?;
+
+    client
+        .request(method, uri)
+        .headers(headers)
+        .body(body)
+        .build()
+        .map_err(|err| {
+            ApiError::InternalServerError(anyhow::anyhow!("Request conversion failed: {err}"))
+        })
 }
 
 pub fn make_router(
