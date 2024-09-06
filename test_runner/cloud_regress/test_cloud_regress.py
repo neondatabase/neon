@@ -62,12 +62,4 @@ def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion):
                 "--schedule=./parallel_schedule",
                 "--max-connections=5",
             ]
-            try:
-                remote_pg.pg_bin.run(regress_cmd, env=env_vars, cwd=runpath)
-            except subprocess.CalledProcessError as e:
-                log.error("Error(s) occurred while running the regression tests")
-                with open(f"{runpath}/regression.out", "r") as f:
-                    print(f.read())
-                with open(f"{runpath}/regression.diffs", "r") as f:
-                    print(f.read())
-                raise e
+            remote_pg.pg_bin.run(regress_cmd, env=env_vars, cwd=runpath)
