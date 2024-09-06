@@ -106,6 +106,107 @@ macro_rules! dispatch_pgversion {
     };
 }
 
+#[macro_export]
+macro_rules! enum_pgversion_dispatch {
+    ($name:expr, $typ:ident, $bind:ident, $code:block) => {
+        enum_pgversion_dispatch!(
+            name = $name,
+            bind = $bind,
+            typ = $typ,
+            code = $code,
+            pgversions = [
+                V14 : v14,
+                V15 : v15,
+                V16 : v16,
+            ]
+        )
+    };
+    (name = $name:expr,
+     bind = $bind:ident,
+     typ = $typ:ident,
+     code = $code:block,
+     pgversions = [$($variant:ident : $md:ident),+ $(,)?]) => {
+        match $name {
+            $(
+            self::$typ::$variant($bind) => {
+                use $crate::$md as pgv;
+                $code
+            }
+            ),+,
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! enum_pgversion {
+    {$name:ident, pgv :: $t:ident} => {
+        enum_pgversion!{
+            name = $name,
+            typ = $t,
+            pgversions = [
+                V14 : v14,
+                V15 : v15,
+                V16 : v16,
+            ]
+        }
+    };
+    {$name:ident, pgv :: $p:ident :: $t:ident} => {
+        enum_pgversion!{
+            name = $name,
+            path = $p,
+            typ = $t,
+            pgversions = [
+                V14 : v14,
+                V15 : v15,
+                V16 : v16,
+            ]
+        }
+    };
+    {name = $name:ident,
+     typ = $t:ident,
+     pgversions = [$($variant:ident : $md:ident),+ $(,)?]} => {
+        pub enum $name {
+            $($variant ( $crate::$md::$t )),+
+        }
+        impl self::$name {
+            pub fn pg_version(&self) -> u32 {
+                enum_pgversion_dispatch!(self, $name, _ign, {
+                    pgv::bindings::PG_MAJORVERSION_NUM
+                })
+            }
+        }
+        $(
+        impl Into<self::$name> for $crate::$md::$t {
+            fn into(self) -> self::$name {
+                self::$name::$variant (self)
+            }
+        }
+        )+
+    };
+    {name = $name:ident,
+     path = $p:ident,
+     typ = $t:ident,
+     pgversions = [$($variant:ident : $md:ident),+ $(,)?]} => {
+        pub enum $name {
+            $($variant ($crate::$md::$p::$t)),+
+        }
+        impl $name {
+            pub fn pg_version(&self) -> u32 {
+                enum_pgversion_dispatch!(self, $name, _ign, {
+                    pgv::bindings::PG_MAJORVERSION_NUM
+                })
+            }
+        }
+        $(
+        impl Into<$name> for $crate::$md::$p::$t {
+            fn into(self) -> $name {
+                $name::$variant (self)
+            }
+        }
+        )+
+    };
+}
+
 pub mod pg_constants;
 pub mod relfile_utils;
 
